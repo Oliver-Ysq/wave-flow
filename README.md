@@ -19,7 +19,7 @@ Agent（独立 Codex ReAct Loop）
 
 ## 当前研发状态
 
-> 最后更新：2026-09-29（第二课：最小 Workflow Runtime）
+> 最后更新：2026-09-29（第三课：并行屏障 `parallel()`）
 
 当前已经完成并经自动化测试验证：
 
@@ -28,12 +28,13 @@ Agent（独立 Codex ReAct Loop）
 - Runtime 负责注入 `ctx.agent()`；Workflow 只能通过该接口委派 Agent，不能直接依赖具体执行器。
 - `AgentAdapter` 抽象将运行时与 Agent 实现隔离；目前使用可控的 `FakeAgentAdapter` 测试运行时行为。
 - 记录最小生命周期事件：`workflow.start`、`agent.started`、`agent.completed`、`workflow.end`。
+- 支持 `ctx.parallel()`：立即启动独立任务、等待全部结束、保持输入顺序，并将单项失败隔离为 `null`。
 
 尚未实现：
 
 - 面向用户的 `wave-flow` CLI（如 `run`、`create`、`go`、`resume`、`inspect`）。
 - 真实的 `codex exec --json` Adapter 与流式事件解析。
-- `parallel()`、`pipeline()`、`phase()`、超时、重试和资源预算。
+- `pipeline()`、`phase()`、超时、重试和资源预算。
 - JSON Schema 结构化结果、Artifact Store 与 Journaled Replay。
 - 默认只读策略下的受控写入、Git Worktree 隔离，以及 Workflow Creator。
 
@@ -77,7 +78,8 @@ src/
     validation.ts              # meta 与 default/run 入口校验
   runtime/                     # 项目核心：组织一次 Workflow 如何运行
     types.ts                   # RuntimeOptions、AgentOptions、AgentResult
-    runner.ts                  # WorkflowRunner：注入 ctx.agent()、委派 Adapter、记录事件
+    runner.ts                  # WorkflowRunner：运行整体生命周期与错误边界
+    context.ts                 # 注入 ctx.agent()、ctx.parallel() 等 Workflow API
   adapters/                    # 可替换的 Agent 执行方式
     agent-adapter.ts           # Adapter 输入/输出协议
     testing/fake-agent-adapter.ts # 测试专用的受控 Agent Adapter
@@ -95,7 +97,7 @@ test/
 研发将沿着 Dynamic Workflow 教学文档的思路，逐步构建并验证：
 
 1. 最小 Workflow Runtime（已完成）
-2. 并发屏障 `parallel()` 与逐项流水线 `pipeline()`
+2. 并发屏障 `parallel()`（已完成）与逐项流水线 `pipeline()`
 3. 真实 Codex CLI Adapter
 4. Journaled Replay 与 Artifact 模型
 5. 资源治理、默认只读与 Worktree 写入隔离

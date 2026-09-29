@@ -1,5 +1,6 @@
-import type { AgentOptions, AgentResult, RuntimeOptions } from "./types";
-import type { WorkflowContext, WorkflowModule } from "../workflow/types";
+import { createWorkflowContext } from "./context";
+import type { RuntimeOptions } from "./types";
+import type { WorkflowModule } from "../workflow/types";
 import { getWorkflowRun, validateMeta } from "../workflow/validation";
 
 /**
@@ -26,7 +27,7 @@ export class WorkflowRunner {
 
     events.emit({ type: "workflow.start", runId, workflow: workflow.meta.name });
     try {
-      const result = await run(this.createContext(runId), args);
+      const result = await run(createWorkflowContext(this.options, runId), args);
       events.emit({ type: "workflow.end", runId, workflow: workflow.meta.name });
       return result;
     } catch (error) {
@@ -38,18 +39,5 @@ export class WorkflowRunner {
       });
       throw error;
     }
-  }
-
-  /** @param runId 本次 Workflow 的唯一标识。@returns 不暴露底层依赖的受控 WorkflowContext。 */
-  private createContext(runId: string): WorkflowContext {
-    return {
-      agent: async (prompt: string, options: AgentOptions = {}): Promise<AgentResult> => {
-        const label = options.label ?? "agent";
-        this.options.events.emit({ type: "agent.started", runId, label, prompt });
-        const result = await this.options.adapter.execute({ prompt, label, cwd: this.options.cwd });
-        this.options.events.emit({ type: "agent.completed", runId, label });
-        return { output: result.output, replayed: false, runId };
-      },
-    };
   }
 }

@@ -28,6 +28,14 @@ export interface WorkflowContext {
    * @returns Agent 的最终输出及运行元数据；错误会向上抛给 Workflow。
    */
   agent(prompt: string, options?: import("../runtime/types").AgentOptions): Promise<import("../runtime/types").AgentResult>;
+
+  /**
+   * 并行执行一组彼此独立的任务，并在全部结束后按原始输入顺序返回结果。
+   * @param tasks 不带参数的异步任务数组。任务应只依赖调用前已经可用的上下文，不能依赖同批其他任务的结果。
+   * @returns 与 tasks 等长的数组：成功项保留结果，抛错或拒绝的项为 `null`；空数组立即返回 `[]`。
+   * 不会因单项失败取消其他任务，因此调用方应在下游显式处理 `null`。
+   */
+  parallel<T>(tasks: Array<() => Promise<T>>): Promise<Array<T | null>>;
 }
 
 /**
