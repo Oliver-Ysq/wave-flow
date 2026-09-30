@@ -280,6 +280,63 @@ log
 
 `--print` 将纯 JSONL 输出至 stdout，供 CI 消费。交互模式基于同一事件流展示最小 TUI：阶段、活跃节点、回放节点与失败情况。
 
+## CLI MVP：先验证本地运行闭环
+
+在完整的 Codex CLI Adapter、JSONL Writer 和配置系统完成前，先提供一个面向开发与试用的 `run` 命令。它只组装现有 Runtime，不复制 Workflow 的校验或编排逻辑。
+
+本地开发期也使用正式命令名，而不是要求用户记忆源码启动命令：
+
+```bash
+# 首次在当前项目执行；Bun 将本地源码注册为 wave-flow 命令。
+bun link
+
+wave-flow run examples/hello-review.ts \
+  --adapter fake \
+  --input '{"target":"src"}'
+```
+
+`package.json` 通过 `bin` 将 `wave-flow` 指向 Bun 可直接执行的 CLI 入口。链接后每次运行仍读取当前项目源码，修改实现后不需要重复 `bun link`。未来发布包后，命令形式保持不变。
+
+MVP 命令契约：
+
+```text
+wave-flow run <workflow-file> --adapter fake [--input <json> | --input-file <path>] [--cwd <path>]
+```
+
+- `run` 是 MVP 唯一支持的子命令。
+- `<workflow-file>` 只能是用户明确指定的本地 `.ts` 文件；不支持 URL、Git 仓库地址或自动下载的第三方 Workflow。Workflow 是受信任本地模块，加载时可能执行模块顶层代码。
+- `--adapter fake` 在 Fake 阶段必填，避免用户误以为命令已调用真实 Codex。后续接入 Codex 后会提供 `--adapter codex` 与项目默认 Adapter 配置。
+- `--input` 与 Deer Workflow 的社区实践对齐，接收一个 JSON 对象并原样传为 `run(ctx, args)` 的 `args`。CLI 不推断 Workflow 的业务字段或类型。
+- `--input-file` 从 JSON 文件读取同样的对象，避免复杂输入受 shell 引号影响。
+- 输入参数二选一；均未提供时 `args` 为 `{}`；JSON 根节点必须是对象。
+- `--cwd` 是 Agent 工作目录，省略时使用运行命令时的当前目录。
+
+CLI 处理边界：
+
+```text
+命令行
+  -> 解析 run / 路径 / 输入 / cwd / adapter
+  -> 检查并 import() 本地 TypeScript Workflow
+  -> 创建 FakeAgentAdapter、TerminalEventSink、WorkflowRunner
+  -> runner.run(workflow, args)
+  -> 显示最终结果或清晰错误并返回非零退出码
+```
+
+CLI 仅负责路径、输入和组件装配；`meta` 与 `default` / `run` 入口仍只由 Runtime 校验，避免规则重复。终端输出消费既有 `WorkflowEvent`，以人类可读形式展示 `workflow.start`、`agent.started`、`agent.completed`、`workflow.end` 与 `workflow.error`。后续 `--print` 只需替换事件接收器为 JSONL Writer，不应修改 Runner。
+
+本阶段目录边界：
+
+```text
+src/cli/
+  main.ts               # 进程入口、统一错误处理与退出码
+  parse-run-command.ts  # 解析 run 命令与输入选项，不执行 Workflow
+  load-workflow.ts      # 路径检查和动态 import() 本地 .ts Workflow
+  terminal-events.ts    # WorkflowEvent 到终端进度文本
+  output.ts             # 最终结果与格式化错误输出
+```
+
+CLI MVP 不包含真实 Codex Adapter、`pipeline()`、`--print` JSONL、`use` / `.wave-flow/config.json`、`create`、`go`、`resume` 或 `inspect`。这些能力会在 Runtime 和 Adapter 的对应课程完成后渐进加入。
+
 ## P0 范围与验收
 
 | 能力 | 验收标准 |
