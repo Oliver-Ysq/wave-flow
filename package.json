@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "wave-flow": "./src/cli/main.ts"
+  },
   "scripts": {
+    "dev": "bun run src/cli/main.ts",
     "test": "bun test",
     "check": "tsc --noEmit"
   },

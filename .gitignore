@@ -2,3 +2,6 @@ node_modules/
 dist/
 .wave-flow/
 *.tsbuildinfo
+
+docs/
+AGENTS.md

@@ -1,104 +1,159 @@
 # wave-flow
 
-`wave-flow` 是一个面向 Codex CLI 的本地 Dynamic Workflow 运行时。
-
-它的目标不是替代 Agent，而是把复杂任务中可预测的部分交给 TypeScript 编排，把需要阅读环境、调用工具和判断下一步的部分交给独立 Agent 执行。
+`wave-flow` 是一个面向本地 Coding Agent 的 Dynamic Workflow 运行时。你用 TypeScript 写清楚任务的顺序、并发关系和结果传递；每个 `ctx.agent()` 则由可替换的 Agent Adapter 执行。
 
 ```text
-Skill
-  └─ 提供领域知识、规范与操作惯例
-       ↓
 Workflow（TypeScript）
-  └─ 决定顺序、并发、循环上限、重试、预算与结果传递
-       ↓
-Agent（独立 Codex ReAct Loop）
-  └─ 阅读环境、调用工具、完成边界清晰的子任务
+  ├─ 决定先后顺序、并发和结果传递
+  └─ 调用 ctx.agent() 提交语义任务
+            ↓
+Workflow Runner
+  ├─ 校验 Workflow
+  ├─ 记录生命周期事件
+  └─ 调用 Agent Adapter
+            ↓
+Agent Adapter
+  └─ 当前：Fake Adapter；未来：Codex CLI
 ```
 
-详细的首版设计见：[2026-09-29-wave-flow-design.md](./2026-09-29-wave-flow-design.md)。
+详细的设计边界见：[2026-09-29-wave-flow-design.md](./2026-09-29-wave-flow-design.md)。
 
-## 当前研发状态
+## 当前功能
 
-> 最后更新：2026-09-29（第三课：并行屏障 `parallel()`）
+- 执行受信任的本地 TypeScript Workflow。
+- 在运行前校验 Workflow 的 `meta` 和 `default` / `run` 入口。
+- 使用 `ctx.agent()` 委派独立 Agent 任务，并输出统一的 `AgentResult`。
+- 使用 `ctx.parallel()` 并行启动独立任务、等待全部完成、保持输入顺序；单项失败返回 `null`，不取消其他任务。
+- 使用 `wave-flow run` 加载 Workflow，传入 JSON 输入，并在终端显示任务生命周期。
+- 支持 `--input`、`--input-file` 和 `--cwd`。
 
-当前已经完成并经自动化测试验证：
+当前唯一可用 Adapter 是 `fake`。它返回固定测试结果，不会读取代码、修改文件或调用 Codex。
 
-- 定义受信任本地 Workflow 的最小契约：静态 `meta` 加 `default` / `run(ctx, args)` 入口。
-- 在启动 Agent 前校验 `meta`：名称必须是 kebab-case、描述必须为非空单行、阶段必须非空且不重复，并且副作用级别必须明确。
-- Runtime 负责注入 `ctx.agent()`；Workflow 只能通过该接口委派 Agent，不能直接依赖具体执行器。
-- `AgentAdapter` 抽象将运行时与 Agent 实现隔离；目前使用可控的 `FakeAgentAdapter` 测试运行时行为。
-- 记录最小生命周期事件：`workflow.start`、`agent.started`、`agent.completed`、`workflow.end`。
-- 支持 `ctx.parallel()`：立即启动独立任务、等待全部结束、保持输入顺序，并将单项失败隔离为 `null`。
+## 安装与本地链接
 
-尚未实现：
-
-- 面向用户的 `wave-flow` CLI（如 `run`、`create`、`go`、`resume`、`inspect`）。
-- 真实的 `codex exec --json` Adapter 与流式事件解析。
-- `pipeline()`、`phase()`、超时、重试和资源预算。
-- JSON Schema 结构化结果、Artifact Store 与 Journaled Replay。
-- 默认只读策略下的受控写入、Git Worktree 隔离，以及 Workflow Creator。
-
-后续每完成一个经过类型检查和测试验证的研发小节，都会同步更新本节内容，不会将计划中的功能写成已实现功能。
-
-## 快速开始
-
-本项目使用 [Bun](https://bun.sh/) 作为 TypeScript 运行时、包管理器与测试运行器。请先安装 Bun 1.4 或更高版本。
+本项目使用 [Bun](https://bun.sh/) 运行 TypeScript、安装依赖和执行测试。请安装 Bun 1.4 或更高版本。
 
 ```bash
 git clone https://github.com/Oliver-Ysq/wave-flow.git
 cd wave-flow
 bun install
+
+# 将当前项目注册为本机的 wave-flow 命令；每台机器首次执行一次即可。
+bun link
 ```
 
-验证当前最小运行时：
+之后在项目目录中可直接使用 `wave-flow`。修改源码后无需再次执行 `bun link`。
+
+## 运行 Workflow
 
 ```bash
-# 静态类型检查：不生成构建产物
+wave-flow run <workflow-file> --adapter fake [选项]
+```
+
+最小示例：
+
+```bash
+wave-flow run examples/hello-review.ts \
+  --adapter fake \
+  --input '{"target":"src"}'
+```
+
+示例输出：
+
+```text
+▶ Workflow started: hello-review
+  Run ID: <run-id>
+  → Agent started: initial-review
+  ✓ Agent completed: initial-review
+✓ Workflow completed: hello-review
+
+Result:
+{
+  "output": "No critical findings.",
+  "replayed": false,
+  "runId": "<run-id>"
+}
+```
+
+### 命令选项
+
+| 选项 | 说明 |
+| --- | --- |
+| `--adapter fake` | 当前必填。明确使用 Fake Adapter，避免误以为已调用真实 Codex。 |
+| `--input '<JSON对象>'` | 直接传入 Workflow 的 `args`。必须是 JSON 对象。 |
+| `--input-file <路径>` | 从 JSON 文件读取 Workflow 的 `args`。 |
+| `--cwd <路径>` | Agent 工作目录；默认是执行命令时的当前目录。 |
+| `--help` | 显示命令帮助。 |
+
+`--input` 与 `--input-file` 不能同时使用。两者都省略时，Workflow 收到空对象 `{}`。
+
+复杂输入建议放在 JSON 文件中，避免 shell 引号问题：
+
+```json
+{
+  "target": "src/auth"
+}
+```
+
+```bash
+wave-flow run examples/hello-review.ts \
+  --adapter fake \
+  --input-file inputs/review.json
+```
+
+## 编写 Workflow
+
+Workflow 是一个本地 `.ts` 模块，必须导出静态 `meta`，并导出默认 `run` 函数或命名 `run` 函数。
+
+```ts
+import type { WorkflowContext, WorkflowMeta } from "../src/workflow/types";
+
+export const meta: WorkflowMeta = {
+  name: "hello-review",
+  description: "Review one target with a single agent.",
+  phases: ["review"],
+  sideEffects: "none",
+};
+
+export default async function run(
+  ctx: WorkflowContext,
+  args: { target: string },
+) {
+  return ctx.agent(`Review target: ${args.target}`, {
+    label: "initial-review",
+  });
+}
+```
+
+`meta.name` 必须是 kebab-case；`description` 必须为非空单行；`phases` 不能为空且不能重复；`sideEffects` 当前允许 `none` 或 `workspace`。
+
+### 并行任务
+
+当多个任务互不依赖、但下游需要等待全部结果时，使用 `ctx.parallel()`：
+
+```ts
+const reviews = await ctx.parallel([
+  () => ctx.agent("Review security", { label: "security" }),
+  () => ctx.agent("Review correctness", { label: "correctness" }),
+]);
+
+// reviews 按输入顺序返回；失败的任务位置为 null。
+return reviews;
+```
+
+## 开发与验证
+
+```bash
+# TypeScript 类型检查
 bun run check
 
-# 运行自动化测试
+# 自动化测试
 bun test
 ```
 
-预期结果：
+## 当前限制
 
-```text
-3 pass
-0 fail
-```
-
-目前尚未提供可直接执行 Workflow 的用户 CLI。因此 [examples/hello-review.ts](./examples/hello-review.ts) 是供 Runtime 加载的示例模块，而不是可以直接单独运行的命令。
-
-## 当前项目结构
-
-```text
-src/
-  workflow/                    # 用户编写 Workflow 时必须遵守的协议
-    types.ts                   # meta、WorkflowModule、WorkflowContext
-    validation.ts              # meta 与 default/run 入口校验
-  runtime/                     # 项目核心：组织一次 Workflow 如何运行
-    types.ts                   # RuntimeOptions、AgentOptions、AgentResult
-    runner.ts                  # WorkflowRunner：运行整体生命周期与错误边界
-    context.ts                 # 注入 ctx.agent()、ctx.parallel() 等 Workflow API
-  adapters/                    # 可替换的 Agent 执行方式
-    agent-adapter.ts           # Adapter 输入/输出协议
-    testing/fake-agent-adapter.ts # 测试专用的受控 Agent Adapter
-  events/                      # 对运行过程的观察接口与实现
-    types.ts                   # WorkflowEvent、EventSink
-    memory-event-sink.ts       # 当前测试用的内存事件实现
-examples/
-  hello-review.ts              # 最小 Workflow 示例
-test/
-  runtime.test.ts              # Runtime 的行为测试
-```
-
-## 开发路线
-
-研发将沿着 Dynamic Workflow 教学文档的思路，逐步构建并验证：
-
-1. 最小 Workflow Runtime（已完成）
-2. 并发屏障 `parallel()`（已完成）与逐项流水线 `pipeline()`
-3. 真实 Codex CLI Adapter
-4. Journaled Replay 与 Artifact 模型
-5. 资源治理、默认只读与 Worktree 写入隔离
-6. `create` / `go` / `run` / `resume` / `inspect` CLI
+- 仅支持本地、受信任的 `.ts` Workflow；不支持 URL 或远程下载的 Workflow。
+- 仅支持 `wave-flow run`；不支持 `create`、`go`、`resume`、`inspect`。
+- 仅支持 `fake` Adapter；真实 Codex CLI Adapter 尚未接入。
+- 尚不支持 JSONL `--print`、输入 schema、断点恢复、超时/重试/预算、Worktree 隔离写入或默认 Adapter 配置。

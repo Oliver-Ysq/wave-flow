@@ -27,7 +27,7 @@ export class WorkflowRunner {
 
     events.emit({ type: "workflow.start", runId, workflow: workflow.meta.name });
     try {
-      const result = await run(createWorkflowContext(this.options, runId), args);
+      const result = await run(createWorkflowContext(this.options, runId), args); // 使用 adapter 执行 agent 、 parallel 等方法
       events.emit({ type: "workflow.end", runId, workflow: workflow.meta.name });
       return result;
     } catch (error) {
