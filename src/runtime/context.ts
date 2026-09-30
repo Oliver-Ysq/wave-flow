@@ -18,10 +18,21 @@ export function createWorkflowContext(options: RuntimeOptions, runId: string): W
   async function agent(prompt: string, agentOptions: AgentOptions = {}): Promise<AgentResult> {
     const label = agentOptions.label ?? "agent";
     options.events.emit({ type: "agent.started", runId, label, prompt });
-    const result = await options.adapter.execute({ prompt, label, cwd: options.cwd });
-    options.events.emit({ type: "agent.completed", runId, label });
-    // 尚未实现 Journal；结果均来自本次执行，因而 replayed 固定为 false。
-    return { output: result.output, replayed: false, runId };
+    try {
+      const result = await options.adapter.execute({ prompt, label, cwd: options.cwd });
+      options.events.emit({ type: "agent.completed", runId, label });
+      // 尚未实现 Journal；结果均来自本次执行，因而 replayed 固定为 false。
+      return { output: result.output, replayed: false, runId };
+    } catch (error) {
+      // 节点级失败必须先记录，Runner 才能在外层补充整次 workflow.error。
+      options.events.emit({
+        type: "agent.failed",
+        runId,
+        label,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   return {

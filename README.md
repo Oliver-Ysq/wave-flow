@@ -13,7 +13,8 @@ Workflow Runner
   └─ 调用 Agent Adapter
             ↓
 Agent Adapter
-  └─ 当前：Fake Adapter；未来：Codex CLI
+  ├─ Fake Adapter：确定性试用与测试
+  └─ Codex CLI Adapter：真实只读 Agent 节点
 ```
 
 详细的设计边界见：[2026-09-29-wave-flow-design.md](./2026-09-29-wave-flow-design.md)。
@@ -26,8 +27,9 @@ Agent Adapter
 - 使用 `ctx.parallel()` 并行启动独立任务、等待全部完成、保持输入顺序；单项失败返回 `null`，不取消其他任务。
 - 使用 `wave-flow run` 加载 Workflow，传入 JSON 输入，并在终端显示任务生命周期。
 - 支持 `--input`、`--input-file` 和 `--cwd`。
+- 支持 `fake` 和 `codex` Adapter；Codex 节点通过独立的 `codex exec --json` 运行。
 
-当前唯一可用 Adapter 是 `fake`。它返回固定测试结果，不会读取代码、修改文件或调用 Codex。
+`fake` 返回固定测试结果，不会读取代码、修改文件或调用 Codex。`codex` 使用当前机器已登录的 Codex CLI，以只读 sandbox 读取工作目录并返回 Agent 最终文本。
 
 ## 安装与本地链接
 
@@ -47,7 +49,7 @@ bun link
 ## 运行 Workflow
 
 ```bash
-wave-flow run <workflow-file> --adapter fake [选项]
+wave-flow run <workflow-file> --adapter <fake|codex> [选项]
 ```
 
 最小示例：
@@ -55,6 +57,15 @@ wave-flow run <workflow-file> --adapter fake [选项]
 ```bash
 wave-flow run examples/hello-review.ts \
   --adapter fake \
+  --input '{"target":"src"}'
+```
+
+真实只读 Codex 示例：
+
+```bash
+# 需要已安装并登录 Codex CLI；Agent 可读取 target，但不会修改工作区。
+wave-flow run examples/hello-review.ts \
+  --adapter codex \
   --input '{"target":"src"}'
 ```
 
@@ -79,7 +90,8 @@ Result:
 
 | 选项 | 说明 |
 | --- | --- |
-| `--adapter fake` | 当前必填。明确使用 Fake Adapter，避免误以为已调用真实 Codex。 |
+| `--adapter fake` | 使用固定结果的模拟 Agent，适合测试 CLI 与 Workflow 控制流。 |
+| `--adapter codex` | 使用已登录的本机 Codex CLI；每个 Agent 节点以 read-only、ephemeral 方式独立运行。 |
 | `--input '<JSON对象>'` | 直接传入 Workflow 的 `args`。必须是 JSON 对象。 |
 | `--input-file <路径>` | 从 JSON 文件读取 Workflow 的 `args`。 |
 | `--cwd <路径>` | Agent 工作目录；默认是执行命令时的当前目录。 |
@@ -155,5 +167,5 @@ bun test
 
 - 仅支持本地、受信任的 `.ts` Workflow；不支持 URL 或远程下载的 Workflow。
 - 仅支持 `wave-flow run`；不支持 `create`、`go`、`resume`、`inspect`。
-- 仅支持 `fake` Adapter；真实 Codex CLI Adapter 尚未接入。
+- Codex Adapter 当前固定使用 read-only sandbox；尚不支持工作区写入、tmux 持久会话或运行中人工接管。
 - 尚不支持 JSONL `--print`、输入 schema、断点恢复、超时/重试/预算、Worktree 隔离写入或默认 Adapter 配置。

@@ -220,6 +220,22 @@ Artifact 是单次运行的执行证据，不是跨运行的隐式记忆。
 
 首版直接使用用户当前的 Codex CLI 登录态，不依赖 OpenAI API Key 或 Codex SDK。
 
+### 首个 Codex Adapter 切片
+
+在完整的 schema、预算、重试与 JSONL 透传前，先实现一个只读、一次性节点执行器：
+
+```bash
+codex exec --json --ephemeral --sandbox read-only --cd <cwd> <prompt>
+```
+
+- 每次 `ctx.agent()` 启动一个独立进程；不使用 tmux 或 PTY 长驻会话。tmux 适合人工接管、连续追问与终端复连，不适合首版节点级隔离和后续 Journaled Replay。
+- `--ephemeral` 避免将节点当作可由 Codex 会话机制恢复的长驻对话；wave-flow 的恢复语义将由自己的 Journal 管理已完成结果。
+- Adapter 逐行读取 stdout 的 JSONL，并只依赖最小稳定信息：`item.completed` 中 `item.type === "agent_message"` 的 `item.text`，以最后一条该消息作为节点 `output`；`turn.completed.usage` 仅暂存为未来预算证据，不在此切片扩展公共 `AgentResult`。
+- stderr 只收集为诊断信息，不按 JSONL 解析。子进程非零退出、stdout 存在非法 JSONL、或正常退出却没有 `agent_message` 时，Adapter 必须失败并携带退出码与有限 stderr 摘要。
+- 首切片不把 Codex 的内部工具事件映射为公共 `WorkflowEvent`；它先保证最终结果和失败边界可靠。后续可在不改 Runner 的前提下补充细粒度事件映射与 `--print` JSONL。
+
+CLI 增加 `--adapter codex`，与当前 `--adapter fake` 并存。二者仅改变 Adapter 选择；Workflow、Runner、`ctx.agent()` 和 `ctx.parallel()` 的 API 不变。写入 sandbox、tmux/持久会话、人类接管、Human-in-the-Loop、结构化 schema、`pipeline()` 与 JSONL `--print` 不属于此切片。
+
 ## 调度、重试与预算
 
 项目默认配置保守且显式：

@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 import { CliUsageError } from "./errors";
 
-/** CLI MVP 唯一支持的执行器名称；真实 Codex 会在后续课程加入。 */
-export type CliAdapterName = "fake";
+/** CLI 当前支持的执行器名称；fake 用于确定性测试，codex 会启动真实只读节点。 */
+export type CliAdapterName = "fake" | "codex";
 
 /**
  * 解析完成、但尚未读取输入文件的 run 命令。
@@ -11,7 +11,7 @@ export type CliAdapterName = "fake";
 export type ParsedRunCommand = {
   /** 用户传入的 Workflow 路径；由 load-workflow.ts 再检查并导入。 */
   workflowPath: string;
-  /** MVP 必填且当前只能为 fake，防止用户误以为实际调用了 Codex。 */
+  /** 必填的执行器名称；fake 与 codex 都必须由用户显式指定。 */
   adapter: CliAdapterName;
   /** 直接写在 --input 后的 JSON 文本；未提供时为 undefined。 */
   inputText?: string;
@@ -46,7 +46,7 @@ export function parseRunCommand(argv: string[], baseDirectory = process.cwd()): 
 
     if (option === "--adapter") {
       if (!value || value.startsWith("--")) throw new CliUsageError("--adapter 需要一个值，例如：--adapter fake");
-      if (value !== "fake") throw new CliUsageError(`当前只支持 --adapter fake，收到：${value}`);
+      if (value !== "fake" && value !== "codex") throw new CliUsageError(`当前只支持 --adapter fake 或 --adapter codex，收到：${value}`);
       adapter = value;
       index += 1;
       continue;
@@ -72,7 +72,7 @@ export function parseRunCommand(argv: string[], baseDirectory = process.cwd()): 
     throw new CliUsageError(`不支持的选项：${option}`);
   }
 
-  if (!adapter) throw new CliUsageError("MVP 阶段必须明确指定 --adapter fake。");
+  if (!adapter) throw new CliUsageError("必须明确指定 --adapter fake 或 --adapter codex。");
   if (inputText !== undefined && inputFile !== undefined) {
     throw new CliUsageError("--input 与 --input-file 不能同时使用。");
   }

@@ -24,6 +24,10 @@ export class TerminalEventSink implements EventSink {
       case "agent.completed":
         this.write(`  ✓ Agent completed: ${event.label}`);
         break;
+      case "agent.failed":
+        this.write(`  ✗ Agent failed: ${event.label}`);
+        this.write(`    ${event.error}`);
+        break;
       case "workflow.end":
         this.write(`✓ Workflow completed: ${event.workflow}`);
         break;

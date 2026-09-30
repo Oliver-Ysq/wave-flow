@@ -127,6 +127,32 @@ wave-flow run examples/hello-review.ts \
 
 **后续演进：** 等真实 Codex Adapter 存在后，引入 `wave-flow use <adapter>` 写入项目配置；优先级应是命令行显式参数 > 项目默认值 > 内置默认值。
 
+### 3.5 为什么 Codex 节点首版不用 tmux
+
+**设计决定：** 每次 `ctx.agent()` 直接启动独立的 `codex exec --json --ephemeral --sandbox read-only` 子进程，而不是通过 tmux 或 PTY 维持会话。
+
+**真实协议证据：** 已实际运行最小只读命令并观察 stdout JSONL：先出现 `thread.started`、`turn.started`，最终回答为 `item.completed` 且 `item.type` 为 `agent_message`，最后出现带 token 统计的 `turn.completed`。stderr 会出现与状态库、插件相关的警告，因此必须和 stdout JSONL 分开处理。
+
+**原因：** wave-flow 当前的节点模型需要独立上下文、明确退出边界和未来的节点级 Journal Replay。Codex 的非交互 `exec --json` 已直接满足这一模型。tmux 更适合 BotMux 一类的长驻会话：人工 attach、连续追问、移动端接管和终端复连。
+
+**最脆弱假设：** `item.completed.agent_message` 与 `turn.completed` 的事件形状会在 Codex CLI 版本间保持足够稳定。Adapter 必须只依赖最小字段、对未知事件忽略、对无最终消息或非法 JSONL 明确失败，并在升级 Codex 时运行集成验证。
+
+**不做什么：** 首切片不把 Codex 工具事件暴露成公共事件，不支持写入 sandbox、tmux 持久会话或运行中人工接管。
+
+### 3.6 真实 Adapter 审查暴露的三个运行边界
+
+**问题来源：** 首次使用真实 Codex 对 Adapter 实现进行审查，发现 Fake Adapter 单元测试无法覆盖的三个缺陷。
+
+**修复 1：节点失败事件。** `ctx.agent()` 在 Adapter 抛错时先发出 `agent.failed`（携带 `label` 与错误文本），再原样抛出，使 Runner 继续发出外层 `workflow.error`。这区分了“哪个节点失败”和“整次运行失败”；并行任务、终端输出和未来 Journal 都依赖这一层次。
+
+**修复 2：Prompt 选项注入。** Codex 命令在 prompt 前加入独立的 `--`。否则 `ctx.agent("--help")` 会被 CLI 当作参数而不是任务内容。已用真实只读 Codex 验证：以 `--help` 开头的 Prompt 仍返回 Agent 输出 `OK`。
+
+**修复 3：输出内存上界。** Adapter 改为流式读取 stdout JSONL，仅保留最后一条 `agent_message`；stderr 在读取时限制为 800 个字符。不能先用 `Response(...).text()` 把复杂任务的完整工具输出载入内存，再事后截断。
+
+**刁钻考官追问：** “为什么测试没有一开始发现？”
+
+**诚实回答：** Fake Adapter 测试验证的是 Runtime 的确定性编排语义，不能证明真实 CLI 的参数解析、输出规模和事件协议边界。真实 Agent 集成测试是必要的第二层证据；本次审查正证明了分层测试不能互相替代。
+
 ## 4. 答辩与面试质询库
 
 ### Q1：这不就是普通的多 Agent 框架吗？
@@ -164,6 +190,12 @@ wave-flow run examples/hello-review.ts \
 **短答：** 有风险，所以首版将它明确限定为用户指定的、受信任的本地模块；不支持 URL、下载或第三方托管。完整的 JavaScript 沙箱是独立问题，不假装已经解决。
 
 **后续方向：** Agent 工具层的 sandbox、写入声明与 Worktree 隔离负责控制真实副作用；它们不等同于 JavaScript 模块沙箱。
+
+### Q7：为什么不直接使用 BotMux 或 tmux 运行 Codex？
+
+**短答：** BotMux/tmux 擅长长驻会话和人工接管；wave-flow 当前需要的是一次性、独立、可测试的 Workflow 节点。`codex exec --json` 已提供适合非交互节点的结构化 stdout、工作目录与 sandbox 参数，直接使用可避免引入 daemon、PTY 和会话回收复杂度。
+
+**局限：** 若未来需求变为“用户在 Agent 运行中 attach、追问或接管同一上下文”，应设计独立的 Session Adapter 或对接 BotMux，而不是污染基础 AgentAdapter 的节点语义。
 
 ## 5. 当前状态快照
 

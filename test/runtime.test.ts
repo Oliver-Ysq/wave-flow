@@ -109,6 +109,25 @@ describe("WorkflowRunner", () => {
     expect(events.events).toEqual([]);
   });
 
+  test("records agent.failed before the outer workflow.error when an adapter rejects", async () => {
+    const events = new MemoryEventSink();
+    const runner = new WorkflowRunner({
+      adapter: { execute: async () => { throw new Error("Agent unavailable."); } },
+      events,
+      cwd: "/workspace",
+      runId: "run-failed-agent-001",
+    });
+
+    await expect(runner.run(workflow, { target: "src/auth" })).rejects.toThrow("Agent unavailable.");
+    expect(events.events.map((event) => event.type)).toEqual([
+      "workflow.start",
+      "agent.started",
+      "agent.failed",
+      "workflow.error",
+    ]);
+    expect(events.events[2]).toMatchObject({ label: "initial-review", error: "Agent unavailable." });
+  });
+
   test("starts parallel tasks together, preserves input order, and waits at the barrier", async () => {
     const adapter = new ControlledAgentAdapter();
     const events = new MemoryEventSink();
@@ -176,5 +195,6 @@ describe("WorkflowRunner", () => {
       { output: "Second result.", replayed: false, runId: "run-parallel-002" },
     ]);
     expect(events.events.filter((event) => event.type === "agent.completed")).toHaveLength(2);
+    expect(events.events.filter((event) => event.type === "agent.failed")).toHaveLength(1);
   });
 });

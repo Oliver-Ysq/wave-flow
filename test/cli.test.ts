@@ -30,8 +30,12 @@ describe("CLI run command", () => {
     expect(parseInputObject(command.inputText!, "--input")).toEqual({ target: "src" });
   });
 
+  test("parses the explicit codex adapter", () => {
+    expect(parseRunCommand(["workflow.ts", "--adapter", "codex"], "/project").adapter).toBe("codex");
+  });
+
   test("rejects missing fake adapter and conflicting input sources", () => {
-    expect(() => parseRunCommand(["workflow.ts"])).toThrow("必须明确指定 --adapter fake");
+    expect(() => parseRunCommand(["workflow.ts"])).toThrow("必须明确指定 --adapter fake 或 --adapter codex");
     expect(() => parseRunCommand(["workflow.ts", "--adapter", "fake", "--input", "{}", "--input-file", "input.json"])).toThrow(
       "不能同时使用",
     );
@@ -60,6 +64,7 @@ describe("CLI run command", () => {
     events.emit({ type: "workflow.start", workflow: "hello-review", runId: "run-001" });
     events.emit({ type: "agent.started", label: "review", prompt: "Review src" , runId: "run-001" });
     events.emit({ type: "agent.completed", label: "review", runId: "run-001" });
+    events.emit({ type: "agent.failed", label: "failed-review", error: "Adapter unavailable", runId: "run-001" });
     events.emit({ type: "workflow.end", workflow: "hello-review", runId: "run-001" });
 
     expect(lines).toEqual([
@@ -67,6 +72,8 @@ describe("CLI run command", () => {
       "  Run ID: run-001",
       "  → Agent started: review",
       "  ✓ Agent completed: review",
+      "  ✗ Agent failed: failed-review",
+      "    Adapter unavailable",
       "✓ Workflow completed: hello-review",
     ]);
   });

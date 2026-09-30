@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { readFile } from "node:fs/promises";
+import { CodexCliAdapter } from "../adapters/codex-cli/codex-cli-adapter";
 import { FakeAgentAdapter } from "../adapters/testing/fake-agent-adapter";
 import { WorkflowRunner } from "../runtime/runner";
 import { CliUsageError } from "./errors";
@@ -9,13 +10,14 @@ import { parseInputObject, parseRunCommand } from "./parse-run-command";
 import { printError, printResult } from "./output";
 import { TerminalEventSink } from "./terminal-events";
 
-const HELP = `wave-flow CLI MVP
+const HELP = `wave-flow CLI
 
 Usage:
-  wave-flow run <workflow-file> --adapter fake [--input <json> | --input-file <path>] [--cwd <path>]
+  wave-flow run <workflow-file> --adapter <fake|codex> [--input <json> | --input-file <path>] [--cwd <path>]
 
 Examples:
   wave-flow run examples/hello-review.ts --adapter fake --input '{"target":"src"}'
+  wave-flow run examples/hello-review.ts --adapter codex --input '{"target":"src"}'
   wave-flow run examples/hello-review.ts --adapter fake --input-file inputs/review.json
 `;
 
@@ -47,9 +49,9 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     const input = inputText === undefined ? {} : parseInputObject(inputText, command.inputFile ?? "--input");
     const workflow = await loadWorkflow(command.workflowPath);
 
-    // adapter 已由 parseRunCommand 校验为 fake；真实 Codex Adapter 将在后续课程接入这里。
+    // Adapter 仅在 CLI 组装；Runner 与 Workflow 不需要知道当前使用 Fake 还是真实 Codex。
     const runner = new WorkflowRunner({
-      adapter: new FakeAgentAdapter("No critical findings."),
+      adapter: command.adapter === "fake" ? new FakeAgentAdapter("No critical findings.") : new CodexCliAdapter(),
       events: new TerminalEventSink(),
       cwd: command.cwd,
     });
