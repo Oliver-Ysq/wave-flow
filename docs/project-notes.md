@@ -153,6 +153,79 @@ wave-flow run examples/hello-review.ts \
 
 **诚实回答：** Fake Adapter 测试验证的是 Runtime 的确定性编排语义，不能证明真实 CLI 的参数解析、输出规模和事件协议边界。真实 Agent 集成测试是必要的第二层证据；本次审查正证明了分层测试不能互相替代。
 
+### 3.7 为什么 `codex exec` 不能直接使用当前桌面的 Browser Use
+
+**复现命令：**
+
+```bash
+codex exec --sandbox workspace-write \
+  "使用 browser use 打开 https://www.baidu.com/，截图核验布局"
+```
+
+**观察结果：** Codex 能启动，但其独立进程中的 `cua_repl` 调用失败，最终报告“内置浏览器不可用，Chrome 未获授权”。这不是 `workspace-write` 失败，也不是网页访问失败。
+
+**根因：能力宿主不同。** `workspace-write` 只决定 Agent 生成的文件和终端命令可写哪些目录；它不授予浏览器、截图、桌面辅助功能或当前聊天窗口 Tab 的控制权。当前桌面对话中的 Browser Use 由桌面应用维护一份已连接的浏览器/计算机控制会话；`codex exec` 是新建的无交互子进程，默认不继承这个会话句柄、浏览器扩展连接或用户授权。
+
+```text
+当前桌面对话
+  -> 已连接的 Browser Use / 当前浏览器 Tab
+
+独立 codex exec
+  -> 新进程、独立工具宿主
+  -> 没有桌面对话的浏览器会话与授权
+```
+
+**为什么不能简单把权限设为 workspace-write：** 文件 sandbox、网络访问、浏览器控制和截图属于不同能力域。即使进程可写项目目录，也不应因此能控制用户已登录浏览器、读取页面、截图或代表用户操作网页。这种混淆会把“代码写权限”错误扩大为“桌面和账号权限”。
+
+**外部实践对比：** Claude Code 的官方 Chrome 能力依赖单独的 Chrome 集成/扩展来连接浏览器，并不是普通 CLI 子进程天然拥有的权限。Deer Workflow 的公开 Runtime 文档未提供 Browser/Chrome/Playwright/screenshot 的 Workflow API；它将可用工具能力留给底层 Agent Runtime。
+
+**设计决定：** 当前 `CodexCliAdapter` 明确定位为无浏览器的独立代码 Agent 节点。浏览器能力必须作为后续独立的执行环境建设：
+
+```text
+Browser Host
+  -> 显式管理浏览器实例、扩展连接、截图与用户授权
+  -> 产生截图/页面证据 Artifact
+
+Browser-capable Adapter 或显式 ctx API
+  -> 只在 Workflow 明确请求时连接 Browser Host
+```
+
+**不应采用的捷径：** 不应让普通 `ctx.agent()` 隐式继承用户当前浏览器；不应把 Browser Use 当作 `codex exec` 的 shell 参数；不应因 `workspace-write` 自动授予浏览器控制。
+
+**可行后续方案：** 优先评估可独立运行、可隔离的浏览器宿主（例如 Playwright 管理的专用浏览器上下文，或受控 Chrome 扩展 Host），再通过显式 capability/adapter 连接 Workflow。页面访问、截图、表单提交和登录态必须分别定义授权与 Artifact 记录规则。
+
+**刁钻考官追问：** “为什么不直接复用用户正在看的浏览器？”
+
+**短答：** 复用能提升便利性，但会把独立、可复现的 Workflow 节点与用户个人登录态、当前 Tab、浏览历史和桌面授权耦合。首版优先节点隔离；若以后支持复用，必须要求显式用户选择目标 Tab、明确授权范围，并记录访问与截图证据。
+
+### 3.8 为什么结构化输出需要 Codex 约束和 Runtime 二次校验
+
+**设计决定：** `ctx.agent({ schema })` 同时使用 Codex `--output-schema` 与本地 Ajv 校验，而不是只要求 Prompt “返回 JSON”。
+
+**原因：** 下游 Workflow 要根据结果做分支、循环或人工确认时，自然语言不是稳定接口；而只依赖外部 CLI 的结构化承诺又会让 Runtime 在 CLI 版本变化、异常退出或格式漂移时失去边界。Codex 负责在 Agent Loop 内尽量修正输出，Ajv 负责在结果跨越 Runtime 边界前验证实际值。
+
+**临时文件取舍：** Codex `--output-schema` 接受文件路径，而不是 JSON 字符串，因此 Adapter 必须创建短生命周期 schema 文件。该文件放系统临时目录，不是项目文件、不是 Artifact；无论节点成功还是失败都要清理。
+
+**最脆弱假设：** JSON Schema 由 Workflow 作者手写，TypeScript 泛型和 Schema 可能不一致。首版不自动生成类型，必须通过测试和清晰示例降低漂移；未来可考虑 schema-first 类型推导，但不能假装当前已经保证静态一致。
+
+**刁钻考官追问：** “为什么有 `--output-schema` 还要引入 Ajv？”
+
+**短答：** `--output-schema` 是外部 Agent 的生成约束，Ajv 是本 Runtime 的输入验证。边界系统不应将外部进程的成功退出等同于数据契约成立。
+
+**真实集成证据：** 已使用真实 `CodexCliAdapter` 与最小 schema `{ ok: boolean }` 运行只读探针，Codex 经临时 `--output-schema` 文件返回 `{"ok":true}`；Runtime 可将该文本解析为 JSON 并通过 Ajv 校验。单元测试另覆盖非法 JSON、必填字段/类型/额外字段错误，以及校验失败时 `agent.failed` 在 `workflow.error` 前发生。
+
+### 3.9 为什么验证结果要区分代码失败与环境阻塞
+
+**问题来源：** `readiness-check` 在只读 Codex 节点中尝试运行 `bun test`，测试里的 `mkdtemp()` 被 sandbox 拒绝并返回 EPERM；而用户在正常本机终端运行同一命令得到 22 pass / 0 fail。若只返回 `canProceed: false`，Workflow 会把“验证环境不可用”错误理解为“代码或测试失败”。
+
+**设计决定：** Readiness Schema 增加 `verification.status`：`passed`、`failed`、`not_run`、`blocked_by_environment`，并要求 Agent 报告 `reason`。
+
+**语义边界：** `failed` 仅表示验证实际运行且失败；`blocked_by_environment` 只表示 Agent 不能在当前 sandbox/权限/依赖条件下完成验证。两者必须由后续 Workflow 采取不同分支，不能混为一个布尔结果。
+
+**刁钻考官追问：** “为什么不直接给验证 Agent workspace-write？”
+
+**短答：** 能跑测试不等于应扩大所有 Agent 的写权限。当前 Codex Adapter 保持 read-only；未来应建立显式、受审查的验证执行环境或专用 sandbox 策略，而不是让普通分析节点因为临时目录需求获得项目写入能力。
+
 ## 4. 答辩与面试质询库
 
 ### Q1：这不就是普通的多 Agent 框架吗？
@@ -197,6 +270,12 @@ wave-flow run examples/hello-review.ts \
 
 **局限：** 若未来需求变为“用户在 Agent 运行中 attach、追问或接管同一上下文”，应设计独立的 Session Adapter 或对接 BotMux，而不是污染基础 AgentAdapter 的节点语义。
 
+### Q8：为什么不只让 Prompt 要求返回 JSON？
+
+**短答：** Prompt 只能提升概率，不能构成运行时类型契约。只要下游要分支或自动执行，Runtime 必须对实际 JSON 和 Schema 做验证；否则一个字段缺失或类型漂移就会在后续节点扩大成错误决策。
+
+**局限：** Schema 验证能保证形状，不能保证语义正确。例如 `canProceed: true` 的业务判断仍可能错误，需要后续 verifier、assert 或人工确认机制。
+
 ## 5. 当前状态快照
 
 ### 已验证
@@ -210,6 +289,8 @@ wave-flow run examples/hello-review.ts \
 ### 未实现或未验证
 
 - 真实 Codex CLI Adapter 与 `codex exec --json` 事件解析。
+- JSON Schema 结构化输出、Ajv 二次校验和 schema 临时文件生命周期。
 - `pipeline()`、`phase()`、Scheduler、并发上限、超时、重试和预算。
 - JSONL `--print`、Artifact、Journaled Replay、`resume`、`inspect`。
 - 写入安全、Worktree 隔离、`create` / `go`、`use` 默认 Adapter 配置。
+- 浏览器执行环境：专用 Browser Host、显式能力声明、截图 Artifact 与浏览器授权模型。

@@ -1,6 +1,9 @@
 import type { AgentAdapter, AgentExecutionInput } from "../agent-adapter";
 import { extractAgentMessageFromLine } from "./jsonl-parser";
 import type { CodexProcessResult } from "./types";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** 运行 Codex 进程的可替换边界，使 JSONL 与失败语义能脱离真实登录态进行单元测试。 */
 export type CodexProcessRunner = (input: AgentExecutionInput) => Promise<CodexProcessResult>;
@@ -45,7 +48,12 @@ export class CodexCliAdapter implements AgentAdapter {
  * @returns stdout JSONL、stderr 诊断和退出码。
  */
 async function runCodexProcess(input: AgentExecutionInput): Promise<CodexProcessResult> {
-  const process = Bun.spawn([
+  const schemaDirectory = input.schema ? await mkdtemp(join(tmpdir(), "wave-flow-schema-")) : undefined;
+  const schemaPath = schemaDirectory ? join(schemaDirectory, "output-schema.json") : undefined;
+
+  try {
+    if (schemaPath) await writeFile(schemaPath, JSON.stringify(input.schema), "utf8");
+    const command = [
     "codex",
     "exec",
     "--json",
@@ -55,21 +63,27 @@ async function runCodexProcess(input: AgentExecutionInput): Promise<CodexProcess
     "--cd",
     input.cwd,
     // 阻止以 -- 开头的任务文本被 Codex 解析成 CLI 选项。
+    ...(schemaPath ? ["--output-schema", schemaPath] : []),
     "--",
     input.prompt,
-  ], {
+    ];
+    const process = Bun.spawn(command, {
     // exec 不应从 wave-flow 的终端继承 stdin；否则 Codex 会等待额外人类输入。
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-  });
+    });
 
-  const [stdoutResult, stderr, exitCode] = await Promise.all([
+    const [stdoutResult, stderr, exitCode] = await Promise.all([
     readFinalAgentMessage(process.stdout),
     readLimitedText(process.stderr, 800),
     process.exited,
-  ]);
-  return { ...stdoutResult, stderr, exitCode };
+    ]);
+    return { ...stdoutResult, stderr, exitCode };
+  } finally {
+    // schema 文件仅是 Codex 的启动参数，任何路径都必须尽力清理且不污染项目目录。
+    if (schemaDirectory) await rm(schemaDirectory, { recursive: true, force: true });
+  }
 }
 
 /**

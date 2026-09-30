@@ -27,7 +27,10 @@ export interface WorkflowContext {
    * @param options 节点标记；省略后 label 默认为 `agent`。
    * @returns Agent 的最终输出及运行元数据；错误会向上抛给 Workflow。
    */
-  agent(prompt: string, options?: import("../runtime/types").AgentOptions): Promise<import("../runtime/types").AgentResult>;
+  agent<T = string>(
+    prompt: string,
+    options?: import("../runtime/types").AgentOptions,
+  ): Promise<import("../runtime/types").AgentResult<T>>;
 
   /**
    * 并行执行一组彼此独立的任务，并在全部结束后按原始输入顺序返回结果。

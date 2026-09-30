@@ -28,6 +28,7 @@ Agent Adapter
 - 使用 `wave-flow run` 加载 Workflow，传入 JSON 输入，并在终端显示任务生命周期。
 - 支持 `--input`、`--input-file` 和 `--cwd`。
 - 支持 `fake` 和 `codex` Adapter；Codex 节点通过独立的 `codex exec --json` 运行。
+- 支持 `ctx.agent<T>(..., { schema })`：Codex 通过 JSON Schema 约束输出，Runtime 使用 Ajv 二次校验后才向下游交付结构化结果。
 
 `fake` 返回固定测试结果，不会读取代码、修改文件或调用 Codex。`codex` 使用当前机器已登录的 Codex CLI，以只读 sandbox 读取工作目录并返回 Agent 最终文本。
 
@@ -153,6 +154,50 @@ const reviews = await ctx.parallel([
 return reviews;
 ```
 
+### 结构化输出
+
+当下游逻辑需要分支或过滤时，为 Agent 提供 JSON Schema。泛型 `T` 只提供 TypeScript 提示；Runtime 会根据 `schema` 验证真实输出。
+
+```ts
+type Readiness = {
+  canProceed: boolean;
+  issues: string[];
+};
+
+const result = await ctx.agent<Readiness>(
+  "检查是否可以继续。",
+  {
+    label: "readiness-check",
+    schema: {
+      type: "object",
+      required: ["canProceed", "issues"],
+      additionalProperties: false,
+      properties: {
+        canProceed: { type: "boolean" },
+        issues: { type: "array", items: { type: "string" } },
+      },
+    },
+  },
+);
+
+if (!result.output.canProceed) {
+  console.log(result.output.issues);
+}
+```
+
+使用 Codex Adapter 时，wave-flow 会临时创建 `--output-schema` 所需文件，并在节点结束后自动清理。非 JSON 或不满足 Schema 的结果会触发 `agent.failed`，不会交给下游 Workflow。
+
+当 Agent 需要报告验证结果时，建议在 Schema 中区分代码状态与执行环境限制：
+
+```ts
+verification: {
+  status: "passed" | "failed" | "not_run" | "blocked_by_environment";
+  reason: string;
+}
+```
+
+`blocked_by_environment` 表示 Agent 因 read-only sandbox、权限或缺失依赖而无法验证，不等同于测试或代码失败。例如只读 Codex 节点可能无法创建某些测试所需的临时文件。
+
 ## 开发与验证
 
 ```bash
@@ -168,4 +213,5 @@ bun test
 - 仅支持本地、受信任的 `.ts` Workflow；不支持 URL 或远程下载的 Workflow。
 - 仅支持 `wave-flow run`；不支持 `create`、`go`、`resume`、`inspect`。
 - Codex Adapter 当前固定使用 read-only sandbox；尚不支持工作区写入、tmux 持久会话或运行中人工接管。
+- 尚不支持自动修复不合格的结构化输出、从 TypeScript 类型自动生成 Schema、`ctx.assert()` 或 `ctx.ask()`。
 - 尚不支持 JSONL `--print`、输入 schema、断点恢复、超时/重试/预算、Worktree 隔离写入或默认 Adapter 配置。

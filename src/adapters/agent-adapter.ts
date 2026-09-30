@@ -6,6 +6,11 @@ export type AgentExecutionInput = {
   label: string;
   /** Agent 应视为工作目录的绝对路径；未来写入模式会更严格地校验它。 */
   cwd: string;
+  /**
+   * 可选 JSON Schema。Adapter 可将它传给底层 Agent；Runtime 仍会对最终 output 二次校验。
+   * schema 为普通 JSON 对象，不能携带函数或运行时引用。
+   */
+  schema?: object;
 };
 
 /**

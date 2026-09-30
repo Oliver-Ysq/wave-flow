@@ -1,5 +1,6 @@
 import type { WorkflowContext } from "../workflow/types";
 import type { AgentOptions, AgentResult, RuntimeOptions } from "./types";
+import { parseStructuredOutput } from "./schema";
 
 /**
  * 为一次 Workflow 运行创建受控上下文。
@@ -15,14 +16,16 @@ export function createWorkflowContext(options: RuntimeOptions, runId: string): W
    * 统一封装一次 Agent 调用，确保无论从 Workflow 直接调用还是从 parallel 中调用，
    * 都遵循相同的事件和 Adapter 委派规则。
    */
-  async function agent(prompt: string, agentOptions: AgentOptions = {}): Promise<AgentResult> {
+  async function agent<T = string>(prompt: string, agentOptions: AgentOptions = {}): Promise<AgentResult<T>> {
     const label = agentOptions.label ?? "agent";
     options.events.emit({ type: "agent.started", runId, label, prompt });
     try {
-      const result = await options.adapter.execute({ prompt, label, cwd: options.cwd });
-      options.events.emit({ type: "agent.completed", runId, label });
+      const result = await options.adapter.execute({ prompt, label, cwd: options.cwd, schema: agentOptions.schema });
       // 尚未实现 Journal；结果均来自本次执行，因而 replayed 固定为 false。
-      return { output: result.output, replayed: false, runId };
+      const output = agentOptions.schema ? parseStructuredOutput<T>(result.output, agentOptions.schema) : (result.output as T);
+      // 结构化结果也必须通过本地校验后，节点才算真正 completed。
+      options.events.emit({ type: "agent.completed", runId, label });
+      return { output, replayed: false, runId };
     } catch (error) {
       // 节点级失败必须先记录，Runner 才能在外层补充整次 workflow.error。
       options.events.emit({

@@ -7,12 +7,17 @@ export type AgentOptions = {
   label?: string;
   /** 调用所属的逻辑阶段；后续会用于阶段级事件、TUI 展示和统计。 */
   phase?: string;
+  /**
+   * 约束 Agent 最终输出形状的 JSON Schema。
+   * 提供后 AgentResult.output 会由 Runtime 解析并校验为结构化值；不提供时 output 保持文本。
+   */
+  schema?: object;
 };
 
 /** Agent 完成独立 ReAct Loop 后交给 Workflow 的结果。 */
-export type AgentResult = {
-  /** Agent 的最终文本输出；启用 schema 后会扩展为已校验的结构化数据。 */
-  output: string;
+export type AgentResult<T = string> = {
+  /** Agent 最终输出；未提供 schema 时为文本，提供 schema 后为已验证的 T。 */
+  output: T;
   /** 当前是否命中历史 Journal；尚未实现 Journal，因此现在恒为 false。 */
   replayed: boolean;
   /** 当前整次 Workflow 运行的唯一标识，用于关联事件、日志和 artifacts。 */

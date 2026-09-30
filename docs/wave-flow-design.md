@@ -236,6 +236,33 @@ codex exec --json --ephemeral --sandbox read-only --cd <cwd> <prompt>
 
 CLI 增加 `--adapter codex`，与当前 `--adapter fake` 并存。二者仅改变 Adapter 选择；Workflow、Runner、`ctx.agent()` 和 `ctx.parallel()` 的 API 不变。写入 sandbox、tmux/持久会话、人类接管、Human-in-the-Loop、结构化 schema、`pipeline()` 与 JSONL `--print` 不属于此切片。
 
+### JSON Schema 结构化输出切片
+
+当下游 Workflow 需要分支、过滤、循环或聚合时，`agent()` 不应交付自由文本。Workflow 可在 `AgentOptions.schema` 传入 JSON Schema，并用泛型描述预期结果：
+
+```ts
+type Readiness = { canProceed: boolean; issues: string[] };
+
+const result = await ctx.agent<Readiness>("检查任务是否可以继续。", {
+  label: "readiness-check",
+  schema: {
+    type: "object",
+    required: ["canProceed", "issues"],
+    additionalProperties: false,
+    properties: {
+      canProceed: { type: "boolean" },
+      issues: { type: "array", items: { type: "string" } },
+    },
+  },
+});
+```
+
+- TypeScript 泛型只提供开发期提示；JSON Schema 是运行时唯一的输出契约，两者由 Workflow 作者保持一致。
+- Codex CLI 的 `--output-schema` 只接收文件路径。Adapter 将 schema 对象写入受控系统临时目录，传入该路径，并在成功、进程失败、JSONL 失败或输出校验失败后都尝试删除该文件；临时 schema 不是 Workflow Artifact。
+- Adapter 从 `agent_message` 得到最终文本后先 `JSON.parse`，再使用 Ajv 对同一份 schema 进行本地二次校验。Codex 负责尽量产生结构化结果，Runtime 仍必须验证，不能信任“看起来像 JSON”的输出。
+- JSON 解析失败、Schema 校验失败、临时文件无法创建或清理失败都使该 Agent 节点失败，触发现有 `agent.failed`；在 `parallel()` 中对应位置为 `null`。
+- 首切片不实现自动修复输出、`ctx.assert()`、`ctx.ask()`、由 TypeScript 自动生成 schema 或将原始结构化结果保存到 Artifact。先保证非法结果不能进入下游。
+
 ## 调度、重试与预算
 
 项目默认配置保守且显式：

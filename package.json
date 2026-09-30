@@ -12,6 +12,7 @@
     "check": "tsc --noEmit"
   },
   "devDependencies": {
+    "ajv": "^8.17.1",
     "@types/bun": "latest",
     "typescript": "^5.9.3"
   }
