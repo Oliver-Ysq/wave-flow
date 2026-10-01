@@ -29,6 +29,7 @@ export class WorkflowRunner {
     try {
       const result = await run(createWorkflowContext(this.options, runId), args); // 使用 adapter 执行 agent 、 parallel 等方法
       events.emit({ type: "workflow.end", runId, workflow: workflow.meta.name });
+      await this.options.journal?.flush();
       return result;
     } catch (error) {
       events.emit({
@@ -37,6 +38,7 @@ export class WorkflowRunner {
         workflow: workflow.meta.name,
         error: error instanceof Error ? error.message : String(error),
       });
+      await this.options.journal?.flush();
       throw error;
     }
   }

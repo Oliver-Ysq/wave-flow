@@ -1,5 +1,6 @@
 import type { AgentAdapter } from "../adapters/agent-adapter";
 import type { EventSink } from "../events/types";
+import type { RunJournal } from "../journal/journal";
 
 /** 单次 Agent 调用的可选标记；label 供事件、日志和未来回放节点使用。 */
 export type AgentOptions = {
@@ -34,4 +35,8 @@ export type RuntimeOptions = {
   cwd: string;
   /** 可选的整次运行标识；省略时 Runtime 会生成随机 UUID。 */
   runId?: string;
+  /** 可选的同一 run Journal；提供后 completed 节点可在 resume 时回放。 */
+  journal?: RunJournal;
+  /** Adapter 的稳定名称，作为 Journal 节点输入身份的一部分。 */
+  adapterId?: string;
 };

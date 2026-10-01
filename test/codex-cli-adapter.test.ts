@@ -67,4 +67,14 @@ describe("CodexCliAdapter", () => {
 
     await expect(adapter.execute({ prompt: "Reply", label: "test", cwd: "/workspace" })).rejects.toThrow("没有返回最终 agent_message");
   });
+
+  test("reports an oversized stdout line after draining the process", async () => {
+    const adapter = new CodexCliAdapter(async () => ({
+      finalMessage: undefined,
+      stdoutParseError: "Codex stdout 单行超过 1048576 字符上限。",
+      stderr: "",
+      exitCode: 0,
+    }));
+    await expect(adapter.execute({ prompt: "Reply", label: "test", cwd: "/workspace" })).rejects.toThrow("stdout JSONL 解析失败");
+  });
 });

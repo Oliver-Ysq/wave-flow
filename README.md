@@ -17,7 +17,7 @@ Agent Adapter
   └─ Codex CLI Adapter：真实只读 Agent 节点
 ```
 
-详细的设计边界见：[2026-09-29-wave-flow-design.md](./2026-09-29-wave-flow-design.md)。
+详细的设计边界见：[docs/wave-flow-design.md](./docs/wave-flow-design.md)。
 
 ## 当前功能
 
@@ -25,6 +25,7 @@ Agent Adapter
 - 在运行前校验 Workflow 的 `meta` 和 `default` / `run` 入口。
 - 使用 `ctx.agent()` 委派独立 Agent 任务，并输出统一的 `AgentResult`。
 - 使用 `ctx.parallel()` 并行启动独立任务、等待全部完成、保持输入顺序；单项失败返回 `null`，不取消其他任务。
+- 支持同一 `runId` 的 Journaled Replay：`resume` 会回放已完成节点，只重跑未完成或失败节点。
 - 使用 `wave-flow run` 加载 Workflow，传入 JSON 输入，并在终端显示任务生命周期。
 - 支持 `--input`、`--input-file` 和 `--cwd`。
 - 支持 `fake` 和 `codex` Adapter；Codex 节点通过独立的 `codex exec --json` 运行。
@@ -100,6 +101,20 @@ Result:
 
 `--input` 与 `--input-file` 不能同时使用。两者都省略时，Workflow 收到空对象 `{}`。
 
+### 恢复和查看运行
+
+每次 `run` 都会显示一个独立的 Run ID，并将 manifest 与 Journal 写到 `.wave-flow/runs/<run-id>/`。
+
+```bash
+# 查看本次运行的 Workflow、Adapter 和节点状态
+wave-flow inspect <run-id>
+
+# 恢复同一个 run：已完成节点直接回放，未完成/失败节点重新执行
+wave-flow resume <run-id>
+```
+
+`resume` 只读取同一个 Run ID 的 Journal，绝不跨 run 复用结果。恢复前会检查 Workflow 源码 hash；manifest 中的 Workflow 路径和 cwd 必须仍位于当前项目内，避免恢复命令访问项目外的文件或目录。
+
 复杂输入建议放在 JSON 文件中，避免 shell 引号问题：
 
 ```json
@@ -153,6 +168,8 @@ const reviews = await ctx.parallel([
 // reviews 按输入顺序返回；失败的任务位置为 null。
 return reviews;
 ```
+
+可运行的并行示例：[examples/parallel-review.ts](./examples/parallel-review.ts)。
 
 ### 结构化输出
 
@@ -211,7 +228,7 @@ bun test
 ## 当前限制
 
 - 仅支持本地、受信任的 `.ts` Workflow；不支持 URL 或远程下载的 Workflow。
-- 仅支持 `wave-flow run`；不支持 `create`、`go`、`resume`、`inspect`。
+- 支持 `run`、`resume` 和 `inspect`；尚不支持 `create`、`go`。
 - Codex Adapter 当前固定使用 read-only sandbox；尚不支持工作区写入、tmux 持久会话或运行中人工接管。
 - 尚不支持自动修复不合格的结构化输出、从 TypeScript 类型自动生成 Schema、`ctx.assert()` 或 `ctx.ask()`。
-- 尚不支持 JSONL `--print`、输入 schema、断点恢复、超时/重试/预算、Worktree 隔离写入或默认 Adapter 配置。
+- 尚不支持 JSONL `--print`、跨 run 缓存、脚本变化后的恢复、自动 Ctrl-C 信号处理、超时/重试/预算、Worktree 隔离写入或默认 Adapter 配置。

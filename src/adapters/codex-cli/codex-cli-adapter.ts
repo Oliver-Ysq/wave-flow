@@ -5,6 +5,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** 单条 Codex JSONL 事件的最大字符上限，防止无换行输出无限增长内存。 */
+const MAX_JSONL_LINE_LENGTH = 1024 * 1024;
+
 /** 运行 Codex 进程的可替换边界，使 JSONL 与失败语义能脱离真实登录态进行单元测试。 */
 export type CodexProcessRunner = (input: AgentExecutionInput) => Promise<CodexProcessResult>;
 
@@ -88,7 +91,7 @@ async function runCodexProcess(input: AgentExecutionInput): Promise<CodexProcess
 
 /**
  * 流式读取 stdout，只保留最后一条 agent_message，避免长工具日志占满内存。
- * JSONL 解析失败时仍持续 drain 到 EOF，确保子进程不会因写满管道阻塞或脱离管理。
+ * JSONL 解析失败或单行过长时仍持续 drain 到 EOF，确保子进程不会因写满管道阻塞或脱离管理。
  */
 async function readFinalAgentMessage(
   stream: ReadableStream<Uint8Array>,
@@ -113,9 +116,21 @@ async function readFinalAgentMessage(
     const { value, done } = await reader.read();
     if (done) break;
     buffered += decoder.decode(value, { stream: true });
+    if (buffered.length > MAX_JSONL_LINE_LENGTH && !buffered.includes("\n")) {
+      // 保留固定大小哨兵，之后继续 drain，不再累计攻击者控制的无换行内容。
+      stdoutParseError ??= `Codex stdout 单行超过 ${MAX_JSONL_LINE_LENGTH} 字符上限。`;
+      buffered = "";
+      continue;
+    }
     const lines = buffered.split(/\r?\n/);
     buffered = lines.pop() ?? "";
-    for (const line of lines) consumeLine(line);
+    for (const line of lines) {
+      if (line.length > MAX_JSONL_LINE_LENGTH) {
+        stdoutParseError ??= `Codex stdout 单行超过 ${MAX_JSONL_LINE_LENGTH} 字符上限。`;
+      } else {
+        consumeLine(line);
+      }
+    }
   }
   buffered += decoder.decode();
   consumeLine(buffered);

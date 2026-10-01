@@ -24,6 +24,9 @@ export class TerminalEventSink implements EventSink {
       case "agent.completed":
         this.write(`  ✓ Agent completed: ${event.label}`);
         break;
+      case "agent.replayed":
+        this.write(`  ↻ Agent replayed: ${event.label}`);
+        break;
       case "agent.failed":
         this.write(`  ✗ Agent failed: ${event.label}`);
         this.write(`    ${event.error}`);

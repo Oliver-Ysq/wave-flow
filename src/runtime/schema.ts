@@ -18,6 +18,17 @@ export function parseStructuredOutput<T>(output: string, schema: object): T {
     throw new Error("Agent 结构化输出不是合法 JSON。");
   }
 
+  return validateStructuredValue<T>(value, schema);
+}
+
+/**
+ * 验证已解析的结构化值；Journal 回放也必须经过该检查，不能因曾经落盘就绕过契约。
+ * @param value 已解析的未知值，例如当前 Agent 输出或 Journal 中保存的 completed output。
+ * @param schema Workflow 当前调用声明的 JSON Schema。
+ * @returns 满足 Schema 的 T。
+ * @throws 值不满足 Schema 时抛出，阻止被篡改或过期的结构化 Journal 结果进入下游。
+ */
+export function validateStructuredValue<T>(value: unknown, schema: object): T {
   const validate = ajv.compile(schema);
   if (!validate(value)) {
     throw new Error(`Agent 结构化输出不满足 JSON Schema：${formatErrors(validate.errors)}`);

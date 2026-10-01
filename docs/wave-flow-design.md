@@ -294,6 +294,27 @@ Scheduler 负责全局信号量、最大节点数、Token 预算、单节点超�
 
 默认严格恢复要求 Workflow 源码和输入都不变。`--allow-script-change` 允许修改源码后继续运行，但只有完整回放 Key 仍相同的节点才能命中缓存。
 
+### 首个 Journaled Replay 切片：同一运行恢复
+
+首个恢复实现只服务同一 `runId`，不在不同 run 之间自动复用任何 Agent 结果。每次 `run` 创建独立证据目录：
+
+```text
+.wave-flow/runs/<run-id>/
+  manifest.json
+  journal.jsonl
+```
+
+`manifest.json` 保存本次运行的固定身份：`runId`、绝对 Workflow 路径、Workflow 源码 hash、初始 input、adapter、cwd 与创建时间。`journal.jsonl` 追加节点事件。只有可靠落盘的 `agent.completed` 记录可以回放；`agent.started`、`agent.failed`、进程中断时仍在运行的节点、以及 `workflow.error` 都不能回放。
+
+```bash
+wave-flow run <workflow-file> ...  # 创建新的、隔离的 runId
+wave-flow resume <run-id>          # 只读取该 runId 自己的 manifest 和 journal
+```
+
+恢复会重新执行 Workflow 脚本，而非恢复 JavaScript 调用栈。Runtime 先验证 manifest 的 runId、字段形状以及 Workflow/cwd 仍位于当前项目内，再比较源码 hash，最后才 import 模块。每次 `ctx.agent()` 根据同一 run 内的稳定节点身份查 Journal：首切片使用 `label + 调用顺序` 形成 `nodeKey`，并要求 `prompt + schema + cwd + adapter` 的 input hash 不变。命中 `agent.completed` 时直接返回保存的 output 和 `replayed: true`；未命中、失败或中断节点则重新调用 Adapter。
+
+Workflow 源码 hash 与 manifest 不同则 `resume` 明确拒绝，避免调用顺序或节点语义变化时错误回放。首切片不支持 `--allow-script-change`、跨 run 内容缓存、自动 Ctrl-C 信号处理、Artifact Store 或业务型 `suspend/ask`。`inspect <run-id>` 只提供 manifest、节点完成/回放/未完成数量与最近错误的最小汇总。
+
 ## 写入安全与隔离
 
 默认 sandbox 为 `read-only`。写入必须同时满足：

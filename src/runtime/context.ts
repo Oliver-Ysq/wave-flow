@@ -1,6 +1,7 @@
 import type { WorkflowContext } from "../workflow/types";
 import type { AgentOptions, AgentResult, RuntimeOptions } from "./types";
-import { parseStructuredOutput } from "./schema";
+import { parseStructuredOutput, validateStructuredValue } from "./schema";
+import { hashValue } from "../journal/hash";
 
 /**
  * 为一次 Workflow 运行创建受控上下文。
@@ -12,19 +13,33 @@ import { parseStructuredOutput } from "./schema";
  * @returns 仅暴露 WorkflowContext 协议中允许调用的方法。
  */
 export function createWorkflowContext(options: RuntimeOptions, runId: string): WorkflowContext {
+  let agentSequence = 0;
   /**
    * 统一封装一次 Agent 调用，确保无论从 Workflow 直接调用还是从 parallel 中调用，
    * 都遵循相同的事件和 Adapter 委派规则。
    */
   async function agent<T = string>(prompt: string, agentOptions: AgentOptions = {}): Promise<AgentResult<T>> {
     const label = agentOptions.label ?? "agent";
+    const nodeKey = `${label}#${++agentSequence}`;
+    const inputHash = hashValue({ prompt, schema: agentOptions.schema ?? null, cwd: options.cwd, adapter: options.adapterId ?? "unknown" });
+    const replayedOutput = options.journal?.completed(nodeKey, inputHash);
+    if (replayedOutput !== undefined) {
+      options.journal?.markReplayed();
+      options.events.emit({ type: "agent.replayed", runId, label });
+      const output = agentOptions.schema
+        ? validateStructuredValue<T>(replayedOutput, agentOptions.schema)
+        : (replayedOutput as T);
+      return { output, replayed: true, runId };
+    }
     options.events.emit({ type: "agent.started", runId, label, prompt });
+    await options.journal?.append({ event: "agent.started", nodeKey, inputHash, timestamp: new Date().toISOString() });
     try {
       const result = await options.adapter.execute({ prompt, label, cwd: options.cwd, schema: agentOptions.schema });
       // 尚未实现 Journal；结果均来自本次执行，因而 replayed 固定为 false。
       const output = agentOptions.schema ? parseStructuredOutput<T>(result.output, agentOptions.schema) : (result.output as T);
       // 结构化结果也必须通过本地校验后，节点才算真正 completed。
       options.events.emit({ type: "agent.completed", runId, label });
+      await options.journal?.append({ event: "agent.completed", nodeKey, inputHash, output, timestamp: new Date().toISOString() });
       return { output, replayed: false, runId };
     } catch (error) {
       // 节点级失败必须先记录，Runner 才能在外层补充整次 workflow.error。
@@ -34,6 +49,7 @@ export function createWorkflowContext(options: RuntimeOptions, runId: string): W
         label,
         error: error instanceof Error ? error.message : String(error),
       });
+      await options.journal?.append({ event: "agent.failed", nodeKey, inputHash, error: error instanceof Error ? error.message : String(error), timestamp: new Date().toISOString() });
       throw error;
     }
   }

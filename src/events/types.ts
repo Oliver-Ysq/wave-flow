@@ -6,6 +6,8 @@ export type WorkflowEvent =
   | { type: "agent.started"; runId: string; label: string; prompt: string }
   /** Adapter 成功返回最终输出。 */
   | { type: "agent.completed"; runId: string; label: string }
+  /** Journal 命中已完成节点；没有启动 Adapter。 */
+  | { type: "agent.replayed"; runId: string; label: string }
   /** Adapter 执行失败；label 用于定位失败节点，error 保留面向人类的诊断信息。 */
   | { type: "agent.failed"; runId: string; label: string; error: string }
   /** Workflow 的 run 函数已正常返回。 */

@@ -226,6 +226,40 @@ Browser-capable Adapter 或显式 ctx API
 
 **短答：** 能跑测试不等于应扩大所有 Agent 的写权限。当前 Codex Adapter 保持 read-only；未来应建立显式、受审查的验证执行环境或专用 sandbox 策略，而不是让普通分析节点因为临时目录需求获得项目写入能力。
 
+### 3.10 Journaled Replay 为什么先只恢复同一 runId
+
+**设计决定：** `wave-flow run` 每次创建独立 `runId`、manifest 和 journal；只有 `wave-flow resume <run-id>` 可以回放该 run 内已完成 Agent 节点。不同 run 默认绝不互相读取或复用结果。
+
+**原因：** run 是一次独立执行证据，包含当时的 input、工作目录、adapter、脚本版本和副作用上下文。跨 run 的内容缓存会模糊“这次运行实际做了什么”，也可能把旧环境或旧输入的结果误当作新任务证据。
+
+**恢复模型：** 不是保存 JavaScript 调用栈，而是重新执行 Workflow，并在每个 `ctx.agent()` 处查询同一 run 的 Journal。只有先落盘的 `agent.completed` 可返回 `replayed: true`；started、failed 和中断节点一律重新执行。
+
+**节点身份：** 首切片用 `label + 调用顺序` 区分同一 run 内的 Agent 调用，同时比较 prompt、schema、cwd 与 adapter 的 hash。脚本 hash 不同则拒绝 resume，不做猜测性恢复。
+
+**与 Claude 的关系：** Claude Code 的动态工作流在暂停后按代理启动顺序重放：已完成代理返回保存结果，停止中/失败代理重跑。wave-flow 借鉴该“完成结果可重放、未完成结果不可信”的边界，但采用本地 `manifest.json + journal.jsonl` 作为独立 CLI Runtime 的证据。
+
+**刁钻考官追问：** “为什么不直接做跨 run 缓存，省更多 Token？”
+
+**短答：** 优化成本不能改变 run 隔离和审计语义。跨 run 缓存是可选的显式产品能力，必须定义环境、输入、脚本和副作用的失效规则；不能在首版恢复功能中默认启用。
+
+**真实 CLI 证据：** 使用 `parallel-review` 创建新 run 后，Journal 记录两个 completed 节点；`wave-flow inspect <run-id>` 显示 `completed=2`，随后 `wave-flow resume <run-id>` 对两个节点均发出 `agent.replayed`，结果的 `replayed` 为 `true`，没有再次启动 Fake Adapter。
+
+### 3.11 Journaled Replay 首次安全审查修复
+
+**问题来源：** 真实 `security-review` 节点审查 Journal 实现后发现三个边界缺口：runId 路径穿越、未校验 manifest 导致 resume 可能导入任意本地 TypeScript，以及 Codex stdout 单条无换行 JSONL 可无界占用内存。
+
+**修复 1：runId 与目录边界。** `resume/inspect` 只接受 Runtime 生成的 UUID。路径在 `resolve()` 后必须仍位于 `.wave-flow/runs` 根目录内，拒绝 `../`、非 UUID 或目录逃逸。
+
+**修复 2：manifest 先验证、项目边界后 import。** Journal 打开时严格检查 manifest：请求 runId 一致、Workflow/cwd 为绝对路径、hash 为 SHA-256、adapter 属于支持枚举、input 为对象、时间格式有效。恢复时 Workflow/cwd 必须仍位于当前项目根目录内，且源码 hash 匹配后才动态 import；因此被篡改的 manifest 不能让 `resume <run-id>` 访问项目外任意模块或目录。Journal 状态仍属于当前本地项目的受信任状态；若同一用户可任意篡改项目内文件，CLI 无法在没有外部密钥/签名机制时证明其完整性。
+
+**修复 3：JSONL 单行上限。** Codex stdout 继续流式 drain；当未换行缓冲超过 1 MiB 时记录解析错误、丢弃该缓冲而继续读取到 EOF。这样不会因坏 CLI 或恶意 executable 的无换行输出撑满内存，同时仍等待子进程退出并保留有限 stderr 诊断。
+
+**补充边界：** Journal 中已保存的结构化 output 在 replay 时仍通过当前调用的 JSON Schema 校验，不能因“曾经落盘”绕过 Runtime 数据契约。
+
+**刁钻考官追问：** “Journal 是本地文件，为什么还要防篡改？”
+
+**短答：** 本地状态不等于可信输入。`resume <runId>` 的用户没有重新显式选择 workflowPath；因此 manifest 若被篡改就可能把恢复命令变成任意本地模块导入。最小 schema/path/hash 验证保护的是恢复入口的能力边界，不是在宣称本地文件不可被修改。
+
 ## 4. 答辩与面试质询库
 
 ### Q1：这不就是普通的多 Agent 框架吗？
