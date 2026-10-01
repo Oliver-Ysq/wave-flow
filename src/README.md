@@ -1,6 +1,6 @@
 # Wave Flow 源码边界
 
-本目录按新架构职责分层。第 1 章只建立这些边界，不提供旧一次性 `codex exec` Runtime 的兼容实现，也不提前实现正常 CLI、tmux、Web 或 HITL。
+本目录按新架构职责分层。目前只建立这些边界，不提供旧一次性 `codex exec` Runtime 的兼容实现，也不提前实现正常 CLI、tmux、Web 或 HITL。
 
 | 目录 | 负责 | 不负责 |
 | --- | --- | --- |

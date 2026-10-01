@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** 第 1 章规定的职责目录；目录是后续实现的唯一落点，而非能力已经可用的声明。 */
+/** 架构规定的职责目录；目录是后续实现的唯一落点，而非能力已经可用的声明。 */
 const requiredDirectories = [
   "src/workflow",
   "src/runtime",
@@ -21,7 +21,7 @@ const requiredDirectories = [
   "src/shared",
 ] as const;
 
-describe("第 1 章：新架构目录与历史实现边界", () => {
+describe("新架构目录与历史实现边界", () => {
   test("为每个职责提供唯一且可追踪的目录落点", async () => {
     await Promise.all(requiredDirectories.map(async (directory) => {
       const path = join(projectRoot, directory);

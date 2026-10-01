@@ -4,7 +4,7 @@ Wave Flow 是一个面向本机单用户的动态工作流产品：用户将以 
 
 ## 当前状态
 
-项目正处于新架构的第 1 章：已删除旧的一次性 `codex exec` Runtime，并按职责建立源码边界。当前**没有可供用户执行 Workflow 的 `run`、`resume`、`inspect` 或 Adapter 命令**；也尚未实现 tmux / PTY、正常交互式 CLI、Local Web、HITL、Journal 或 Replay。
+项目已完成旧一次性 `codex exec` Runtime 的移除，并按职责建立源码边界。当前**没有可供用户执行 Workflow 的 `run`、`resume`、`inspect` 或 Adapter 命令**；也尚未实现 tmux / PTY、正常交互式 CLI、Local Web、HITL、Journal 或 Replay。
 
 这意味着历史的 `ctx.agent()`、Fake Adapter、`codex exec --json`、旧示例和旧 Journaled Replay 都不再可用，也不代表本项目的当前能力。
 
