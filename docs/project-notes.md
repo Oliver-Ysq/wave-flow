@@ -136,6 +136,12 @@ tmux 解决“进程仍存活时如何保持同一上下文”；Journal 解决�
 
 **已验证事实：** 第 1 章已删除旧 Fake/Codex `exec` Runtime、旧 Journal、CLI、示例及其测试，并建立按职责分层的新源码目录与结构测试。
 
+**已验证事实：** Workflow 层现已验证受信任本地 `.ts` 模块的项目目录边界、纯字面量 `meta` 与默认 async `run(args)` 入口；作者 API 通过 AsyncLocalStorage 按 Run 隔离，`parallel()` 与 `pipeline()` 保持失败项为 `null` 的编排语义。
+
+**设计决定：** 作者 API 不使用旧 `ctx` 参数或可变全局状态。AsyncLocalStorage 只承载同一 Bun 进程内的异步调用上下文，不跨进程、不作为 Journal，也不替代会话 capability。
+
+**设计决定：** Workflow 目前只允许从 `wave-flow` 进行运行时值导入，且禁止动态 import 与相对路径运行时依赖。这样主 Workflow 源码 hash 可代表实际加载的运行时模块边界，避免进程内 ESM 依赖缓存与后续 replay 指纹不一致；代价是作者暂不能拆分运行时 Workflow 辅助模块，类型 import 不受影响。
+
 **设计决定：** 不保留旧 API 或可执行兼容入口，防止 README、演示、测试和后续章节将一次性执行语义误认为新架构能力。
 
 **已知限制：** 目录边界不构成 Runtime、正常 CLI Session Host、Web 控制台、受控 HITL、Journal 或 Replay 的实现证据；这些能力必须在后续章节各自形成可验证闭环后才能对外宣称可用。

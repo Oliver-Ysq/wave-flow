@@ -1,6 +1,6 @@
 # Wave Flow 源码边界
 
-本目录按新架构职责分层。目前只建立这些边界，不提供旧一次性 `codex exec` Runtime 的兼容实现，也不提前实现正常 CLI、tmux、Web 或 HITL。
+本目录按新架构职责分层。Workflow 层现已提供受信任本地 `.ts` 模块加载、纯字面量 `meta` 校验，以及以 AsyncLocalStorage 隔离的 `agent()`、`phase()`、`parallel()`、`pipeline()` 和 `log()` 作者 API；它们目前只委派最小内存宿主，不提供旧一次性 `codex exec` Runtime，也不启动正常 CLI、tmux、Web 或 HITL。
 
 | 目录 | 负责 | 不负责 |
 | --- | --- | --- |

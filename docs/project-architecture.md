@@ -115,11 +115,11 @@ flowchart LR
 
 ## 3. P0 模块地图
 
-第 1 章已建立以下源码目录及边界说明，供后续章节在唯一职责位置实现。除目录和结构验证外，图中的 Runtime、Session Host、Adapter、Control Server、Journal、daemon、CLI 与 Web 均尚未实现。
+当前已建立以下源码目录及边界说明。Workflow 层已经具备受信任本地 TypeScript Workflow 的加载、静态 `meta` 契约验证，以及由 AsyncLocalStorage 隔离的 `agent/phase/parallel/pipeline/log` 作者 API；Runtime 仅提供该 API 的最小内存宿主协议。Session Host、Adapter、Control Server、Journal、daemon、CLI 与 Web 均尚未实现。
 
 ```text
 src/
-  workflow/                 # Workflow 模块加载、meta 校验、作者 API 注入
+  workflow/                 # Workflow 模块加载、meta 校验、作者 API 注入（仅 wave-flow 值导入）
   runtime/                  # Run、Phase、Agent 节点调度和状态机
   sessions/                 # AgentSession 生命周期
     backends/               # tmux / PTY，身份、三态探测、detach/destroy
