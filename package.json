@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "bin": {
+    "wave-flow": "./src/cli/main.ts"
+  },
   "scripts": {
     "test": "bun test",
     "check": "tsc --noEmit"

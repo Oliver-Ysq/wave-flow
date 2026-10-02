@@ -34,9 +34,14 @@ export class RunJournal {
   static async open(runId: string, root: string): Promise<{ journal: RunJournal; events: readonly JournalEvent[] }> {
     validateRunId(runId);
     const directory = runDirectory(root, runId);
-    const manifest = validateManifest(JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as unknown);
+    let manifestSource: string;
+    try { manifestSource = await readFile(join(directory, "manifest.json"), "utf8"); } catch { throw new Error("指定 Run 不存在或 manifest 不可读取。"); }
+    let manifestValue: unknown;
+    try { manifestValue = JSON.parse(manifestSource) as unknown; } catch (error) { throw new Error(`Run manifest JSON 无效：${error instanceof Error ? error.message : String(error)}`); }
+    const manifest = validateManifest(manifestValue);
     if (manifest.runId !== runId) throw new Error("Manifest runId 与请求不一致。");
-    const text = await readFile(join(directory, "journal.jsonl"), "utf8");
+    let text: string;
+    try { text = await readFile(join(directory, "journal.jsonl"), "utf8"); } catch { throw new Error("指定 Run 的 Journal 不可读取。"); }
     const lines = text.split("\n");
     const events: JournalEvent[] = [];
     const state = new RunStateMachine(manifest);

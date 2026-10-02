@@ -38,6 +38,6 @@ describe("新架构目录与历史实现边界", () => {
     await expect(access(join(projectRoot, "src/adapters/codex-cli"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/adapters/testing"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/runtime/runner.ts"))).rejects.toThrow();
-    await expect(access(join(projectRoot, "src/cli/main.ts"))).rejects.toThrow();
+    await expect(access(join(projectRoot, "src/cli/run-lifecycle.ts"))).rejects.toThrow();
   });
 });

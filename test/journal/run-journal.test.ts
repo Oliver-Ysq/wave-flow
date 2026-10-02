@@ -14,6 +14,11 @@ function manifest(cwd: string): RunManifest {
 }
 
 describe("RunJournal", () => {
+  test("以稳定诊断拒绝不存在的 Run", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    await expect(RunJournal.open("11111111-1111-4111-8111-111111111111", runsRoot(cwd))).rejects.toThrow("指定 Run 不存在或 manifest 不可读取");
+  });
+
   test("耐久创建 Manifest、事件和 JSON 对象结果", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
