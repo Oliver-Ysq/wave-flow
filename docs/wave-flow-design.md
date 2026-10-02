@@ -176,7 +176,7 @@ pipeline<T>(items: readonly T[], ...stages: PipelineStage[]): Promise<Array<unkn
 log(message: string): void;
 ```
 
-- `agent()` 创建节点与独立真实 CLI 会话。
+- `agent()` 创建节点与独立真实 CLI 会话；一期每个 `agent()` 前必须已调用 `phase(title)` 选择 meta 中声明的阶段，避免节点脱离 Phase → Agent 主视图。
 - `phase()` 改变当前 Workflow 的共享阶段；之后创建的 Agent 自动归属该阶段。
 - `parallel()` 使用 Deer 的惰性 thunk 数组；全部启动、顺序回收；单项失败为 `null`，不取消兄弟任务。
 - `pipeline()` 让每个 item 独立经过阶段；一个 item 失败会跳过其后续阶段并在原位置返回 `null`，不是全局 Barrier。
@@ -297,7 +297,7 @@ queued → running → waiting_for_input → running → completed
 | `running` | Scheduler | 会话已启动，正在执行。 |
 | `waiting_for_input` | `wave-flow block` | 原 Agent 命令等待人类答案。 |
 | `completed` | `wave-flow complete` | 校验结果已耐久落盘。 |
-| `failed` | `wave-flow fail` | Agent 确认任务无法完成。 |
+| `failed` | `wave-flow fail` | Agent 确认任务无法完成的不可逆终态；不能再上报 `complete`。 |
 | `cancelled` | 用户/Runtime | 人为停止或上游不可继续，不等同业务失败。 |
 | `interrupted` | Runtime | 会话异常丢失，无法证明完成或失败。 |
 
@@ -331,7 +331,9 @@ daemon 重启后，未决问题恢复为 dormant 状态，Web 继续显示同一
 wave-flow fail --reason "无法连接到目标测试环境"
 ```
 
-`fail` 使当前 `agent()` 返回 `null`。`block` 不是终态；回答后继续等待 `complete` 或 `fail`。用户停止节点/Run 是 `cancelled`，CLI 异常退出、tmux 无法重连等不确定情况是 `interrupted`；两者绝不能伪装为 `failed`。
+`fail` 使当前 `agent()` 返回 `null`，且是不可逆终态：同一节点之后的 `complete` 必须拒绝。`block` 不是终态；回答后继续等待 `complete` 或 `fail`。用户停止节点/Run 是 `cancelled`，CLI 异常退出、tmux 无法重连等不确定情况是 `interrupted`；两者绝不能伪装为 `failed`。
+
+终端观察、接管与人工调试只能用于仍为 `running` 或 `waiting_for_input` 的节点。Agent 遇到可通过继续排查、终端交互或补充信息解决的问题时不得过早调用 `fail`；需要结构化的人类决定时使用 `block`。已 `failed` 节点保留其终端与 Journal 作为诊断证据，但不能被复活为 `completed`。
 
 ## Web 控制台
 
@@ -374,6 +376,12 @@ Agent 终端嵌入 Web 不属于 P0 最小闭环，作为 P1 建设；它直接�
 - 首次连接从 tmux 的权威屏幕和 scrollback 初始化 xterm，再接收实时字节；不得重放 daemon 自进程启动以来积累的原始 ANSI 流。
 - 同一节点一次只有一个 Web terminal write owner；其他标签只读。用户点击“接管终端”获得短期 write lease，主动释放、断连或 lease 超时后回收，其他标签才能接管。
 - 一期为本机单用户，不复制 Botmux 的远程 token/多用户授权体系；write lease 用来解决同一用户多个标签同时输入、resize 与 TUI 状态不可解释的问题。
+
+### P2：显式 Retry 节点
+
+P2 在 P0 与 P1 都形成可验证闭环后才实现失败节点的重试体验。Retry 不是状态机回退：`failed` 节点永远保留为不可逆终态，用户从其诊断或终端证据明确发起 Retry 后，Runtime 创建新的 Agent 节点、新的 `agentSessionId` 与新的 Journal 事件。新节点必须记录 `retryOfNodeId`、用户发起时间、原因（如有）和实际继承的输入；它可在新会话中执行，也可在已验证可安全复用的原会话上建立新的 attempt，但不得将旧节点的 `failed → completed` 改写为状态迁移。
+
+Retry 的下游依赖、并发护栏、会话复用和副作用语义必须在 P2 单独定义并验证。它不能绕过 `resume` 的同 Run replay 规则，也不能将失败节点误标为已完成。
 
 ## Journaled Replay 与显式恢复
 

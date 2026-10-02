@@ -19,13 +19,29 @@ export type WorkflowExecutionContext = {
   currentPhase: string | undefined;
   /** 大于零表示正在并发 thunk 或 pipeline stage 中，禁止切换共享阶段。 */
   concurrentDepth: number;
+  /** 已开始但作者尚未 await 的 Agent 操作；Workflow 返回前必须完成，避免 Run 过早封存。 */
+  readonly pendingOperations: Set<Promise<unknown>>;
 };
 
 const storage = new AsyncLocalStorage<WorkflowExecutionContext>();
 
 /** 在独立异步上下文内执行一次 Workflow，确保并行 Run 不共享作者 API 状态。 */
 export function runWithWorkflowContext<Result>(meta: WorkflowMeta, host: WorkflowExecutionHost, cwd: string, callback: () => Promise<Result>): Promise<Result> {
-  return storage.run({ meta, host, cwd, agentIds: new Set(), lifecycle: { active: true }, currentPhase: undefined, concurrentDepth: 0 }, callback);
+  return storage.run({ meta, host, cwd, agentIds: new Set(), lifecycle: { active: true }, currentPhase: undefined, concurrentDepth: 0, pendingOperations: new Set() }, callback);
+}
+
+/** 登记一个 Agent 操作；即使作者未 await，Workflow 入口也会在结束前等待它完成。 */
+export function trackWorkflowOperation<T>(operation: Promise<T>): Promise<T> {
+  const context = requireWorkflowContext();
+  context.pendingOperations.add(operation);
+  void operation.finally(() => context.pendingOperations.delete(operation)).catch(() => undefined);
+  return operation;
+}
+
+/** 等待当前 Run 中所有已启动 Agent 操作；拒绝会向 Workflow 顶层传播。 */
+export async function waitForWorkflowOperations(): Promise<void> {
+  const context = requireWorkflowContext();
+  while (context.pendingOperations.size > 0) await Promise.all([...context.pendingOperations]);
 }
 
 /** 取得当前 Workflow 上下文；作者 API 在 Workflow 外调用时必须拒绝。 */

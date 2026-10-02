@@ -33,7 +33,7 @@ function workflow<Result>(run: () => Promise<Result>): WorkflowModule<undefined,
 
 describe("Workflow 作者 API", () => {
   test("仅能在 Workflow 执行上下文中调用", async () => {
-    await expect(agent("outside", { id: "outside", cli: "codex" })).rejects.toThrow("只能在正在执行的 Workflow 内");
+    expect(() => agent("outside", { id: "outside", cli: "codex" })).toThrow("只能在正在执行的 Workflow 内");
     expect(() => phase("scan")).toThrow("只能在正在执行的 Workflow 内");
   });
 

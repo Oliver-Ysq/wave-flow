@@ -3,20 +3,22 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { JsonObject } from "../shared/json";
 import type { AgentOptions, PipelineStage } from "../shared/workflow-types";
-import { requireWorkflowContext, runInConcurrentWorkflowScope } from "./execution-context";
+import { requireWorkflowContext, runInConcurrentWorkflowScope, trackWorkflowOperation } from "./execution-context";
 import { WorkflowContractError } from "./errors";
 
 const agentId = /^[A-Za-z0-9._:/-]{1,120}$/;
 
 /** 创建一个独立 Agent 节点请求；本阶段仅委派内存宿主，不启动 CLI。 */
-export async function agent<T extends JsonObject = JsonObject>(prompt: string, options: AgentOptions): Promise<T | null> {
+export function agent<T extends JsonObject = JsonObject>(prompt: string, options: AgentOptions): Promise<T | null> {
   const context = requireWorkflowContext();
   if (typeof prompt !== "string" || prompt.trim() === "") throw new WorkflowContractError("agent() 的 prompt 必须为非空字符串。");
   validateAgentOptions(options);
   if (context.agentIds.has(options.id)) throw new WorkflowContractError(`agent() 的 id 在同一 Run 内必须唯一：${options.id}`);
   context.agentIds.add(options.id);
-  const cwd = await normalizeAgentCwd(options.cwd, context.cwd);
-  return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase: context.currentPhase }) as Promise<T | null>;
+  return trackWorkflowOperation((async () => {
+    const cwd = await normalizeAgentCwd(options.cwd, context.cwd);
+    return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase: context.currentPhase }) as Promise<T | null>;
+  })());
 }
 
 /** 切换之后创建的 Agent 所属阶段；仅允许声明的 title，且不能在并发范围调用。 */

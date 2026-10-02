@@ -1,0 +1,79 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { RunJournal } from "../../src/journal/run-journal";
+import { runsRoot } from "../../src/journal/paths";
+import { RUNTIME_VERSION, type RunManifest } from "../../src/journal/types";
+
+const directories: string[] = [];
+afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+
+function manifest(cwd: string): RunManifest {
+  return { runId: "11111111-1111-4111-8111-111111111111", runtimeVersion: RUNTIME_VERSION, workflow: { name: "journal-check", description: "Check journal.", phases: [{ title: "scan" }] }, workflowHash: "a".repeat(64), cwd, input: {}, createdAt: "2026-10-02T00:00:00.000Z" };
+}
+
+describe("RunJournal", () => {
+  test("耐久创建 Manifest、事件和 JSON 对象结果", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const path = await journal.writeResult("scan/auth", { ok: true });
+    expect(JSON.parse(await readFile(join(journal.directory, path), "utf8"))).toEqual({ nodeId: "scan/auth", result: { ok: true } });
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events).toHaveLength(1);
+  });
+
+  test("重开 completed 节点时要求独立结果文件存在且与事件一致", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, status: "running" });
+    const resultPath = await journal.writeResult("scan-auth", { ok: true });
+    await journal.append({ type: "agent.completed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, resultPath, result: { ok: true } });
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: expect.any(Array) });
+    await writeFile(join(journal.directory, resultPath), JSON.stringify({ nodeId: "scan-auth", result: { ok: false } }), "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("结果文件与 Journal 事件不一致");
+  });
+
+  test("允许唯一截断尾行，但拒绝中间损坏", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), "{\"type\":", "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: [{ type: "run.created" }] });
+    await appendFile(join(journal.directory, "journal.jsonl"), "\nnot-json\n{}\n", "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("第 2 行损坏");
+  });
+
+  test("并发追加保持一行一个完整 JSON 事实", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await Promise.all(Array.from({ length: 20 }, (_, index) => journal.append({
+      type: "log.written", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message: `log-${index}`,
+    })));
+    const text = await readFile(join(journal.directory, "journal.jsonl"), "utf8");
+    expect(text.trim().split("\n")).toHaveLength(21);
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: expect.any(Array) });
+  });
+
+  test("拒绝未知事件与不合法状态顺序", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "unknown", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("未知");
+  });
+
+  test("拒绝完成节点早于创建节点的事件顺序", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "agent.completed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "missing", agentSessionId: null, diagnostic: null, resultPath: "nodes/x/result.json", result: { ok: true } })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("resultPath 不匹配节点目录");
+  });
+
+  test("完整的非 JSON 尾行不能伪装为截断写入", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), "not-json", "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("第 2 行损坏");
+  });
+});

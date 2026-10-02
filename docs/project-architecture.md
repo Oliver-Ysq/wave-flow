@@ -185,7 +185,7 @@ export default async function run(args: { target: string }) {
 }
 ```
 
-`meta` 位于 imports 之后、类型和可执行代码之前，且自身是纯字面量。`phase()` 是共享状态，不能在 `parallel()` thunk 或 `pipeline()` stage 中切换。每个 `agent()` 必须显式提供 Run 内唯一的 `id` 与目标 CLI。
+`meta` 位于 imports 之后、类型和可执行代码之前，且自身是纯字面量。`phase()` 是共享状态，不能在 `parallel()` thunk 或 `pipeline()` stage 中切换。每个 `agent()` 必须显式提供 Run 内唯一的 `id` 与目标 CLI，并且在调用前已选择 meta 声明的 Phase。
 
 ## 5. Agent Session 层
 
@@ -261,6 +261,10 @@ P0 不嵌入交互式终端。终端记录作为事件/诊断数据保存在 Ses
 ### P1：Web Terminal
 
 参考 Botmux：每个浏览器标签通过独立 tmux attach 连接真实会话；从 tmux 权威 scrollback 初始化；同一节点只允许一个 write-owner lease，其余标签只读。关闭 viewer 不停止 Agent。
+
+### P2：显式 Retry
+
+`failed` 节点不接受 `complete`，也不会被状态机复活。用户从失败节点的诊断或终端记录显式选择 Retry 时，Runtime 创建新的 Agent 节点、会话身份和 Journal 事实，并以 `retryOfNodeId` 指向原节点。Retry 是新的 attempt，不是 `failed → running → completed` 的状态回退；下游依赖和会话复用策略在实现前单独验证。
 
 ## 9. 外部参考的取舍
 
