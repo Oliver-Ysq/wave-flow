@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { DaemonClient } from "./daemon-client";
-import { formatSnapshot, helpText } from "./output";
+import { formatCapabilities, formatSnapshot, helpText } from "./output";
 import { parseCommand } from "./parse-command";
 import { withLocalDaemon } from "../daemon/local-daemon-lifecycle";
 
@@ -10,6 +10,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
   if (command.kind === "help") { write(helpText); return; }
   await withLocalDaemon(async (baseUrl) => {
     const client = new DaemonClient(baseUrl);
+    if (command.kind === "capabilities") {
+      const snapshot = await client.capabilities();
+      write(command.json ? JSON.stringify(snapshot, null, 2) : formatCapabilities(snapshot));
+      return;
+    }
     const response = command.kind === "run"
       ? await client.createRun({ workflowPath: command.workflowPath, cwd: command.cwd, input: command.input })
       : await client.inspect(command.runId, command.cwd);

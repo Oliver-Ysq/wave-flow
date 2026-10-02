@@ -1,5 +1,6 @@
 import type { JsonObject } from "../shared/json";
 import type { AgentCli, AgentSandbox, NormalizedAgentRequest, WorkflowMeta } from "../shared/workflow-types";
+import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilities";
 
 /** Agent 节点在一次 Run 内可见的状态；终态不可回退。 */
 export type AgentNodeStatus = "queued" | "running" | "waiting_for_input" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -11,6 +12,10 @@ export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "inte
 export type AgentNodeExecutor = {
   /** 执行一个已进入 running 的节点；对象表示完成，null 表示明确业务失败，抛错表示中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
+  /** 可选的运行期能力重检；真实会话执行器应在节点启动前返回当前环境快照。 */
+  probeCapabilities?(): Promise<CapabilitySnapshot>;
+  /** 节点启动所需的能力项；返回 unknown 或 unavailable 时 Runtime 必须 fail closed。 */
+  requiredCapabilities?(node: AgentNodeSnapshot): Readonly<Record<string, (snapshot: CapabilitySnapshot) => CapabilityStatus>>;
 };
 
 /** Agent 节点对执行器与查询层公开的不可变快照。 */

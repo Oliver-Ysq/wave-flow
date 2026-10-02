@@ -1,4 +1,5 @@
 import type { CreateRunRequest, RunResponse } from "../daemon/types";
+import type { CapabilitySnapshot } from "../adapters/capabilities";
 
 /** 仅通过 loopback HTTP 与 daemon 通信的 CLI 客户端。 */
 export class DaemonClient {
@@ -12,6 +13,14 @@ export class DaemonClient {
   /** 请求 daemon 返回内存或 Journal 重建的 Run 查询视图。 */
   async inspect(runId: string, cwd: string): Promise<RunResponse> {
     return this.request(`/runs/${encodeURIComponent(runId)}?cwd=${encodeURIComponent(cwd)}`);
+  }
+
+  /** 请求 daemon 返回当前机器的三态能力快照。 */
+  async capabilities(): Promise<CapabilitySnapshot> {
+    const response = await fetch(`${this.baseUrl}/capabilities`);
+    const value = await response.json() as CapabilitySnapshot | { error: string };
+    if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
+    return value;
   }
 
   private async request(path: string, init?: RequestInit): Promise<RunResponse> {

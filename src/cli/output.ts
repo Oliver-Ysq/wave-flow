@@ -1,4 +1,5 @@
 import type { RunSnapshot } from "../runtime/run-types";
+import type { CapabilitySnapshot } from "../adapters/capabilities";
 
 /** 渲染用户可读的 Phase → Agent Run 查询结果。 */
 export function formatSnapshot(snapshot: RunSnapshot): string {
@@ -16,5 +17,21 @@ export const helpText = `wave-flow 开发验证 CLI
 用法:
   wave-flow run <workflow.ts> [--input <json>] [--cwd <path>]
   wave-flow inspect <run-id> [--cwd <path>]
+  wave-flow capabilities [--json]
 
 当前 run 使用确定性开发验证执行器，不启动 tmux、Codex 或其他真实 Agent。`;
+
+/** 渲染人类可读能力摘要；仅显示被当前实现证明的能力。 */
+export function formatCapabilities(snapshot: CapabilitySnapshot): string {
+  const codex = snapshot.adapters.codex;
+  return [
+    `平台: ${snapshot.host.platform}`,
+    `tmux: ${snapshot.host.tmux.status}`,
+    `tmux 持久会话: ${snapshot.host.tmux.persistentSessions}`,
+    `Codex 命令: ${codex.status}`,
+    `Codex 正常交互会话: ${codex.interactiveSession}`,
+    `Codex 已验证 Prompt 投递: ${codex.verifiedPromptDelivery}`,
+    `Codex read-only sandbox: ${codex.sandbox.readOnly}`,
+    `Codex workspace-write sandbox: ${codex.sandbox.workspaceWrite}`,
+  ].join("\n");
+}

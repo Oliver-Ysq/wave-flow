@@ -5,6 +5,7 @@ import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { CreateRunRequest, RunResponse } from "./types";
+import { probeCapabilities } from "./capability-probe";
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
 export class LocalDaemon {
@@ -24,6 +25,7 @@ export class LocalDaemon {
   private async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
       if (request.method === "POST" && url.pathname === "/runs") return this.json(await this.createRun(await this.readJson(request)));
       if (request.method === "GET" && /^\/runs\/[^/]+$/.test(url.pathname)) {
         const runId = decodeURIComponent(url.pathname.slice("/runs/".length));

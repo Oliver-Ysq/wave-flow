@@ -13,6 +13,16 @@ describe("CLI run / inspect", () => {
     expect(parseCommand(["run", "flow.ts", "--input", '{"target":"src"}', "--cwd", "project"], "/workspace")).toEqual({ kind: "run", workflowPath: "flow.ts", cwd: "/workspace/project", input: { target: "src" } });
     expect(parseCommand(["inspect", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "inspect" });
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
+    expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
+    expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");
+  });
+
+  test("capabilities --json 输出机器可读的三态快照", async () => {
+    const lines: string[] = [];
+    await main(["capabilities", "--json"], process.cwd(), (line) => { lines.push(line); });
+    const snapshot = JSON.parse(lines.join("\n")) as { version: number; adapters: { codex: { verifiedPromptDelivery: string } } };
+    expect(snapshot.version).toBe(1);
+    expect(snapshot.adapters.codex.verifiedPromptDelivery).toBe("unavailable");
   });
 
   test("run 通过 daemon 产生可渲染的开发验证 Run", async () => {

@@ -42,9 +42,12 @@ export default async function run(args: { target: string }) {
 ```bash
 wave-flow run ./workflow.ts --input '{"target":"src"}'
 wave-flow inspect <run-id>
+wave-flow capabilities --json
 ```
 
 `run` 会输出唯一的 RunId，并将 Run、事件与结果写入当前项目的 `.wave-flow/runs/`。当前结果来自确定性开发验证执行器，不会使用 `cli: "codex"` 启动 Codex；该字段仅验证 Workflow 节点契约。
+
+`capabilities --json` 输出当前机器的三态能力快照。命令存在只代表二进制可被探测；只有显示为 `available` 的能力才能被后续 Runtime 使用。当前正常交互会话、首条 Prompt 投递和 sandbox 仍未验证，不能据此启动真实 Agent。
 
 ## 开发与验证
 

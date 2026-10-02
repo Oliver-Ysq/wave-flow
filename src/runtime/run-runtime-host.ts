@@ -6,6 +6,7 @@ import type { WorkflowExecutionHost } from "./workflow-host";
 import type { AgentNodeExecutor } from "./run-types";
 import { RunStateMachine } from "./run-state-machine";
 import { WorkflowContractError } from "../workflow/errors";
+import { requireCapabilities } from "../adapters/capabilities";
 
 /** 将 Workflow 作者 API 映射为耐久 Run 状态事实的 Runtime Host。 */
 export class RunRuntimeHost implements WorkflowExecutionHost {
@@ -31,6 +32,13 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       request,
     });
     await this.durableApply(created);
+    try {
+      await this.checkCapabilities(this.state.agent(nodeId));
+    } catch (error) {
+      const diagnostic = error instanceof Error ? error.message : String(error);
+      await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+      throw error;
+    }
     const started = this.event({ type: "agent.status", nodeId, status: "running" });
     await this.durableApply(started);
     const node = this.state.agent(nodeId);
@@ -79,6 +87,14 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   private async durableApply(event: JournalEvent): Promise<void> {
     await this.journal.append(event);
     this.state.apply(event);
+  }
+
+  private async checkCapabilities(node: import("./run-types").AgentNodeSnapshot): Promise<void> {
+    const requirements = this.executor.requiredCapabilities?.(node);
+    if (!requirements || Object.keys(requirements).length === 0) return;
+    if (!this.executor.probeCapabilities) throw new Error("执行器声明了启动能力需求，但未提供运行期能力重检。");
+    const snapshot = await this.executor.probeCapabilities();
+    requireCapabilities(Object.fromEntries(Object.entries(requirements).map(([name, read]) => [name, read(snapshot)])));
   }
 
   private async captureBackgroundFailure(operation: Promise<void>): Promise<void> {

@@ -40,6 +40,18 @@ describe("LocalDaemon", () => {
     await expect(fetch(`${baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: "not-json" }).then((response) => response.status)).resolves.toBe(400);
   });
 
+  test("通过 loopback API 返回三态 capabilities 快照", async () => {
+    const daemon = new LocalDaemon(); daemons.push(daemon);
+    const { baseUrl } = daemon.start();
+    const response = await fetch(`${baseUrl}/capabilities`);
+    const snapshot = await response.json() as { version: number; host: { tmux: { status: string } }; adapters: { codex: { interactiveSession: string; verifiedPromptDelivery: string } } };
+    expect(response.status).toBe(200);
+    expect(snapshot.version).toBe(1);
+    expect(["available", "unavailable", "unknown"]).toContain(snapshot.host.tmux.status);
+    expect(snapshot.adapters.codex.interactiveSession).toBe("unavailable");
+    expect(snapshot.adapters.codex.verifiedPromptDelivery).toBe("unavailable");
+  });
+
   test("inspect 即使命中内存 Run 也要求请求 cwd 一致", async () => {
     const { cwd, workflowPath } = await fixture();
     const otherCwd = await mkdtemp(join(tmpdir(), "wave-flow-other-")); directories.push(otherCwd);

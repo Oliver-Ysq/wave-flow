@@ -7,6 +7,7 @@ import type { AgentNodeExecutor } from "../../src/runtime/run-types";
 import type { JsonObject } from "../../src/shared/json";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
 import { agent, phase } from "../../src/workflow/author-api";
+import type { CapabilitySnapshot } from "../../src/adapters/capabilities";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -82,5 +83,22 @@ describe("RunRuntime", () => {
     instance.journal.failNextAppendForTest();
     await expect(instance.run(workflow)).rejects.toThrow("Injected Journal append failure");
     expect(instance.snapshot().status).toBe("interrupted");
+  });
+
+  test("执行器声明的运行期能力 unknown 时节点在启动前 fail closed", async () => {
+    const unknownSnapshot: CapabilitySnapshot = {
+      version: 1,
+      host: { platform: "test", tmux: { status: "unknown", persistentSessions: "unknown" } },
+      adapters: { codex: { status: "available", interactiveSession: "unknown", verifiedPromptDelivery: "unknown", persistentTmuxSession: "unknown", sandbox: { readOnly: "unknown", workspaceWrite: "unknown" } } },
+    };
+    let executions = 0;
+    const instance = await runtime({
+      execute: async () => { executions += 1; return { unexpected: true }; },
+      probeCapabilities: async () => unknownSnapshot,
+      requiredCapabilities: () => ({ "codex.interactiveSession": (snapshot) => snapshot.adapters.codex.interactiveSession }),
+    });
+    await expect(instance.run(workflow)).rejects.toThrow("codex.interactiveSession=unknown");
+    expect(executions).toBe(0);
+    expect(instance.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
   });
 });

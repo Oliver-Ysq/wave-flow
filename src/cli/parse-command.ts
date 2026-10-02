@@ -5,12 +5,19 @@ import { isJsonObject, type JsonObject } from "../shared/json";
 export type RunCommand = { readonly kind: "run"; readonly workflowPath: string; readonly cwd: string; readonly input: JsonObject };
 /** CLI 解析后的 inspect 命令。 */
 export type InspectCommand = { readonly kind: "inspect"; readonly runId: string; readonly cwd: string };
-export type CliCommand = RunCommand | InspectCommand | { readonly kind: "help" };
+/** CLI 解析后的 capabilities 命令；json 为 true 时输出机器可读快照。 */
+export type CapabilitiesCommand = { readonly kind: "capabilities"; readonly json: boolean };
+export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h" || command === "help") return { kind: "help" };
+  if (command === "capabilities") {
+    if (rest.length === 0) return { kind: "capabilities", json: false };
+    if (rest.length === 1 && rest[0] === "--json") return { kind: "capabilities", json: true };
+    throw new Error("capabilities 仅支持 --json 选项。");
+  }
   if (command === "run") {
     const workflowPath = rest[0];
     if (!workflowPath || workflowPath.startsWith("-")) throw new Error("run 命令需要 Workflow 路径。");
