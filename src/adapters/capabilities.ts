@@ -32,7 +32,7 @@ export type CapabilitySnapshot = {
     readonly tmux: {
       /** tmux 二进制是否可被探测到。 */
       readonly status: CapabilityStatus;
-      /** Wave Flow 是否已能管理可恢复的 tmux 会话；未实现时不可报告 available。 */
+      /** Wave Flow 是否已能以私有 socket 创建、写入、探测和销毁 tmux 会话；不等同于已验证 Agent Prompt 投递。 */
       readonly persistentSessions: CapabilityStatus;
     };
   };

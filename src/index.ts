@@ -8,6 +8,7 @@ export { loadWorkflow } from "./workflow/load-workflow";
 export { executeWorkflow } from "./workflow/execute-workflow";
 export type { WorkflowExecutionOptions } from "./workflow/execute-workflow";
 export type { WorkflowExecutionHost } from "./runtime/workflow-host";
+export type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdentity, SessionLiveness } from "./sessions/types";
 export { RunRuntime } from "./runtime/run-runtime";
 export type { CreateRunOptions } from "./runtime/run-runtime";
 export type { AgentNodeExecutor, AgentNodeSnapshot, AgentNodeStatus, PhaseSnapshot, RunSnapshot, RunStatus } from "./runtime/run-types";

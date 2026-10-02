@@ -49,6 +49,8 @@ wave-flow capabilities --json
 
 `capabilities --json` 输出当前机器的三态能力快照。命令存在只代表二进制可被探测；只有显示为 `available` 的能力才能被后续 Runtime 使用。当前正常交互会话、首条 Prompt 投递和 sandbox 仍未验证，不能据此启动真实 Agent。
 
+当前已验证 Wave Flow 能在私有 tmux socket 中创建、输入、诊断读取和销毁受管终端会话；它不会使用或接管你默认 tmux server 的会话。该能力仍不表示 Codex 已能被安全启动或接收 Prompt。
+
 ## 开发与验证
 
 项目使用 [Bun](https://bun.sh/) 与 TypeScript：
