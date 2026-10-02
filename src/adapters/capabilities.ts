@@ -36,7 +36,7 @@ export type CapabilitySnapshot = {
       readonly persistentSessions: CapabilityStatus;
     };
   };
-  /** 当前已知 Adapter 能力；4.2 仅报告 Codex。 */
+  /** 当前已知 Adapter 能力；当前仅报告 Codex。 */
   readonly adapters: { readonly codex: AdapterCapabilities };
 };
 
