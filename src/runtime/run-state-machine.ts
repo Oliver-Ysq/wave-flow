@@ -1,7 +1,7 @@
 import type { JournalEvent, RunManifest } from "../journal/types";
 import type { AgentNodeSnapshot, AgentNodeStatus, PhaseSnapshot, RunSnapshot, RunStatus } from "./run-types";
 
-const terminalAgentStatuses = new Set<AgentNodeStatus>(["completed", "failed", "cancelled", "interrupted"]);
+const terminalAgentStatuses = new Set<AgentNodeStatus>(["completed", "cancelled", "interrupted"]);
 
 /** 由 Journal 事实驱动的内存查询投影；不直接执行 Agent 或写文件。 */
 export class RunStateMachine {
@@ -29,10 +29,10 @@ export class RunStateMachine {
         this.#applyAgentCreated(event);
         return;
       case "agent.status":
-        this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic);
+        this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic, null, event.agentSessionId);
         return;
       case "agent.completed":
-        this.#applyAgentStatus(event.nodeId, "completed", event.at, null, event.result);
+        this.#applyAgentStatus(event.nodeId, "completed", event.at, event.diagnostic, event.result, event.agentSessionId);
         return;
       case "run.status":
         this.#applyRunStatus(event.status, event.at, event.diagnostic);
@@ -89,11 +89,12 @@ export class RunStateMachine {
     });
   }
 
-  #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null): void {
+  #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null, agentSessionId: string | null = null): void {
     if (!nodeId) throw new Error("Agent 状态事件缺少 nodeId。");
     const agent = this.#agents.get(nodeId);
     if (!agent) throw new Error(`未知 Agent 节点：${nodeId}`);
     if (!canTransition(agent.status, status)) throw new Error(`非法 Agent 状态转移：${agent.status} → ${status}`);
+    if (agent.agentSessionId !== null && agentSessionId !== null && agent.agentSessionId !== agentSessionId) throw new Error("Agent 状态事件的会话身份不匹配。");
     const updated: AgentNodeSnapshot = {
       ...agent,
       status,
@@ -101,6 +102,7 @@ export class RunStateMachine {
       diagnostic,
       startedAt: status === "running" && agent.startedAt === null ? at : agent.startedAt,
       endedAt: terminalAgentStatuses.has(status) ? at : agent.endedAt,
+      agentSessionId: agent.agentSessionId ?? agentSessionId,
     };
     this.#agents.set(nodeId, updated);
   }
@@ -116,8 +118,8 @@ export class RunStateMachine {
 
 function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
   if (from === "queued") return to === "running" || to === "cancelled" || to === "interrupted";
-  if (from === "running") return to === "waiting_for_input" || terminalAgentStatuses.has(to);
-  if (from === "waiting_for_input") return to === "running" || terminalAgentStatuses.has(to);
+  if (from === "running") return to === "blocked" || terminalAgentStatuses.has(to);
+  if (from === "blocked") return to === "running" || terminalAgentStatuses.has(to);
   return false;
 }
 

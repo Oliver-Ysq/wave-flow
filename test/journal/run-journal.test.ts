@@ -72,7 +72,7 @@ describe("RunJournal", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
     await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "agent.completed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "missing", agentSessionId: null, diagnostic: null, resultPath: "nodes/x/result.json", result: { ok: true } })}\n`, "utf8");
-    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("resultPath 不匹配节点目录");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("未知 Agent 节点");
   });
 
   test("完整的非 JSON 尾行不能伪装为截断写入", async () => {

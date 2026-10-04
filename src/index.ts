@@ -20,6 +20,9 @@ export { InteractiveCliBootstrap, InteractiveCliBootstrapError } from "./session
 export type { BootstrappedInteractiveSession } from "./sessions/bootstrap/interactive-cli-bootstrap";
 export { RunRuntime } from "./runtime/run-runtime";
 export type { CreateRunOptions } from "./runtime/run-runtime";
+export { ControlServer } from "./control/control-server";
+export { handleCompleteHttp } from "./control/control-http";
+export type { CompleteRequest, RegisteredControlNode } from "./control/control-server";
 export type { AgentNodeExecutor, AgentNodeSnapshot, AgentNodeStatus, PhaseSnapshot, RunSnapshot, RunStatus } from "./runtime/run-types";
 
 /** Workflow 作者与 Runtime 集成可使用的公开类型。 */

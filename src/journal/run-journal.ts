@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isJsonObject } from "../shared/json";
+import { isJsonObject, type JsonObject } from "../shared/json";
 import { nodeDirectoryName, runDirectory, validateRunId } from "./paths";
 import type { JournalEvent, RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
@@ -57,7 +57,10 @@ export class RunJournal {
       }
       try {
         const event = validateEvent(parsed, manifest.runId);
-        if (event.type === "agent.completed") await validateCompletedResult(directory, event);
+        if (event.type === "agent.completed") {
+          if (event.nodeId === null) throw new Error("agent.completed 缺少 nodeId。");
+          await validateCompletedResult(directory, event, state.agent(event.nodeId).request.schema ?? {});
+        }
         state.apply(event);
         events.push(event);
       } catch (error) {
@@ -85,6 +88,13 @@ export class RunJournal {
     if (!isJsonObject(result)) throw new Error("节点完成结果必须是 JSON 对象。");
     const relativePath = join("nodes", nodeDirectoryName(nodeId), "result.json");
     await atomicWrite(join(this.directory, relativePath), `${JSON.stringify({ nodeId, result }, null, 2)}\n`);
+    return relativePath;
+  }
+
+  /** 耐久写入节点结果的 Schema 校验证据；必须早于 completed Journal 事件。 */
+  async writeValidation(nodeId: string, schema: unknown, result: JsonObject): Promise<string> {
+    const relativePath = join("nodes", nodeDirectoryName(nodeId), "validation.json");
+    await atomicWrite(join(this.directory, relativePath), `${JSON.stringify({ nodeId, schema, result, valid: true }, null, 2)}\n`);
     return relativePath;
   }
 }
@@ -116,7 +126,7 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
   const event = value as Record<string, unknown>;
   if (event.runId !== expectedRunId || typeof event.at !== "string" || Number.isNaN(Date.parse(event.at))) throw new Error("Journal 事件身份或时间无效。");
   if (event.nodeId !== null && typeof event.nodeId !== "string") throw new Error("Journal nodeId 无效。");
-  if (event.agentSessionId !== null) throw new Error("本阶段 Journal agentSessionId 必须为 null。");
+  if (event.agentSessionId !== null && (typeof event.agentSessionId !== "string" || !event.agentSessionId.trim())) throw new Error("Journal agentSessionId 无效。");
   if (event.diagnostic !== null && typeof event.diagnostic !== "string") throw new Error("Journal diagnostic 无效。");
   switch (event.type) {
     case "run.created":
@@ -135,7 +145,7 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
       break;
     case "agent.completed":
-      if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result)) throw new Error("agent.completed payload 无效。");
+      if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result) || (event.validationPath !== undefined && typeof event.validationPath !== "string")) throw new Error("agent.completed payload 无效。");
       break;
     case "run.status":
       if (event.nodeId !== null || !isRunStatus(event.status)) throw new Error("run.status payload 无效。");
@@ -156,8 +166,8 @@ function isNormalizedRequest(value: unknown): boolean {
   return (value.phase === undefined || typeof value.phase === "string") && (value.input === undefined || isJsonObject(value.input));
 }
 
-function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "waiting_for_input" || value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"; }
-function isRunStatus(value: unknown): boolean { return value === "running" || value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"; }
+function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "completed" || value === "cancelled" || value === "interrupted"; }
+function isRunStatus(value: unknown): boolean { return value === "running" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 
 function isTruncatedJsonTail(line: string): boolean {
   const text = line.trim();
@@ -165,7 +175,7 @@ function isTruncatedJsonTail(line: string): boolean {
 }
 
 /** 验证 completed 事件对应的独立结果文件，防止 Journal 单独伪造完成状态。 */
-async function validateCompletedResult(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>): Promise<void> {
+async function validateCompletedResult(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
   if (event.nodeId === null) throw new Error("agent.completed 缺少 nodeId。");
   const expectedPath = join("nodes", nodeDirectoryName(event.nodeId), "result.json");
   if (event.resultPath !== expectedPath) throw new Error("agent.completed resultPath 不匹配节点目录。");
@@ -178,6 +188,16 @@ async function validateCompletedResult(directory: string, event: Extract<Journal
   if (!isPlainObject(value) || value.nodeId !== event.nodeId || !isJsonObject(value.result) || !isDeepStrictEqual(value.result, event.result)) {
     throw new Error("agent.completed 结果文件与 Journal 事件不一致。");
   }
+  if (event.validationPath !== undefined) await validateCompletedValidation(directory, event, expectedSchema);
+}
+
+async function validateCompletedValidation(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
+  if (event.nodeId === null || event.validationPath === undefined) throw new Error("agent.completed validation 记录无效。");
+  const expectedPath = join("nodes", nodeDirectoryName(event.nodeId), "validation.json");
+  if (event.validationPath !== expectedPath) throw new Error("agent.completed validationPath 不匹配节点目录。");
+  let value: unknown;
+  try { value = JSON.parse(await readFile(join(directory, expectedPath), "utf8")) as unknown; } catch (error) { throw new Error(`agent.completed 校验记录不可读取：${error instanceof Error ? error.message : String(error)}`); }
+  if (!isPlainObject(value) || value.nodeId !== event.nodeId || value.valid !== true || !isDeepStrictEqual(value.schema, expectedSchema) || !isJsonObject(value.result) || !isDeepStrictEqual(value.result, event.result)) throw new Error("agent.completed 校验记录与节点 schema 或结果不一致。");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -59,7 +59,7 @@ export interface SessionBackend {
   pasteText(identity: SessionIdentity, text: string): Promise<void>;
   /** 向会话发送受控特殊键；当前仅开放 Enter，Adapter 不得注入任意按键序列。 */
   sendSpecialKey(identity: SessionIdentity, key: "Enter"): Promise<void>;
-  /** 获取近期终端内容用于诊断；调用方不得从内容推断业务 completed / failed。 */
+  /** 获取近期终端内容用于诊断；调用方不得从内容推断节点业务状态。 */
   readRecent(identity: SessionIdentity, lines?: number): Promise<string>;
   /** 验证会话存在性和 identity 是否匹配。 */
   liveness(identity: SessionIdentity): Promise<SessionLiveness>;

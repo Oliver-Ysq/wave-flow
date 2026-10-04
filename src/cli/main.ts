@@ -3,11 +3,13 @@ import { DaemonClient } from "./daemon-client";
 import { formatCapabilities, formatSnapshot, helpText } from "./output";
 import { parseCommand } from "./parse-command";
 import { withLocalDaemon } from "../daemon/local-daemon-lifecycle";
+import { executeComplete, parseCompleteCommand } from "./complete-command";
 
 /** CLI 主入口；run 和 inspect 均只经 localhost daemon 访问 Run 状态。 */
 export async function main(argv: readonly string[] = process.argv.slice(2), cwd = process.cwd(), write: (line: string) => void = (line) => { process.stdout.write(`${line}\n`); }): Promise<void> {
   const command = parseCommand(argv, cwd);
   if (command.kind === "help") { write(helpText); return; }
+  if (command.kind === "complete") { await executeComplete(parseCompleteCommand(command.argv)); write("节点已完成上报。"); return; }
   await withLocalDaemon(async (baseUrl) => {
     const client = new DaemonClient(baseUrl);
     if (command.kind === "capabilities") {

@@ -6,10 +6,13 @@ import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { CreateRunRequest, RunResponse } from "./types";
 import { probeCapabilities } from "./capability-probe";
+import { handleCompleteHttp } from "../control/control-http";
+import type { ControlServer } from "../control/control-server";
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
 export class LocalDaemon {
   #runs = new Map<string, RunRuntime>();
+  #controls = new Map<string, ControlServer>();
   #server: ReturnType<typeof Bun.serve> | null = null;
 
   /** 启动 HTTP 服务；默认随机端口，严格绑定 127.0.0.1。 */
@@ -22,6 +25,14 @@ export class LocalDaemon {
   /** 停止短生命周期 daemon；不会删除 Journal 或本地结果文件。 */
   stop(): void { this.#server?.stop(true); this.#server = null; }
 
+  /** 注册一个真实 Run 的 ControlServer；必须与当前 daemon 中的同一 Run 绑定。 */
+  registerControl(runId: string, control: ControlServer): void {
+    const runtime = this.#runs.get(runId);
+    if (!runtime || runtime.journal.manifest.runId !== runId) throw new Error("只能为当前 daemon 已知的 Run 注册 ControlServer。");
+    if (this.#controls.has(runId)) throw new Error("该 Run 的 ControlServer 已注册。");
+    this.#controls.set(runId, control);
+  }
+
   private async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -32,6 +43,13 @@ export class LocalDaemon {
         const cwd = url.searchParams.get("cwd");
         if (!cwd) throw new DaemonRequestError(400, "inspect 请求缺少 cwd。");
         return this.json(await this.inspect(runId, cwd));
+      }
+      const completeMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/complete$/);
+      if (completeMatch) {
+        const runId = decodeURIComponent(completeMatch[1]);
+        const control = this.#controls.get(runId);
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleCompleteHttp(control, request);
       }
       throw new DaemonRequestError(404, "未知 daemon API 路径或方法。");
     } catch (error) {

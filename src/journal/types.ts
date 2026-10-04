@@ -58,6 +58,8 @@ export type JournalEvent = JournalBase & ({
 } | {
   readonly type: "agent.completed";
   readonly resultPath: string;
+  /** 可选 Schema 校验证据文件；Control complete 写入后必须随事件记录，开发执行器旧事件可省略。 */
+  readonly validationPath?: string;
   /** 已写入结果文件的 JSON 对象副本，供 Journal 重建查询视图。 */
   readonly result: JsonObject;
 } | {

@@ -7,7 +7,8 @@ export type RunCommand = { readonly kind: "run"; readonly workflowPath: string; 
 export type InspectCommand = { readonly kind: "inspect"; readonly runId: string; readonly cwd: string };
 /** CLI 解析后的 capabilities 命令；json 为 true 时输出机器可读快照。 */
 export type CapabilitiesCommand = { readonly kind: "capabilities"; readonly json: boolean };
-export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | { readonly kind: "help" };
+export type CompleteCommand = { readonly kind: "complete"; readonly argv: readonly string[] };
+export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | CompleteCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
@@ -18,6 +19,7 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
     if (rest.length === 1 && rest[0] === "--json") return { kind: "capabilities", json: true };
     throw new Error("capabilities 仅支持 --json 选项。");
   }
+  if (command === "complete") return { kind: "complete", argv: rest };
   if (command === "run") {
     const workflowPath = rest[0];
     if (!workflowPath || workflowPath.startsWith("-")) throw new Error("run 命令需要 Workflow 路径。");

@@ -60,9 +60,8 @@ export class RunRuntime {
       const result = await executeWorkflow(workflow, this.journal.manifest.input, this.host, { cwd: this.journal.manifest.cwd });
       await this.host.flush();
       const nodes = this.state.snapshot().phases.flatMap((phase) => phase.agents);
-      const runStatus = nodes.some((agent) => agent.status === "failed") ? "failed" : "completed";
-      if (runStatus === "completed" && nodes.some((agent) => agent.status !== "completed")) throw new Error("Workflow 返回时仍有未完成 Agent 节点。");
-      await this.transitionRun(runStatus, runStatus === "failed" ? "至少一个 Agent 明确业务失败。" : null);
+      if (nodes.some((agent) => agent.status !== "completed")) throw new Error("Workflow 返回时仍有未完成 Agent 节点。");
+      await this.transitionRun("completed", null);
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
@@ -74,7 +73,7 @@ export class RunRuntime {
   /** 返回当前不可变查询投影。 */
   snapshot(): RunSnapshot { return this.state.snapshot(); }
 
-  private async transitionRun(status: "completed" | "failed" | "interrupted", diagnostic: string | null): Promise<void> {
+  private async transitionRun(status: "completed" | "interrupted", diagnostic: string | null): Promise<void> {
     const event: JournalEvent = { type: "run.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic, status };
     await this.journal.append(event);
     this.state.apply(event);

@@ -3,14 +3,14 @@ import type { AgentCli, AgentSandbox, NormalizedAgentRequest, WorkflowMeta } fro
 import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilities";
 
 /** Agent 节点在一次 Run 内可见的状态；终态不可回退。 */
-export type AgentNodeStatus = "queued" | "running" | "waiting_for_input" | "completed" | "failed" | "cancelled" | "interrupted";
+export type AgentNodeStatus = "queued" | "running" | "blocked" | "completed" | "cancelled" | "interrupted";
 
 /** Run 的聚合终态；由节点终态与顶层 Workflow 诊断决定。 */
-export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type RunStatus = "running" | "completed" | "cancelled" | "interrupted";
 
 /** 注入 Runtime 的可控节点执行器；本阶段不启动 CLI 或读取终端。 */
 export type AgentNodeExecutor = {
-  /** 执行一个已进入 running 的节点；对象表示完成，null 表示明确业务失败，抛错表示中断。 */
+  /** 执行一个已进入 running 的节点；对象表示完成，null 或抛错都表示无法验证完成的中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
   /** 可选的运行期能力重检；真实会话执行器应在节点启动前返回当前环境快照。 */
   probeCapabilities?(): Promise<CapabilitySnapshot>;

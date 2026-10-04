@@ -33,13 +33,13 @@ describe("RunRuntime", () => {
     expect(instance.snapshot()).toMatchObject({ status: "completed", phases: [{ title: "scan", agents: [{ id: "scan-auth", status: "completed", result: { ok: true } }] }] });
   });
 
-  test("executor 明确返回 null 时区分业务失败，且 Workflow 得到 null", async () => {
+  test("executor 返回 null 时标记 interrupted，不能伪装为业务失败", async () => {
     const instance = await runtime({ execute: async () => null });
-    await expect(instance.run(workflow)).resolves.toBeNull();
-    expect(instance.snapshot()).toMatchObject({ status: "failed", phases: [{ agents: [{ status: "failed" }] }] });
+    await expect(instance.run(workflow)).rejects.toThrow("无法验证节点已完成");
+    expect(instance.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
   });
 
-  test("executor 抛错时标记 interrupted，而不伪装为业务 failed", async () => {
+  test("executor 抛错时标记 interrupted", async () => {
     const instance = await runtime({ execute: async () => { throw new Error("executor crashed"); } });
     await expect(instance.run(workflow)).rejects.toThrow("executor crashed");
     expect(instance.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted", diagnostic: "executor crashed" }] }] });

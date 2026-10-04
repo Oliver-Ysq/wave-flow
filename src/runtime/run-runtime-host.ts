@@ -36,24 +36,29 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       await this.checkCapabilities(this.state.agent(nodeId));
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+      if (this.state.agent(nodeId).status === "queued") {
+        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+      }
       throw error;
     }
-    const started = this.event({ type: "agent.status", nodeId, status: "running" });
+    const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: crypto.randomUUID() });
     await this.durableApply(started);
     const node = this.state.agent(nodeId);
     try {
       const result = await this.executor.execute(node);
       if (result === null) {
-        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "failed", diagnostic: "Agent executor 明确返回业务失败。" }));
-        return null;
+        const diagnostic = "执行器返回 null，无法验证节点已完成。";
+        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+        throw new Error(diagnostic);
       }
       const resultPath = await this.journal.writeResult(nodeId, result);
       await this.durableApply(this.event({ type: "agent.completed", nodeId, resultPath, result }));
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+      if (this.state.agent(nodeId).status === "running") {
+        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
+      }
       throw error;
     }
   }
@@ -79,7 +84,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       ...event,
       at: new Date().toISOString(),
       runId: this.state.manifest.runId,
-      agentSessionId: null,
+      agentSessionId: event.agentSessionId ?? null,
       diagnostic: event.diagnostic ?? null,
     } as unknown as JournalEvent;
   }

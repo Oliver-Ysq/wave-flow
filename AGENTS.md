@@ -20,14 +20,14 @@
 - 作者 API 优先使用 `agent()`、`phase()`、`parallel()`、`pipeline()`、`log()`。不要新增或延续 `ctx.agent()`、每个 Agent 的 `phase` 字段等偏离 Deer 基线的接口。
 - `meta` 是顶部纯字面量，包含 kebab-case `name`、非空单行 `description`、有序唯一的 `{ title }` `phases`，以及可选 JSON-safe `exampleArgs`。一期 `meta` 必填，`phase(title)` 必须精确匹配已声明标题。
 - 每个 `agent()` 必须提供 Run 内唯一的稳定 `id` 与当前已实现的 `cli: "codex"`。TraeX 仅在其 Adapter、测试与能力探测完整后加入。一个 Agent 节点绑定一个真实 tmux/PTY 会话和一个正常交互式 CLI 进程；下游不得隐式复用其聊天历史。
-- Runtime 负责动态调度和节点状态；Session Host 负责 tmux/PTY 生命周期与终端字节转发；Adapter 只负责启动特定正常 CLI；Control Server 负责验证 `complete/block/fail`；Web 只展示和控制 Run。不要让任一层跨越该职责边界。
+- Runtime 负责动态调度和节点状态；Session Host 负责 tmux/PTY 生命周期与终端字节转发；Adapter 只负责启动特定正常 CLI；Control Server 负责验证 `complete/block/answer/continue`；Web 只展示和控制 Run。不要让任一层跨越该职责边界。
 - 默认 UI 是 Phase → Agent 层级；不要把复杂自由 DAG 当作主界面。真实依赖来自 Workflow 的实际调用与显式输入，未来可作为次级视图。
 
 ## Agent 会话、状态与安全
 
 - 不再新增以 `codex exec --json` 为核心的一次性节点实现。真实节点必须通过正常交互式 Codex CLI，在 tmux（生产默认）或 PTY（开发/故障降级）中运行；TraeX 作为短期后续 Adapter 单独验证。
-- 不从终端 ANSI、自然语言“完成”或空闲提示推断节点状态。只有受管会话中的 `wave-flow complete`、`wave-flow block`、`wave-flow fail` 能改变业务状态。
-- `complete` 只在 JSON 结果、Schema 校验记录和 Journal 均耐久落盘后生效；`block` 只使节点进入等待输入，答案必须回到原 `block` 命令 stdout；`fail` 是 Agent 明确业务失败。用户停止必须是 `cancelled`，未知进程/会话异常必须是 `interrupted`，不得混为 `failed`。
+- 不从终端 ANSI、自然语言“完成”或空闲提示推断节点状态。只有受管会话中的 `wave-flow complete`、`wave-flow block`、`wave-flow continue` 能改变业务状态；`wave-flow answer` 只交付信息，不能直接改变节点状态。
+- `complete` 只在 JSON 结果、Schema 校验记录和 Journal 均耐久落盘后生效；`block` 使 Agent 工具调用等待，`wave-flow-answer` 或 `terminal-answer` 只唤醒原命令，只有原 Agent `continue` 才可使 `blocked → running`。用户停止必须是 `cancelled`，未知进程/会话异常必须是 `interrupted`；不再存在 Agent 主动上报的业务失败状态。
 - Agent 上报必须绑定 `runId + nodeId + agentSessionId` 的会话 capability。能力的用途是隔离本机无关进程和其他节点，不能将其误表述为防御已控制该 Agent 终端的主体。
 - 一期默认共享项目 cwd：并行只读允许；并行写入仅限可证明路径不重叠；同一文件或逻辑区域存在冲突风险时必须顺序执行。不要假设已有 worktree 隔离或自动合并。
 - `sandbox` 约束 Adapter 启动的 Agent CLI，而不是 Workflow JavaScript。只支持 `read-only` 与 `workspace-write`；不要引入危险全权限模式。
