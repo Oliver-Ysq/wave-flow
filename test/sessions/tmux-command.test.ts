@@ -22,5 +22,13 @@ describe("TmuxCommandClient", () => {
     expect(calls[0].stdin).toBe("text; $(unsafe)");
     expect(calls[0].args).not.toContain("text; $(unsafe)");
     expect(calls[1].args).toContain("paste-buffer");
+    expect(calls[1].args).toContain("-p");
+  });
+
+  test("提交键只能以受控 Enter 经私有 socket 发送", async () => {
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = { run: async (args) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+    await new TmuxCommandClient("/private/socket", runner).sendSpecialKey("wf-test", "Enter");
+    expect(calls).toEqual([["-S", "/private/socket", "send-keys", "-t", "wf-test", "Enter"]]);
   });
 });

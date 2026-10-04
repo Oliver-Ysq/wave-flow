@@ -13,6 +13,8 @@ class RecordingBackend implements SessionBackend {
   identity: SessionIdentity = { backend: "tmux", sessionName: "wf-session", backendRef: "/tmp/wf.sock", runId: "11111111-1111-4111-8111-111111111111", nodeId: "node", agentSessionId: "agent", cli: "codex", createdAt: "2026-01-01T00:00:00.000Z" };
   async create(_options: CreateSessionOptions): Promise<SessionIdentity> { this.calls.push("create"); return this.identity; }
   async sendText(_identity: SessionIdentity, _text: string): Promise<void> {}
+  async pasteText(_identity: SessionIdentity, _text: string): Promise<void> {}
+  async sendSpecialKey(_identity: SessionIdentity, _key: "Enter"): Promise<void> {}
   async readRecent(_identity: SessionIdentity, _lines?: number): Promise<string> { return ""; }
   async liveness(_identity: SessionIdentity): Promise<SessionLiveness> { return "exists"; }
   async detach(_identity: SessionIdentity): Promise<void> {}
@@ -25,10 +27,10 @@ class FakeAdapter implements InteractiveCliAdapter {
   readonly calls: string[] = [];
   ready: PromptReadyEvidence = { ready: true, diagnostic: "fake ready" };
   submission: PromptSubmissionEvidence = { submitted: true, proof: "native-hook", cliSessionId: "cli-session", diagnostic: "fake confirmed" };
-  launch(_request: InteractiveCliStartRequest): InteractiveCliLaunchPlan { this.calls.push("launch"); return { command: ["fake-cli"] }; }
-  async waitUntilReady(_request: InteractiveCliStartRequest, _identity: SessionIdentity): Promise<PromptReadyEvidence> { this.calls.push("ready"); return this.ready; }
-  async submitInitialPrompt(_request: InteractiveCliStartRequest, _identity: SessionIdentity): Promise<void> { this.calls.push("submit"); }
-  async confirmInitialPrompt(_request: InteractiveCliStartRequest, _identity: SessionIdentity): Promise<PromptSubmissionEvidence> { this.calls.push("confirm"); return this.submission; }
+  async launch(_request: InteractiveCliStartRequest, _signal: AbortSignal): Promise<InteractiveCliLaunchPlan> { this.calls.push("launch"); return { command: ["fake-cli"] }; }
+  async waitUntilReady(_request: InteractiveCliStartRequest, _plan: InteractiveCliLaunchPlan, _identity: SessionIdentity, _signal: AbortSignal): Promise<PromptReadyEvidence> { this.calls.push("ready"); return this.ready; }
+  async submitInitialPrompt(_request: InteractiveCliStartRequest, _plan: InteractiveCliLaunchPlan, _identity: SessionIdentity, _signal: AbortSignal): Promise<void> { this.calls.push("submit"); }
+  async confirmInitialPrompt(_request: InteractiveCliStartRequest, _plan: InteractiveCliLaunchPlan, _identity: SessionIdentity, _signal: AbortSignal): Promise<PromptSubmissionEvidence> { this.calls.push("confirm"); return this.submission; }
 }
 
 function request(): InteractiveCliStartRequest { return { runId: "11111111-1111-4111-8111-111111111111", node: node(), prompt: "任务", identityFile: "/project/session.json" }; }
@@ -88,6 +90,17 @@ describe("InteractiveCliBootstrap", () => {
     adapter.waitUntilReady = async () => new Promise<PromptReadyEvidence>(() => undefined);
     await expect(new InteractiveCliBootstrap(backend, 1).start(adapter, request())).rejects.toThrow("首条 Prompt ready Gate 超时");
     expect(adapter.calls).toEqual(["launch"]);
+    expect(backend.calls).toEqual(["create", "destroy"]);
+  });
+
+  test("Gate 超时会向 Adapter 发送 abort，避免遗留后台观察", async () => {
+    const backend = new RecordingBackend(); const adapter = new FakeAdapter();
+    let aborted = false;
+    adapter.waitUntilReady = async (_request, _plan, _identity, signal) => new Promise<PromptReadyEvidence>((_resolve, reject) => {
+      signal.addEventListener("abort", () => { aborted = true; reject(new Error("observing cancelled")); }, { once: true });
+    });
+    await expect(new InteractiveCliBootstrap(backend, 1).start(adapter, request())).rejects.toThrow("首条 Prompt ready Gate 超时");
+    expect(aborted).toBe(true);
     expect(backend.calls).toEqual(["create", "destroy"]);
   });
 });

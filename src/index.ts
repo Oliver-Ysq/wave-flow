@@ -10,7 +10,7 @@ export type { WorkflowExecutionOptions } from "./workflow/execute-workflow";
 export type { WorkflowExecutionHost } from "./runtime/workflow-host";
 export type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdentity, SessionLiveness } from "./sessions/types";
 export { CodexInteractiveAdapter } from "./adapters/codex-interactive-adapter";
-export type { CodexInteractiveStartRequest } from "./adapters/codex-interactive-adapter";
+export type { CodexInteractiveAdapterOptions, CodexInteractiveStartRequest } from "./adapters/codex-interactive-adapter";
 export type { InteractiveCliAdapter, InteractiveCliLaunchPlan, InteractiveCliStartRequest, PromptReadyEvidence, PromptSubmissionEvidence } from "./adapters/interactive-cli-adapter";
 export { InteractiveCliBootstrap, InteractiveCliBootstrapError } from "./sessions/bootstrap/interactive-cli-bootstrap";
 export type { BootstrappedInteractiveSession } from "./sessions/bootstrap/interactive-cli-bootstrap";

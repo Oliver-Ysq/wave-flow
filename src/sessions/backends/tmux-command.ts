@@ -24,12 +24,18 @@ export class TmuxCommandClient {
     if (result.exitCode !== 0) throw new Error(`tmux 创建会话失败：${trimDiagnostic(result.stderr)}`);
   }
 
-  /** 使用私有 tmux buffer 粘贴文本，避免通过 shell 拼接任务内容。 */
+  /** 使用私有 tmux buffer 以 bracketed-paste 语义粘贴文本，避免多行内容被解释成连续 Enter。 */
   async pasteText(sessionName: string, bufferName: string, text: string): Promise<void> {
     const loaded = await this.runner.run(["-S", this.socketPath, "load-buffer", "-b", bufferName, "-"], this.timeoutMs, text);
     if (loaded.exitCode !== 0) throw new Error(`tmux 写入 buffer 失败：${trimDiagnostic(loaded.stderr)}`);
-    const pasted = await this.runner.run(["-S", this.socketPath, "paste-buffer", "-d", "-b", bufferName, "-t", sessionName], this.timeoutMs);
+    const pasted = await this.runner.run(["-S", this.socketPath, "paste-buffer", "-d", "-p", "-b", bufferName, "-t", sessionName], this.timeoutMs);
     if (pasted.exitCode !== 0) throw new Error(`tmux 粘贴文本失败：${trimDiagnostic(pasted.stderr)}`);
+  }
+
+  /** 向私有会话发送一个受控特殊键，不能传入任务正文。 */
+  async sendSpecialKey(sessionName: string, key: "Enter"): Promise<void> {
+    const result = await this.runner.run(["-S", this.socketPath, "send-keys", "-t", sessionName, key], this.timeoutMs);
+    if (result.exitCode !== 0) throw new Error(`tmux 发送特殊键失败：${trimDiagnostic(result.stderr)}`);
   }
 
   /** 捕获会话近期屏幕内容，仅供诊断。 */

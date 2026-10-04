@@ -55,6 +55,10 @@ export interface SessionBackend {
   create(options: CreateSessionOptions): Promise<SessionIdentity>;
   /** 向会话输入原始文本；成功只代表后端已接收，不代表 CLI 已提交或完成。 */
   sendText(identity: SessionIdentity, text: string): Promise<void>;
+  /** 以 bracketed paste 语义粘贴多行文本；不会将其中换行解释为 Enter。 */
+  pasteText(identity: SessionIdentity, text: string): Promise<void>;
+  /** 向会话发送受控特殊键；当前仅开放 Enter，Adapter 不得注入任意按键序列。 */
+  sendSpecialKey(identity: SessionIdentity, key: "Enter"): Promise<void>;
   /** 获取近期终端内容用于诊断；调用方不得从内容推断业务 completed / failed。 */
   readRecent(identity: SessionIdentity, lines?: number): Promise<string>;
   /** 验证会话存在性和 identity 是否匹配。 */

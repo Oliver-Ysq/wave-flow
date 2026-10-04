@@ -20,6 +20,8 @@ export type InteractiveCliLaunchPlan = {
   readonly command: readonly string[];
   /** 仅注入该受管会话的环境；不能携带 Workflow 作者任意环境变量。 */
   readonly env?: Readonly<Record<string, string>>;
+  /** Adapter 私有的首条 Prompt 上下文；Bootstrap 只透传，绝不读取、持久化或解释其内容。 */
+  readonly submissionContext?: unknown;
 };
 
 /** Adapter 对“现在是否允许提交首条 Prompt”的专属判断。 */
@@ -55,11 +57,11 @@ export interface InteractiveCliAdapter {
   /** 此 Adapter 当前可承载的 Workflow CLI；Bootstrap 必须拒绝不匹配的节点，防止错用启动参数或提交证据。 */
   readonly cli: AgentCli;
   /** 根据受控节点输入构造正常交互 CLI 的启动 argv。 */
-  launch(request: InteractiveCliStartRequest): InteractiveCliLaunchPlan;
+  launch(request: InteractiveCliStartRequest, signal: AbortSignal): Promise<InteractiveCliLaunchPlan>;
   /** 等待本 CLI 专属的可提交条件；不满足时返回 ready: false。 */
-  waitUntilReady(request: InteractiveCliStartRequest, identity: SessionIdentity): Promise<PromptReadyEvidence>;
+  waitUntilReady(request: InteractiveCliStartRequest, plan: InteractiveCliLaunchPlan, identity: SessionIdentity, signal: AbortSignal): Promise<PromptReadyEvidence>;
   /** 以本 CLI 专属方式提交首条 Prompt；只在 ready: true 后调用。 */
-  submitInitialPrompt(request: InteractiveCliStartRequest, identity: SessionIdentity): Promise<void>;
+  submitInitialPrompt(request: InteractiveCliStartRequest, plan: InteractiveCliLaunchPlan, identity: SessionIdentity, signal: AbortSignal): Promise<void>;
   /** 使用本 CLI 的原生证据确认提交；无法证明时必须返回 submitted: false。 */
-  confirmInitialPrompt(request: InteractiveCliStartRequest, identity: SessionIdentity): Promise<PromptSubmissionEvidence>;
+  confirmInitialPrompt(request: InteractiveCliStartRequest, plan: InteractiveCliLaunchPlan, identity: SessionIdentity, signal: AbortSignal): Promise<PromptSubmissionEvidence>;
 }

@@ -46,6 +46,18 @@ export class TmuxSessionBackend implements SessionBackend {
     await this.client.pasteText(identity.sessionName, `wf-${crypto.randomUUID()}`, text);
   }
 
+  /** 通过 tmux bracketed paste 输入多行文本，保留换行作为 composer 内容。 */
+  async pasteText(identity: SessionIdentity, text: string): Promise<void> {
+    await this.requireMatchingIdentity(identity);
+    await this.client.pasteText(identity.sessionName, `wf-${crypto.randomUUID()}`, text);
+  }
+
+  /** 将提交键与文本粘贴分离，避免多行 Prompt 被误拆成多个 Codex 回合。 */
+  async sendSpecialKey(identity: SessionIdentity, key: "Enter"): Promise<void> {
+    await this.requireMatchingIdentity(identity);
+    await this.client.sendSpecialKey(identity.sessionName, key);
+  }
+
   /** 捕获近期屏幕作为诊断；绝不根据文本改变业务节点状态。 */
   async readRecent(identity: SessionIdentity, lines = 200): Promise<string> {
     await this.requireMatchingIdentity(identity);

@@ -36,7 +36,7 @@ export class InteractiveCliBootstrap {
     if (adapter.cli !== request.node.cli) {
       throw new InteractiveCliBootstrapError(`${adapter.id} Adapter 不能启动 cli: ${request.node.cli} 节点。`, null);
     }
-    const plan = adapter.launch(request);
+    const plan = await withinTimeout((signal) => adapter.launch(request, signal), this.gateTimeoutMs, "launch");
     if (plan.command.length === 0) throw new InteractiveCliBootstrapError(`${adapter.id} Adapter 未提供正常交互 CLI 启动命令。`, null);
     const identity = await this.sessions.create({
       runId: request.runId,
@@ -49,10 +49,10 @@ export class InteractiveCliBootstrap {
     });
     try {
       assertIdentityMatchesRequest(identity, request);
-      const ready = await withinTimeout(adapter.waitUntilReady(request, identity), this.gateTimeoutMs, "ready");
+      const ready = await withinTimeout((signal) => adapter.waitUntilReady(request, plan, identity, signal), this.gateTimeoutMs, "ready");
       if (!ready.ready) throw new Error(`首条 Prompt 尚未就绪：${ready.diagnostic}`);
-      await withinTimeout(adapter.submitInitialPrompt(request, identity), this.gateTimeoutMs, "submit");
-      const submission = await withinTimeout(adapter.confirmInitialPrompt(request, identity), this.gateTimeoutMs, "confirm");
+      await withinTimeout((signal) => adapter.submitInitialPrompt(request, plan, identity, signal), this.gateTimeoutMs, "submit");
+      const submission = await withinTimeout((signal) => adapter.confirmInitialPrompt(request, plan, identity, signal), this.gateTimeoutMs, "confirm");
       assertSubmissionIsBound(submission);
       return { identity, ready, submission };
     } catch (error) {
@@ -80,10 +80,17 @@ function assertSubmissionIsBound(submission: PromptSubmissionEvidence): void {
 }
 
 /** 为单个 Adapter Gate 设置硬超时，避免卡死的 CLI 探测泄漏受管会话。 */
-function withinTimeout<T>(operation: Promise<T>, timeoutMs: number, stage: "ready" | "submit" | "confirm"): Promise<T> {
+function withinTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number, stage: "launch" | "ready" | "submit" | "confirm"): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    operation,
-    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`首条 Prompt ${stage} Gate 超时。`)), timeoutMs); }),
-  ]).finally(() => { if (timer) clearTimeout(timer); });
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`首条 Prompt ${stage} Gate 超时。`));
+    }, timeoutMs);
+  });
+  return Promise.race([operation(controller.signal), timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+    controller.abort();
+  });
 }

@@ -49,7 +49,7 @@ wave-flow capabilities --json
 
 `capabilities --json` 输出当前机器的三态能力快照。命令存在只代表二进制可被探测；只有显示为 `available` 的能力才能被后续 Runtime 使用。当前正常交互会话、首条 Prompt 投递和 sandbox 仍未验证，不能据此启动真实 Agent。
 
-当前已验证 Wave Flow 能在私有 tmux socket 中创建、输入、诊断读取和销毁受管终端会话；它不会使用或接管你默认 tmux server 的会话。Codex Adapter 已将正常交互启动固定为 `codex --sandbox <read-only|workspace-write> --cd <cwd> --no-alt-screen <prompt>`，不会退回到 `codex exec` 或把 Prompt 拼入 shell；但该 Adapter 尚未获得 Codex 可验证的 Prompt 接收回执。因此能力快照仍会将真实交互节点判为不可用，当前 `run` 不会启动真实 Codex。
+当前已验证 Wave Flow 能在私有 tmux socket 中创建、输入、诊断读取和销毁受管终端会话；它不会使用或接管你默认 tmux server 的会话。Codex Adapter 已将正常交互启动固定为 `codex --sandbox <read-only|workspace-write> --cd <cwd> --no-alt-screen`，不会退回到 `codex exec` 或把 Prompt 拼入 shell。首条 Prompt 只会在 Codex composer 就绪后以 bracketed paste 写入并单独 Enter 提交；但该路径尚未接入真实 Runtime，因此能力快照仍会将真实交互节点判为不可用，当前 `run` 不会启动真实 Codex。
 
 ## 开发与验证
 
