@@ -4,6 +4,7 @@ import type { JournalEvent } from "../journal/types";
 import type { RunStateMachine } from "../runtime/run-state-machine";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
+import type { SessionIdentity } from "../sessions/types";
 
 /** 注册后仅在当前 daemon 生命周期有效的节点 capability。 */
 export type RegisteredControlNode = {
@@ -15,6 +16,8 @@ export type RegisteredControlNode = {
   readonly agentSessionId: string;
   /** 仅注入受管 Agent 会话环境的高熵 capability。 */
   readonly capability: string;
+  /** 节点完成后通知对应真实执行器返回结果；仅 daemon 内部使用，异常不得回滚已完成状态。 */
+  readonly onCompleted?: (result: JsonObject) => void;
 };
 
 /** 受管 CLI 提交 complete 时发送的 JSON 内容；daemon 不读取调用方任意路径。 */
@@ -25,12 +28,32 @@ export type CompleteRequest = RegisteredControlNode & {
   readonly result: JsonObject;
 };
 
+/** 已确认首条任务投递后的会话记录；只有它耐久后才允许 complete。 */
+export type RecordedAgentSession = {
+  /** 所属 Run。 */
+  readonly runId: string;
+  /** 节点稳定 id。 */
+  readonly nodeId: string;
+  /** 与当前 running 节点一致的会话身份。 */
+  readonly agentSessionId: string;
+  /** Session Host 返回的稳定会话坐标。 */
+  readonly session: SessionIdentity;
+  /** 首条任务的实际投递方式。 */
+  readonly delivery: "tmux" | "codex-rpc";
+  /** App Server hybrid 的官方 thread/turn 坐标。 */
+  readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; };
+};
+
 /** Control Server 的最小 complete 协议。 */
 export class ControlServer {
   #nodes = new Map<string, RegisteredControlNode>();
   #completing = new Set<string>();
+  #recordedSessions = new Set<string>();
 
   constructor(private readonly journal: RunJournal, private readonly state: RunStateMachine) {}
+
+  /** 当前 Control 所属 Run；供真实执行器构造受管环境，不对 Workflow 作者 API 暴露。 */
+  get runId(): string { return this.journal.manifest.runId; }
 
   /** 注册一个已进入 running 的真实 Agent；同一 node/session 只能注册一次。 */
   register(node: RegisteredControlNode): void {
@@ -43,11 +66,44 @@ export class ControlServer {
     this.#nodes.set(key, node);
   }
 
+  /** 启动失败时撤销尚未完成的 capability；已完成节点不会被撤销。 */
+  unregister(runId: string, nodeId: string, agentSessionId: string): void {
+    const key = controlKey(runId, nodeId);
+    const node = this.#nodes.get(key);
+    if (node?.agentSessionId === agentSessionId) {
+      this.#nodes.delete(key);
+      this.#recordedSessions.delete(key);
+    }
+  }
+
+  /** 耐久记录已投递任务的会话坐标，避免 complete 指向不可恢复或错误的终端。 */
+  async recordSession(record: RecordedAgentSession): Promise<void> {
+    const key = controlKey(record.runId, record.nodeId);
+    const node = this.#nodes.get(key);
+    if (!node || node.agentSessionId !== record.agentSessionId) throw new Error("会话记录的 Control 节点或会话身份不匹配。");
+    if (this.#recordedSessions.has(key)) throw new Error("该节点的会话坐标已记录。");
+    const snapshot = this.state.agent(record.nodeId);
+    if (snapshot.status !== "running" || snapshot.agentSessionId !== record.agentSessionId) throw new Error("只能记录当前 running 节点的会话坐标。");
+    if (record.session.runId !== record.runId || record.session.nodeId !== record.nodeId || record.session.agentSessionId !== record.agentSessionId || record.session.cli !== snapshot.cli) throw new Error("会话坐标与当前节点身份不匹配。");
+    if (record.delivery === "tmux" && record.appServer !== undefined) throw new Error("普通 tmux 投递不得记录 App Server 坐标。");
+    if (record.delivery === "codex-rpc" && (!record.appServer || !record.appServer.endpoint || !record.appServer.threadId || !record.appServer.turnId)) throw new Error("App Server 投递缺少 thread/turn 坐标。");
+    const event: JournalEvent = {
+      type: "agent.session", at: new Date().toISOString(), runId: record.runId, nodeId: record.nodeId,
+      agentSessionId: record.agentSessionId, diagnostic: record.delivery,
+      delivery: record.delivery, session: record.session,
+      ...(record.appServer ? { appServer: { ...record.appServer, protocolVersion: 1 as const } } : {}),
+    };
+    await this.journal.append(event);
+    this.state.apply(event);
+    this.#recordedSessions.add(key);
+  }
+
   /** 校验 capability、Schema 与 durable 写入后，唯一地完成 running 节点。 */
   async complete(request: CompleteRequest): Promise<void> {
     const key = controlKey(request.runId, request.nodeId);
     const node = this.#nodes.get(key);
     if (!node || node.agentSessionId !== request.agentSessionId || node.capability !== request.capability) throw new Error("Control capability、Run、节点或会话身份不匹配。");
+    if (!this.#recordedSessions.has(key)) throw new Error("首条任务投递的会话坐标尚未耐久记录，拒绝 complete。");
     if (this.#completing.has(key)) throw new Error("该节点正在处理 complete，拒绝并发上报。");
     this.#completing.add(key);
     try {
@@ -62,6 +118,7 @@ export class ControlServer {
     await this.journal.append(event);
     this.state.apply(event);
     this.#nodes.delete(key);
+    try { node.onCompleted?.(request.result); } catch {}
     } finally {
       this.#completing.delete(key);
     }

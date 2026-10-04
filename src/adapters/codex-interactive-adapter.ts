@@ -22,6 +22,8 @@ export type CodexInteractiveAdapterOptions = {
   readonly pasteSettleMs?: number;
   /** 每次 Enter 后等待 history 记录的窗口毫秒数；默认 800。 */
   readonly confirmationAttemptMs?: number;
+  /** 仅注入本受管会话的 Control 环境；用于让 Agent 通过 wave-flow complete 回连当前 daemon。 */
+  readonly sessionEnv?: Readonly<Record<string, string>>;
 };
 
 /** Codex 首条 Prompt 确认所需的 Adapter 私有 launch context。 */
@@ -47,6 +49,7 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
   private readonly historyPollMs: number;
   private readonly pasteSettleMs: number;
   private readonly confirmationAttemptMs: number;
+  private readonly sessionEnv: Readonly<Record<string, string>>;
 
   constructor(private readonly sessions: SessionBackend, options: CodexInteractiveAdapterOptions = {}) {
     this.codexCommand = options.command ?? "codex";
@@ -54,6 +57,7 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
     this.historyPollMs = positiveMilliseconds(options.historyPollMs ?? 100, "historyPollMs");
     this.pasteSettleMs = positiveMilliseconds(options.pasteSettleMs ?? 200, "pasteSettleMs");
     this.confirmationAttemptMs = positiveMilliseconds(options.confirmationAttemptMs ?? 800, "confirmationAttemptMs");
+    this.sessionEnv = options.sessionEnv ?? {};
   }
 
   /** 构造空启动的正常交互式 Codex argv；首条任务必须经 Ready Gate 后 bracketed paste 投递。 */
@@ -62,7 +66,16 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
     if (node.cli !== "codex") throw new Error("Codex Adapter 只能启动 cli: codex 节点。");
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("Codex 初始 Prompt 必须为非空字符串。");
     const sandbox = codexSandbox(node.sandbox);
-    const command = [this.codexCommand, "--sandbox", sandbox, "--cd", node.cwd, "--no-alt-screen"];
+    // 受管 tmux 会话不能依赖 Codex Desktop 的共享 app-server：某些受限环境会禁止
+    // 它登记 pid 或读取全局锁。正常 TUI 仍在本 tmux pane 中运行，故显式关闭该
+    // 外部 daemon，避免把其启动失败误报为 Wave Flow 会话丢失。
+    const command = [
+      this.codexCommand,
+      // 严格参考 Botmux：以当前进程 argv 覆盖预置信任，避免不稳定的首次目录信任
+      // 菜单吞掉首条任务；不改用户全局 config，也不信任 Workflow 以外目录。
+      "-c", `projects={${JSON.stringify(node.cwd)}={trust_level="trusted"}}`,
+      "--no-daemon", "--sandbox", sandbox, "--cd", node.cwd, "--no-alt-screen",
+    ];
     if (node.request.model) command.push("--model", node.request.model);
     return command;
   }
@@ -73,15 +86,15 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
     const nonce = crypto.randomUUID();
     const submittedPrompt = `${request.prompt}\n\n[Wave Flow 内部关联标识：wf-submit:${nonce}]`;
     const context: CodexSubmissionContext = { historyOffset: null, submittedPrompt };
-    return { command: this.commandFor(request), submissionContext: context };
+    return { command: this.commandFor(request), env: this.sessionEnv, submissionContext: context };
   }
 
   /** 严格参考 Botmux：拒绝 loading、恢复、容量队列与编号菜单，仅在 composer 与初始化 banner 同时成立时放行。 */
-  async waitUntilReady(_request: CodexInteractiveStartRequest, _plan: InteractiveCliLaunchPlan, identity: SessionIdentity, signal: AbortSignal): Promise<PromptReadyEvidence> {
+  async waitUntilReady(request: CodexInteractiveStartRequest, _plan: InteractiveCliLaunchPlan, identity: SessionIdentity, signal: AbortSignal): Promise<PromptReadyEvidence> {
     while (true) {
       throwIfAborted(signal);
       const screen = await this.sessions.readRecent(identity, 120);
-      if (isCodexComposerReady(screen)) return { ready: true, diagnostic: "Codex composer 已确认就绪。" };
+      if (isCodexComposerReady(screen, request.node.cwd)) return { ready: true, diagnostic: "Codex composer 已确认就绪。" };
       await waitForAbortableDelay(this.historyPollMs, signal);
     }
   }
@@ -127,16 +140,22 @@ function requireCodexContext(plan: InteractiveCliLaunchPlan): CodexSubmissionCon
   return context;
 }
 
-function isCodexComposerReady(screen: string): boolean {
+function isCodexComposerReady(screen: string, cwd: string): boolean {
   if (/(?:model|directory):\s*loading\b|Resuming session|esc to interrupt|Queued for capacity/i.test(screen)) return false;
   const lines = screen.trimEnd().split(/\r?\n/);
   const promptIndex = [...lines].reverse().findIndex((line) => /^\s*›(?!\s*\d+\.)\s*(?:Ask Codex to do anything)?\s*$/.test(line));
   if (promptIndex < 0) return false;
   const index = lines.length - 1 - promptIndex;
   const footer = lines.slice(index + 1).filter((line) => line.trim());
-  const bannerReady = /│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t\r\n]*│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│/.test(screen);
-  return bannerReady && footer.length === 1 && /^\s*\S[^\n]* · (?:\/|~)\S*/.test(footer[0]);
+  if (footer.length !== 1 || !new RegExp(`^\\s*\\S[^\\n]* · ${escapeRegExp(cwd)}\\s*$`).test(footer[0]!)) return false;
+  // Codex 0.15x 以前是 model/directory 方框；0.159 实际改为“OpenAI Codex”标题
+  // 加 cwd。两种都要求 cwd 与本节点完全一致，不能因历史滚动中的普通 › 误放行。
+  const legacyBanner = /│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t\r\n]*│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│/.test(screen);
+  const currentBanner = new RegExp(`>_ OpenAI Codex[^\\n]*\\n\\s*${escapeRegExp(cwd)}\\s*(?:\\n|$)`).test(screen);
+  return legacyBanner || currentBanner;
 }
+
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 /** 在创建会话前记录 history 当前字节长度；仅文件不存在时允许以空历史的 0 作为基线。 */
 async function historyOffset(path: string, signal: AbortSignal): Promise<number> {

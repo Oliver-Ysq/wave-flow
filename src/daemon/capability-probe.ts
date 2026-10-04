@@ -10,7 +10,7 @@ export type CapabilityCommandRunner = {
   run(command: string, args: readonly string[], timeoutMs: number, stdin?: string): Promise<{ readonly exitCode: number; readonly stdout?: string; readonly stderr?: string }>;
 };
 
-/** 创建当前 Bun 环境的最小能力快照；未实现的产品能力必须保持 unavailable 或 unknown。 */
+/** 创建当前 Bun 环境的最小能力快照；未实际探测的产品能力必须保持 unknown。 */
 export async function probeCapabilities(runner: CapabilityCommandRunner = bunCommandRunner, timeoutMs = 3_000): Promise<CapabilitySnapshot> {
   const tmux = await probeCommand(runner, "tmux", ["-V"], timeoutMs);
   const codex = await probeCommand(runner, "codex", ["--version"], timeoutMs);
@@ -21,13 +21,23 @@ export async function probeCapabilities(runner: CapabilityCommandRunner = bunCom
     adapters: {
       codex: {
         status: codex,
-        interactiveSession: "unavailable",
-        verifiedPromptDelivery: "unavailable",
-        persistentTmuxSession: "unavailable",
+        // 仅 `codex --version` 与 tmux 基础操作不能证明登录态、TUI 启动或 history
+        // 确认能成功；将它们报为 unavailable 会错误暗示实现缺失，报为 available
+        // 又会把用户环境问题当成已验证。故保持 unknown，由实际启动 Gate 决定。
+        interactiveSession: unverifiedInteractiveCapability(codex, persistentSessions),
+        verifiedPromptDelivery: unverifiedInteractiveCapability(codex, persistentSessions),
+        persistentTmuxSession: unverifiedInteractiveCapability(codex, persistentSessions),
         sandbox: { readOnly: "unknown", workspaceWrite: "unknown" },
       },
     },
   };
+}
+
+/** 二进制与 tmux 均已知可用后，未实际启动的交互能力只能是 unknown。 */
+function unverifiedInteractiveCapability(codex: CapabilityStatus, tmux: CapabilityStatus): CapabilityStatus {
+  if (codex !== "available") return codex;
+  if (tmux !== "available") return tmux;
+  return "unknown";
 }
 
 async function probePrivateTmuxSession(runner: CapabilityCommandRunner, timeoutMs: number): Promise<CapabilityStatus> {

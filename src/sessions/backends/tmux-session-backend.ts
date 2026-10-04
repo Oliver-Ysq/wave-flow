@@ -16,13 +16,17 @@ export class TmuxSessionBackend implements SessionBackend {
       backendRef: this.client.socketPath,
       runId: options.runId,
       nodeId: options.nodeId,
-      agentSessionId: crypto.randomUUID(),
+      agentSessionId: options.agentSessionId ?? crypto.randomUUID(),
       cli: options.cli,
       createdAt: new Date().toISOString(),
       identityFile: options.identityFile,
     };
     await this.client.createSession(identity.sessionName, options.cwd, {
       ...options.env,
+      // 当前父进程可能由无交互环境以 TERM=dumb 启动；若原样继承，Codex 会在
+      // 创建后立即拒绝启动 TUI，tmux 则只留下“会话消失”的弱诊断。tmux pane
+      // 自身是 screen 兼容终端，明确注入该值才能让正常交互 CLI 获得一致语义。
+      TERM: "screen-256color",
       WF_BACKEND: "tmux",
       WF_RUN_ID: identity.runId,
       WF_NODE_ID: identity.nodeId,

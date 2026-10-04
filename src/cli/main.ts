@@ -6,7 +6,7 @@ import { withLocalDaemon } from "../daemon/local-daemon-lifecycle";
 import { executeComplete, parseCompleteCommand } from "./complete-command";
 
 /** CLI 主入口；run 和 inspect 均只经 localhost daemon 访问 Run 状态。 */
-export async function main(argv: readonly string[] = process.argv.slice(2), cwd = process.cwd(), write: (line: string) => void = (line) => { process.stdout.write(`${line}\n`); }): Promise<void> {
+export async function main(argv: readonly string[] = process.argv.slice(2), cwd = process.cwd(), write: (line: string) => void = (line) => { process.stdout.write(`${line}\n`); }, deterministicForTest = false): Promise<void> {
   const command = parseCommand(argv, cwd);
   if (command.kind === "help") { write(helpText); return; }
   if (command.kind === "complete") { await executeComplete(parseCompleteCommand(command.argv)); write("节点已完成上报。"); return; }
@@ -18,10 +18,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
       return;
     }
     const response = command.kind === "run"
-      ? await client.createRun({ workflowPath: command.workflowPath, cwd: command.cwd, input: command.input })
+      ? await client.createRun({ workflowPath: command.workflowPath, cwd: command.cwd, input: command.input, codexRpcInput: command.codexRpcInput })
       : await client.inspect(command.runId, command.cwd);
     write(formatSnapshot(response.snapshot));
-  });
+  }, deterministicForTest);
 }
 
 if (import.meta.main) main().catch((error) => { process.stderr.write(`wave-flow: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

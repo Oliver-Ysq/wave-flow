@@ -5,6 +5,7 @@ import { isJsonObject, type JsonObject } from "../shared/json";
 import { nodeDirectoryName, runDirectory, validateRunId } from "./paths";
 import type { JournalEvent, RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
+import type { SessionIdentity } from "../sessions/types";
 
 /** 同一 Run 的 append-only Journal 与结果文件存储；不解释节点状态机。 */
 export class RunJournal {
@@ -144,6 +145,11 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "agent.status":
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
       break;
+    case "agent.session":
+      if (typeof event.nodeId !== "string" || !isSessionDelivery(event.delivery) || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.session payload 无效。");
+      if (event.delivery === "tmux" && event.appServer !== undefined) throw new Error("普通 tmux 投递不得携带 App Server 坐标。");
+      if (event.delivery === "codex-rpc" && !isAppServerCoordinate(event.appServer)) throw new Error("App Server 投递缺少有效坐标。");
+      break;
     case "agent.completed":
       if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result) || (event.validationPath !== undefined && typeof event.validationPath !== "string")) throw new Error("agent.completed payload 无效。");
       break;
@@ -168,6 +174,26 @@ function isNormalizedRequest(value: unknown): boolean {
 
 function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isRunStatus(value: unknown): boolean { return value === "running" || value === "completed" || value === "cancelled" || value === "interrupted"; }
+function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" { return value === "tmux" || value === "codex-rpc"; }
+
+function isSessionIdentity(value: unknown): value is SessionIdentity {
+  if (!isPlainObject(value)) return false;
+  return value.backend === "tmux" && typeof value.sessionName === "string" && value.sessionName.trim() !== "" && typeof value.backendRef === "string" && value.backendRef.startsWith("/") && typeof value.runId === "string" && typeof value.nodeId === "string" && typeof value.agentSessionId === "string" && value.agentSessionId.trim() !== "" && value.cli === "codex" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && (value.identityFile === undefined || (typeof value.identityFile === "string" && value.identityFile.startsWith("/")));
+}
+
+function isAppServerCoordinate(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  return isLoopbackWebSocketEndpoint(value.endpoint) && typeof value.threadId === "string" && value.threadId.trim() !== "" && typeof value.turnId === "string" && value.turnId.trim() !== "" && value.protocolVersion === 1;
+}
+
+/** URL 会将无尾随斜杠 endpoint 规范化为 `/`；不能用字符串正则把等价坐标拒绝。 */
+function isLoopbackWebSocketEndpoint(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "ws:" && url.hostname === "127.0.0.1" && /^\d+$/.test(url.port) && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/";
+  } catch { return false; }
+}
 
 function isTruncatedJsonTail(line: string): boolean {
   const text = line.trim();

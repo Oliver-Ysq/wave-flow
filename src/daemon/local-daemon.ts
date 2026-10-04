@@ -1,19 +1,57 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
-import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { CreateRunRequest, RunResponse } from "./types";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
 import type { ControlServer } from "../control/control-server";
+import { createRealCodexExecutor } from "../runtime/real-codex-factory";
+import { DeterministicExecutor } from "../runtime/deterministic-executor";
+import type { AgentNodeExecutor } from "../runtime/run-types";
+import { RealCodexExecutor } from "../runtime/real-codex-executor";
+import { runsRoot } from "../journal/paths";
+
+/** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
+export type RealCodexExecutorFactory = (args: {
+  /** 当前 daemon 的 loopback Control 根地址。 */
+  readonly controlUrl: string;
+  /** 当前项目 Run 耐久目录的根路径。 */
+  readonly runsRoot: string;
+  /** 当前 daemon 的唯一私有 tmux socket 身份。 */
+  readonly daemonInstanceId: string;
+  /** 本次 Run 是否使用 App Server hybrid 投递。 */
+  readonly codexRpcInput: boolean;
+}) => RealCodexExecutor;
+
+/** LocalDaemon 的可选构造配置；生产默认使用真实 Codex 执行器。 */
+export type LocalDaemonOptions = {
+  /** 仅自动测试使用确定性执行器；不能用于用户 CLI。默认 false。 */
+  readonly deterministicForTest?: boolean;
+  /** 替换真实执行器的创建方式，以便验证 daemon/Control 闭环而不连接模型服务。 */
+  readonly createRealExecutor?: RealCodexExecutorFactory;
+};
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
 export class LocalDaemon {
   #runs = new Map<string, RunRuntime>();
   #controls = new Map<string, ControlServer>();
   #server: ReturnType<typeof Bun.serve> | null = null;
+  readonly instanceId = crypto.randomUUID();
+
+  private readonly deterministicForTest: boolean;
+  private readonly createRealExecutor: RealCodexExecutorFactory;
+
+  /**
+   * @param options 自动测试可选择稳定或 fake 真实执行器；省略时启动真正 tmux/Codex。
+   * 为保持已有测试调用兼容，也接受历史 boolean 形式；用户 CLI 不会传入该参数。
+   */
+  constructor(options: LocalDaemonOptions | boolean = {}) {
+    const normalized = typeof options === "boolean" ? { deterministicForTest: options } : options;
+    this.deterministicForTest = normalized.deterministicForTest === true;
+    this.createRealExecutor = normalized.createRealExecutor ?? createRealCodexExecutor;
+  }
 
   /** 启动 HTTP 服务；默认随机端口，严格绑定 127.0.0.1。 */
   start(port = 0): { readonly baseUrl: string; stop(): void } {
@@ -65,7 +103,16 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(value.workflowPath, cwd);
     const sourcePath = await realpath(resolve(cwd, value.workflowPath));
     const source = await Bun.file(sourcePath).text();
-    const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, cwd, executor: new DeterministicExecutor() });
+    const executor: AgentNodeExecutor = this.deterministicForTest
+      ? new DeterministicExecutor()
+      : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: runsRoot(cwd), daemonInstanceId: this.instanceId, codexRpcInput: value.codexRpcInput !== false });
+    const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, cwd, executor });
+    if (!this.deterministicForTest && executor instanceof RealCodexExecutor) {
+      const control = runtime.createControlServer();
+      executor.bindControl(control);
+      this.#runs.set(runtime.snapshot().id, runtime);
+      this.registerControl(runtime.snapshot().id, control);
+    }
     try {
       await runtime.run(workflow);
     } catch (error) {
@@ -101,5 +148,5 @@ class DaemonRequestError extends Error { constructor(readonly status: number, me
 function isCreateRunRequest(value: unknown): value is CreateRunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
-  return typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input);
+  return typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean");
 }

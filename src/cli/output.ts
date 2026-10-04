@@ -11,15 +11,17 @@ export function formatSnapshot(snapshot: RunSnapshot): string {
   return lines.join("\n");
 }
 
-/** 4.1 CLI 帮助；明确该路径不启动真实 Coding Agent。 */
-export const helpText = `wave-flow 开发验证 CLI
+/** 本机 CLI 帮助；真实 Run 默认通过 App Server 投递并保留 tmux viewer。 */
+export const helpText = `wave-flow 本机工作流 CLI
 
 用法:
-  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>]
+  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--tmux-tui-input]
   wave-flow inspect <run-id> [--cwd <path>]
   wave-flow capabilities [--json]
 
-当前 run 使用确定性开发验证执行器，不启动 tmux、Codex 或其他真实 Agent。`;
+run 默认使用 App Server 的 turn/start ACK 投递首条任务，并保留 tmux 中的 Codex viewer 供人工查看和交互。
+--tmux-tui-input 显式使用普通 tmux TUI 的 paste/history 投递兼容路径。
+--codex-rpc-input 仍接受，但已是默认行为。`;
 
 /** 渲染人类可读能力摘要；仅显示被当前实现证明的能力。 */
 export function formatCapabilities(snapshot: CapabilitySnapshot): string {

@@ -41,6 +41,7 @@ export class InteractiveCliBootstrap {
     const identity = await this.sessions.create({
       runId: request.runId,
       nodeId: request.node.id,
+      agentSessionId: request.node.agentSessionId ?? undefined,
       cli: request.node.cli,
       cwd: request.node.cwd,
       command: plan.command,

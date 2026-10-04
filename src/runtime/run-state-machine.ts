@@ -10,6 +10,7 @@ export class RunStateMachine {
   #diagnostic: string | null = null;
   #endedAt: string | null = null;
   #agents = new Map<string, AgentNodeSnapshot>();
+  #recordedSessions = new Set<string>();
 
   constructor(readonly manifest: RunManifest) {}
 
@@ -31,7 +32,14 @@ export class RunStateMachine {
       case "agent.status":
         this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic, null, event.agentSessionId);
         return;
+      case "agent.session":
+        this.#applyAgentSession(event);
+        return;
       case "agent.completed":
+        // 带 validationPath 的 completed 仅能由 ControlServer 写入；它必须有先前耐久的
+        // agent.session，防止重开时仅靠伪造 completed 事件绕过受管会话绑定。旧确定性
+        // 执行器事件没有 validationPath，保留其兼容读取语义。
+        if (event.validationPath !== undefined && (!event.nodeId || !this.#recordedSessions.has(event.nodeId))) throw new Error("Control agent.completed 缺少先前的 agent.session 事实。");
         this.#applyAgentStatus(event.nodeId, "completed", event.at, event.diagnostic, event.result, event.agentSessionId);
         return;
       case "run.status":
@@ -87,6 +95,15 @@ export class RunStateMachine {
       agentSessionId: null,
       request: event.request,
     });
+  }
+
+  #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("agent.session 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("agent.session 必须属于当前 running 节点。");
+    if (event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId || event.session.cli !== agent.cli) throw new Error("agent.session 会话坐标与节点不匹配。");
+    if (this.#recordedSessions.has(event.nodeId)) throw new Error("同一 Agent 节点只能记录一次 agent.session。");
+    this.#recordedSessions.add(event.nodeId);
   }
 
   #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null, agentSessionId: string | null = null): void {

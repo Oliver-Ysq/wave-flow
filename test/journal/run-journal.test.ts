@@ -81,4 +81,27 @@ describe("RunJournal", () => {
     await appendFile(join(journal.directory, "journal.jsonl"), "not-json", "utf8");
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("第 2 行损坏");
   });
+
+  test("Control completed 重开时必须有先前耐久的 agent.session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
+    const resultPath = await journal.writeResult("scan-auth", { ok: true });
+    const validationPath = await journal.writeValidation("scan-auth", {}, { ok: true });
+    await journal.append({ type: "agent.completed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "done", resultPath, validationPath, result: { ok: true } });
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("缺少先前的 agent.session");
+  });
+
+  test("App Server 坐标接受 URL 语义等价的无尾随斜杠 endpoint", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    const session = { backend: "tmux" as const, sessionName: "wf-test", backendRef: "/tmp/wf.sock", runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", cli: "codex" as const, createdAt: new Date().toISOString() };
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
+    await journal.append({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "codex-rpc", delivery: "codex-rpc", session, appServer: { endpoint: "ws://127.0.0.1:43180", threadId: "thread", turnId: "turn", protocolVersion: 1 } });
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: expect.arrayContaining([expect.objectContaining({ type: "agent.session" })]) });
+  });
 });

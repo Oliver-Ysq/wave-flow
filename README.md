@@ -4,7 +4,7 @@ Wave Flow 是一个面向本机单用户的动态工作流产品：用户将以 
 
 ## 当前状态
 
-项目已完成旧一次性 `codex exec` Runtime 的移除，并按职责建立源码边界。当前可使用 `run` 与 `inspect` 验证 Workflow、Run 状态机与 Journal；该路径使用确定性开发验证执行器，**不会**启动 tmux、Codex、TraeX 或其他真实 Agent。正常交互式 CLI、Local Web、HITL、Replay 与 Adapter 仍未实现。
+项目已完成旧一次性 `codex exec` Runtime 的移除，并按职责建立源码边界。`run` 默认会在私有 tmux 会话中启动正常交互式 Codex，确认首条任务进入会话后等待 Agent 调用 `wave-flow complete` 上报结构化结果；`inspect` 用于读取耐久 Run 状态。Local Web、HITL、Replay、跨 daemon 恢复与 TraeX 尚未实现。
 
 这意味着历史的 `ctx.agent()`、`codex exec --json`、旧示例和旧 Journaled Replay 都不再可用，也不代表本项目的当前能力。
 
@@ -45,11 +45,11 @@ wave-flow inspect <run-id>
 wave-flow capabilities --json
 ```
 
-`run` 会输出唯一的 RunId，并将 Run、事件与结果写入当前项目的 `.wave-flow/runs/`。当前结果来自确定性开发验证执行器，不会使用 `cli: "codex"` 启动 Codex；该字段仅验证 Workflow 节点契约。
+`run` 会输出唯一的 RunId，并将 Run、事件、会话坐标与结果写入当前项目的 `.wave-flow/runs/`。默认经本机 App Server 的 `turn/start` ACK 投递首条任务，同时保留 tmux 中的 Codex viewer；传入 `--tmux-tui-input` 可显式改用普通 tmux TUI 的 paste/history 兼容路径。两种模式都由 Agent 的 `wave-flow complete` 作为唯一完成依据。
 
-`capabilities --json` 输出当前机器的三态能力快照。命令存在只代表二进制可被探测；只有显示为 `available` 的能力才能被后续 Runtime 使用。当前正常交互会话、首条 Prompt 投递和 sandbox 仍未验证，不能据此启动真实 Agent。
+`capabilities --json` 输出当前机器的三态能力快照。命令存在只代表二进制可被探测；`unknown` 表示尚未形成环境结论，`unavailable` 表示已确认不能使用。真实 Runtime 会在启动前检查 tmux 与 Codex 二进制，并在会话启动、首条任务确认时继续 fail closed；不会把终端文字或二进制存在当作任务已投递。
 
-当前已验证 Wave Flow 能在私有 tmux socket 中创建、输入、诊断读取和销毁受管终端会话；它不会使用或接管你默认 tmux server 的会话。Codex Adapter 已将正常交互启动固定为 `codex --sandbox <read-only|workspace-write> --cd <cwd> --no-alt-screen`，不会退回到 `codex exec` 或把 Prompt 拼入 shell。首条 Prompt 只会在 Codex composer 就绪后以 bracketed paste 写入并单独 Enter 提交；但该路径尚未接入真实 Runtime，因此能力快照仍会将真实交互节点判为不可用，当前 `run` 不会启动真实 Codex。
+当前已验证 Wave Flow 能在私有 tmux socket 中创建、输入、诊断读取和销毁受管终端会话；它不会使用或接管你默认 tmux server 的会话。默认 App Server 路径以 `initialize → thread/start → turn/start` ACK 确认首条任务，不会退回到 `codex exec` 或从终端文字推断状态；tmux viewer 仅供人工查看和交互。普通 TUI 兼容路径才会在 composer 就绪后以 bracketed paste 和原生 history 确认任务；无法确认时 Run 会 `interrupted`，而不会把任务当作已投递。
 
 ## 开发与验证
 

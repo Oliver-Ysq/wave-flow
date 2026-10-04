@@ -59,7 +59,7 @@ export type CodexAppServerProcess = {
 };
 
 /** 可注入 App Server 进程创建器，避免测试依赖真实账号或模型服务。 */
-export type CodexAppServerProcessSpawner = (command: readonly string[]) => CodexAppServerProcess;
+export type CodexAppServerProcessSpawner = (command: readonly string[], env: Readonly<Record<string, string>>) => CodexAppServerProcess;
 
 /** 本机 loopback App Server Host；它不接受 Workflow 自定义 argv 或 listener 地址。 */
 export class CodexAppServerHost {
@@ -70,7 +70,7 @@ export class CodexAppServerHost {
   #generation = 0;
 
   /** @param command 正常 Codex 可执行文件，默认从 PATH 查找 `codex`。 */
-  constructor(private readonly spawnProcess: CodexAppServerProcessSpawner = bunCodexAppServerSpawner, private readonly command = "codex", private readonly readyTimeoutMs = 10_000) {
+  constructor(private readonly spawnProcess: CodexAppServerProcessSpawner = bunCodexAppServerSpawner, private readonly command = "codex", private readonly readyTimeoutMs = 10_000, private readonly sessionEnv: Readonly<Record<string, string>> = {}) {
     if (!Number.isFinite(readyTimeoutMs) || readyTimeoutMs <= 0) throw new Error("App Server readyTimeoutMs 必须是正的有限毫秒数。");
   }
 
@@ -94,7 +94,7 @@ export class CodexAppServerHost {
     const port = await reserveLoopbackPort();
     this.requireCurrentGeneration(generation);
     const endpoint = `ws://127.0.0.1:${port}`;
-    const process = this.spawnProcess([this.command, "app-server", "--listen", endpoint]);
+    const process = this.spawnProcess([this.command, "app-server", "--listen", endpoint], this.sessionEnv);
     this.#process = process;
     try {
       await waitForConnectableEndpoint(endpoint, connect, process.exited, this.readyTimeoutMs, signal);
@@ -114,6 +114,17 @@ export class CodexAppServerHost {
     this.#process?.kill();
     this.#process = null;
     this.#endpoint = null;
+  }
+
+  /**
+   * 返回当前 App Server 的退出事实。
+   *
+   * Host 已成功报告 endpoint 后，进程仍可能异常退出；调用方必须监测这一事实，不能
+   * 只因 remote viewer 仍在重连就把节点误认为可继续。未启动时没有可观察进程。
+   */
+  get exited(): Promise<number> {
+    if (!this.#process) throw new Error("Codex App Server 尚未启动，无法观察退出状态。");
+    return this.#process.exited;
   }
 
   /** 异步启动完成前被 stop 或替代启动时，旧实例不能重新写回当前 Host。 */
@@ -357,6 +368,7 @@ export async function createCodexRemoteViewer(
   return sessions.create({
     runId: request.runId,
     nodeId: request.node.id,
+    agentSessionId: request.node.agentSessionId ?? undefined,
     cli: "codex",
     cwd: request.node.cwd,
     // 严格参考 Botmux remote viewer：viewer 不走受控输入 Gate，启动更新选择器会永久遮挡
@@ -378,7 +390,10 @@ export function assertLoopbackWebSocketEndpoint(endpoint: string): void {
 function appServerThreadParams(node: AgentNodeSnapshot): Readonly<Record<string, unknown>> {
   return {
     cwd: node.cwd,
-    sandbox: node.sandbox === "read-only" ? "readOnly" : "workspaceWrite",
+    // Codex App Server 0.159 使用与交互 CLI 相同的 kebab-case sandbox 枚举；
+    // 不能沿用早期实验协议的 readOnly/workspaceWrite，否则 thread/start 会在
+    // 首条任务前拒绝并触发不必要的 tmux fallback。
+    sandbox: node.sandbox,
     serviceName: "wave-flow",
     ...(node.request.model ? { model: node.request.model } : {}),
   };
@@ -490,7 +505,7 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
   });
 }
 
-const bunCodexAppServerSpawner: CodexAppServerProcessSpawner = (command) => {
-  const process = Bun.spawn([...command], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  return { exited: process.exited, kill: () => process.kill() };
+const bunCodexAppServerSpawner: CodexAppServerProcessSpawner = (command, env) => {
+  const child = Bun.spawn([...command], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, ...env } });
+  return { exited: child.exited, kill: () => child.kill() };
 };

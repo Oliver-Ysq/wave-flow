@@ -9,6 +9,8 @@ export type CreateRunRequest = {
   readonly cwd: string;
   /** 传给 Workflow default run(args) 的 JSON-safe 对象。 */
   readonly input: JsonObject;
+  /** 是否使用 Botmux 风格 App Server hybrid 投递；默认 true，Workflow 源码不可设置。 */
+  readonly codexRpcInput?: boolean;
 };
 
 /** 创建或查询 Run 的 loopback API 响应。 */

@@ -1,6 +1,6 @@
 # Wave Flow 源码边界
 
-本目录按新架构职责分层。Workflow 层现已提供受信任本地 `.ts` 模块加载、纯字面量 `meta` 校验，以及以 AsyncLocalStorage 隔离的 `agent()`、`phase()`、`parallel()`、`pipeline()` 和 `log()` 作者 API；当前 CLI 路径仍只委派确定性开发执行器，不提供旧一次性 `codex exec` Runtime。`adapters/` 已有严格参考 Botmux 的 Codex 空启动、Ready Gate、bracketed paste、Enter 与原生 history 确认链，但尚未接入 Runtime，不能启动真实节点。
+本目录按新架构职责分层。Workflow 层现已提供受信任本地 `.ts` 模块加载、纯字面量 `meta` 校验，以及以 AsyncLocalStorage 隔离的 `agent()`、`phase()`、`parallel()`、`pipeline()` 和 `log()` 作者 API；CLI 默认使用真实 Codex App Server 的 `turn/start` ACK 投递首条任务，并保留 tmux remote viewer。普通 tmux paste/history 是显式兼容路径；两者都不提供旧一次性 `codex exec` Runtime。
 
 | 目录 | 负责 | 不负责 |
 | --- | --- | --- |

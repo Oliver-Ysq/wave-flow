@@ -37,6 +37,8 @@ export type CreateSessionOptions = {
   readonly runId: string;
   /** 所属 Agent 节点 id。 */
   readonly nodeId: string;
+  /** Runtime 已分配的稳定 Agent 会话身份；提供时后端必须原样使用，使 Control、Journal 与终端身份一致。 */
+  readonly agentSessionId?: string;
   /** 正常 CLI 标识；当前仅支持 Codex。 */
   readonly cli: "codex";
   /** 已验证的项目内工作目录。 */

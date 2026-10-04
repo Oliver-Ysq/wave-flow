@@ -7,6 +7,7 @@ import type { AgentNodeExecutor } from "./run-types";
 import { RunStateMachine } from "./run-state-machine";
 import { WorkflowContractError } from "../workflow/errors";
 import { requireCapabilities } from "../adapters/capabilities";
+import { isDeepStrictEqual } from "node:util";
 
 /** 将 Workflow 作者 API 映射为耐久 Run 状态事实的 Runtime Host。 */
 export class RunRuntimeHost implements WorkflowExecutionHost {
@@ -19,6 +20,9 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly executor: AgentNodeExecutor,
     initialSequence = 0,
   ) { this.#sequence = initialSequence; }
+
+  /** 返回当前 Run 的耐久存储与状态机，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
+  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return { journal: this.journal, state: this.state }; }
 
   /** 创建、启动并执行节点；只有结果与 Journal 均耐久后才返回对象。 */
   async agent(request: NormalizedAgentRequest): Promise<JsonObject | null> {
@@ -46,6 +50,12 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     const node = this.state.agent(nodeId);
     try {
       const result = await this.executor.execute(node);
+      // 真实执行器的 complete 已由 ControlServer 按证据顺序写入 Journal；不能重复写入。
+      const current = this.state.agent(nodeId);
+      if (current.status === "completed") {
+        if (result === null || !isDeepStrictEqual(current.result, result)) throw new Error("真实执行器返回结果与已耐久的 complete 结果不一致。");
+        return result;
+      }
       if (result === null) {
         const diagnostic = "执行器返回 null，无法验证节点已完成。";
         await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));

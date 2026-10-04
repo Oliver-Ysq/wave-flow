@@ -37,20 +37,21 @@ class RecordingBackend implements SessionBackend {
 }
 
 function identityFor(nodeId: string): SessionIdentity { return { backend: "tmux", sessionName: "wf-test", backendRef: "/tmp/wf.sock", runId: "11111111-1111-4111-8111-111111111111", nodeId, agentSessionId: "agent", cli: "codex", createdAt: "2026-01-01T00:00:00.000Z" }; }
-function readyScreen(): string { return "╭─ >_ OpenAI Codex ─╮\n│ model: gpt │\n│ directory: /workspace │\n╰─────────────────────╯\n› Ask Codex to do anything\ngpt · /workspace · Ready"; }
+function readyScreen(): string { return "╭─ >_ OpenAI Codex ─╮\n│ model: gpt │\n│ directory: /workspace/project │\n╰─────────────────────╯\n› Ask Codex to do anything\ngpt · /workspace/project · Ready"; }
+function currentReadyScreen(cwd = "/workspace/project"): string { return `>_ OpenAI Codex (v0.159.2)\n${cwd}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · ${cwd}`; }
 
 describe("CodexInteractiveAdapter", () => {
   test("只构造空启动的正常交互式 codex argv，不将 Prompt 放入位置参数", () => {
     const adapter = new CodexInteractiveAdapter(new RecordingBackend(), { command: "codex-test" });
     expect(adapter.commandFor({ node: node({ sandbox: "workspace-write", request: { ...node().request, model: "gpt-test" } }), prompt: "修复 '引号'\n并检查" })).toEqual([
-      "codex-test", "--sandbox", "workspace-write", "--cd", "/workspace/project", "--no-alt-screen", "--model", "gpt-test",
+      "codex-test", "-c", 'projects={"/workspace/project"={trust_level="trusted"}}', "--no-daemon", "--sandbox", "workspace-write", "--cd", "/workspace/project", "--no-alt-screen", "--model", "gpt-test",
     ]);
   });
 
   test("首条 Prompt 仅在 Ready 后经 bracketed paste 与 Enter 提交，不进入启动 argv", async () => {
     const backend = new RecordingBackend(); const adapter = new CodexInteractiveAdapter(backend);
     const plan = await adapter.launch({ runId: "11111111-1111-4111-8111-111111111111", node: node(), prompt: "检查变更", identityFile: "/workspace/project/.wave-flow/session.json" }, new AbortController().signal);
-    expect(plan.command).toEqual(["codex", "--sandbox", "read-only", "--cd", "/workspace/project", "--no-alt-screen"]);
+    expect(plan.command).toEqual(["codex", "-c", 'projects={"/workspace/project"={trust_level="trusted"}}', "--no-daemon", "--sandbox", "read-only", "--cd", "/workspace/project", "--no-alt-screen"]);
     await expect(adapter.waitUntilReady({ runId: "11111111-1111-4111-8111-111111111111", node: node(), prompt: "检查变更", identityFile: "/workspace/project/.wave-flow/session.json" }, plan, identityFor("review"), new AbortController().signal)).resolves.toMatchObject({ ready: true });
     await expect(adapter.submitInitialPrompt({ runId: "11111111-1111-4111-8111-111111111111", node: node(), prompt: "检查变更", identityFile: "/workspace/project/.wave-flow/session.json" }, plan, identityFor("review"), new AbortController().signal)).resolves.toBeUndefined();
     expect(backend.pasted).toHaveLength(1);
@@ -156,6 +157,21 @@ describe("CodexInteractiveAdapter", () => {
     await Bun.sleep(5);
     backend.screen = readyScreen();
     await expect(pending).resolves.toMatchObject({ ready: true });
+  });
+
+  test("接受 Codex 0.159 当前标题/cwd/页脚布局，但仍要求节点 cwd 精确匹配", async () => {
+    const backend = new RecordingBackend();
+    backend.screen = currentReadyScreen();
+    const adapter = new CodexInteractiveAdapter(backend, { historyPollMs: 1 });
+    const request = { runId: "11111111-1111-4111-8111-111111111111", node: node(), prompt: "检查变更", identityFile: "/workspace/project/session.json" } as const;
+    const plan = await adapter.launch(request, new AbortController().signal);
+    await expect(adapter.waitUntilReady(request, plan, identityFor("review"), new AbortController().signal)).resolves.toMatchObject({ ready: true });
+    backend.screen = currentReadyScreen("/other-project");
+    const controller = new AbortController();
+    const pending = adapter.waitUntilReady(request, plan, identityFor("review"), controller.signal);
+    await Bun.sleep(3);
+    controller.abort();
+    await expect(pending).rejects.toThrow("Gate 已取消");
   });
 
   test("history 未在首个窗口出现时按 Botmux 策略重试 Enter", async () => {

@@ -9,6 +9,7 @@ import { executeWorkflow } from "../workflow/execute-workflow";
 import { RunRuntimeHost } from "./run-runtime-host";
 import { RunStateMachine } from "./run-state-machine";
 import type { AgentNodeExecutor, RunSnapshot } from "./run-types";
+import { ControlServer } from "../control/control-server";
 
 /** 创建一次耐久 Run 所需的公开配置。 */
 export type CreateRunOptions = {
@@ -72,6 +73,15 @@ export class RunRuntime {
 
   /** 返回当前不可变查询投影。 */
   snapshot(): RunSnapshot { return this.state.snapshot(); }
+
+  /** 供 daemon 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
+  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return this.host.controlContext(); }
+
+  /** 为当前 Run 创建唯一 ControlServer；真实执行器须在节点启动前绑定它。 */
+  createControlServer(): ControlServer {
+    const context = this.controlContext();
+    return new ControlServer(context.journal, context.state);
+  }
 
   private async transitionRun(status: "completed" | "interrupted", diagnostic: string | null): Promise<void> {
     const event: JournalEvent = { type: "run.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic, status };

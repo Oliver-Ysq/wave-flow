@@ -47,7 +47,7 @@ describe("CodexAppServerAdapter", () => {
     const result = await subject.submitInitialPrompt(node, "检查实现", new AbortController().signal);
     expect(result).toEqual({ submitted: true, proof: "native-rpc", binding: { endpoint: "ws://127.0.0.1:4500", threadId: "thr-1", turnId: "turn-1" } });
     expect(connection.sent.map(methodOf)).toEqual(["initialize", "initialized", "thread/start", "turn/start"]);
-    expect((connection.sent[2] as CodexAppServerRequest).params).toMatchObject({ cwd: "/workspace", sandbox: "workspaceWrite", serviceName: "wave-flow" });
+    expect((connection.sent[2] as CodexAppServerRequest).params).toMatchObject({ cwd: "/workspace", sandbox: "workspace-write", serviceName: "wave-flow" });
     expect((connection.sent[3] as CodexAppServerRequest).params).toEqual({ threadId: "thr-1", input: [{ type: "text", text: "检查实现" }] });
   });
 
@@ -198,6 +198,19 @@ describe("CodexAppServerHost", () => {
     latch.release?.();
     await expect(starting).rejects.toThrow("已被停止");
     expect(killed).toBeGreaterThan(0);
+  });
+
+  test("成功启动后可观察 App Server 进程退出", async () => {
+    let exit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => { exit = resolve; });
+    const host = new CodexAppServerHost(
+      () => ({ exited, kill() {} }),
+      "codex-test",
+      100,
+    );
+    await host.start(async () => new FakeConnection([]), new AbortController().signal);
+    exit(17);
+    await expect(host.exited).resolves.toBe(17);
   });
 
   test("stop 后立即 start 创建新 generation，旧启动的 finally 不会清空新事务", async () => {

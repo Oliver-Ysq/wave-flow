@@ -1,6 +1,7 @@
 import type { JsonObject } from "../shared/json";
 import type { NormalizedAgentRequest, WorkflowMeta } from "../shared/workflow-types";
 import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
+import type { SessionIdentity } from "../sessions/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
 export const RUNTIME_VERSION = 1;
@@ -55,6 +56,20 @@ export type JournalEvent = JournalBase & ({
 } | {
   readonly type: "agent.status";
   readonly status: AgentNodeStatus;
+} | {
+  /** 已确认首条任务投递的真实会话坐标；必须早于该节点的 complete。 */
+  readonly type: "agent.session";
+  /** 首条任务的实际投递通道。 */
+  readonly delivery: "tmux" | "codex-rpc";
+  /** Session Host 返回的完整稳定会话身份。 */
+  readonly session: SessionIdentity;
+  /** hybrid 投递的官方 thread/turn 坐标；普通 tmux 投递没有此字段。 */
+  readonly appServer?: {
+    readonly endpoint: string;
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly protocolVersion: 1;
+  };
 } | {
   readonly type: "agent.completed";
   readonly resultPath: string;

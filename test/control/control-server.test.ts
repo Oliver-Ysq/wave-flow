@@ -27,6 +27,10 @@ async function fixture(schema?: JsonSchema) {
   const capability = "capability-1";
   const control = new ControlServer(journal, state);
   control.register({ runId: manifest.runId, nodeId: "node", agentSessionId, capability });
+  await control.recordSession({
+    runId: manifest.runId, nodeId: "node", agentSessionId, delivery: "tmux",
+    session: { backend: "tmux", sessionName: "wf-control", backendRef: "/tmp/wf-control.sock", runId: manifest.runId, nodeId: "node", agentSessionId, cli: "codex", createdAt: new Date().toISOString() },
+  });
   return { cwd, journal, state, control, runId: manifest.runId, agentSessionId, capability };
 }
 
@@ -53,6 +57,13 @@ describe("ControlServer complete", () => {
     const request = { runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } };
     await value.control.complete(request);
     await expect(value.control.complete(request)).rejects.toThrow("不匹配");
+  });
+
+  test("首条任务会话坐标未耐久记录时拒绝 complete", async () => {
+    const value = await fixture();
+    const control = new ControlServer(value.journal, value.state);
+    control.register({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
+    await expect(control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } })).rejects.toThrow("会话坐标尚未耐久记录");
   });
 
   test("并发 complete 在任何结果或 Journal 写入前拒绝第二次上报", async () => {

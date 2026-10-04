@@ -13,7 +13,7 @@ describe("Capabilities", () => {
     expect(() => requireCapabilities({ codex: "unavailable" })).toThrow("codex=unavailable");
   });
 
-  test("二进制可用不冒充交互会话、Prompt 或 sandbox 已验证", async () => {
+  test("二进制可用但未实际启动时，交互会话与 Prompt 只报告 unknown", async () => {
     let exists = false;
     let marker = "";
     const runner: CapabilityCommandRunner = { run: async (_command, args, _timeout, stdin) => {
@@ -27,7 +27,7 @@ describe("Capabilities", () => {
     const snapshot = await probeCapabilities(runner);
     expect(snapshot).toMatchObject({
       host: { tmux: { status: "available", persistentSessions: "available" } },
-      adapters: { codex: { status: "available", interactiveSession: "unavailable", verifiedPromptDelivery: "unavailable", sandbox: { readOnly: "unknown", workspaceWrite: "unknown" } } },
+      adapters: { codex: { status: "available", interactiveSession: "unknown", verifiedPromptDelivery: "unknown", sandbox: { readOnly: "unknown", workspaceWrite: "unknown" } } },
     });
   });
 
@@ -36,6 +36,14 @@ describe("Capabilities", () => {
     await expect(probeCapabilities(missing)).resolves.toMatchObject({ host: { tmux: { status: "unavailable", persistentSessions: "unavailable" } }, adapters: { codex: { status: "unavailable" } } });
     const unknown: CapabilityCommandRunner = { run: async () => { throw new Error("timeout"); } };
     await expect(probeCapabilities(unknown)).resolves.toMatchObject({ host: { tmux: { status: "unknown", persistentSessions: "unknown" } }, adapters: { codex: { status: "unknown" } } });
+  });
+
+  test("Codex 存在但 tmux 不可用时，不把交互会话误报为 available", async () => {
+    const runner: CapabilityCommandRunner = { run: async (command) => {
+      if (command === "tmux") return { exitCode: 127, stderr: "not found" };
+      return { exitCode: 0 };
+    } };
+    await expect(probeCapabilities(runner)).resolves.toMatchObject({ adapters: { codex: { status: "available", interactiveSession: "unavailable", verifiedPromptDelivery: "unavailable", persistentTmuxSession: "unavailable" } } });
   });
 
   test("探测超时必须返回 unknown，而不能无限阻塞 capabilities 命令", async () => {

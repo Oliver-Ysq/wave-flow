@@ -79,4 +79,20 @@ describe("TmuxSessionBackend", () => {
     expect(calls.some((args) => args.includes("send-keys") || args.includes("kill-session"))).toBe(false);
     await expect(readFile(identityFile, "utf8")).resolves.toContain("wf-test");
   });
+
+  test("为正常交互 CLI 覆盖父进程的 TERM=dumb，避免 Codex 拒绝 TUI", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-tmux-")); directories.push(cwd);
+    const calls: Array<{ args: readonly string[]; stdin?: string }> = [];
+    const runner: TmuxCommandRunner = { run: async (args, _timeout, stdin) => {
+      calls.push({ args: [...args], stdin });
+      if (args.includes("has-session")) return { exitCode: 1, stdout: "", stderr: "no server running" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    } };
+    const backend = new TmuxSessionBackend(new TmuxCommandClient(join(cwd, "socket"), runner));
+    await backend.create({ runId: "11111111-1111-4111-8111-111111111111", nodeId: "node", agentSessionId: "session", cli: "codex", cwd, command: ["codex"], env: { TERM: "dumb", CUSTOM: "kept" } });
+    const create = calls.find(({ args }) => args.includes("new-session"))?.args ?? [];
+    expect(create).toContain("TERM=screen-256color");
+    expect(create).toContain("CUSTOM=kept");
+    expect(create).not.toContain("TERM=dumb");
+  });
 });

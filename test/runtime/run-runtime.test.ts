@@ -8,6 +8,8 @@ import type { JsonObject } from "../../src/shared/json";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
 import { agent, phase } from "../../src/workflow/author-api";
 import type { CapabilitySnapshot } from "../../src/adapters/capabilities";
+import { ControlServer } from "../../src/control/control-server";
+import type { SessionIdentity } from "../../src/sessions/types";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -37,6 +39,25 @@ describe("RunRuntime", () => {
     const instance = await runtime({ execute: async () => null });
     await expect(instance.run(workflow)).rejects.toThrow("无法验证节点已完成");
     expect(instance.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
+  });
+
+  test("真实执行器经 Control 完成后不会重复追加 completed 事件", async () => {
+    let control: ControlServer | undefined;
+    const instance = await runtime({
+      execute: async (node) => {
+        const server = control!;
+        const capability = "runtime-capability";
+        server.register({ runId: server.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability });
+        const session: SessionIdentity = { backend: "tmux", sessionName: "wf-runtime", backendRef: "/tmp/wf-runtime.sock", runId: server.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, cli: "codex", createdAt: new Date().toISOString() };
+        await server.recordSession({ runId: server.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, delivery: "tmux", session });
+        await server.complete({ runId: server.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability, summary: "done", result: { ok: true } });
+        return { ok: true };
+      },
+    });
+    control = instance.createControlServer();
+    await expect(instance.run(workflow)).resolves.toEqual({ ok: true });
+    const reopened = await RunRuntime.open(instance.journal.manifest.runId, instance.journal.manifest.cwd, { execute: async () => ({ unused: true }) });
+    expect(reopened.snapshot().phases[0]?.agents[0]).toMatchObject({ status: "completed", result: { ok: true } });
   });
 
   test("executor 抛错时标记 interrupted", async () => {
