@@ -1,10 +1,10 @@
 # Wave Flow
 
-Wave Flow 是一个面向本机单用户的动态工作流产品：用户将以 TypeScript 编排任务，每个 Agent 节点最终会托管一个真实、长期存活、可交互的 Codex 或 Claude Code CLI 会话。本地 CLI 与 Web 控制台会共同管理 daemon。
+Wave Flow 是一个面向本机单用户的动态工作流产品：用户将以 TypeScript 编排任务，每个 Agent 节点最终会托管一个真实、长期存活、可交互的 Codex CLI 会话。本地 CLI 与 Web 控制台会共同管理 daemon。TraeX 是短期后续接入目标，当前尚不可用。
 
 ## 当前状态
 
-项目已完成旧一次性 `codex exec` Runtime 的移除，并按职责建立源码边界。当前可使用 `run` 与 `inspect` 验证 Workflow、Run 状态机与 Journal；该路径使用确定性开发验证执行器，**不会**启动 tmux、Codex、Claude 或其他真实 Agent。正常交互式 CLI、Local Web、HITL、Replay 与 Adapter 仍未实现。
+项目已完成旧一次性 `codex exec` Runtime 的移除，并按职责建立源码边界。当前可使用 `run` 与 `inspect` 验证 Workflow、Run 状态机与 Journal；该路径使用确定性开发验证执行器，**不会**启动 tmux、Codex、TraeX 或其他真实 Agent。正常交互式 CLI、Local Web、HITL、Replay 与 Adapter 仍未实现。
 
 这意味着历史的 `ctx.agent()`、`codex exec --json`、旧示例和旧 Journaled Replay 都不再可用，也不代表本项目的当前能力。
 

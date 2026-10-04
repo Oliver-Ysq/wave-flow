@@ -1,6 +1,8 @@
 import type { SessionBackend, SessionIdentity } from "../sessions/types";
 import type { AgentSandbox } from "../shared/workflow-types";
 import type { InteractiveCliAdapter, InteractiveCliLaunchPlan, InteractiveCliStartRequest, PromptReadyEvidence, PromptSubmissionEvidence } from "./interactive-cli-adapter";
+import type { AdapterCapabilities } from "./capabilities";
+import type { RegisteredInteractiveAdapter } from "./adapter-registry";
 import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -109,6 +111,14 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
       : unconfirmed("未找到本次提交后可归属的 Codex 原生记录。");
   }
 
+}
+
+/** 将已实现的正常交互 Codex Adapter 注册为唯一可用的 tmux TUI CLI Base。 */
+export function codexTmuxTuiRegistration(
+  adapter: CodexInteractiveAdapter,
+  probeCapabilities: () => Promise<AdapterCapabilities>,
+): RegisteredInteractiveAdapter {
+  return { cli: "codex", cliBase: "tmux-tui", adapter, probeCapabilities };
 }
 
 function requireCodexContext(plan: InteractiveCliLaunchPlan): CodexSubmissionContext {

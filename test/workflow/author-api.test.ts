@@ -56,10 +56,11 @@ describe("Workflow 作者 API", () => {
   test("拒绝非法 Agent 选项、重复 id 与未声明阶段", async () => {
     const host = new MemoryHost();
     await expect(executeWorkflow(workflow(async () => agent("", { id: "bad", cli: "codex" })), undefined, host)).rejects.toThrow("非空字符串");
+    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unsupported", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex");
     await expect(executeWorkflow(workflow(async () => phase("missing")), undefined, host)).rejects.toThrow("已声明的阶段");
     await expect(executeWorkflow(workflow(async () => {
-      await agent("one", { id: "same", cli: "claude" });
-      return agent("two", { id: "same", cli: "claude" });
+      await agent("one", { id: "same", cli: "codex" });
+      return agent("two", { id: "same", cli: "codex" });
     }), undefined, host)).rejects.toThrow("必须唯一");
     await expect(executeWorkflow(workflow(async () => agent("schema", {
       id: "invalid-schema", cli: "codex", schema: { invalid: undefined } as unknown as Record<string, never>,
@@ -71,7 +72,7 @@ describe("Workflow 作者 API", () => {
     const right = new MemoryHost();
     await Promise.all([
       executeWorkflow(workflow(async () => { phase("scan"); return agent("left", { id: "left", cli: "codex" }); }), undefined, left),
-      executeWorkflow(workflow(async () => { phase("summarize"); return agent("right", { id: "right", cli: "claude" }); }), undefined, right),
+      executeWorkflow(workflow(async () => { phase("summarize"); return agent("right", { id: "right", cli: "codex" }); }), undefined, right),
     ]);
     expect(left.agents[0].phase).toBe("scan");
     expect(right.agents[0].phase).toBe("summarize");
@@ -121,7 +122,7 @@ describe("Workflow 作者 API", () => {
     const host = new MemoryHost();
     await expect(executeWorkflow(workflow(() => parallel([
       () => agent("one", { id: "same", cli: "codex" }),
-      () => agent("two", { id: "same", cli: "claude" }),
+      () => agent("two", { id: "same", cli: "codex" }),
     ])), undefined, host)).rejects.toThrow("必须唯一");
     expect(host.agents).toHaveLength(1);
   });

@@ -3,7 +3,7 @@
 ## 设计基准与文档
 
 - `docs/wave-flow-design.md` 是项目唯一设计规格。开始新增能力、调整公开接口、改变运行语义或安全边界前，必须先阅读相关章节；已确认的改变必须同步更新该文档。
-- Workflow 作者可见的语义必须优先参考 Claude Code Dynamic Workflows 官方文档，以及 Deer Workflow 的公开源码、测试与文档。涉及 `meta`、`agent()`、`phase()`、`parallel()`、`pipeline()`、恢复、暂停或并发时，先核对一手依据；不得凭印象发明接口。
+- Workflow 作者可见的语义必须优先参考 Deer Workflow 的公开源码、测试与文档。涉及 `meta`、`agent()`、`phase()`、`parallel()`、`pipeline()`、恢复、暂停或并发时，先核对一手依据；不得凭印象发明接口。
 - 只有在两者未覆盖，或“正常交互式 CLI 会话”明确要求扩展时，才能设计 Wave Flow 新能力。必须在规格与最终说明中标为“Wave Flow 新增设计”，说明必要性、替代方案和边界。
 - `docs/project-notes.md` 是项目笔记和答辩材料的唯一位置。只记录可复用技术亮点、关键架构/安全取舍、重大失败教训、可验证证据及答辩问题；不要记录工程流水、逐条命令、临时目录、补丁步骤、普通测试通过记录或文件级细节。
 - `docs/highlight.md` 是用户维护的候选亮点清单；未经用户对具体内容明确同意，不得新增、修改或删除其中任何条目。
@@ -17,15 +17,15 @@
 
 - 一期是本机单用户的 CLI + Local Web 产品。daemon 只监听 `127.0.0.1`；不添加登录、多人协作、云端同步、远程控制或可视化 Workflow 编辑。
 - Workflow 是用户明确指定的本地 TypeScript 文件，是受信任扩展模块；仅允许本地加载，禁止 URL、自动下载和未知来源 Workflow。
-- 作者 API 优先使用 `agent()`、`phase()`、`parallel()`、`pipeline()`、`log()`。不要新增或延续 `ctx.agent()`、每个 Agent 的 `phase` 字段等偏离 Claude/Deer 基线的接口。
+- 作者 API 优先使用 `agent()`、`phase()`、`parallel()`、`pipeline()`、`log()`。不要新增或延续 `ctx.agent()`、每个 Agent 的 `phase` 字段等偏离 Deer 基线的接口。
 - `meta` 是顶部纯字面量，包含 kebab-case `name`、非空单行 `description`、有序唯一的 `{ title }` `phases`，以及可选 JSON-safe `exampleArgs`。一期 `meta` 必填，`phase(title)` 必须精确匹配已声明标题。
-- 每个 `agent()` 必须提供 Run 内唯一的稳定 `id` 与 `cli: "codex" | "claude"`。一个 Agent 节点绑定一个真实 tmux/PTY 会话和一个正常交互式 CLI 进程；下游不得隐式复用其聊天历史。
+- 每个 `agent()` 必须提供 Run 内唯一的稳定 `id` 与当前已实现的 `cli: "codex"`。TraeX 仅在其 Adapter、测试与能力探测完整后加入。一个 Agent 节点绑定一个真实 tmux/PTY 会话和一个正常交互式 CLI 进程；下游不得隐式复用其聊天历史。
 - Runtime 负责动态调度和节点状态；Session Host 负责 tmux/PTY 生命周期与终端字节转发；Adapter 只负责启动特定正常 CLI；Control Server 负责验证 `complete/block/fail`；Web 只展示和控制 Run。不要让任一层跨越该职责边界。
 - 默认 UI 是 Phase → Agent 层级；不要把复杂自由 DAG 当作主界面。真实依赖来自 Workflow 的实际调用与显式输入，未来可作为次级视图。
 
 ## Agent 会话、状态与安全
 
-- 不再新增以 `codex exec --json` 为核心的一次性节点实现。真实节点必须通过正常交互式 Codex 或 Claude Code CLI，在 tmux（生产默认）或 PTY（开发/故障降级）中运行。
+- 不再新增以 `codex exec --json` 为核心的一次性节点实现。真实节点必须通过正常交互式 Codex CLI，在 tmux（生产默认）或 PTY（开发/故障降级）中运行；TraeX 作为短期后续 Adapter 单独验证。
 - 不从终端 ANSI、自然语言“完成”或空闲提示推断节点状态。只有受管会话中的 `wave-flow complete`、`wave-flow block`、`wave-flow fail` 能改变业务状态。
 - `complete` 只在 JSON 结果、Schema 校验记录和 Journal 均耐久落盘后生效；`block` 只使节点进入等待输入，答案必须回到原 `block` 命令 stdout；`fail` 是 Agent 明确业务失败。用户停止必须是 `cancelled`，未知进程/会话异常必须是 `interrupted`，不得混为 `failed`。
 - Agent 上报必须绑定 `runId + nodeId + agentSessionId` 的会话 capability。能力的用途是隔离本机无关进程和其他节点，不能将其误表述为防御已控制该 Agent 终端的主体。
@@ -46,7 +46,7 @@
 
 - 使用 Bun。优先运行 `bun run check`、`bun test` 和 `git diff --check`；行为改动应覆盖正常路径、输入错误、边界条件和不应发生的副作用。
 - 新的真实 CLI Adapter、tmux/PTY Session Host、Control Server、Journal/Replay 和 Web API 必须可独立测试。测试不应依赖真实模型服务、用户登录或不稳定终端文本。
-- 不要用未来能力的空接口占位。工作按已确认范围渐进：先建立可验证的最小端到端闭环，再增加 worktree、复杂表单、Claude Hook 优化或桌面端。
+- 不要用未来能力的空接口占位。工作按已确认范围渐进：先建立可验证的最小端到端闭环，再增加 worktree、复杂表单、TraeX Adapter 优化或桌面端。
 - 当前旧 Runtime、Fake Adapter、旧 `codex exec` 代码属于历史实现；在新架构迁移前不得把它们表述为新规格已实现的能力。
 
 ## 刁钻考官复盘

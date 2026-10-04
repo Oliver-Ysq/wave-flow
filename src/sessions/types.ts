@@ -23,8 +23,8 @@ export type SessionIdentity = {
   readonly nodeId: string;
   /** 此次真实终端会话的随机身份，不等同于节点 id。 */
   readonly agentSessionId: string;
-  /** 要在会话中运行的正常 CLI 标识。 */
-  readonly cli: "codex" | "claude";
+  /** 要在会话中运行的正常 CLI 标识；当前仅支持 Codex。 */
+  readonly cli: "codex";
   /** 创建时间，用于 Journal、诊断和恢复证据。 */
   readonly createdAt: string;
   /** 可选的耐久 identity 文件坐标；仅 confirmed destroy 后可清理，unknown 时必须保留。 */
@@ -37,8 +37,8 @@ export type CreateSessionOptions = {
   readonly runId: string;
   /** 所属 Agent 节点 id。 */
   readonly nodeId: string;
-  /** 正常 CLI 标识；本节不实际启动 Codex。 */
-  readonly cli: "codex" | "claude";
+  /** 正常 CLI 标识；当前仅支持 Codex。 */
+  readonly cli: "codex";
   /** 已验证的项目内工作目录。 */
   readonly cwd: string;
   /** 待运行命令的 argv；后端必须安全转义，不能直接拼接 shell 文本。 */

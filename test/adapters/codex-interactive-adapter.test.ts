@@ -60,7 +60,7 @@ describe("CodexInteractiveAdapter", () => {
 
   test("拒绝非 Codex 节点和空 Prompt", () => {
     const adapter = new CodexInteractiveAdapter(new RecordingBackend());
-    expect(() => adapter.commandFor({ node: node({ cli: "claude" }), prompt: "任务" })).toThrow("cli: codex");
+    expect(() => adapter.commandFor({ node: node({ cli: "traex" as never }), prompt: "任务" })).toThrow("cli: codex");
     expect(() => adapter.commandFor({ node: node(), prompt: " " })).toThrow("非空");
   });
 

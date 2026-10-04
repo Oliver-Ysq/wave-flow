@@ -7,7 +7,7 @@
 | `workflow/` | Workflow 加载、静态 `meta` 与作者 API | 启动具体 CLI |
 | `runtime/` | Run、Phase、Agent 状态与调度 | 解析 CLI 终端文本 |
 | `sessions/` | AgentSession 与 tmux / PTY 生命周期 | 决定 Workflow 拓扑 |
-| `adapters/` | Codex / Claude 正常 CLI 与能力声明 | 持久化 Run 状态 |
+| `adapters/` | Codex 及后续 TraeX 正常 CLI 与能力声明 | 持久化 Run 状态 |
 | `control/` | `complete` / `block` / `fail` 与 capability | 解释自然语言终端输出 |
 | `journal/` | Manifest、事件、结果与 Replay 证据 | 回滚外部副作用 |
 | `daemon/` | 仅限 localhost 的 API 与服务生命周期 | 复制 Workflow 规则 |

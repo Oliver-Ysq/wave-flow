@@ -152,7 +152,7 @@ function isWorkflowMeta(value: unknown): boolean {
 }
 
 function isNormalizedRequest(value: unknown): boolean {
-  if (!isPlainObject(value) || typeof value.id !== "string" || (value.cli !== "codex" && value.cli !== "claude") || (value.sandbox !== "read-only" && value.sandbox !== "workspace-write") || typeof value.cwd !== "string" || typeof value.prompt !== "string") return false;
+  if (!isPlainObject(value) || typeof value.id !== "string" || value.cli !== "codex" || (value.sandbox !== "read-only" && value.sandbox !== "workspace-write") || typeof value.cwd !== "string" || typeof value.prompt !== "string") return false;
   return (value.phase === undefined || typeof value.phase === "string") && (value.input === undefined || isJsonObject(value.input));
 }
 

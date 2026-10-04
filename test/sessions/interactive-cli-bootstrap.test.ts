@@ -23,7 +23,7 @@ class RecordingBackend implements SessionBackend {
 
 class FakeAdapter implements InteractiveCliAdapter {
   readonly id = "fake";
-  constructor(readonly cli: "codex" | "claude" = "codex") {}
+  constructor(readonly cli: "codex" = "codex") {}
   readonly calls: string[] = [];
   ready: PromptReadyEvidence = { ready: true, diagnostic: "fake ready" };
   submission: PromptSubmissionEvidence = { submitted: true, proof: "native-hook", cliSessionId: "cli-session", diagnostic: "fake confirmed" };
@@ -59,7 +59,7 @@ describe("InteractiveCliBootstrap", () => {
   });
 
   test("拒绝将一个 CLI 的 Adapter 用于另一个 CLI 节点，且不创建会话", async () => {
-    const backend = new RecordingBackend(); const adapter = new FakeAdapter("claude");
+    const backend = new RecordingBackend(); const adapter = new FakeAdapter("traex" as never);
     await expect(new InteractiveCliBootstrap(backend).start(adapter, request())).rejects.toThrow("不能启动 cli: codex 节点");
     expect(adapter.calls).toEqual([]);
     expect(backend.calls).toEqual([]);

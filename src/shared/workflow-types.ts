@@ -1,7 +1,7 @@
 import type { JsonObject, JsonValue } from "./json";
 
-/** Workflow 可使用的正常交互式 CLI；运行时只允许这两个 Adapter。 */
-export type AgentCli = "codex" | "claude";
+/** Workflow 当前可使用的正常交互式 CLI；TraeX 在其 Adapter、测试与能力探测完成后再加入。 */
+export type AgentCli = "codex";
 
 /** Agent CLI 的可写范围；默认 read-only，影响后续 Adapter 的 sandbox 启动参数。 */
 export type AgentSandbox = "read-only" | "workspace-write";
@@ -31,7 +31,7 @@ export type WorkflowMeta = {
 export type AgentOptions = {
   /** Run 内唯一且稳定的节点身份；最长 120 字符，参与后续会话和 replay 绑定。 */
   readonly id: string;
-  /** 要启动的正常交互式 CLI Adapter；仅允许 codex 或 claude。 */
+  /** 要启动的正常交互式 CLI Adapter；当前仅允许已实现并可验证的 codex。 */
   readonly cli: AgentCli;
   /** 可选展示名称；省略时运行时使用 id，不影响节点稳定身份。 */
   readonly label?: string;

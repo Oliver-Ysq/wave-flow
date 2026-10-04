@@ -48,7 +48,7 @@ export type PromptSubmissionEvidence = {
  * 正常交互式 CLI 的专属边界。
  *
  * Bootstrap 只安排这四步，绝不持有任一 CLI 的屏幕模式、历史文件或 Hook 协议。未来
- * Claude Code、TraeX 必须各自实现本接口并提供独立的可验证 evidence，不能复用 Codex
+ * TraeX 必须在短期后续规划中实现本接口并提供独立的可验证 evidence，不能复用 Codex
  * 的内部文件或把终端文本当作通用正确性信号。
  */
 export interface InteractiveCliAdapter {
