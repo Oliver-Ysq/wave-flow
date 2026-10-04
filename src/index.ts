@@ -12,7 +12,9 @@ export type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdenti
 export { CodexInteractiveAdapter, codexTmuxTuiRegistration } from "./adapters/codex-interactive-adapter";
 export type { CodexInteractiveAdapterOptions, CodexInteractiveStartRequest } from "./adapters/codex-interactive-adapter";
 export { AdapterRegistry } from "./adapters/adapter-registry";
-export type { CodexCliBase, RegisteredInteractiveAdapter } from "./adapters/adapter-registry";
+export type { CodexControlTransport, RegisteredInteractiveAdapter } from "./adapters/adapter-registry";
+export { CodexAppServerAdapter, CodexAppServerHost, CodexAppServerRegistry, CodexAppServerAmbiguousSubmissionError, assertLoopbackWebSocketEndpoint, bunCodexAppServerConnection, createCodexRemoteViewer } from "./adapters/codex-app-server";
+export type { CodexAppServerBinding, CodexAppServerConnection, CodexAppServerConnectionFactory, CodexAppServerMessage, CodexAppServerProcess, CodexAppServerProcessSpawner, CodexAppServerRequest, CodexAppServerSubmission, RegisteredCodexAppServerAdapter } from "./adapters/codex-app-server";
 export type { InteractiveCliAdapter, InteractiveCliLaunchPlan, InteractiveCliStartRequest, PromptReadyEvidence, PromptSubmissionEvidence } from "./adapters/interactive-cli-adapter";
 export { InteractiveCliBootstrap, InteractiveCliBootstrapError } from "./sessions/bootstrap/interactive-cli-bootstrap";
 export type { BootstrappedInteractiveSession } from "./sessions/bootstrap/interactive-cli-bootstrap";

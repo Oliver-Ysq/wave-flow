@@ -113,12 +113,12 @@ export class CodexInteractiveAdapter implements InteractiveCliAdapter {
 
 }
 
-/** 将已实现的正常交互 Codex Adapter 注册为唯一可用的 tmux TUI CLI Base。 */
+/** 将已实现的正常交互 Codex Adapter 注册为唯一可用的 tmux TUI 控制传输。 */
 export function codexTmuxTuiRegistration(
   adapter: CodexInteractiveAdapter,
   probeCapabilities: () => Promise<AdapterCapabilities>,
 ): RegisteredInteractiveAdapter {
-  return { cli: "codex", cliBase: "tmux-tui", adapter, probeCapabilities };
+  return { cli: "codex", controlTransport: "tmux-tui", adapter, probeCapabilities };
 }
 
 function requireCodexContext(plan: InteractiveCliLaunchPlan): CodexSubmissionContext {
