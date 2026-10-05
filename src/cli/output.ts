@@ -15,10 +15,13 @@ export function formatSnapshot(snapshot: RunSnapshot): string {
 export const helpText = `wave-flow 本机工作流 CLI
 
 用法:
+  wave-flow start
   wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--tmux-tui-input]
-  wave-flow inspect <run-id> [--cwd <path>]
+  wave-flow serve
+  wave-flow inspect <run-id>
   wave-flow capabilities [--json]
 
+start 确保当前用户的全局 daemon 已启动并健康后立即退出，不创建 Run。
 run 默认使用 App Server 的 turn/start ACK 投递首条任务，并保留 tmux 中的 Codex viewer 供人工查看和交互。
 --tmux-tui-input 显式使用普通 tmux TUI 的 paste/history 投递兼容路径。
 --codex-rpc-input 仍接受，但已是默认行为。`;

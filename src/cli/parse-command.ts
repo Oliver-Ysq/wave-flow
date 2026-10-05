@@ -4,11 +4,14 @@ import { isJsonObject, type JsonObject } from "../shared/json";
 /** CLI 解析后的 run 命令；cwd 和 workflow 路径尚由 daemon 做最终 realpath 校验。 */
 export type RunCommand = { readonly kind: "run"; readonly workflowPath: string; readonly cwd: string; readonly input: JsonObject; /** true 时经 App Server ACK 投递首条任务；默认 true。 */ readonly codexRpcInput: boolean };
 /** CLI 解析后的 inspect 命令。 */
-export type InspectCommand = { readonly kind: "inspect"; readonly runId: string; readonly cwd: string };
+export type InspectCommand = { readonly kind: "inspect"; readonly runId: string };
 /** CLI 解析后的 capabilities 命令；json 为 true 时输出机器可读快照。 */
 export type CapabilitiesCommand = { readonly kind: "capabilities"; readonly json: boolean };
+/** 显式确保当前用户的全局 daemon 已健康启动；成功后立即退出。 */
+export type StartCommand = { readonly kind: "start" };
+export type ServeCommand = { readonly kind: "serve" };
 export type CompleteCommand = { readonly kind: "complete"; readonly argv: readonly string[] };
-export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | CompleteCommand | { readonly kind: "help" };
+export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
@@ -20,6 +23,8 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
     throw new Error("capabilities 仅支持 --json 选项。");
   }
   if (command === "complete") return { kind: "complete", argv: rest };
+  if (command === "start") { if (rest.length > 0) throw new Error("start 不接受参数。"); return { kind: "start" }; }
+  if (command === "serve") { if (rest.length > 0) throw new Error("serve 不接受参数。"); return { kind: "serve" }; }
   if (command === "run") {
     const workflowPath = rest[0];
     if (!workflowPath || workflowPath.startsWith("-")) throw new Error("run 命令需要 Workflow 路径。");
@@ -29,8 +34,8 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
   if (command === "inspect") {
     const runId = rest[0];
     if (!runId || runId.startsWith("-")) throw new Error("inspect 命令需要 run-id。");
-    const options = parseOptions(rest.slice(1), initialCwd);
-    return { kind: "inspect", runId, cwd: options.cwd };
+    if (rest.slice(1).length > 0) throw new Error("inspect 不接受 --cwd；RunId 可直接定位用户级执行档案。");
+    return { kind: "inspect", runId };
   }
   throw new Error(`未知命令：${command}`);
 }

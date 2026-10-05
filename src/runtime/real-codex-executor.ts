@@ -63,6 +63,9 @@ export class RealCodexExecutor implements AgentNodeExecutor {
       resolveCompletion = (result) => { if (!settled) { settled = true; resolve(result); } };
       rejectCompletion = (error) => { if (!settled) { settled = true; reject(error); } };
     });
+    // App Server 退出可能在调用方拿到 execute() 返回 Promise 前发生；先登记一个
+    // 旁路 rejection handler，避免 Bun 将正确传播给调用方的中断误报为未处理拒绝。
+    void completionWithFailure.catch(() => undefined);
     control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, onCompleted: resolveCompletion });
     let stopHybrid: (() => void) | null = null;
     const cleanupHybrid = () => { if (stopHybrid !== null) stopHybrid(); };

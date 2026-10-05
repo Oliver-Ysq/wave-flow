@@ -19,8 +19,14 @@ export type CreateRunOptions = {
   readonly input: JsonObject;
   /** Workflow 主文件内容；用于生成本次 Manifest 的 hash。 */
   readonly workflowSource: string;
-  /** 项目 cwd；默认当前进程目录。 */
-  readonly cwd?: string;
+  /** CLI 创建请求的稳定 UUID；重试时必须保持不变。 */
+  readonly clientRequestId: string;
+  /** Workflow 所属项目目录；用于相对节点 cwd 解析。 */
+  readonly workflowProjectCwd: string;
+  /** realpath 后的 Workflow 文件。 */
+  readonly workflowPath: string;
+  /** 用户级 Run Store 根目录；仅供 daemon / 测试注入。 */
+  readonly storeRoot?: string;
   /** 本章可控 Agent 执行器；不启动真实 CLI。 */
   readonly executor: AgentNodeExecutor;
 };
@@ -35,20 +41,21 @@ export class RunRuntime {
 
   /** 创建 Manifest、Journal、状态机与 Host，尚不执行 Workflow。 */
   static async create(options: CreateRunOptions): Promise<RunRuntime> {
-    const cwd = await realpath(options.cwd ?? process.cwd());
+    const workflowProjectCwd = await realpath(options.workflowProjectCwd);
+    const workflowPath = await realpath(options.workflowPath);
     const manifest: RunManifest = {
-      runId: crypto.randomUUID(), runtimeVersion: RUNTIME_VERSION, workflow: options.workflow.meta,
-      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), cwd, input: options.input, createdAt: new Date().toISOString(),
+      runId: crypto.randomUUID(), clientRequestId: options.clientRequestId, runtimeVersion: RUNTIME_VERSION, workflow: options.workflow.meta,
+      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), workflowPath, workflowProjectCwd, input: options.input, createdAt: new Date().toISOString(),
     };
-    const journal = await RunJournal.create(manifest, runsRoot(cwd));
+    const journal = await RunJournal.create(manifest, options.storeRoot ?? runsRoot());
     const state = new RunStateMachine(manifest);
     state.apply({ type: "run.created", at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, runStatus: "running" });
     return new RunRuntime(journal, state, new RunRuntimeHost(journal, state, options.executor));
   }
 
   /** 打开已有 Run 并从已验证 Journal 事实重建 Phase → Agent 查询视图。 */
-  static async open(runId: string, cwd: string, executor: AgentNodeExecutor): Promise<RunRuntime> {
-    const opened = await RunJournal.open(runId, runsRoot(await realpath(cwd)));
+  static async open(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot()): Promise<RunRuntime> {
+    const opened = await RunJournal.open(runId, storeRoot);
     const state = new RunStateMachine(opened.journal.manifest);
     for (const event of opened.events) state.apply(event);
     const sequence = state.snapshot().phases.flatMap((phase) => phase.agents).length;
@@ -58,7 +65,7 @@ export class RunRuntime {
   /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。 */
   async run(workflow: WorkflowModule<JsonObject, unknown>): Promise<unknown> {
     try {
-      const result = await executeWorkflow(workflow, this.journal.manifest.input, this.host, { cwd: this.journal.manifest.cwd });
+      const result = await executeWorkflow(workflow, this.journal.manifest.input, this.host, { cwd: this.journal.manifest.workflowProjectCwd });
       await this.host.flush();
       const nodes = this.state.snapshot().phases.flatMap((phase) => phase.agents);
       if (nodes.some((agent) => agent.status !== "completed")) throw new Error("Workflow 返回时仍有未完成 Agent 节点。");
@@ -73,6 +80,20 @@ export class RunRuntime {
 
   /** 返回当前不可变查询投影。 */
   snapshot(): RunSnapshot { return this.state.snapshot(); }
+
+  /**
+   * 等待首个真实节点会话已耐久记录、因全局资源护栏实际等待，或 Run 已终结。
+   *
+   * daemon 只能在这之后把 running Run 交还给 CLI，避免“任务尚未安全投递”就让用户
+   * 误以为可关闭启动过程。多个后续节点仍在后台按 Workflow 正常调度。
+   */
+  async waitForSafeLaunch(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.state.snapshot().status === "running" && !this.state.hasRecordedSession() && !this.host.hasWaitingStart()) {
+      if (Date.now() >= deadline) throw new Error("Run 未在时限内完成首个节点会话投递。");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
 
   /** 供 daemon 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return this.host.controlContext(); }

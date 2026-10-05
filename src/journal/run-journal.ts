@@ -1,8 +1,8 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { appendFile, chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isJsonObject, type JsonObject } from "../shared/json";
-import { nodeDirectoryName, runDirectory, validateRunId } from "./paths";
+import { nodeDirectoryName, runDirectory, runsRoot, validateRunId, waveFlowHome } from "./paths";
 import type { JournalEvent, RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
 import type { SessionIdentity } from "../sessions/types";
@@ -23,9 +23,11 @@ export class RunJournal {
   static async create(manifest: RunManifest, root: string): Promise<RunJournal> {
     validateManifest(manifest);
     const directory = runDirectory(root, manifest.runId);
-    await mkdir(directory, { recursive: true });
+    await ensureProductionStateHome(root);
+    await ensurePrivateDirectory(root);
+    await ensurePrivateDirectory(directory);
     await atomicWrite(join(directory, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    await writeFile(join(directory, "journal.jsonl"), "", "utf8");
+    await writePrivateFile(join(directory, "journal.jsonl"), "");
     const journal = new RunJournal(manifest, directory);
     await journal.append({ type: "run.created", at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, runStatus: "running" });
     return journal;
@@ -34,6 +36,11 @@ export class RunJournal {
   /** 打开已存在 Run，返回 Manifest 与全部有效 Journal 事实；中间损坏必须拒绝。 */
   static async open(runId: string, root: string): Promise<{ journal: RunJournal; events: readonly JournalEvent[] }> {
     validateRunId(runId);
+    try { await assertProductionStateHome(root); await assertPrivateDirectory(root); } catch (error) {
+      const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+      if (code === "ENOENT") throw new Error("指定 Run 不存在或 manifest 不可读取。");
+      throw error;
+    }
     const directory = runDirectory(root, runId);
     let manifestSource: string;
     try { manifestSource = await readFile(join(directory, "manifest.json"), "utf8"); } catch { throw new Error("指定 Run 不存在或 manifest 不可读取。"); }
@@ -100,11 +107,43 @@ export class RunJournal {
   }
 }
 
+/** 生产 Run Store 不能经 ~/.wave-flow 的软链接或宽权限目录绕过检查。 */
+async function ensureProductionStateHome(root: string): Promise<void> {
+  if (resolve(root) !== resolve(runsRoot())) return;
+  await ensurePrivateDirectory(waveFlowHome());
+}
+
+async function assertProductionStateHome(root: string): Promise<void> {
+  if (resolve(root) !== resolve(runsRoot())) return;
+  await assertPrivateDirectory(waveFlowHome());
+}
+
 async function atomicWrite(filePath: string, content: string): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
+  await ensurePrivateDirectory(dirname(filePath));
   const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporaryPath, content, "utf8");
+  await writePrivateFile(temporaryPath, content);
   await rename(temporaryPath, filePath);
+  await chmod(filePath, 0o600);
+}
+
+async function writePrivateFile(path: string, content: string): Promise<void> {
+  await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  const created = await mkdir(path, { recursive: true, mode: 0o700 });
+  await assertPrivateDirectory(path);
+  // 已有目录的安全性已由 assertPrivateDirectory 验证；不因 ACL 拒绝冗余 chmod
+  // 而让读取已有 Run 或写入新事件失败。
+  if (created !== undefined) await chmod(path, 0o700);
+}
+
+async function assertPrivateDirectory(path: string): Promise<void> {
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Wave Flow 状态目录必须是真实目录。");
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("Wave Flow 状态目录不属于当前用户。");
+  if ((info.mode & 0o077) !== 0) throw new Error("Wave Flow 状态目录权限过宽。");
 }
 
 /** 运行时验证 Manifest，避免可修改的 JSON 文件绕过类型约束。 */
@@ -113,9 +152,11 @@ export function validateManifest(value: unknown): RunManifest {
   const manifest = value as Record<string, unknown>;
   if (typeof manifest.runId !== "string") throw new Error("Manifest 缺少 runId。");
   validateRunId(manifest.runId);
-  if (manifest.runtimeVersion !== 1) throw new Error("Manifest Runtime 版本不兼容。");
+  if (manifest.runtimeVersion !== 3) throw new Error("Manifest Runtime 版本不兼容。");
+  if (typeof manifest.clientRequestId !== "string" || !/^[0-9a-f-]{36}$/i.test(manifest.clientRequestId)) throw new Error("Manifest clientRequestId 无效。");
   if (typeof manifest.workflowHash !== "string" || !/^[0-9a-f]{64}$/i.test(manifest.workflowHash)) throw new Error("Manifest workflowHash 无效。");
-  if (typeof manifest.cwd !== "string" || !manifest.cwd.startsWith("/")) throw new Error("Manifest cwd 必须为绝对路径。");
+  if (typeof manifest.workflowPath !== "string" || !manifest.workflowPath.startsWith("/")) throw new Error("Manifest workflowPath 必须为绝对路径。");
+  if (typeof manifest.workflowProjectCwd !== "string" || !manifest.workflowProjectCwd.startsWith("/")) throw new Error("Manifest workflowProjectCwd 必须为绝对路径。");
   if (!isJsonObject(manifest.input)) throw new Error("Manifest input 必须为 JSON-safe 对象。");
   if (typeof manifest.createdAt !== "string" || Number.isNaN(Date.parse(manifest.createdAt))) throw new Error("Manifest createdAt 无效。");
   if (!isWorkflowMeta(manifest.workflow)) throw new Error("Manifest workflow 无效。");

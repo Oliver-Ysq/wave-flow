@@ -49,7 +49,12 @@ describe("TmuxSessionBackend", () => {
     await backend.sendText(identity, "hello tmux\n");
     await Bun.sleep(100);
     await expect(backend.readRecent(identity)).resolves.toContain("ECHO:hello tmux");
-    const defaultSessions = await Bun.$`tmux list-sessions`.text();
+    // 干净机器通常根本没有默认 tmux server，list-sessions 会以 1 退出；这同样
+    // 证明私有 socket 没有污染默认 server，不能把它当作测试失败。
+    const defaultServer = await Bun.spawn(["tmux", "list-sessions"], { stdout: "pipe", stderr: "pipe" });
+    const defaultSessions = await new Response(defaultServer.stdout).text();
+    const defaultExitCode = await defaultServer.exited;
+    expect([0, 1]).toContain(defaultExitCode);
     expect(defaultSessions).not.toContain(identity.sessionName);
     const result = await backend.destroy(identity);
     expect(result).toEqual({ status: "destroyed", diagnostic: null });

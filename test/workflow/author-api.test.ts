@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { WorkflowExecutionHost } from "../../src/runtime/workflow-host";
 import type { JsonObject } from "../../src/shared/json";
 import type { NormalizedAgentRequest, WorkflowMeta, WorkflowModule } from "../../src/shared/workflow-types";
@@ -149,12 +149,25 @@ describe("Workflow 作者 API", () => {
     expect(host.agents).toEqual([]);
   });
 
-  test("默认使用 Run cwd，并拒绝项目外的 Agent cwd", async () => {
-    const host = new MemoryHost();
-    const inside = await executeWorkflow(workflow(() => agent("inside", { id: "inside", cli: "codex" })), undefined, host);
-    expect(inside).toEqual({ id: "inside" });
-    expect(host.agents[0].cwd).toBe(process.cwd());
-    await expect(executeWorkflow(workflow(() => agent("outside", { id: "outside-cwd", cli: "codex", cwd: ".." })), undefined, host)).rejects.toThrow("项目 cwd 内");
+  test("默认使用项目 cwd，允许显式绝对的独立 Agent cwd，拒绝越界相对路径", async () => {
+    const project = await mkdtemp(join(tmpdir(), "wave-flow-project-"));
+    const child = join(project, "frontend");
+    const external = await mkdtemp(join(tmpdir(), "wave-flow-external-"));
+    await Bun.$`mkdir -p ${child}`;
+    try {
+      const host = new MemoryHost();
+      await executeWorkflow(workflow(async () => {
+        phase("scan");
+        await agent("default", { id: "default", cli: "codex" });
+        await agent("child", { id: "child", cli: "codex", cwd: "frontend" });
+        return agent("external", { id: "external", cli: "codex", cwd: external });
+      }), undefined, host, { cwd: project });
+      expect(host.agents.map((item) => item.cwd)).toEqual([await realpath(project), await realpath(child), await realpath(external)]);
+      await expect(executeWorkflow(workflow(() => agent("outside", { id: "outside-cwd", cli: "codex", cwd: ".." })), undefined, new MemoryHost(), { cwd: project })).rejects.toThrow("相对 cwd 必须位于");
+      expect(resolve(external)).toBe(external);
+    } finally {
+      await Promise.all([rm(project, { recursive: true, force: true }), rm(external, { recursive: true, force: true })]);
+    }
   });
 
   test("拒绝将普通文件作为 Run cwd", async () => {

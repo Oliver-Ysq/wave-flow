@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunJournal } from "../../src/journal/run-journal";
@@ -10,7 +10,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 function manifest(cwd: string): RunManifest {
-  return { runId: "11111111-1111-4111-8111-111111111111", runtimeVersion: RUNTIME_VERSION, workflow: { name: "journal-check", description: "Check journal.", phases: [{ title: "scan" }] }, workflowHash: "a".repeat(64), cwd, input: {}, createdAt: "2026-10-02T00:00:00.000Z" };
+  return { runId: "11111111-1111-4111-8111-111111111111", clientRequestId: "22222222-2222-4222-8222-222222222222", runtimeVersion: RUNTIME_VERSION, workflow: { name: "journal-check", description: "Check journal.", phases: [{ title: "scan" }] }, workflowHash: "a".repeat(64), workflowPath: join(cwd, "workflow.ts"), workflowProjectCwd: cwd, input: {}, createdAt: "2026-10-02T00:00:00.000Z" };
 }
 
 describe("RunJournal", () => {
@@ -26,6 +26,20 @@ describe("RunJournal", () => {
     expect(JSON.parse(await readFile(join(journal.directory, path), "utf8"))).toEqual({ nodeId: "scan/auth", result: { ok: true } });
     const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
     expect(opened.events).toHaveLength(1);
+  });
+
+  test("拒绝软链接或宽权限的 Run Store 根目录", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const target = await mkdtemp(join(tmpdir(), "wave-flow-journal-target-")); directories.push(target);
+    const linked = join(cwd, "linked-runs");
+    await symlink(target, linked);
+    await expect(RunJournal.create(manifest(cwd), linked)).rejects.toThrow("真实目录");
+    const wide = join(cwd, "wide-runs");
+    await writeFile(wide, "not-a-dir");
+    await rm(wide);
+    await Bun.$`mkdir -p ${wide}`;
+    await chmod(wide, 0o755);
+    await expect(RunJournal.create(manifest(cwd), wide)).rejects.toThrow("权限过宽");
   });
 
   test("重开 completed 节点时要求独立结果文件存在且与事件一致", async () => {

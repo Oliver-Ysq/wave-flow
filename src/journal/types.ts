@@ -4,20 +4,24 @@ import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { SessionIdentity } from "../sessions/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 1;
+export const RUNTIME_VERSION = 3;
 
 /** 一次 Run 创建后不可变的耐久身份信息。 */
 export type RunManifest = {
   /** Run 的 UUID；仅接受 Runtime 创建的标准 UUID。 */
   readonly runId: string;
+  /** CLI 创建请求的稳定 UUID；响应丢失重试只能复用同一 Run。 */
+  readonly clientRequestId: string;
   /** Manifest 格式与 Runtime 兼容版本。 */
   readonly runtimeVersion: number;
   /** 已验证 Workflow 元数据。 */
   readonly workflow: WorkflowMeta;
-  /** Workflow 主文件内容 hash；本阶段由调用方提供，后续 Resume 用于匹配。 */
+  /** Workflow 主文件内容 hash；后续 Resume 用于匹配。 */
   readonly workflowHash: string;
-  /** 本次 Run 的 canonical 项目 cwd。 */
-  readonly cwd: string;
+  /** realpath 后的 Workflow 文件，用于恢复时验证同一受信任源码。 */
+  readonly workflowPath: string;
+  /** Workflow 所属项目目录，用于相对节点 cwd 解析与恢复校验。 */
+  readonly workflowProjectCwd: string;
   /** 本次 Workflow 的 JSON-safe 输入。 */
   readonly input: JsonObject;
   /** Run 创建时间。 */

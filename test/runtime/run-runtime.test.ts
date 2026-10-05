@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunRuntime } from "../../src/runtime/run-runtime";
@@ -10,6 +10,8 @@ import { agent, phase } from "../../src/workflow/author-api";
 import type { CapabilitySnapshot } from "../../src/adapters/capabilities";
 import { ControlServer } from "../../src/control/control-server";
 import type { SessionIdentity } from "../../src/sessions/types";
+import { runsRoot } from "../../src/journal/paths";
+import { AgentStartLimiter, LimitedAgentExecutor } from "../../src/daemon/agent-start-limiter";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -25,7 +27,9 @@ const workflow: WorkflowModule<JsonObject, unknown> = {
 async function runtime(executor: AgentNodeExecutor): Promise<RunRuntime> {
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-runtime-"));
   directories.push(cwd);
-  return RunRuntime.create({ workflow, input: {}, workflowSource: "workflow source", cwd, executor });
+  const workflowPath = join(cwd, "workflow.ts");
+  await writeFile(workflowPath, "workflow source", "utf8");
+  return RunRuntime.create({ workflow, input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: cwd, workflowPath, storeRoot: runsRoot(join(cwd, "store")), executor });
 }
 
 describe("RunRuntime", () => {
@@ -56,7 +60,7 @@ describe("RunRuntime", () => {
     });
     control = instance.createControlServer();
     await expect(instance.run(workflow)).resolves.toEqual({ ok: true });
-    const reopened = await RunRuntime.open(instance.journal.manifest.runId, instance.journal.manifest.cwd, { execute: async () => ({ unused: true }) });
+    const reopened = await RunRuntime.open(instance.journal.manifest.runId, { execute: async () => ({ unused: true }) }, join(instance.journal.directory, ".."));
     expect(reopened.snapshot().phases[0]?.agents[0]).toMatchObject({ status: "completed", result: { ok: true } });
   });
 
@@ -95,7 +99,7 @@ describe("RunRuntime", () => {
   test("可以从 Manifest 和 Journal 重开并重建 Phase → Agent 视图", async () => {
     const instance = await runtime({ execute: async () => ({ ok: true }) });
     await instance.run(workflow);
-    const restored = await RunRuntime.open(instance.journal.manifest.runId, instance.journal.manifest.cwd, { execute: async () => ({ unused: true }) });
+    const restored = await RunRuntime.open(instance.journal.manifest.runId, { execute: async () => ({ unused: true }) }, join(instance.journal.directory, ".."));
     expect(restored.snapshot()).toMatchObject({ status: "completed", phases: [{ title: "scan", agents: [{ id: "scan-auth", status: "completed", result: { ok: true } }] }] });
   });
 
@@ -121,5 +125,14 @@ describe("RunRuntime", () => {
     await expect(instance.run(workflow)).rejects.toThrow("codex.interactiveSession=unknown");
     expect(executions).toBe(0);
     expect(instance.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
+  });
+
+  test("真实 Runtime 在 Agent 获得 sessionId 后仍释放全局启动名额", async () => {
+    const limiter = new AgentStartLimiter(1);
+    const base = { execute: async (node: import("../../src/runtime/run-types").AgentNodeSnapshot) => ({ id: node.id }) };
+    const first = await runtime(new LimitedAgentExecutor(base, limiter));
+    const second = await runtime(new LimitedAgentExecutor(base, limiter));
+    await expect(first.run(workflow)).resolves.toEqual({ id: "scan-auth" });
+    await expect(second.run(workflow)).resolves.toEqual({ id: "scan-auth" });
   });
 });

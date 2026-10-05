@@ -37,7 +37,7 @@ class RecordingBackend implements SessionBackend {
 }
 
 function identityFor(nodeId: string): SessionIdentity { return { backend: "tmux", sessionName: "wf-test", backendRef: "/tmp/wf.sock", runId: "11111111-1111-4111-8111-111111111111", nodeId, agentSessionId: "agent", cli: "codex", createdAt: "2026-01-01T00:00:00.000Z" }; }
-function readyScreen(): string { return "╭─ >_ OpenAI Codex ─╮\n│ model: gpt │\n│ directory: /workspace/project │\n╰─────────────────────╯\n› Ask Codex to do anything\ngpt · /workspace/project · Ready"; }
+function readyScreen(cwd = "/workspace/project"): string { return `╭─ >_ OpenAI Codex ─╮\n│ model: gpt │\n│ directory: ${cwd} │\n╰─────────────────────╯\n› Ask Codex to do anything\ngpt · ${cwd}`; }
 function currentReadyScreen(cwd = "/workspace/project"): string { return `>_ OpenAI Codex (v0.159.2)\n${cwd}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · ${cwd}`; }
 
 describe("CodexInteractiveAdapter", () => {
@@ -92,11 +92,17 @@ describe("CodexInteractiveAdapter", () => {
     await adapter.submitInitialPrompt(request, nextPlan, identityFor("review"), new AbortController().signal);
     const nextPrompt = (nextPlan.submissionContext as { submittedPrompt: string }).submittedPrompt;
     await writeFile(history, `${JSON.stringify({ text: wrongNonce, session_id: "foreign" })}\n${JSON.stringify({ text: nextPrompt })}\n{"text":"partial`, { encoding: "utf8", flag: "a" });
+    const controller = new AbortController();
+    const confirmation = adapter.confirmInitialPrompt(request, nextPlan, identityFor("review"), controller.signal);
     const result = await Promise.race([
-      adapter.confirmInitialPrompt(request, nextPlan, identityFor("review"), new AbortController().signal),
+      confirmation,
       Bun.sleep(30).then(() => "timeout" as const),
     ]);
     expect(result).toBe("timeout");
+    // race 的超时不会取消仍在轮询 history 的 Promise；必须显式终止并等待它收尾，
+    // 否则测试进程会保留定时器，导致完整 bun test 永远不结束。
+    controller.abort();
+    await expect(confirmation).rejects.toThrow("Gate 已取消");
   });
 
   test("Bootstrap 只在 Codex 原生 history 追加匹配记录后返回 native-history", async () => {
@@ -110,10 +116,10 @@ describe("CodexInteractiveAdapter", () => {
         await writeFile(history, `${JSON.stringify({ text: prompt, session_id: "codex-native-session" })}\n`, { encoding: "utf8", flag: "a" });
         return identity;
       },
-      async sendText() {}, async pasteText(_identity, text) { await writeFile(history, `${JSON.stringify({ text, session_id: "codex-native-session" })}\n`, { encoding: "utf8", flag: "a" }); }, async sendSpecialKey() {}, async readRecent() { return readyScreen(); }, async liveness() { return "exists" as SessionLiveness; }, async detach() {},
+      async sendText() {}, async pasteText(_identity, text) { await writeFile(history, `${JSON.stringify({ text, session_id: "codex-native-session" })}\n`, { encoding: "utf8", flag: "a" }); }, async sendSpecialKey() {}, async readRecent() { return readyScreen(cwd); }, async liveness() { return "exists" as SessionLiveness; }, async detach() {},
       async destroy(): Promise<DestroyResult> { destroyed = true; return { status: "destroyed", diagnostic: null }; },
     };
-    const request = { runId: identity.runId, node: node({ cwd }), prompt: "检查变更", identityFile: join(cwd, "session.json") } as const;
+    const request = { runId: identity.runId, node: node({ cwd, request: { ...node().request, cwd } }), prompt: "检查变更", identityFile: join(cwd, "session.json") } as const;
     const result = await new InteractiveCliBootstrap(backend, 100).start(new CodexInteractiveAdapter(backend, { command: "codex", historyPath: history, historyPollMs: 1, pasteSettleMs: 1, confirmationAttemptMs: 10 }), request);
     expect(result.submission).toEqual({ submitted: true, proof: "native-history", cliSessionId: "codex-native-session", diagnostic: "已确认 Codex 原生 history 提交记录。" });
     expect(destroyed).toBe(false);
@@ -125,10 +131,10 @@ describe("CodexInteractiveAdapter", () => {
     const identity: SessionIdentity = { backend: "tmux", sessionName: "wf-test", backendRef: "/tmp/wf.sock", runId: "11111111-1111-4111-8111-111111111111", nodeId: "review", agentSessionId: "agent", cli: "codex", createdAt: "2026-01-01T00:00:00.000Z" };
     let destroyed = false;
     const backend: SessionBackend = {
-      async create() { return identity; }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen(); }, async liveness() { return "exists" as SessionLiveness; }, async detach() {},
+      async create() { return identity; }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen(cwd); }, async liveness() { return "exists" as SessionLiveness; }, async detach() {},
       async destroy(): Promise<DestroyResult> { destroyed = true; return { status: "destroyed", diagnostic: null }; },
     };
-    const request = { runId: identity.runId, node: node({ cwd }), prompt: "检查变更", identityFile: join(cwd, "session.json") } as const;
+    const request = { runId: identity.runId, node: node({ cwd, request: { ...node().request, cwd } }), prompt: "检查变更", identityFile: join(cwd, "session.json") } as const;
     await expect(new InteractiveCliBootstrap(backend, 30).start(new CodexInteractiveAdapter(backend, { command: "codex", historyPath: history, historyPollMs: 1, pasteSettleMs: 1, confirmationAttemptMs: 10 }), request)).rejects.toThrow("首条 Prompt confirm Gate 超时");
     expect(destroyed).toBe(true);
   });

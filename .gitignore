@@ -1,6 +1,11 @@
 node_modules/
 dist/
-.wave-flow/
+# 项目内只保留 Wave Flow 专属、可提交的编排源码；Run、daemon 与其他运行状态
+# 全部位于用户级 ~/.wave-flow，不应在项目内生成。
+.wave-flow/*
+!.wave-flow/
+!.wave-flow/workflows/
+!.wave-flow/workflows/**
 *.tsbuildinfo
 
 docs/

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ControlServer } from "../../src/control/control-server";
 import { RunJournal } from "../../src/journal/run-journal";
 import { nodeDirectoryName, runsRoot } from "../../src/journal/paths";
-import type { JournalEvent, RunManifest } from "../../src/journal/types";
+import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
 import type { JsonSchema } from "../../src/shared/workflow-types";
 
@@ -14,7 +14,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 
 async function fixture(schema?: JsonSchema) {
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-control-")); directories.push(cwd);
-  const manifest: RunManifest = { runId: crypto.randomUUID(), runtimeVersion: 1, workflow: { name: "control-check", description: "Control check.", phases: [{ title: "run" }] }, workflowHash: "a".repeat(64), cwd, input: {}, createdAt: new Date().toISOString() };
+  const manifest: RunManifest = { runId: crypto.randomUUID(), clientRequestId: crypto.randomUUID(), runtimeVersion: RUNTIME_VERSION, workflow: { name: "control-check", description: "Control check.", phases: [{ title: "run" }] }, workflowHash: "a".repeat(64), workflowPath: join(cwd, "workflow.ts"), workflowProjectCwd: cwd, input: {}, createdAt: new Date().toISOString() };
   const journal = await RunJournal.create(manifest, runsRoot(cwd));
   const state = new RunStateMachine(manifest);
   state.apply({ type: "run.created", at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, runStatus: "running" });

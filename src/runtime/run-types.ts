@@ -10,6 +10,12 @@ export type RunStatus = "running" | "completed" | "cancelled" | "interrupted";
 
 /** 注入 Runtime 的可控节点执行器；本阶段不启动 CLI 或读取终端。 */
 export type AgentNodeExecutor = {
+  /** 可选的全局启动名额等待；未取得名额前节点必须保持 queued。 */
+  waitForStart?(node: AgentNodeSnapshot): Promise<void>;
+  /** 节点尚未进入 execute 即无法启动时归还先前取得的名额。 */
+  cancelStart?(node: AgentNodeSnapshot): void;
+  /** 是否已有节点因全局资源名额实际等待；仅用于异步 run 的安全交还。 */
+  hasWaitingStart?(): boolean;
   /** 执行一个已进入 running 的节点；对象表示完成，null 或抛错都表示无法验证完成的中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
   /** 可选的运行期能力重检；真实会话执行器应在节点启动前返回当前环境快照。 */
@@ -30,7 +36,7 @@ export type AgentNodeSnapshot = {
   readonly cli: AgentCli;
   /** 节点实际使用的 sandbox。 */
   readonly sandbox: AgentSandbox;
-  /** 已验证的项目内工作目录。 */
+  /** 已验证的节点工作目录；可为 Workflow 项目子目录或显式独立本地项目。 */
   readonly cwd: string;
   /** 面向界面的名称；省略时等于 id。 */
   readonly label: string;

@@ -80,14 +80,17 @@ async function inConcurrentScope<T>(callback: () => Promise<T>): Promise<T> {
 }
 
 async function normalizeAgentCwd(requestedCwd: string | undefined, runCwd: string): Promise<string> {
-  const candidate = resolve(runCwd, requestedCwd ?? runCwd);
+  if (requestedCwd !== undefined && isAbsolute(requestedCwd) === false && requestedCwd.trim().startsWith("/")) throw new WorkflowContractError("agent() 的 cwd 路径无效。");
+  const candidate = isAbsolute(requestedCwd ?? "") ? requestedCwd! : resolve(runCwd, requestedCwd ?? runCwd);
   let actualCwd: string;
   try {
     actualCwd = await realpath(candidate);
   } catch (error) {
     throw new WorkflowContractError(`agent() 的 cwd 无法解析：${error instanceof Error ? error.message : String(error)}`);
   }
-  const fromRunCwd = relative(runCwd, actualCwd);
-  if (fromRunCwd.startsWith("..") || isAbsolute(fromRunCwd)) throw new WorkflowContractError("agent() 的 cwd 必须位于 Run 的项目 cwd 内。");
+  if (requestedCwd !== undefined && !isAbsolute(requestedCwd)) {
+    const fromRunCwd = relative(runCwd, actualCwd);
+    if (fromRunCwd.startsWith("..") || isAbsolute(fromRunCwd)) throw new WorkflowContractError("agent() 的相对 cwd 必须位于 Workflow 项目目录内。");
+  }
   return actualCwd;
 }

@@ -3,9 +3,9 @@ import { RUNTIME_VERSION, type RunManifest } from "../../src/journal/types";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
 
 const manifest: RunManifest = {
-  runId: "11111111-1111-4111-8111-111111111111", runtimeVersion: RUNTIME_VERSION,
+  runId: "11111111-1111-4111-8111-111111111111", clientRequestId: "22222222-2222-4222-8222-222222222222", runtimeVersion: RUNTIME_VERSION,
   workflow: { name: "state-check", description: "Check state.", phases: [{ title: "scan" }] },
-  workflowHash: "a".repeat(64), cwd: "/project", input: {}, createdAt: "2026-10-02T00:00:00.000Z",
+  workflowHash: "a".repeat(64), workflowPath: "/project/.wave-flow/workflows/check.ts", workflowProjectCwd: "/project", input: {}, createdAt: "2026-10-02T00:00:00.000Z",
 };
 
 function event(value: Record<string, unknown>) {

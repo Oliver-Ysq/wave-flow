@@ -24,6 +24,9 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** 返回当前 Run 的耐久存储与状态机，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return { journal: this.journal, state: this.state }; }
 
+  /** 是否已有节点确实因 daemon 全局资源名额等待。 */
+  hasWaitingStart(): boolean { return this.executor.hasWaitingStart?.() === true; }
+
   /** 创建、启动并执行节点；只有结果与 Journal 均耐久后才返回对象。 */
   async agent(request: NormalizedAgentRequest): Promise<JsonObject | null> {
     if (request.phase === undefined) throw new WorkflowContractError("agent() 前必须调用 phase() 选择已声明阶段。");
@@ -45,8 +48,18 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       }
       throw error;
     }
+    // 全局 daemon 的名额必须在节点进入 running 前取得。这样超限节点可被权威
+    // 快照如实显示为 queued，而不会先伪装成已启动的 tmux/App Server 会话。
+    await this.executor.waitForStart?.(this.state.agent(nodeId));
     const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: crypto.randomUUID() });
-    await this.durableApply(started);
+    try {
+      await this.durableApply(started);
+    } catch (error) {
+      // 名额已取得但 running 事实未耐久时，节点从未真正进入执行器；必须归还，
+      // 否则一次 Journal 写入错误会永久耗尽全局会话名额。
+      this.executor.cancelStart?.(this.state.agent(nodeId));
+      throw error;
+    }
     const node = this.state.agent(nodeId);
     try {
       const result = await this.executor.execute(node);

@@ -9,7 +9,7 @@ export type WorkflowExecutionContext = {
   readonly meta: WorkflowMeta;
   /** Runtime 注入的最小委派宿主；本层不创建 CLI、会话或 Journal。 */
   readonly host: WorkflowExecutionHost;
-  /** 本次 Run 的 canonical 项目 cwd；Agent cwd 只能是此目录或其子目录。 */
+  /** 本次 Run 的 Workflow 项目 cwd；相对 Agent cwd 只能位于此目录，绝对 cwd 可指向显式独立项目。 */
   readonly cwd: string;
   /** 已使用 Agent id，确保同一 Run 的稳定节点身份不重复。 */
   readonly agentIds: Set<string>;

@@ -58,7 +58,7 @@ export class RunStateMachine {
       id: this.manifest.runId,
       status: this.#status,
       workflow: this.manifest.workflow,
-      cwd: this.manifest.cwd,
+      cwd: this.manifest.workflowProjectCwd,
       createdAt: this.manifest.createdAt,
       endedAt: this.#endedAt,
       diagnostic: this.#diagnostic,
@@ -72,6 +72,9 @@ export class RunStateMachine {
     if (!agent) throw new Error(`未知 Agent 节点：${nodeId}`);
     return cloneAgent(agent);
   }
+
+  /** 是否已有节点完成真实会话事实耐久记录；供 daemon 判断 Run 可安全异步交还给 CLI。 */
+  hasRecordedSession(): boolean { return this.#recordedSessions.size > 0; }
 
   #applyAgentCreated(event: Extract<JournalEvent, { type: "agent.created" }>): void {
     if (this.#status !== "running") throw new Error("终态 Run 不能创建 Agent 节点。");
