@@ -5,7 +5,7 @@ import type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdenti
 
 const node: AgentNodeSnapshot = {
   id: "review", phase: "执行", sequence: 1, cli: "codex", sandbox: "workspace-write", cwd: "/workspace", label: "review", status: "running", result: null, diagnostic: null,
-  createdAt: "2026-10-04T00:00:00.000Z", startedAt: "2026-10-04T00:00:00.000Z", endedAt: null, agentSessionId: null,
+  createdAt: "2026-10-04T00:00:00.000Z", startedAt: "2026-10-04T00:00:00.000Z", endedAt: null, agentSessionId: null, block: null,
   request: { id: "review", cli: "codex", label: "review", cwd: "/workspace", sandbox: "workspace-write", prompt: "检查实现", phase: "执行" },
 };
 

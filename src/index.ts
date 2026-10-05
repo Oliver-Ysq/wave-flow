@@ -22,7 +22,10 @@ export { RunRuntime } from "./runtime/run-runtime";
 export type { CreateRunOptions } from "./runtime/run-runtime";
 export { ControlServer } from "./control/control-server";
 export { handleCompleteHttp } from "./control/control-http";
+export { handleBlockHttp, handleAnswerHttp, handleContinueHttp } from "./control/block-http";
+export { BlockBroker } from "./control/block-broker";
 export type { CompletionSubmission, CompleteRequest, RegisteredControlNode } from "./control/control-server";
+export type { BlockAnswerSubmission, BlockResolution, BlockSubmission, ContinueSubmission } from "./control/control-server";
 export type { AgentNodeExecutor, AgentNodeSnapshot, AgentNodeStatus, PhaseSnapshot, RunSnapshot, RunStatus } from "./runtime/run-types";
 
 /** Workflow 作者与 Runtime 集成可使用的公开类型。 */

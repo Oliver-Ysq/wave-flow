@@ -6,7 +6,7 @@ function node(id: string): AgentNodeSnapshot {
   return {
     id, phase: "run", sequence: 1, cli: "codex", sandbox: "read-only", cwd: "/tmp", label: id,
     status: "running", result: null, diagnostic: null, createdAt: new Date().toISOString(), startedAt: null, endedAt: null,
-    agentSessionId: `${id}-session`, request: { id, cli: "codex", cwd: "/tmp", sandbox: "read-only", prompt: id, phase: "run" },
+    agentSessionId: `${id}-session`, block: null, request: { id, cli: "codex", cwd: "/tmp", sandbox: "read-only", prompt: id, phase: "run" },
   };
 }
 

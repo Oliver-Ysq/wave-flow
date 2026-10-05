@@ -118,4 +118,17 @@ describe("RunJournal", () => {
     await journal.append({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "codex-rpc", delivery: "codex-rpc", session, appServer: { endpoint: "ws://127.0.0.1:43180", threadId: "thread", turnId: "turn", protocolVersion: 1 } });
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: expect.arrayContaining([expect.objectContaining({ type: "agent.session" })]) });
   });
+
+  test("重开时拒绝被篡改为不符合 answer-schema 的 block 答案", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    const sessionId = "session";
+    const blockRequestId = "33333333-3333-4333-8333-333333333333";
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, status: "running" });
+    await journal.append({ type: "block.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: "需要确认", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object", required: ["approved"], properties: { approved: { type: "boolean" } } } });
+    await journal.append({ type: "block.answered", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, blockRequestId, answer: { approved: "yes" } });
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("answer-schema");
+  });
 });

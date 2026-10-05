@@ -16,7 +16,7 @@ afterEach(async () => {
 function node(overrides: Partial<AgentNodeSnapshot> = {}): AgentNodeSnapshot {
   return {
     id: "review", phase: "scan", sequence: 1, cli: "codex", sandbox: "read-only", cwd: "/workspace/project", label: "Review", status: "running", result: null, diagnostic: null,
-    createdAt: "2026-01-01T00:00:00.000Z", startedAt: "2026-01-01T00:00:00.000Z", endedAt: null, agentSessionId: null,
+    createdAt: "2026-01-01T00:00:00.000Z", startedAt: "2026-01-01T00:00:00.000Z", endedAt: null, agentSessionId: null, block: null,
     request: { id: "review", cli: "codex", cwd: "/workspace/project", sandbox: "read-only", prompt: "检查变更", phase: "scan" },
     ...overrides,
   };

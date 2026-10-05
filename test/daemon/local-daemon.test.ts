@@ -30,6 +30,29 @@ async function testDaemon(options: ConstructorParameters<typeof LocalDaemon>[0] 
 }
 
 describe("LocalDaemon", () => {
+  test("answer 可按全局 blockRequestId 路由到正确 Run，而不要求用户提供 runId", async () => {
+    const { cwd, workflowPath } = await fixture();
+    let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
+    const backend: SessionBackend = {
+      async create(value) { options = value; return identity(value.runId, value.nodeId, value.agentSessionId!); },
+      async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "exists"; }, async detach() {},
+      async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const daemon = await testDaemon({ createRealExecutor: ({ controlUrl, runsRoot }) => new RealCodexExecutor(backend, controlUrl, runsRoot, async (_sessions, adapter, request) => {
+      const plan = await adapter.launch(request, new AbortController().signal);
+      return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile }) };
+    }) });
+    const { baseUrl } = daemon.start();
+    const created = await fetch(`${baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);
+    await waitFor(() => options !== null);
+    // 用真实受管环境发起 block；HTTP route 的 answer 不携带 runId。
+    const requestId = crypto.randomUUID();
+    const block = fetch(`${baseUrl}/runs/${created.runId}/control/block`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ blockRequestId: requestId, runId: options!.env!.WF_RUN_ID, nodeId: options!.env!.WF_NODE_ID, agentSessionId: options!.env!.WF_AGENT_SESSION_ID, capability: options!.env!.WF_CONTROL_CAPABILITY, needHelp: "需要人工确认" }) });
+    await waitForAsync(async () => (await fetch(`${baseUrl}/runs/${created.runId}`).then((response) => response.json() as Promise<{ snapshot: { phases: Array<{ agents: Array<{ status: string }> }> } }>)).snapshot.phases[0]?.agents[0]?.status === "blocked");
+    const answer = await fetch(`${baseUrl}/blocks/${requestId}/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: { approved: true } }) });
+    expect(answer.status).toBe(200);
+    await expect(block.then((response) => response.json())).resolves.toEqual({ blockRequestId: requestId, answer: { approved: true } });
+  });
   test("仅绑定 loopback，并经 API 创建 Journaled Run", async () => {
     const { cwd, workflowPath } = await fixture();
     const daemon = await testDaemon();
@@ -259,6 +282,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("等待真实执行器启动超时。");
+    await Bun.sleep(2);
+  }
+}
+
+async function waitForAsync(predicate: () => Promise<boolean>, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error("等待异步条件超时。");
     await Bun.sleep(2);
   }
 }

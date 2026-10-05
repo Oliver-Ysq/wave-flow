@@ -6,6 +6,7 @@ import { isJsonObject } from "../shared/json";
 import type { CreateRunRequest, RunResponse } from "./types";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
+import { handleAnswerHttp, handleBlockHttp, handleContinueHttp } from "../control/block-http";
 import type { ControlServer } from "../control/control-server";
 import { createRealCodexExecutor } from "../runtime/real-codex-factory";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
@@ -111,6 +112,25 @@ export class LocalDaemon {
         const control = this.#controls.get(runId);
         if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
         return handleCompleteHttp(control, request);
+      }
+      const blockMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/block$/);
+      if (blockMatch) {
+        const control = this.#controls.get(decodeURIComponent(blockMatch[1]));
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleBlockHttp(control, request);
+      }
+      const answerMatch = url.pathname.match(/^\/blocks\/([^/]+)\/answer$/);
+      if (answerMatch) {
+        const blockRequestId = decodeURIComponent(answerMatch[1]);
+        const control = [...this.#controls.values()].find((candidate) => candidate.hasBlock(blockRequestId));
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleAnswerHttp(control, blockRequestId, request);
+      }
+      const continueMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/continue$/);
+      if (continueMatch) {
+        const control = this.#controls.get(decodeURIComponent(continueMatch[1]));
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleContinueHttp(control, request);
       }
       throw new DaemonRequestError(404, "未知 daemon API 路径或方法。");
     } catch (error) {

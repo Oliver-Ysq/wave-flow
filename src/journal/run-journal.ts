@@ -194,6 +194,15 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "agent.completed":
       if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result) || (event.validationPath !== undefined && typeof event.validationPath !== "string")) throw new Error("agent.completed payload 无效。");
       break;
+    case "block.created":
+      if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim() || typeof event.needHelp !== "string" || !event.needHelp.trim() || (event.answerSchema !== undefined && !isJsonObject(event.answerSchema))) throw new Error("block.created payload 无效。");
+      break;
+    case "block.answered":
+      if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim() || !isJsonObject(event.answer)) throw new Error("block.answered payload 无效。");
+      break;
+    case "agent.continued":
+      if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim()) throw new Error("agent.continued payload 无效。");
+      break;
     case "run.status":
       if (event.nodeId !== null || !isRunStatus(event.status)) throw new Error("run.status payload 无效。");
       break;

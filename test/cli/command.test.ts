@@ -17,6 +17,9 @@ describe("CLI run / inspect", () => {
     expect(parseCommand(["start"], "/workspace")).toEqual({ kind: "start" });
     expect(() => parseCommand(["start", "unexpected"], "/workspace")).toThrow("start 不接受参数");
     expect(parseCommand(["serve"], "/workspace")).toEqual({ kind: "serve" });
+    expect(parseCommand(["block", "--need-help", "需要数据库"], "/workspace")).toMatchObject({ kind: "block" });
+    expect(parseCommand(["answer", "11111111-1111-4111-8111-111111111111", "--value", "{\"resolved\":true}"], "/workspace")).toMatchObject({ kind: "answer" });
+    expect(parseCommand(["continue", "--block-request-id", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "continue" });
     expect(parseCommand(["inspect", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "inspect" });
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
     expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
@@ -36,6 +39,7 @@ describe("CLI run / inspect", () => {
     await main(["start"], process.cwd(), (line) => { lines.push(line); }, true);
     expect(lines).toEqual([expect.stringContaining("Wave Flow daemon 已就绪：http://127.0.0.1:")]);
   });
+
 
   test("创建 Run 的传输层重试复用同一 clientRequestId", async () => {
     const original = globalThis.fetch;

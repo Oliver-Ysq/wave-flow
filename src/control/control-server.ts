@@ -5,6 +5,9 @@ import type { RunStateMachine } from "../runtime/run-state-machine";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
 import type { SessionIdentity } from "../sessions/types";
+import { BlockBroker, type BlockAnswerSubmission, type BlockResolution, type BlockSubmission, type ContinueSubmission } from "./block-broker";
+
+export type { BlockAnswerSubmission, BlockResolution, BlockSubmission, ContinueSubmission } from "./block-broker";
 
 /** 注册后仅在当前 daemon 生命周期有效的节点 capability。 */
 export type RegisteredControlNode = {
@@ -68,6 +71,9 @@ export class ControlServer {
   #nodes = new Map<string, RegisteredControlNode>();
   #completing = new Set<string>();
   #recordedSessions = new Set<string>();
+  #blocks = new BlockBroker();
+  #answering = new Set<string>();
+  #continuing = new Set<string>();
 
   constructor(private readonly journal: RunJournal, private readonly state: RunStateMachine) {}
 
@@ -90,6 +96,7 @@ export class ControlServer {
     const key = controlKey(runId, nodeId);
     const node = this.#nodes.get(key);
     if (node?.agentSessionId === agentSessionId) {
+      this.#blocks.cancelForSession(runId, nodeId, agentSessionId, "原 Agent 会话已结束，无法继续等待人工答案。");
       this.#nodes.delete(key);
       this.#recordedSessions.delete(key);
     }
@@ -141,6 +148,83 @@ export class ControlServer {
     } finally {
       this.#completing.delete(key);
     }
+  }
+
+  /**
+   * 让原 Agent 调用等待人类答案；状态先 durable 变为 blocked，答案不会直接恢复节点。
+   */
+  async block(request: BlockSubmission): Promise<BlockResolution> {
+    const key = controlKey(request.runId, request.nodeId);
+    this.requireCurrentNode(key, request);
+    if (!this.#recordedSessions.has(key)) throw new Error("首条任务投递的会话坐标尚未耐久记录，拒绝 block。");
+    if (!request.needHelp.trim()) throw new Error("block --need-help 必须非空。");
+    const snapshot = this.state.agent(request.nodeId);
+    if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
+    const pending = this.#blocks.create(request);
+    try {
+      const event: JournalEvent = {
+        type: "block.created", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
+        agentSessionId: request.agentSessionId, diagnostic: request.needHelp, blockRequestId: pending.blockRequestId,
+        needHelp: request.needHelp, ...(request.answerSchema ? { answerSchema: request.answerSchema } : {}),
+      };
+      await this.journal.append(event);
+      this.state.apply(event);
+    } catch (error) {
+      this.#blocks.discard(pending.blockRequestId);
+      throw error;
+    }
+    // 只有 Journal 已经证明节点 blocked 后，原 Agent 才可开始等待答案。
+    return this.#blocks.wait(pending.blockRequestId);
+  }
+
+  /** 人类答案先写 Journal，再精确唤醒创建该 block 的原调用；状态仍保持 blocked。 */
+  async answer(submission: BlockAnswerSubmission): Promise<void> {
+    if (this.#answering.has(submission.blockRequestId)) throw new Error("该 block 正在处理答案，拒绝并发 answer。");
+    this.#answering.add(submission.blockRequestId);
+    try {
+    const pending = this.#blocks.validateAnswer(submission);
+    const event: JournalEvent = {
+      type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,
+      agentSessionId: pending.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId, answer: submission.answer,
+    };
+    await this.journal.append(event);
+    this.state.apply(event);
+    // durable-first：只有答案已成为 Journal 事实后，才允许原 Agent 收到它。
+    this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer);
+    } finally {
+      this.#answering.delete(submission.blockRequestId);
+    }
+  }
+
+  /** daemon 用于按全局 blockRequestId 路由用户侧 answer；不暴露 pending 内容。 */
+  hasBlock(blockRequestId: string): boolean { return this.#blocks.has(blockRequestId); }
+
+  /** 只有原 Agent 在收到答案并自行判断可继续后，才推进 blocked → running。 */
+  async continue(request: ContinueSubmission): Promise<void> {
+    if (this.#continuing.has(request.blockRequestId)) throw new Error("该 block 正在处理 continue，拒绝并发请求。");
+    this.#continuing.add(request.blockRequestId);
+    try {
+    const key = controlKey(request.runId, request.nodeId);
+    this.requireCurrentNode(key, request);
+    const snapshot = this.state.agent(request.nodeId);
+    if (snapshot.status !== "blocked") throw new Error(`continue 只允许当前 blocked 节点，实际为 ${snapshot.status}。`);
+    const pending = this.#blocks.assertCanContinue(request);
+    const event: JournalEvent = {
+      type: "agent.continued", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
+      agentSessionId: request.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId,
+    };
+    await this.journal.append(event);
+    this.state.apply(event);
+    this.#blocks.finishContinue(pending.blockRequestId);
+    } finally {
+      this.#continuing.delete(request.blockRequestId);
+    }
+  }
+
+  private requireCurrentNode(key: string, request: Pick<BlockSubmission, "runId" | "nodeId" | "agentSessionId" | "capability">): RegisteredControlNode {
+    const node = this.#nodes.get(key);
+    if (!node || node.agentSessionId !== request.agentSessionId || node.capability !== request.capability) throw new Error("Control capability、Run、节点或会话身份不匹配。");
+    return node;
   }
 }
 

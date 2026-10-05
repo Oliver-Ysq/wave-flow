@@ -11,7 +11,10 @@ export type CapabilitiesCommand = { readonly kind: "capabilities"; readonly json
 export type StartCommand = { readonly kind: "start" };
 export type ServeCommand = { readonly kind: "serve" };
 export type CompleteCommand = { readonly kind: "complete"; readonly argv: readonly string[] };
-export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | { readonly kind: "help" };
+export type BlockCliCommand = { readonly kind: "block"; readonly argv: readonly string[] };
+export type AnswerCliCommand = { readonly kind: "answer"; readonly argv: readonly string[] };
+export type ContinueCliCommand = { readonly kind: "continue"; readonly argv: readonly string[] };
+export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | BlockCliCommand | AnswerCliCommand | ContinueCliCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
@@ -23,6 +26,9 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
     throw new Error("capabilities 仅支持 --json 选项。");
   }
   if (command === "complete") return { kind: "complete", argv: rest };
+  if (command === "block") return { kind: "block", argv: rest };
+  if (command === "answer") return { kind: "answer", argv: rest };
+  if (command === "continue") return { kind: "continue", argv: rest };
   if (command === "start") { if (rest.length > 0) throw new Error("start 不接受参数。"); return { kind: "start" }; }
   if (command === "serve") { if (rest.length > 0) throw new Error("serve 不接受参数。"); return { kind: "serve" }; }
   if (command === "run") {

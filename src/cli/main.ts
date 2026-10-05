@@ -6,18 +6,26 @@ import { discoverDaemon, ensureGlobalDaemon } from "../daemon/daemon-lifecycle";
 import { inspectStoredRun, LocalDaemon } from "../daemon/local-daemon";
 import { runsRoot } from "../journal/paths";
 import { executeComplete, parseCompleteCommand } from "./complete-command";
+import { executeBlock, parseBlockCommand } from "./block-command";
+import { executeAnswer, executeContinue, parseAnswerCommand, parseContinueCommand } from "./hitl-command";
 
 /** CLI 主入口；run 通过 daemon 创建，inspect 读取同一 daemon 的权威状态。 */
 export async function main(argv: readonly string[] = process.argv.slice(2), cwd = process.cwd(), write: (line: string) => void = (line) => { process.stdout.write(`${line}\n`); }, deterministicForTest = false): Promise<void> {
   const command = parseCommand(argv, cwd);
   if (command.kind === "help") { write(helpText); return; }
   if (command.kind === "complete") { await executeComplete(parseCompleteCommand(command.argv)); write("节点已完成上报。"); return; }
+  if (command.kind === "block") {
+    const resolution = await executeBlock(parseBlockCommand(command.argv));
+    write(JSON.stringify(resolution));
+    return;
+  }
+  if (command.kind === "continue") { await executeContinue(parseContinueCommand(command.argv)); write("节点已恢复运行。"); return; }
   const testDaemon = deterministicForTest ? new LocalDaemon({ deterministicForTest: true, storeRoot: runsRoot(`${cwd}/.test-wave-flow`) }) : null;
-  // inspect 不能为了查看历史结果悄悄启动一个新 daemon。若现有 daemon 不在线，
-  // 只允许读取已终结 Run 的耐久证据；运行中的 Run 必须由拥有它的 daemon 恢复。
+  // inspect 与 answer 都不能为了查询历史状态或交付 pending block 悄悄启动新 daemon。
+  // 前者只允许读取已终结 Run 的耐久证据；后者必须交给仍持有原等待者的 daemon。
   const daemon = deterministicForTest
     ? null
-    : command.kind === "inspect"
+    : command.kind === "inspect" || command.kind === "answer"
       ? await discoverDaemon()
       : await ensureGlobalDaemon();
   const testServer = testDaemon?.start();
@@ -39,8 +47,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
       write(formatSnapshot(response.snapshot));
       return;
     }
-    if (!baseUrl) throw new Error("无法连接 Wave Flow daemon。");
+    if (!baseUrl) {
+      if (command.kind === "answer") throw new Error("没有可验证的 Wave Flow daemon；当前版本不能在 daemon 重启后交付 pending block 答案。");
+      throw new Error("无法连接 Wave Flow daemon。");
+    }
     const client = new DaemonClient(baseUrl);
+    if (command.kind === "answer") { await executeAnswer(parseAnswerCommand(command.argv), baseUrl); write("答案已交付给等待中的 Agent。"); return; }
     if (command.kind === "capabilities") {
       const snapshot = await client.capabilities();
       write(command.json ? JSON.stringify(snapshot, null, 2) : formatCapabilities(snapshot));

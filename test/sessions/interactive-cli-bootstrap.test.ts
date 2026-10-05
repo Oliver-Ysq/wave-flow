@@ -5,7 +5,7 @@ import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
 import type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdentity, SessionLiveness } from "../../src/sessions/types";
 
 function node(): AgentNodeSnapshot {
-  return { id: "node", phase: "phase", sequence: 1, cli: "codex", sandbox: "read-only", cwd: "/project", label: "Node", status: "running", result: null, diagnostic: null, createdAt: "2026-01-01T00:00:00.000Z", startedAt: null, endedAt: null, agentSessionId: null, request: { id: "node", cli: "codex", cwd: "/project", sandbox: "read-only", prompt: "任务", phase: "phase" } };
+  return { id: "node", phase: "phase", sequence: 1, cli: "codex", sandbox: "read-only", cwd: "/project", label: "Node", status: "running", result: null, diagnostic: null, createdAt: "2026-01-01T00:00:00.000Z", startedAt: null, endedAt: null, agentSessionId: null, block: null, request: { id: "node", cli: "codex", cwd: "/project", sandbox: "read-only", prompt: "任务", phase: "phase" } };
 }
 
 class RecordingBackend implements SessionBackend {

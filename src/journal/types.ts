@@ -82,6 +82,25 @@ export type JournalEvent = JournalBase & ({
   /** 已写入结果文件的 JSON 对象副本，供 Journal 重建查询视图。 */
   readonly result: JsonObject;
 } | {
+  /** Agent 请求人工协助；状态机据此从 running 进入 blocked。 */
+  readonly type: "block.created";
+  /** 同一 Run 内稳定且全局不可猜的请求 id。 */
+  readonly blockRequestId: string;
+  /** 面向人的完整求助说明。 */
+  readonly needHelp: string;
+  /** 人类答案的可选 JSON Schema；未提供时接受任意 JSON 对象。 */
+  readonly answerSchema?: JsonObject;
+} | {
+  /** 用户答案已经耐久保存；不改变 blocked 状态。 */
+  readonly type: "block.answered";
+  readonly blockRequestId: string;
+  /** 已校验为 JSON 对象的人类答案。 */
+  readonly answer: JsonObject;
+} | {
+  /** 原 Agent 确认已可继续，唯一合法的 blocked → running 迁移。 */
+  readonly type: "agent.continued";
+  readonly blockRequestId: string;
+} | {
   readonly type: "run.status";
   readonly status: RunStatus;
 });

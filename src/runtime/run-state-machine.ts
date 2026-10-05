@@ -1,5 +1,7 @@
+import Ajv from "ajv";
 import type { JournalEvent, RunManifest } from "../journal/types";
 import type { AgentNodeSnapshot, AgentNodeStatus, PhaseSnapshot, RunSnapshot, RunStatus } from "./run-types";
+import type { JsonSchema } from "../shared/workflow-types";
 
 const terminalAgentStatuses = new Set<AgentNodeStatus>(["completed", "cancelled", "interrupted"]);
 
@@ -11,6 +13,7 @@ export class RunStateMachine {
   #endedAt: string | null = null;
   #agents = new Map<string, AgentNodeSnapshot>();
   #recordedSessions = new Set<string>();
+  #blockSchemas = new Map<string, JsonSchema | undefined>();
 
   constructor(readonly manifest: RunManifest) {}
 
@@ -41,6 +44,15 @@ export class RunStateMachine {
         // 执行器事件没有 validationPath，保留其兼容读取语义。
         if (event.validationPath !== undefined && (!event.nodeId || !this.#recordedSessions.has(event.nodeId))) throw new Error("Control agent.completed 缺少先前的 agent.session 事实。");
         this.#applyAgentStatus(event.nodeId, "completed", event.at, event.diagnostic, event.result, event.agentSessionId);
+        return;
+      case "block.created":
+        this.#applyBlockCreated(event);
+        return;
+      case "block.answered":
+        this.#applyBlockAnswered(event);
+        return;
+      case "agent.continued":
+        this.#applyBlockContinued(event);
         return;
       case "run.status":
         this.#applyRunStatus(event.status, event.at, event.diagnostic);
@@ -96,6 +108,7 @@ export class RunStateMachine {
       startedAt: null,
       endedAt: null,
       agentSessionId: null,
+      block: null,
       request: event.request,
     });
   }
@@ -123,8 +136,37 @@ export class RunStateMachine {
       startedAt: status === "running" && agent.startedAt === null ? at : agent.startedAt,
       endedAt: terminalAgentStatuses.has(status) ? at : agent.endedAt,
       agentSessionId: agent.agentSessionId ?? agentSessionId,
+      // block 摘要只在 blocked 节点有意义。被取消、中断或完成后不得继续向
+      // CLI/Web 暴露已经失效的人工协助请求。
+      block: status === "blocked" ? agent.block : null,
     };
     this.#agents.set(nodeId, updated);
+  }
+
+  #applyBlockCreated(event: Extract<JournalEvent, { type: "block.created" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("block.created 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("block.created 必须属于当前 running 的原 Agent 会话。");
+    if (agent.block) throw new Error("同一 Agent 不能同时创建多个 block。");
+    this.#applyAgentStatus(event.nodeId, "blocked", event.at, event.diagnostic, null, event.agentSessionId);
+    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false } });
+    this.#blockSchemas.set(event.blockRequestId, event.answerSchema);
+  }
+
+  #applyBlockAnswered(event: Extract<JournalEvent, { type: "block.answered" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("block.answered 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId) throw new Error("block.answered 不属于当前 pending block。");
+    validateBlockAnswer(this.#blockSchemas.get(event.blockRequestId), event.answer);
+    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, answered: true } });
+  }
+
+  #applyBlockContinued(event: Extract<JournalEvent, { type: "agent.continued" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("agent.continued 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || !agent.block.answered) throw new Error("agent.continued 不属于已回答的 pending block。");
+    this.#applyAgentStatus(event.nodeId, "running", event.at, event.diagnostic, null, event.agentSessionId);
+    this.#blockSchemas.delete(event.blockRequestId);
   }
 
   #applyRunStatus(status: RunStatus, at: string, diagnostic: string | null): void {
@@ -145,4 +187,11 @@ function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
 
 function cloneAgent(agent: AgentNodeSnapshot): AgentNodeSnapshot {
   return { ...agent, request: { ...agent.request, input: agent.request.input ? { ...agent.request.input } : undefined } };
+}
+
+/** 重开 Journal 时必须重新验证答案，防止篡改 block.answered 绕过原 answer-schema。 */
+function validateBlockAnswer(schema: JsonSchema | undefined, answer: import("../shared/json").JsonObject): void {
+  if (!schema) return;
+  const validator = new Ajv({ allErrors: true, strict: false }).compile(schema);
+  if (!validator(answer)) throw new Error(`block.answered 结果不符合 answer-schema：${new Ajv({ allErrors: true, strict: false }).errorsText(validator.errors)}`);
 }

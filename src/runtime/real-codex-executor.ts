@@ -136,7 +136,7 @@ async function defaultStartSession(sessions: SessionBackend, adapter: CodexInter
 }
 
 function managedPrompt(node: AgentNodeSnapshot): string {
-  return `${node.request.prompt}\n\n完成任务后必须执行以下步骤：\n1. 将最终结构化结果写入一个绝对路径的 JSON 文件，文件内容必须是 JSON 对象。\n2. 执行 wave-flow complete --summary <简短完成说明> --result-file <该绝对路径>。\n不要仅用自然语言声称完成；只有上述命令成功后节点才会完成。`;
+  return `${node.request.prompt}\n\n完成任务后必须执行以下步骤：\n1. 将最终结构化结果写入一个绝对路径的 JSON 文件，文件内容必须是 JSON 对象。\n2. 执行 wave-flow complete --summary <简短完成说明> --result-file <该绝对路径>。\n若遇到无法安全继续的需求、环境或逻辑阻塞，执行 wave-flow block --need-help <完整说明> [--answer-schema <JSON Schema>]；命令会返回 blockRequestId 和 JSON 答案。验证答案已解决阻塞后，再执行 wave-flow continue --block-request-id <该 id>。\n不要仅用自然语言声称完成；只有上述命令成功后节点才会完成。`;
 }
 
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }

@@ -52,8 +52,20 @@ export type AgentNodeSnapshot = {
   readonly endedAt: string | null;
   /** 后续 Session Host 分配的会话身份；本阶段固定为 null。 */
   readonly agentSessionId: string | null;
+  /** 当前业务型人工协助请求；非 blocked 节点固定为 null。 */
+  readonly block: BlockSnapshot | null;
   /** 原始规范化请求，供 Journal / Replay 之后计算指纹。 */
   readonly request: NormalizedAgentRequest;
+};
+
+/** Phase → Agent 视图中可展示的 pending block 摘要。 */
+export type BlockSnapshot = {
+  /** 用于 answer / continue 绑定的稳定请求 id。 */
+  readonly blockRequestId: string;
+  /** Agent 为何无法安全继续、希望人如何帮助的说明。 */
+  readonly needHelp: string;
+  /** 人类答案是否已经耐久交付给原 Agent；不会自动恢复节点。 */
+  readonly answered: boolean;
 };
 
 /** 一个 Phase 的查询投影；顺序与 Workflow meta 完全一致。 */
