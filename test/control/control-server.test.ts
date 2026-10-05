@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlServer } from "../../src/control/control-server";
+import { ControlServer, type CompletionSubmission, type CompleteRequest } from "../../src/control/control-server";
 import { RunJournal } from "../../src/journal/run-journal";
 import { nodeDirectoryName, runsRoot } from "../../src/journal/paths";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
@@ -35,6 +35,14 @@ async function fixture(schema?: JsonSchema) {
 }
 
 describe("ControlServer complete", () => {
+  test("旧 CompleteRequest 导入保持为 CompletionSubmission 的兼容别名", () => {
+    const submission: CompleteRequest = {
+      runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: {},
+    };
+    const current: CompletionSubmission = submission;
+    expect(current.summary).toBe("done");
+  });
+
   test("校验身份后以结果、校验记录、Journal 的顺序完成节点", async () => {
     const value = await fixture({ type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } });
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
@@ -43,6 +51,18 @@ describe("ControlServer complete", () => {
     expect(validation).toMatchObject({ nodeId: "node", valid: true, result: { ok: true } });
     const reopened = await RunJournal.open(value.runId, runsRoot(value.cwd));
     expect(reopened.events.at(-1)).toMatchObject({ type: "agent.completed", diagnostic: "done", validationPath: expect.stringContaining("validation.json") });
+  });
+
+  test("非 Codex 的 Adapter 只能通过统一 CompletionSubmission 走 Control 完成", async () => {
+    const value = await fixture({ type: "object", required: ["remoteId"], properties: { remoteId: { type: "string" } } });
+    const submission: CompletionSubmission = {
+      runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId,
+      capability: value.capability, summary: "远端 Agent 已完成", result: { remoteId: "remote-42" },
+    };
+    await value.control.complete(submission);
+    expect(value.state.agent("node")).toMatchObject({ status: "completed", result: { remoteId: "remote-42" } });
+    const reopened = await RunJournal.open(value.runId, runsRoot(value.cwd));
+    expect(reopened.events.at(-1)).toMatchObject({ type: "agent.completed", validationPath: expect.stringContaining("validation.json") });
   });
 
   test("Schema 或 capability 错误时保持 running，且不产生完成事件", async () => {
@@ -57,6 +77,17 @@ describe("ControlServer complete", () => {
     const request = { runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } };
     await value.control.complete(request);
     await expect(value.control.complete(request)).rejects.toThrow("不匹配");
+  });
+
+  test("节点已 interrupted 后，旧受管会话不能将其复活为 completed", async () => {
+    const value = await fixture();
+    const interrupted: JournalEvent = {
+      type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node",
+      agentSessionId: value.agentSessionId, diagnostic: "会话不可验证", status: "interrupted",
+    };
+    await value.journal.append(interrupted); value.state.apply(interrupted);
+    await expect(value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "late", result: { ok: true } })).rejects.toThrow("只允许当前 running 节点");
+    expect(value.state.agent("node")).toMatchObject({ status: "interrupted", result: null });
   });
 
   test("首条任务会话坐标未耐久记录时拒绝 complete", async () => {

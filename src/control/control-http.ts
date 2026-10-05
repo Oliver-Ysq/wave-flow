@@ -1,8 +1,8 @@
 import type { JsonObject } from "../shared/json";
-import type { CompleteRequest, ControlServer } from "./control-server";
+import type { CompletionSubmission, ControlServer } from "./control-server";
 
 /** Control complete 的 loopback JSON 请求体；CLI 必须上传已读取的结果对象，而非文件路径。 */
-export type CompleteHttpRequest = CompleteRequest;
+export type CompleteHttpRequest = CompletionSubmission;
 
 /** 将一个已绑定节点的 ControlServer 挂载为单一路由；调用方负责 daemon 的 Run 路由与生命周期。 */
 export async function handleCompleteHttp(control: ControlServer, request: Request): Promise<Response> {

@@ -20,13 +20,32 @@ export type RegisteredControlNode = {
   readonly onCompleted?: (result: JsonObject) => void;
 };
 
-/** 受管 CLI 提交 complete 时发送的 JSON 内容；daemon 不读取调用方任意路径。 */
-export type CompleteRequest = RegisteredControlNode & {
+/**
+ * 所有 Adapter 共用的节点完成提交。
+ *
+ * Adapter 只能携带受管会话身份和 JSON 结果调用 Control；它没有 Journal、状态机
+ * 或 onCompleted 回调的写入权限，不能自行将节点标记为完成。
+ */
+export type CompletionSubmission = {
+  /** 所属 Run。 */
+  readonly runId: string;
+  /** 节点稳定 id。 */
+  readonly nodeId: string;
+  /** 受管 Agent 会话身份。 */
+  readonly agentSessionId: string;
+  /** 仅注入受管会话环境的 capability。 */
+  readonly capability: string;
   /** 可选展示摘要；仅用于诊断，不替代 JSON 结果。 */
   readonly summary: string;
   /** 受管 CLI 已在本地读取的 JSON 对象结果。 */
   readonly result: JsonObject;
 };
+
+/**
+ * @deprecated 请使用 CompletionSubmission。
+ * 保留该别名避免已有 Adapter 在完成协议改名时失去编译兼容；运行时语义完全相同。
+ */
+export type CompleteRequest = CompletionSubmission;
 
 /** 已确认首条任务投递后的会话记录；只有它耐久后才允许 complete。 */
 export type RecordedAgentSession = {
@@ -99,7 +118,7 @@ export class ControlServer {
   }
 
   /** 校验 capability、Schema 与 durable 写入后，唯一地完成 running 节点。 */
-  async complete(request: CompleteRequest): Promise<void> {
+  async complete(request: CompletionSubmission): Promise<void> {
     const key = controlKey(request.runId, request.nodeId);
     const node = this.#nodes.get(key);
     if (!node || node.agentSessionId !== request.agentSessionId || node.capability !== request.capability) throw new Error("Control capability、Run、节点或会话身份不匹配。");
