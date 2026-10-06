@@ -135,9 +135,10 @@ describe("Codex App Server viewer 与注册边界", () => {
     const sessions: SessionBackend = {
       async create(value) { capture.options = value; return identity; }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "missing" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
     };
-    await createCodexRemoteViewer(sessions, { runId: "run-1", node, identityFile: "/tmp/session.json" }, { endpoint: "ws://127.0.0.1:4500", threadId: "thr-1", turnId: "turn-1" });
+    await createCodexRemoteViewer(sessions, { runId: "run-1", node, identityFile: "/tmp/session.json", env: { WF_RECLAIM_TOKEN: "secret" } }, { endpoint: "ws://127.0.0.1:4500", threadId: "thr-1", turnId: "turn-1" });
     const viewerCommand = capture.options?.command;
     expect(viewerCommand).toEqual(["codex", "--remote", "ws://127.0.0.1:4500", "-c", "check_for_update_on_startup=false", "resume", "--no-alt-screen", "thr-1"]);
+    expect(capture.options?.env).toEqual({ WF_RECLAIM_TOKEN: "secret" });
     expect(JSON.stringify(viewerCommand)).not.toContain("Prompt");
   });
 

@@ -47,6 +47,7 @@ export class InteractiveCliBootstrap {
       command: plan.command,
       env: plan.env,
       identityFile: request.identityFile,
+      reclaimTokenHash: request.reclaimTokenHash,
     });
     try {
       assertIdentityMatchesRequest(identity, request);

@@ -1,5 +1,5 @@
 import type { JsonObject } from "../shared/json";
-import type { BlockAnswerSubmission, BlockSubmission, ContinueSubmission, ControlServer } from "./control-server";
+import type { BlockAnswerSubmission, BlockSubmission, ContinueSubmission, ControlServer, ReclaimBlockSubmission, ReclaimContinueSubmission } from "./control-server";
 
 /** 将受管 Agent 的 block 请求挂载为 loopback HTTP 路由。 */
 export async function handleBlockHttp(control: ControlServer, request: Request): Promise<Response> {
@@ -12,6 +12,17 @@ export async function handleBlockHttp(control: ControlServer, request: Request):
   } catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 }); }
 }
 
+/** 已认领旧会话的 block；daemon 先验证 session 再将请求交给 Control。 */
+export async function handleReclaimBlockHttp(control: ControlServer, request: Request): Promise<Response> {
+  try {
+    if (request.method !== "POST") return Response.json({ error: "Control reclaim block 只接受 POST。" }, { status: 405 });
+    const value = await readJson(request);
+    if (!isReclaimBlockSubmission(value)) return Response.json({ error: "Control reclaim block 请求无效。" }, { status: 400 });
+    const resolution = await control.blockReclaimed(value);
+    return Response.json(resolution);
+  } catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 }); }
+}
+
 /** 人类答案路由；答案只唤醒原 block 命令，不改变节点状态。 */
 export async function handleAnswerHttp(control: ControlServer, blockRequestId: string, request: Request): Promise<Response> {
   try {
@@ -20,6 +31,17 @@ export async function handleAnswerHttp(control: ControlServer, blockRequestId: s
     if (!value || typeof value !== "object" || Array.isArray(value) || !isJsonObject((value as Record<string, unknown>).answer)) return Response.json({ error: "Control answer 请求无效。" }, { status: 400 });
     const submission: BlockAnswerSubmission = { blockRequestId, answer: (value as { answer: JsonObject }).answer };
     await control.answer(submission);
+    return Response.json({ ok: true });
+  } catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 }); }
+}
+
+/** 已认领旧会话的 continue。 */
+export async function handleReclaimContinueHttp(control: ControlServer, request: Request): Promise<Response> {
+  try {
+    if (request.method !== "POST") return Response.json({ error: "Control reclaim continue 只接受 POST。" }, { status: 405 });
+    const value = await readJson(request);
+    if (!isReclaimContinueSubmission(value)) return Response.json({ error: "Control reclaim continue 请求无效。" }, { status: 400 });
+    await control.continueReclaimed(value);
     return Response.json({ ok: true });
   } catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 }); }
 }
@@ -50,6 +72,18 @@ function isContinueSubmission(value: unknown): value is ContinueSubmission {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
   return typeof item.blockRequestId === "string" && typeof item.runId === "string" && typeof item.nodeId === "string" && typeof item.agentSessionId === "string" && typeof item.capability === "string";
+}
+
+function isReclaimBlockSubmission(value: unknown): value is ReclaimBlockSubmission {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.blockRequestId === "string" && typeof item.runId === "string" && typeof item.nodeId === "string" && typeof item.agentSessionId === "string" && typeof item.needHelp === "string" && (item.answerSchema === undefined || isJsonObject(item.answerSchema));
+}
+
+function isReclaimContinueSubmission(value: unknown): value is ReclaimContinueSubmission {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.blockRequestId === "string" && typeof item.runId === "string" && typeof item.nodeId === "string" && typeof item.agentSessionId === "string";
 }
 
 function isJsonObject(value: unknown): value is JsonObject { return value !== null && typeof value === "object" && !Array.isArray(value); }

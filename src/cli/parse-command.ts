@@ -14,7 +14,8 @@ export type CompleteCommand = { readonly kind: "complete"; readonly argv: readon
 export type BlockCliCommand = { readonly kind: "block"; readonly argv: readonly string[] };
 export type AnswerCliCommand = { readonly kind: "answer"; readonly argv: readonly string[] };
 export type ContinueCliCommand = { readonly kind: "continue"; readonly argv: readonly string[] };
-export type CliCommand = RunCommand | InspectCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | BlockCliCommand | AnswerCliCommand | ContinueCliCommand | { readonly kind: "help" };
+export type ResumeCliCommand = { readonly kind: "resume"; readonly runId: string };
+export type CliCommand = RunCommand | InspectCommand | ResumeCliCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | BlockCliCommand | AnswerCliCommand | ContinueCliCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
@@ -29,6 +30,11 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
   if (command === "block") return { kind: "block", argv: rest };
   if (command === "answer") return { kind: "answer", argv: rest };
   if (command === "continue") return { kind: "continue", argv: rest };
+  if (command === "resume") {
+    const runId = rest[0];
+    if (!runId || runId.startsWith("-") || rest.length !== 1) throw new Error("resume 命令需要唯一 run-id。 ");
+    return { kind: "resume", runId };
+  }
   if (command === "start") { if (rest.length > 0) throw new Error("start 不接受参数。"); return { kind: "start" }; }
   if (command === "serve") { if (rest.length > 0) throw new Error("serve 不接受参数。"); return { kind: "serve" }; }
   if (command === "run") {

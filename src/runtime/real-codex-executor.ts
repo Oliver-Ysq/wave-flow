@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { renderAgentIdentity } from "../cli/agent-identity";
 import { CodexInteractiveAdapter } from "../adapters/codex-interactive-adapter";
 import type { ControlServer } from "../control/control-server";
 import { nodeDirectoryName } from "../journal/paths";
@@ -15,7 +17,7 @@ import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilit
 export class RealCodexExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
 
-  /** @param controlUrl 当前前台 daemon 的 loopback 根地址，仅注入该 Agent 会话。 */
+  /** @param controlUrl 仅用于当前 daemon 内部注册；不直接注入 Agent 工具环境。 */
   constructor(
     private readonly sessions: SessionBackend,
     private readonly controlUrl: string,
@@ -23,7 +25,7 @@ export class RealCodexExecutor implements AgentNodeExecutor {
     private readonly startSession: (sessions: SessionBackend, adapter: CodexInteractiveAdapter, request: InteractiveCliStartRequest) => Promise<{ readonly identity: SessionIdentity }> = defaultStartSession,
     private readonly livenessPollMs = 1_000,
     private readonly codexRpcInput = true,
-    private readonly startHybrid: (sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>) => Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; /** App Server 进程退出时 resolve；fake 启动器可省略。 */ readonly exited?: Promise<number>; stop(): void }> = defaultStartHybrid,
+    private readonly startHybrid: (sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string) => Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; /** App Server 进程退出时 resolve；fake 启动器可省略。 */ readonly exited?: Promise<number>; stop(): void }> = defaultStartHybrid,
   ) {}
 
   /** Runtime 创建 ControlServer 后绑定；未绑定时拒绝启动，避免无 capability 的真实 Agent。 */
@@ -49,12 +51,11 @@ export class RealCodexExecutor implements AgentNodeExecutor {
     if (!control) throw new Error("真实 Codex 执行器尚未绑定 ControlServer。");
     if (!node.agentSessionId) throw new Error("真实 Codex 节点缺少 agentSessionId。");
     const capability = crypto.randomUUID();
+    const reclaimTokenHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
     const sessionEnv = {
-        WF_CONTROL_URL: this.controlUrl,
         WF_RUN_ID: control.runId,
         WF_NODE_ID: node.id,
         WF_AGENT_SESSION_ID: node.agentSessionId,
-        WF_CONTROL_CAPABILITY: capability,
       };
     let settled = false;
     let resolveCompletion!: (result: JsonObject) => void;
@@ -66,7 +67,7 @@ export class RealCodexExecutor implements AgentNodeExecutor {
     // App Server 退出可能在调用方拿到 execute() 返回 Promise 前发生；先登记一个
     // 旁路 rejection handler，避免 Bun 将正确传播给调用方的中断误报为未处理拒绝。
     void completionWithFailure.catch(() => undefined);
-    control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, onCompleted: resolveCompletion });
+    control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, reclaimTokenHash, onCompleted: resolveCompletion });
     let stopHybrid: (() => void) | null = null;
     const cleanupHybrid = () => { if (stopHybrid !== null) stopHybrid(); };
     try {
@@ -75,7 +76,7 @@ export class RealCodexExecutor implements AgentNodeExecutor {
       let hybridBinding: CodexAppServerBinding | null = null;
       if (this.codexRpcInput) {
         try {
-          const hybrid = await this.startHybrid(this.sessions, node, managedPrompt(node), identityFile, sessionEnv);
+          const hybrid = await this.startHybrid(this.sessions, node, managedPrompt(node, renderAgentIdentity({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId })), identityFile, sessionEnv, reclaimTokenHash);
           started = hybrid;
           stopHybrid = hybrid.stop;
           hybridBinding = hybrid.binding;
@@ -94,11 +95,12 @@ export class RealCodexExecutor implements AgentNodeExecutor {
           }
         } catch (error) {
           if (error instanceof CodexAppServerAmbiguousSubmissionError) throw error;
-          started = await this.startOrdinary(node, control.runId, identityFile, sessionEnv);
+          started = await this.startOrdinary(node, control.runId, identityFile, sessionEnv, reclaimTokenHash, renderAgentIdentity({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId }));
         }
       } else {
-        started = await this.startOrdinary(node, control.runId, identityFile, sessionEnv);
+        started = await this.startOrdinary(node, control.runId, identityFile, sessionEnv, reclaimTokenHash, renderAgentIdentity({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId }));
       }
+      if (started.identity.reclaimTokenHash !== reclaimTokenHash) throw new Error("SessionBackend 返回的会话未携带匹配的 reclaim token hash。");
       await control.recordSession(hybridBinding
         ? { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, session: started.identity, delivery: "codex-rpc", appServer: hybridBinding }
         : { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, session: started.identity, delivery: "tmux" });
@@ -115,8 +117,8 @@ export class RealCodexExecutor implements AgentNodeExecutor {
     }
   }
 
-  private startOrdinary(node: AgentNodeSnapshot, runId: string, identityFile: string, sessionEnv: Readonly<Record<string, string>>): Promise<{ readonly identity: SessionIdentity }> {
-    return this.startSession(this.sessions, new CodexInteractiveAdapter(this.sessions, { sessionEnv }), { runId, node, prompt: managedPrompt(node), identityFile });
+  private startOrdinary(node: AgentNodeSnapshot, runId: string, identityFile: string, sessionEnv: Readonly<Record<string, string>>, reclaimTokenHash: string, identity: string): Promise<{ readonly identity: SessionIdentity }> {
+    return this.startSession(this.sessions, new CodexInteractiveAdapter(this.sessions, { sessionEnv }), { runId, node, prompt: managedPrompt(node, identity), identityFile, reclaimTokenHash });
   }
 
   private async monitorSession(identity: SessionIdentity, isSettled: () => boolean, reject: (error: Error) => void): Promise<void> {
@@ -135,13 +137,13 @@ async function defaultStartSession(sessions: SessionBackend, adapter: CodexInter
   return new InteractiveCliBootstrap(sessions).start(adapter, request);
 }
 
-function managedPrompt(node: AgentNodeSnapshot): string {
-  return `${node.request.prompt}\n\n完成任务后必须执行以下步骤：\n1. 将最终结构化结果写入一个绝对路径的 JSON 文件，文件内容必须是 JSON 对象。\n2. 执行 wave-flow complete --summary <简短完成说明> --result-file <该绝对路径>。\n若遇到无法安全继续的需求、环境或逻辑阻塞，执行 wave-flow block --need-help <完整说明> [--answer-schema <JSON Schema>]；命令会返回 blockRequestId 和 JSON 答案。验证答案已解决阻塞后，再执行 wave-flow continue --block-request-id <该 id>。\n不要仅用自然语言声称完成；只有上述命令成功后节点才会完成。`;
+function managedPrompt(node: AgentNodeSnapshot, identity: string): string {
+  return `${node.request.prompt}\n\n本 Agent 的稳定控制身份（不是秘密；每次控制命令必须原样携带）：${identity}\n\n完成任务后必须执行以下步骤：\n1. 将最终结构化结果写入一个绝对路径的 JSON 文件，文件内容必须是 JSON 对象。\n2. 执行 wave-flow complete --summary <简短完成说明> --result-file <该绝对路径> ${identity}。\n若遇到无法安全继续的需求、环境或逻辑阻塞，执行 wave-flow block --need-help <完整说明> [--answer-schema <JSON Schema>] ${identity}；命令会返回 blockRequestId 和 JSON 答案。验证答案已解决阻塞后，再执行 wave-flow continue --block-request-id <该 id> ${identity}。\n不要仅用自然语言声称完成；只有上述命令成功后节点才会完成。`;
 }
 
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
-async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>): Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; readonly exited: Promise<number>; stop(): void }> {
+async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string): Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; readonly exited: Promise<number>; stop(): void }> {
   const host = new CodexAppServerHost(undefined, "codex", 10_000, env);
   try {
     const endpoint = await host.start(bunCodexAppServerConnection, new AbortController().signal);
@@ -149,7 +151,7 @@ async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnaps
     const submission = await adapter.submitInitialPrompt(node, prompt, new AbortController().signal);
     let identity: SessionIdentity;
     try {
-      identity = await createCodexRemoteViewer(sessions, { runId: env.WF_RUN_ID, node, identityFile }, submission.binding);
+      identity = await createCodexRemoteViewer(sessions, { runId: env.WF_RUN_ID, node, identityFile, reclaimTokenHash, env }, submission.binding);
     } catch (error) {
       throw new CodexAppServerAmbiguousSubmissionError(`App Server 已确认首条任务但 remote viewer 创建失败，禁止回退投递：${error instanceof Error ? error.message : String(error)}`);
     }

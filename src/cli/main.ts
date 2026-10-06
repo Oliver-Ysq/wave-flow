@@ -53,6 +53,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
     }
     const client = new DaemonClient(baseUrl);
     if (command.kind === "answer") { await executeAnswer(parseAnswerCommand(command.argv), baseUrl); write("答案已交付给等待中的 Agent。"); return; }
+    if (command.kind === "resume") { const response = await client.resume(command.runId); write(formatSnapshot(response.snapshot)); return; }
     if (command.kind === "capabilities") {
       const snapshot = await client.capabilities();
       write(command.json ? JSON.stringify(snapshot, null, 2) : formatCapabilities(snapshot));

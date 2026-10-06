@@ -37,6 +37,7 @@ export class RunRuntime {
     readonly journal: RunJournal,
     readonly state: RunStateMachine,
     private readonly host: RunRuntimeHost,
+    private readonly replay = false,
   ) {}
 
   /** 创建 Manifest、Journal、状态机与 Host，尚不执行 Workflow。 */
@@ -62,6 +63,20 @@ export class RunRuntime {
     return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, sequence));
   }
 
+  /**
+   * 用户显式 resume 后，从 Workflow 起点重放调用轨迹。Host 以 sequence=0 开始逐项
+   * 比对 Journal；只复用连续匹配的 completed 节点。
+   */
+  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot()): Promise<RunRuntime> {
+    const opened = await RunJournal.open(runId, storeRoot);
+    if (opened.journal.manifest.runtimeVersion !== RUNTIME_VERSION) throw new Error(`resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${opened.journal.manifest.runtimeVersion} 只能读取。`);
+    const state = new RunStateMachine(opened.journal.manifest);
+    for (const event of opened.events) state.apply(event);
+    if (state.snapshot().status !== "running") throw new Error("只有仍为 running 的 Run 可以 resume。");
+    const historicalSequence = state.snapshot().phases.flatMap((phase) => phase.agents).reduce((maximum, node) => Math.max(maximum, node.sequence), 0);
+    return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, historicalSequence, true), true);
+  }
+
   /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。 */
   async run(workflow: WorkflowModule<JsonObject, unknown>): Promise<unknown> {
     try {
@@ -73,7 +88,7 @@ export class RunRuntime {
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      if (this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
+      if (!this.replay && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
       throw error;
     }
   }

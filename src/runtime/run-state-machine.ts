@@ -12,6 +12,7 @@ export class RunStateMachine {
   #diagnostic: string | null = null;
   #endedAt: string | null = null;
   #agents = new Map<string, AgentNodeSnapshot>();
+  #logicalSequences = new Map<string, number>();
   #recordedSessions = new Set<string>();
   #blockSchemas = new Map<string, JsonSchema | undefined>();
 
@@ -31,6 +32,9 @@ export class RunStateMachine {
         return;
       case "agent.created":
         this.#applyAgentCreated(event);
+        return;
+      case "agent.restarted":
+        this.#applyAgentRestarted(event);
         return;
       case "agent.status":
         this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic, null, event.agentSessionId);
@@ -85,8 +89,23 @@ export class RunStateMachine {
     return cloneAgent(agent);
   }
 
-  /** 是否已有节点完成真实会话事实耐久记录；供 daemon 判断 Run 可安全异步交还给 CLI。 */
-  hasRecordedSession(): boolean { return this.#recordedSessions.size > 0; }
+  /** 节点在当前 Workflow 分支中的逻辑调用位置；与追加式展示顺序分离。 */
+  logicalSequence(nodeId: string): number {
+    const value = this.#logicalSequences.get(nodeId);
+    if (!value) throw new Error(`未知 Agent 节点：${nodeId}`);
+    return value;
+  }
+
+  /**
+   * 是否有当前仍在运行或等待人工协助的节点完成真实会话事实耐久记录。
+   * 已 completed 节点的旧 session 不能让 resume 在新 attempt 尚未投递时提前返回。
+   */
+  hasRecordedSession(): boolean {
+    return [...this.#recordedSessions].some((nodeId) => {
+      const status = this.#agents.get(nodeId)?.status;
+      return status === "running" || status === "blocked";
+    });
+  }
 
   #applyAgentCreated(event: Extract<JournalEvent, { type: "agent.created" }>): void {
     if (this.#status !== "running") throw new Error("终态 Run 不能创建 Agent 节点。");
@@ -111,6 +130,20 @@ export class RunStateMachine {
       block: null,
       request: event.request,
     });
+    this.#logicalSequences.set(event.nodeId, event.logicalSequence ?? event.sequence);
+  }
+
+  /** 显式 resume 对同一节点创建新 attempt；只允许覆盖非 completed 的旧尝试。 */
+  #applyAgentRestarted(event: Extract<JournalEvent, { type: "agent.restarted" }>): void {
+    if (!event.nodeId) throw new Error("agent.restarted 缺少节点。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.sequence !== event.sequence || (event.logicalSequence !== undefined && this.logicalSequence(event.nodeId) !== event.logicalSequence) || (agent.status === "completed" && !event.invalidatedByPriorRestart)) throw new Error("agent.restarted 不属于可重跑的旧节点。");
+    if (!sameRequest(agent.request, event.request)) throw new Error("agent.restarted 请求与原节点不一致。");
+    if (agent.agentSessionId === event.newAgentSessionId) throw new Error("agent.restarted 不得复用旧会话身份。");
+    // 旧 attempt 的 agent.session 不能证明新 attempt 已安全投递；resume CLI 必须等候
+    // 新会话自己的 session 事实，不能因旧记录提前返回。
+    this.#recordedSessions.delete(event.nodeId);
+    this.#agents.set(event.nodeId, { ...agent, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null });
   }
 
   #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
@@ -187,6 +220,20 @@ function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
 
 function cloneAgent(agent: AgentNodeSnapshot): AgentNodeSnapshot {
   return { ...agent, request: { ...agent.request, input: agent.request.input ? { ...agent.request.input } : undefined } };
+}
+
+function sameRequest(left: import("../shared/workflow-types").NormalizedAgentRequest, right: import("../shared/workflow-types").NormalizedAgentRequest): boolean {
+  return canonical(left) === canonical(right);
+}
+
+function canonical(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** 重开 Journal 时必须重新验证答案，防止篡改 block.answered 绕过原 answer-schema。 */

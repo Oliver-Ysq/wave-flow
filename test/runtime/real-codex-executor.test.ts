@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { ControlServer } from "../../src/control/control-server";
 import { RunJournal } from "../../src/journal/run-journal";
 import { runsRoot } from "../../src/journal/paths";
@@ -49,7 +50,7 @@ describe("RealCodexExecutor", () => {
       missingSessions(), "http://127.0.0.1:9999", runsRoot(value.cwd),
       async () => { throw new Error("默认策略不应启动普通 tmux 投递"); }, 1,
       undefined,
-      async (_backend, node) => { hybridStarts += 1; return { identity: identity(value.manifest.runId, node.agentSessionId!), binding: { endpoint: "ws://127.0.0.1:9999", threadId: "thread", turnId: "turn" }, stop() {} }; },
+      async (_backend, node, _prompt, _file, _env, hash) => { hybridStarts += 1; return { identity: identity(value.manifest.runId, node.agentSessionId!, hash), binding: { endpoint: "ws://127.0.0.1:9999", threadId: "thread", turnId: "turn" }, stop() {} }; },
     );
     executor.bindControl(value.control);
     await expect(executor.execute(value.node)).rejects.toThrow("无法继续验证");
@@ -60,33 +61,52 @@ describe("RealCodexExecutor", () => {
     const value = await fixture();
     const capture: { createOptions: CreateSessionOptions | null } = { createOptions: null };
     const sessions: SessionBackend = {
-      async create(options) { capture.createOptions = options; return identity(value.manifest.runId, value.agentSessionId); }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen; }, async liveness() { return "exists" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+      async create(options) { capture.createOptions = options; return identity(value.manifest.runId, value.agentSessionId, options.reclaimTokenHash); }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen; }, async liveness() { return "exists" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
     };
+    let submittedPrompt = "";
     const executor = new RealCodexExecutor(sessions, "http://127.0.0.1:9999", runsRoot(value.cwd), async (backend, adapter, request) => {
+      submittedPrompt = request.prompt;
       const plan = await adapter.launch(request, new AbortController().signal);
-      const identity = await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId ?? undefined, cli: request.node.cli, cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile });
+      const identity = await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId ?? undefined, cli: request.node.cli, cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash });
       return { identity };
     }, 1_000, false);
     executor.bindControl(value.control);
     const completing = executor.execute(value.node);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitFor(() => capture.createOptions !== null);
     expect(capture.createOptions?.agentSessionId).toBe(value.agentSessionId);
-    expect(capture.createOptions?.env).toMatchObject({ WF_RUN_ID: value.manifest.runId, WF_NODE_ID: "node", WF_AGENT_SESSION_ID: value.agentSessionId, WF_CONTROL_URL: "http://127.0.0.1:9999" });
-    const capability = capture.createOptions?.env?.WF_CONTROL_CAPABILITY;
-    expect(capability).toBeString();
-    await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: capability!, summary: "done", result: { ok: true } });
+    expect(capture.createOptions?.env).toMatchObject({ WF_RUN_ID: value.manifest.runId, WF_NODE_ID: "node", WF_AGENT_SESSION_ID: value.agentSessionId });
+    const reclaimToken = capture.createOptions?.env?.WF_RECLAIM_TOKEN;
+    expect(reclaimToken).toBeUndefined();
+    expect(capture.createOptions?.env?.WF_CONTROL_URL).toBeUndefined();
+    expect(capture.createOptions?.env?.WF_CONTROL_CAPABILITY).toBeUndefined();
+    expect(capture.createOptions?.reclaimTokenHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(submittedPrompt).toContain(`--run-id ${value.manifest.runId} --node-id node --agent-session-id ${value.agentSessionId}`);
+    expect(submittedPrompt).toContain("wave-flow block");
+    expect(submittedPrompt).toContain("wave-flow continue");
+    expect(submittedPrompt).toContain("wave-flow complete");
+    await value.control.completeReclaimed({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.agentSessionId, summary: "done", result: { ok: true } });
     await expect(completing).resolves.toEqual({ ok: true });
   });
 
   test("会话 liveness 无法验证时中断等待并撤销 capability", async () => {
     const value = await fixture();
     const sessions: SessionBackend = {
-      async create() { return identity(value.manifest.runId, value.agentSessionId); }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen; }, async liveness() { return "unknown" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+      async create(options) { return identity(value.manifest.runId, value.agentSessionId, options.reclaimTokenHash); }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen; }, async liveness() { return "unknown" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
     };
-    const executor = new RealCodexExecutor(sessions, "http://127.0.0.1:9999", runsRoot(value.cwd), async (_backend, _adapter, request) => ({ identity: identity(request.runId, value.agentSessionId) }), 1, false);
+    const executor = new RealCodexExecutor(sessions, "http://127.0.0.1:9999", runsRoot(value.cwd), async (_backend, _adapter, request) => ({ identity: identity(request.runId, value.agentSessionId, request.reclaimTokenHash) }), 1, false);
     executor.bindControl(value.control);
     await expect(executor.execute(value.node)).rejects.toThrow("无法继续验证：unknown");
     await expect(value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: "anything", summary: "done", result: { ok: true } })).rejects.toThrow("不匹配");
+  });
+
+  test("SessionBackend 未回传会话标记 hash 时 fail-closed", async () => {
+    const value = await fixture();
+    const sessions: SessionBackend = {
+      async create() { return identity(value.manifest.runId, value.agentSessionId); }, async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return readyScreen; }, async liveness() { return "exists" as SessionLiveness; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const executor = new RealCodexExecutor(sessions, "http://127.0.0.1:9999", runsRoot(value.cwd), async (_backend, _adapter, request) => ({ identity: identity(request.runId, value.agentSessionId) }), 1, false);
+    executor.bindControl(value.control);
+    await expect(executor.execute(value.node)).rejects.toThrow("reclaim token hash");
   });
 
   test("codexRpcInput 成功时使用 hybrid 启动，不调用普通 tmux paste 启动", async () => {
@@ -98,7 +118,7 @@ describe("RealCodexExecutor", () => {
       sessions, "http://127.0.0.1:9999", runsRoot(value.cwd),
       async () => { ordinaryStarts += 1; throw new Error("ordinary should not run"); },
       1, true,
-      async (_backend, node, _prompt, _identityFile, env) => { hybridStarts += 1; expect(env.WF_AGENT_SESSION_ID).toBe(value.agentSessionId); return { identity: identity(value.manifest.runId, node.agentSessionId!), binding: { endpoint: "ws://127.0.0.1:9999/", threadId: "thread", turnId: "turn" }, stop() {} }; },
+      async (_backend, node, _prompt, _identityFile, env, hash) => { hybridStarts += 1; expect(env.WF_AGENT_SESSION_ID).toBe(value.agentSessionId); return { identity: identity(value.manifest.runId, node.agentSessionId!, hash), binding: { endpoint: "ws://127.0.0.1:9999/", threadId: "thread", turnId: "turn" }, stop() {} }; },
     );
     executor.bindControl(value.control);
     const completing = executor.execute(value.node);
@@ -131,7 +151,7 @@ describe("RealCodexExecutor", () => {
       { ...missingSessions(), async liveness() { return "exists" as SessionLiveness; } },
       "http://127.0.0.1:9999", runsRoot(value.cwd),
       async () => { throw new Error("不应回退普通投递"); }, 1, true,
-      async (_backend, node) => ({ identity: identity(value.manifest.runId, node.agentSessionId!), binding: { endpoint: "ws://127.0.0.1:9999", threadId: "thread", turnId: "turn" }, exited, stop() {} }),
+      async (_backend, node, _prompt, _identityFile, _env, hash) => ({ identity: identity(value.manifest.runId, node.agentSessionId!, hash), binding: { endpoint: "ws://127.0.0.1:9999", threadId: "thread", turnId: "turn" }, exited, stop() {} }),
     );
     executor.bindControl(value.control);
     const running = executor.execute(value.node);
@@ -141,8 +161,16 @@ describe("RealCodexExecutor", () => {
   });
 });
 
-function identity(runId: string, agentSessionId: string): SessionIdentity {
-  return { backend: "tmux", sessionName: "wf-test", backendRef: "/tmp/socket", runId, nodeId: "node", agentSessionId, cli: "codex", createdAt: new Date().toISOString() };
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("等待真实执行器创建会话超时。");
+    await Bun.sleep(5);
+  }
+}
+
+function identity(runId: string, agentSessionId: string, reclaimTokenHash?: string): SessionIdentity {
+  return { backend: "tmux", sessionName: "wf-test", backendRef: "/tmp/socket", runId, nodeId: "node", agentSessionId, cli: "codex", createdAt: new Date().toISOString(), ...(reclaimTokenHash ? { reclaimTokenHash } : {}) };
 }
 
 const readyScreen = "╭────────╮\n│ model: test │\n│ directory: /tmp │\n╰────────╯\n› Ask Codex to do anything\ntest · /tmp";

@@ -64,6 +64,26 @@ export class BlockBroker {
     return pending;
   }
 
+  /**
+   * 从 Journal 重建一个已经 durable 的 block；不得再次写 block.created。
+   * 仅 daemon 重启后的 Control 恢复路径使用，恢复后仍必须由原会话携带
+   * daemon 仍会在恢复前核验真实会话，重连者才能取得答案或调用 continue。
+   */
+  restore(submission: BlockSubmission, answer: JsonObject | null): void {
+    if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
+    if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已恢复。");
+    if (submission.answerSchema) new Ajv({ allErrors: true, strict: false }).compile(submission.answerSchema);
+    if (answer) validateAnswer(submission.answerSchema, answer);
+    this.#pending.set(submission.blockRequestId, { ...submission, answer, resolve: null, reject: null });
+  }
+
+  /** 验证重连请求恰好对应 Journal 中的同一个 block，而非创建第二个 block。 */
+  assertSameSubmission(submission: BlockSubmission): PendingBlock {
+    const pending = this.require(submission.blockRequestId);
+    if (pending.runId !== submission.runId || pending.nodeId !== submission.nodeId || pending.agentSessionId !== submission.agentSessionId || pending.capability !== submission.capability || pending.needHelp !== submission.needHelp || JSON.stringify(pending.answerSchema ?? null) !== JSON.stringify(submission.answerSchema ?? null)) throw new Error("重连 block 与 Journal 中原请求不一致。");
+    return pending;
+  }
+
   /** 原 block HTTP 调用等待人类答案；答案先到时立即返回。 */
   wait(blockRequestId: string): Promise<BlockResolution> {
     const pending = this.require(blockRequestId);

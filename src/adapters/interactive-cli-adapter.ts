@@ -12,6 +12,8 @@ export type InteractiveCliStartRequest = {
   readonly prompt: string;
   /** 会话 identity 的耐久文件路径；由 SessionBackend 在确认销毁后清理。 */
   readonly identityFile: string;
+  /** 随机会话标记 hash；SessionBackend 将其写入 identity，用于新 daemon 核验。 */
+  readonly reclaimTokenHash?: string;
 };
 
 /** Adapter 交给 SessionBackend 的正常 CLI 启动计划。 */

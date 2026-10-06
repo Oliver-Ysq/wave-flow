@@ -20,6 +20,7 @@ export class TmuxSessionBackend implements SessionBackend {
       cli: options.cli,
       createdAt: new Date().toISOString(),
       identityFile: options.identityFile,
+      reclaimTokenHash: options.reclaimTokenHash,
     };
     await this.client.createSession(identity.sessionName, options.cwd, {
       ...options.env,
@@ -32,6 +33,7 @@ export class TmuxSessionBackend implements SessionBackend {
       WF_NODE_ID: identity.nodeId,
       WF_AGENT_SESSION_ID: identity.agentSessionId,
       WF_CLI: identity.cli,
+      ...(identity.reclaimTokenHash ? { WF_RECLAIM_TOKEN_HASH: identity.reclaimTokenHash } : {}),
     }, shellCommand(options.command));
     if (identity.identityFile) {
       try {
@@ -79,8 +81,9 @@ export class TmuxSessionBackend implements SessionBackend {
       this.client.environment(identity.sessionName, "WF_NODE_ID"),
       this.client.environment(identity.sessionName, "WF_AGENT_SESSION_ID"),
       this.client.environment(identity.sessionName, "WF_CLI"),
+      this.client.environment(identity.sessionName, "WF_RECLAIM_TOKEN_HASH"),
     ]);
-    return values[0] === "tmux" && values[1] === identity.runId && values[2] === identity.nodeId && values[3] === identity.agentSessionId && values[4] === identity.cli ? "exists" : "unknown";
+    return values[0] === "tmux" && values[1] === identity.runId && values[2] === identity.nodeId && values[3] === identity.agentSessionId && values[4] === identity.cli && (identity.reclaimTokenHash === undefined || values[5] === identity.reclaimTokenHash) ? "exists" : "unknown";
   }
 
   /** detached tmux 会话没有观察者需要断开；该操作是幂等 no-op。 */

@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isJsonObject, type JsonObject } from "../shared/json";
 import { nodeDirectoryName, runDirectory, runsRoot, validateRunId, waveFlowHome } from "./paths";
-import type { JournalEvent, RunManifest } from "./types";
+import { COMPATIBLE_RUNTIME_VERSIONS, type JournalEvent, type RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
 import type { SessionIdentity } from "../sessions/types";
 
@@ -92,16 +92,16 @@ export class RunJournal {
   }
 
   /** 耐久写入一个节点完成结果；仅接受 JSON 对象。 */
-  async writeResult(nodeId: string, result: unknown): Promise<string> {
+  async writeResult(nodeId: string, result: unknown, agentSessionId?: string): Promise<string> {
     if (!isJsonObject(result)) throw new Error("节点完成结果必须是 JSON 对象。");
-    const relativePath = join("nodes", nodeDirectoryName(nodeId), "result.json");
+    const relativePath = attemptPath(nodeId, agentSessionId, "result.json");
     await atomicWrite(join(this.directory, relativePath), `${JSON.stringify({ nodeId, result }, null, 2)}\n`);
     return relativePath;
   }
 
   /** 耐久写入节点结果的 Schema 校验证据；必须早于 completed Journal 事件。 */
-  async writeValidation(nodeId: string, schema: unknown, result: JsonObject): Promise<string> {
-    const relativePath = join("nodes", nodeDirectoryName(nodeId), "validation.json");
+  async writeValidation(nodeId: string, schema: unknown, result: JsonObject, agentSessionId?: string): Promise<string> {
+    const relativePath = attemptPath(nodeId, agentSessionId, "validation.json");
     await atomicWrite(join(this.directory, relativePath), `${JSON.stringify({ nodeId, schema, result, valid: true }, null, 2)}\n`);
     return relativePath;
   }
@@ -152,7 +152,7 @@ export function validateManifest(value: unknown): RunManifest {
   const manifest = value as Record<string, unknown>;
   if (typeof manifest.runId !== "string") throw new Error("Manifest 缺少 runId。");
   validateRunId(manifest.runId);
-  if (manifest.runtimeVersion !== 3) throw new Error("Manifest Runtime 版本不兼容。");
+  if (!COMPATIBLE_RUNTIME_VERSIONS.includes(manifest.runtimeVersion as never)) throw new Error("Manifest Runtime 版本不兼容。");
   if (typeof manifest.clientRequestId !== "string" || !/^[0-9a-f-]{36}$/i.test(manifest.clientRequestId)) throw new Error("Manifest clientRequestId 无效。");
   if (typeof manifest.workflowHash !== "string" || !/^[0-9a-f]{64}$/i.test(manifest.workflowHash)) throw new Error("Manifest workflowHash 无效。");
   if (typeof manifest.workflowPath !== "string" || !manifest.workflowPath.startsWith("/")) throw new Error("Manifest workflowPath 必须为绝对路径。");
@@ -181,7 +181,10 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (event.nodeId !== null || typeof event.message !== "string") throw new Error("log.written payload 无效。");
       break;
     case "agent.created":
-      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.phase !== null && typeof event.phase !== "string") || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
+      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
+      break;
+    case "agent.restarted":
+      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || typeof event.newAgentSessionId !== "string" || !event.newAgentSessionId.trim() || typeof event.invalidatedByPriorRestart !== "boolean" || !isNormalizedRequest(event.request)) throw new Error("agent.restarted payload 无效。");
       break;
     case "agent.status":
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
@@ -228,7 +231,7 @@ function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" { retu
 
 function isSessionIdentity(value: unknown): value is SessionIdentity {
   if (!isPlainObject(value)) return false;
-  return value.backend === "tmux" && typeof value.sessionName === "string" && value.sessionName.trim() !== "" && typeof value.backendRef === "string" && value.backendRef.startsWith("/") && typeof value.runId === "string" && typeof value.nodeId === "string" && typeof value.agentSessionId === "string" && value.agentSessionId.trim() !== "" && value.cli === "codex" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && (value.identityFile === undefined || (typeof value.identityFile === "string" && value.identityFile.startsWith("/")));
+  return value.backend === "tmux" && typeof value.sessionName === "string" && value.sessionName.trim() !== "" && typeof value.backendRef === "string" && value.backendRef.startsWith("/") && typeof value.runId === "string" && typeof value.nodeId === "string" && typeof value.agentSessionId === "string" && value.agentSessionId.trim() !== "" && value.cli === "codex" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && (value.identityFile === undefined || (typeof value.identityFile === "string" && value.identityFile.startsWith("/"))) && (value.reclaimTokenHash === undefined || (typeof value.reclaimTokenHash === "string" && /^[0-9a-f]{64}$/i.test(value.reclaimTokenHash)));
 }
 
 function isAppServerCoordinate(value: unknown): boolean {
@@ -253,11 +256,12 @@ function isTruncatedJsonTail(line: string): boolean {
 /** 验证 completed 事件对应的独立结果文件，防止 Journal 单独伪造完成状态。 */
 async function validateCompletedResult(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
   if (event.nodeId === null) throw new Error("agent.completed 缺少 nodeId。");
-  const expectedPath = join("nodes", nodeDirectoryName(event.nodeId), "result.json");
-  if (event.resultPath !== expectedPath) throw new Error("agent.completed resultPath 不匹配节点目录。");
+  const expectedPath = attemptPath(event.nodeId, event.agentSessionId ?? undefined, "result.json");
+  const legacyPath = join("nodes", nodeDirectoryName(event.nodeId), "result.json");
+  if (event.resultPath !== expectedPath && event.resultPath !== legacyPath) throw new Error("agent.completed resultPath 不匹配节点目录。");
   let value: unknown;
   try {
-    value = JSON.parse(await readFile(join(directory, expectedPath), "utf8")) as unknown;
+    value = JSON.parse(await readFile(join(directory, event.resultPath), "utf8")) as unknown;
   } catch (error) {
     throw new Error(`agent.completed 结果文件不可读取：${error instanceof Error ? error.message : String(error)}`);
   }
@@ -269,13 +273,19 @@ async function validateCompletedResult(directory: string, event: Extract<Journal
 
 async function validateCompletedValidation(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
   if (event.nodeId === null || event.validationPath === undefined) throw new Error("agent.completed validation 记录无效。");
-  const expectedPath = join("nodes", nodeDirectoryName(event.nodeId), "validation.json");
-  if (event.validationPath !== expectedPath) throw new Error("agent.completed validationPath 不匹配节点目录。");
+  const expectedPath = attemptPath(event.nodeId, event.agentSessionId ?? undefined, "validation.json");
+  const legacyPath = join("nodes", nodeDirectoryName(event.nodeId), "validation.json");
+  if (event.validationPath !== expectedPath && event.validationPath !== legacyPath) throw new Error("agent.completed validationPath 不匹配节点目录。");
   let value: unknown;
-  try { value = JSON.parse(await readFile(join(directory, expectedPath), "utf8")) as unknown; } catch (error) { throw new Error(`agent.completed 校验记录不可读取：${error instanceof Error ? error.message : String(error)}`); }
+  try { value = JSON.parse(await readFile(join(directory, event.validationPath), "utf8")) as unknown; } catch (error) { throw new Error(`agent.completed 校验记录不可读取：${error instanceof Error ? error.message : String(error)}`); }
   if (!isPlainObject(value) || value.nodeId !== event.nodeId || value.valid !== true || !isDeepStrictEqual(value.schema, expectedSchema) || !isJsonObject(value.result) || !isDeepStrictEqual(value.result, event.result)) throw new Error("agent.completed 校验记录与节点 schema 或结果不一致。");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/** v4 attempt 结果不可覆盖旧 attempt；无 session id 的历史事件保留旧路径兼容。 */
+function attemptPath(nodeId: string, agentSessionId: string | undefined, file: "result.json" | "validation.json"): string {
+  return agentSessionId ? join("nodes", nodeDirectoryName(nodeId), "attempts", nodeDirectoryName(agentSessionId), file) : join("nodes", nodeDirectoryName(nodeId), file);
 }

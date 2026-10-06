@@ -21,6 +21,7 @@ describe("CLI run / inspect", () => {
     expect(parseCommand(["answer", "11111111-1111-4111-8111-111111111111", "--value", "{\"resolved\":true}"], "/workspace")).toMatchObject({ kind: "answer" });
     expect(parseCommand(["continue", "--block-request-id", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "continue" });
     expect(parseCommand(["inspect", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "inspect" });
+    expect(parseCommand(["resume", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "resume", runId: "11111111-1111-4111-8111-111111111111" });
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
     expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
     expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");

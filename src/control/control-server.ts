@@ -19,6 +19,8 @@ export type RegisteredControlNode = {
   readonly agentSessionId: string;
   /** 仅注入受管 Agent 会话环境的高熵 capability。 */
   readonly capability: string;
+  /** 受管 Agent 的长期认领凭证 hash；明文只存在于 Agent 工具环境。 */
+  readonly reclaimTokenHash: string;
   /** 节点完成后通知对应真实执行器返回结果；仅 daemon 内部使用，异常不得回滚已完成状态。 */
   readonly onCompleted?: (result: JsonObject) => void;
 };
@@ -43,6 +45,15 @@ export type CompletionSubmission = {
   /** 受管 CLI 已在本地读取的 JSON 对象结果。 */
   readonly result: JsonObject;
 };
+
+/** daemon 重启后由旧 Agent CLI 发起的稳定身份完成提交。 */
+/** Agent 明示稳定身份后的控制提交；身份只定位候选会话，daemon 仍验证真实会话。 */
+export type ReclaimCompletionSubmission = Omit<CompletionSubmission, "capability">;
+
+/** 旧 Agent 通过长期 token 认领后发起的 block。 */
+export type ReclaimBlockSubmission = Omit<BlockSubmission, "capability">;
+/** 旧 Agent 通过长期 token 认领后发起的 continue。 */
+export type ReclaimContinueSubmission = Omit<ContinueSubmission, "capability">;
 
 /**
  * @deprecated 请使用 CompletionSubmission。
@@ -83,12 +94,27 @@ export class ControlServer {
   /** 注册一个已进入 running 的真实 Agent；同一 node/session 只能注册一次。 */
   register(node: RegisteredControlNode): void {
     if (node.runId !== this.journal.manifest.runId) throw new Error("Control 节点不属于当前 Run。");
-    if (!node.agentSessionId.trim() || !node.capability.trim()) throw new Error("Control 注册缺少会话身份或 capability。");
+    if (!node.agentSessionId.trim() || !node.capability.trim() || !/^[0-9a-f]{64}$/i.test(node.reclaimTokenHash)) throw new Error("Control 注册缺少会话身份、capability 或 reclaim token hash。");
     const snapshot = this.state.agent(node.nodeId);
     if (snapshot.status !== "running" || snapshot.agentSessionId !== node.agentSessionId) throw new Error("Control 只能注册当前 running 的同一 Agent 会话。");
     const key = controlKey(node.runId, node.nodeId);
     if (this.#nodes.has(key)) throw new Error("Control 节点已注册。");
     this.#nodes.set(key, node);
+  }
+
+  /** 从 Journal 重建一个旧受管会话；blocked 时必须同时提供其唯一 pending block。 */
+  restore(node: Omit<RegisteredControlNode, "capability" | "onCompleted"> & { readonly session: SessionIdentity; readonly block?: { readonly blockRequestId: string; readonly needHelp: string; readonly answerSchema?: JsonSchema; readonly answer: JsonObject | null } }): void {
+    if (node.runId !== this.journal.manifest.runId || node.session.runId !== node.runId || node.session.nodeId !== node.nodeId || node.session.agentSessionId !== node.agentSessionId || node.session.reclaimTokenHash !== node.reclaimTokenHash) throw new Error("恢复 Control 会话身份或 reclaim token hash 不匹配。");
+    const snapshot = this.state.agent(node.nodeId);
+    if ((snapshot.status !== "running" && snapshot.status !== "blocked") || snapshot.agentSessionId !== node.agentSessionId) throw new Error("只能恢复当前 running 或 blocked 的旧 Agent 会话。");
+    if (snapshot.status === "blocked" && (!node.block || snapshot.block?.blockRequestId !== node.block.blockRequestId)) throw new Error("恢复 blocked 会话必须提供同一 pending block。");
+    if (snapshot.status === "running" && node.block) throw new Error("running 会话不得恢复 pending block。");
+    const key = controlKey(node.runId, node.nodeId);
+    if (this.#nodes.has(key)) throw new Error("Control 节点已注册。");
+    const restored = { runId: node.runId, nodeId: node.nodeId, agentSessionId: node.agentSessionId, reclaimTokenHash: node.reclaimTokenHash, capability: crypto.randomUUID() };
+    this.#nodes.set(key, restored);
+    this.#recordedSessions.add(key);
+    if (node.block) this.#blocks.restore({ ...restored, blockRequestId: node.block.blockRequestId, needHelp: node.block.needHelp, ...(node.block.answerSchema ? { answerSchema: node.block.answerSchema } : {}) }, node.block.answer);
   }
 
   /** 启动失败时撤销尚未完成的 capability；已完成节点不会被撤销。 */
@@ -138,8 +164,8 @@ export class ControlServer {
     if (snapshot.status !== "running") throw new Error(`complete 只允许当前 running 节点，实际为 ${snapshot.status}。`);
     if (snapshot.agentSessionId !== request.agentSessionId) throw new Error("complete 会话身份与当前节点不匹配。");
     validateSchema(snapshot.request.schema, request.result);
-    const resultPath = await this.journal.writeResult(request.nodeId, request.result);
-    const validationPath = await this.journal.writeValidation(request.nodeId, snapshot.request.schema ?? {}, request.result);
+    const resultPath = await this.journal.writeResult(request.nodeId, request.result, request.agentSessionId);
+    const validationPath = await this.journal.writeValidation(request.nodeId, snapshot.request.schema ?? {}, request.result, request.agentSessionId);
     const event: JournalEvent = { type: "agent.completed", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId, agentSessionId: request.agentSessionId, diagnostic: request.summary, resultPath, validationPath, result: request.result };
     await this.journal.append(event);
     this.state.apply(event);
@@ -148,6 +174,31 @@ export class ControlServer {
     } finally {
       this.#completing.delete(key);
     }
+  }
+
+  /** 旧 Agent 以稳定身份重新接入当前 daemon 并完成；会话真实性由 daemon 恢复验证。 */
+  async completeReclaimed(request: ReclaimCompletionSubmission): Promise<void> {
+    const key = controlKey(request.runId, request.nodeId);
+    const node = this.#nodes.get(key);
+    if (!node || node.agentSessionId !== request.agentSessionId) throw new Error("Run、节点或会话身份不匹配。");
+    return this.complete({ ...request, capability: node.capability });
+  }
+
+  /** daemon 已验证受管会话后，以当前内部 capability 执行 block。 */
+  async blockReclaimed(request: ReclaimBlockSubmission): Promise<BlockResolution> {
+    const node = this.requireReclaimedNode(request);
+    const snapshot = this.state.agent(request.nodeId);
+    if (snapshot.status === "blocked") {
+      this.#blocks.assertSameSubmission({ ...request, capability: node.capability });
+      return this.#blocks.wait(request.blockRequestId);
+    }
+    return this.block({ ...request, capability: node.capability });
+  }
+
+  /** daemon 已验证受管会话后，以当前内部 capability 执行 continue。 */
+  async continueReclaimed(request: ReclaimContinueSubmission): Promise<void> {
+    const node = this.requireReclaimedNode(request);
+    return this.continue({ ...request, capability: node.capability });
   }
 
   /**
@@ -199,6 +250,11 @@ export class ControlServer {
   /** daemon 用于按全局 blockRequestId 路由用户侧 answer；不暴露 pending 内容。 */
   hasBlock(blockRequestId: string): boolean { return this.#blocks.has(blockRequestId); }
 
+  /** 当前 Control 是否已注册或恢复指定的受管会话；供 daemon 并行 reclaim 去重。 */
+  hasNode(runId: string, nodeId: string, agentSessionId: string): boolean {
+    return this.#nodes.get(controlKey(runId, nodeId))?.agentSessionId === agentSessionId;
+  }
+
   /** 只有原 Agent 在收到答案并自行判断可继续后，才推进 blocked → running。 */
   async continue(request: ContinueSubmission): Promise<void> {
     if (this.#continuing.has(request.blockRequestId)) throw new Error("该 block 正在处理 continue，拒绝并发请求。");
@@ -224,6 +280,12 @@ export class ControlServer {
   private requireCurrentNode(key: string, request: Pick<BlockSubmission, "runId" | "nodeId" | "agentSessionId" | "capability">): RegisteredControlNode {
     const node = this.#nodes.get(key);
     if (!node || node.agentSessionId !== request.agentSessionId || node.capability !== request.capability) throw new Error("Control capability、Run、节点或会话身份不匹配。");
+    return node;
+  }
+
+  private requireReclaimedNode(request: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string }): RegisteredControlNode {
+    const node = this.#nodes.get(controlKey(request.runId, request.nodeId));
+    if (!node || node.agentSessionId !== request.agentSessionId) throw new Error("Run、节点或会话身份不匹配。");
     return node;
   }
 }

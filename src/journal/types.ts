@@ -4,7 +4,9 @@ import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { SessionIdentity } from "../sessions/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 3;
+export const RUNTIME_VERSION = 5;
+/** 当前实现可安全读取的历史耐久格式；旧格式只读兼容，不允许追加新的 Replay attempt。 */
+export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, RUNTIME_VERSION] as const;
 
 /** 一次 Run 创建后不可变的耐久身份信息。 */
 export type RunManifest = {
@@ -54,8 +56,24 @@ export type JournalEvent = JournalBase & ({
   readonly message: string;
 } | {
   readonly type: "agent.created";
+  /** Journal 展示顺序；动态分支的新节点从历史最大值继续。 */
   readonly sequence: number;
+  /** Workflow 中本次实际 agent() 调用位置；v3/v4 省略时等于 sequence。 */
+  readonly logicalSequence?: number;
   readonly phase: string | null;
+  readonly request: NormalizedAgentRequest;
+} | {
+  /** 用户显式 resume 后，为同一逻辑节点创建新的真实执行尝试。 */
+  readonly type: "agent.restarted";
+  /** 与原 agent.created 相同的稳定节点 id。 */
+  readonly sequence: number;
+  /** Workflow 中本次实际 agent() 调用位置；用于后续再次 resume。 */
+  readonly logicalSequence?: number;
+  /** 新 attempt 的会话身份；不得复用旧会话 id。 */
+  readonly newAgentSessionId: string;
+  /** true 表示此前已有节点不能复用，当前 completed 旧结果也必须随下游重新执行。 */
+  readonly invalidatedByPriorRestart: boolean;
+  /** 当前重新执行时验证到的请求；必须与原请求完全一致。 */
   readonly request: NormalizedAgentRequest;
 } | {
   readonly type: "agent.status";

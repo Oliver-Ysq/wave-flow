@@ -1,5 +1,7 @@
 import { isJsonObject, type JsonObject } from "../shared/json";
 import type { BlockResolution } from "../control/control-server";
+import { discoverDaemon } from "../daemon/daemon-lifecycle";
+import { parseAgentIdentity, type AgentIdentity } from "./agent-identity";
 
 /** Agent 发起业务型人工协助的命令参数。 */
 export type BlockCommand = {
@@ -7,10 +9,14 @@ export type BlockCommand = {
   readonly needHelp: string;
   /** 可选的人类答案 JSON Schema。 */
   readonly answerSchema?: JsonObject;
+  /** Agent 显式携带的稳定会话身份。 */
+  readonly identity: AgentIdentity;
 };
 
 /** 解析 `wave-flow block --need-help <text> [--answer-schema <json>]`。 */
 export function parseBlockCommand(argv: readonly string[]): BlockCommand {
+  const parsed = parseAgentIdentity(argv);
+  argv = parsed.rest;
   let needHelp: string | null = null;
   let answerSchema: JsonObject | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -25,25 +31,28 @@ export function parseBlockCommand(argv: readonly string[]): BlockCommand {
     throw new Error(`block 不支持选项：${flag}`);
   }
   if (!needHelp?.trim()) throw new Error("block 需要非空 --need-help。");
-  return { needHelp, ...(answerSchema ? { answerSchema } : {}) };
+  return { needHelp, identity: parsed.identity, ...(answerSchema ? { answerSchema } : {}) };
 }
 
 /** Agent 通过受管环境请求帮助，并在收到耐久答案后返回 JSON 对象。 */
-export async function executeBlock(command: BlockCommand, environment: Record<string, string | undefined> = process.env): Promise<BlockResolution> {
-  const endpoint = requireLoopbackControlUrl(environment.WF_CONTROL_URL);
-  const runId = required(environment, "WF_RUN_ID");
-  const response = await fetch(`${endpoint}/runs/${encodeURIComponent(runId)}/control/block`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ blockRequestId: crypto.randomUUID(), runId, nodeId: required(environment, "WF_NODE_ID"), agentSessionId: required(environment, "WF_AGENT_SESSION_ID"), capability: required(environment, "WF_CONTROL_CAPABILITY"), needHelp: command.needHelp, ...(command.answerSchema ? { answerSchema: command.answerSchema } : {}) }),
-  });
-  const value = await response.json() as BlockResolution | { error?: string };
-  if (!response.ok || !("answer" in value) || !("blockRequestId" in value)) throw new Error("error" in value ? value.error ?? `Control block 请求失败：${response.status}` : `Control block 请求失败：${response.status}`);
-  return value;
-}
-
-function required(environment: Record<string, string | undefined>, name: string): string { const value = environment[name]?.trim(); if (!value) throw new Error(`block 缺少受管会话环境变量：${name}。`); return value; }
-function requireLoopbackControlUrl(value: string | undefined): string {
-  let url: URL; try { url = new URL(value ?? ""); } catch { throw new Error("block Control URL 无效。"); }
-  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("block Control URL 必须是无凭据的 http://127.0.0.1:<port>。");
-  return url.toString().replace(/\/$/, "");
+export async function executeBlock(
+  command: BlockCommand,
+  discover: () => Promise<{ readonly baseUrl: string } | null> = discoverDaemon,
+): Promise<BlockResolution> {
+  const body = { blockRequestId: crypto.randomUUID(), ...command.identity, needHelp: command.needHelp, ...(command.answerSchema ? { answerSchema: command.answerSchema } : {}) };
+  // daemon 崩溃会中断旧 HTTP 等待；保留同一 request id 重连，绝不另建 block。
+  while (true) {
+    const daemon = await discover();
+    if (!daemon) { await Bun.sleep(500); continue; }
+    try {
+      const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/block`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const value = await response.json() as BlockResolution | { error?: string };
+      if (response.ok && "answer" in value && "blockRequestId" in value) return value;
+      // 明确的业务/身份拒绝不可靠重试掩盖；仅连接中断才重连。
+      throw new Error("error" in value ? value.error ?? `Control block 请求失败：${response.status}` : `Control block 请求失败：${response.status}`);
+    } catch (error) {
+      if (error instanceof TypeError) { await Bun.sleep(500); continue; }
+      throw error;
+    }
+  }
 }

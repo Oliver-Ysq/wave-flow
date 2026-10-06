@@ -29,6 +29,8 @@ export type SessionIdentity = {
   readonly createdAt: string;
   /** 可选的耐久 identity 文件坐标；仅 confirmed destroy 后可清理，unknown 时必须保留。 */
   readonly identityFile?: string;
+  /** 随机会话标记的 SHA-256；新 daemon 用它比对 Journal 与 tmux identity，绝不保存明文。 */
+  readonly reclaimTokenHash?: string;
 };
 
 /** 创建具体会话后端资源所需的受控输入。 */
@@ -39,6 +41,8 @@ export type CreateSessionOptions = {
   readonly nodeId: string;
   /** Runtime 已分配的稳定 Agent 会话身份；提供时后端必须原样使用，使 Control、Journal 与终端身份一致。 */
   readonly agentSessionId?: string;
+  /** 随机会话标记的 SHA-256；写入 session identity 供新 daemon 验证，明文不落盘。 */
+  readonly reclaimTokenHash?: string;
   /** 正常 CLI 标识；当前仅支持 Codex。 */
   readonly cli: "codex";
   /** 已验证的项目内工作目录。 */

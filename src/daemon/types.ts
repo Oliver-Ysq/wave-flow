@@ -22,3 +22,9 @@ export type RunResponse = {
   /** daemon 权威的 Phase → Agent 查询快照。 */
   readonly snapshot: RunSnapshot;
 };
+
+/** 用户显式请求同一 Run 的调用级恢复；runId 仅来自 URL，避免客户端覆写 Manifest 身份。 */
+export type ResumeRunRequest = {
+  /** true 代表用户已确认允许从第一个 interrupted 节点创建新 attempt。 */
+  readonly authorized: true;
+};

@@ -19,6 +19,20 @@ describe("RunJournal", () => {
     await expect(RunJournal.open("11111111-1111-4111-8111-111111111111", runsRoot(cwd))).rejects.toThrow("指定 Run 不存在或 manifest 不可读取");
   });
 
+  test("兼容读取 v3 Manifest", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const old = { ...manifest(cwd), runtimeVersion: 3 as const };
+    await RunJournal.create(old, runsRoot(cwd));
+    await expect(RunJournal.open(old.runId, runsRoot(cwd))).resolves.toBeDefined();
+  });
+
+  test("兼容读取 v4 Manifest", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const old = { ...manifest(cwd), runtimeVersion: 4 as const };
+    await RunJournal.create(old, runsRoot(cwd));
+    await expect(RunJournal.open(old.runId, runsRoot(cwd))).resolves.toBeDefined();
+  });
+
   test("耐久创建 Manifest、事件和 JSON 对象结果", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
@@ -26,6 +40,19 @@ describe("RunJournal", () => {
     expect(JSON.parse(await readFile(join(journal.directory, path), "utf8"))).toEqual({ nodeId: "scan/auth", result: { ok: true } });
     const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
     expect(opened.events).toHaveLength(1);
+  });
+
+  test("不同 Agent attempt 的结果与校验记录不得互相覆盖", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const first = await journal.writeResult("scan-auth", { attempt: 1 }, "session-one");
+    const second = await journal.writeResult("scan-auth", { attempt: 2 }, "session-two");
+    const firstValidation = await journal.writeValidation("scan-auth", {}, { attempt: 1 }, "session-one");
+    const secondValidation = await journal.writeValidation("scan-auth", {}, { attempt: 2 }, "session-two");
+    expect(first).not.toBe(second);
+    expect(firstValidation).not.toBe(secondValidation);
+    await expect(Bun.file(join(journal.directory, first)).json()).resolves.toEqual({ nodeId: "scan-auth", result: { attempt: 1 } });
+    await expect(Bun.file(join(journal.directory, second)).json()).resolves.toEqual({ nodeId: "scan-auth", result: { attempt: 2 } });
   });
 
   test("拒绝软链接或宽权限的 Run Store 根目录", async () => {

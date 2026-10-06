@@ -11,15 +11,21 @@ import { isDeepStrictEqual } from "node:util";
 
 /** 将 Workflow 作者 API 映射为耐久 Run 状态事实的 Runtime Host。 */
 export class RunRuntimeHost implements WorkflowExecutionHost {
-  #sequence = 0;
+  #logicalSequence = 0;
+  #journalSequence = 0;
   #backgroundFailure: Error | null = null;
+  #replayPrefix = true;
 
   constructor(
     private readonly journal: RunJournal,
     private readonly state: RunStateMachine,
     private readonly executor: AgentNodeExecutor,
-    initialSequence = 0,
-  ) { this.#sequence = initialSequence; }
+    initialJournalSequence = 0,
+    private readonly replay = false,
+  ) {
+    this.#journalSequence = initialJournalSequence;
+    if (!replay) this.#logicalSequence = initialJournalSequence;
+  }
 
   /** 返回当前 Run 的耐久存储与状态机，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return { journal: this.journal, state: this.state }; }
@@ -31,14 +37,21 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   async agent(request: NormalizedAgentRequest): Promise<JsonObject | null> {
     if (request.phase === undefined) throw new WorkflowContractError("agent() 前必须调用 phase() 选择已声明阶段。");
     const nodeId = request.id;
-    const created = this.event({
-      type: "agent.created",
-      nodeId,
-      sequence: ++this.#sequence,
-      phase: request.phase ?? null,
-      request,
-    });
-    await this.durableApply(created);
+    const logicalSequence = ++this.#logicalSequence;
+    let existing: import("./run-types").AgentNodeSnapshot | null = null;
+    try { existing = this.state.agent(nodeId); } catch {}
+    if (existing) {
+      if (!this.replay || this.state.logicalSequence(nodeId) !== logicalSequence || existing.phase !== (request.phase ?? null) || fingerprint(existing.request) !== fingerprint(request)) throw new WorkflowContractError(`resume 的第 ${logicalSequence} 个 agent() 调用与 Journal 节点不匹配：${nodeId}；旧=${fingerprint(existing.request)}；新=${fingerprint(request)}`);
+      if (existing.status === "completed" && this.#replayPrefix) return existing.result;
+      if ((existing.status === "running" || existing.status === "blocked") && this.#replayPrefix) throw new WorkflowContractError(`resume 遇到仍存活或未确认丢失的节点：${nodeId}；先恢复其 Control 或将其明确标记为 interrupted。`);
+      const invalidatedByPriorRestart = !this.#replayPrefix;
+      const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, request });
+      await this.durableApply(restarted);
+      this.#replayPrefix = false;
+    } else {
+      const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: request.phase ?? null, request });
+      await this.durableApply(created);
+    }
     try {
       await this.checkCapabilities(this.state.agent(nodeId));
     } catch (error) {
@@ -51,7 +64,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     // 全局 daemon 的名额必须在节点进入 running 前取得。这样超限节点可被权威
     // 快照如实显示为 queued，而不会先伪装成已启动的 tmux/App Server 会话。
     await this.executor.waitForStart?.(this.state.agent(nodeId));
-    const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: crypto.randomUUID() });
+    const restartedSession = existing && this.replay ? this.state.agent(nodeId).agentSessionId : null;
+    const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: restartedSession ?? crypto.randomUUID() });
     try {
       await this.durableApply(started);
     } catch (error) {
@@ -74,8 +88,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
         await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
         throw new Error(diagnostic);
       }
-      const resultPath = await this.journal.writeResult(nodeId, result);
-      await this.durableApply(this.event({ type: "agent.completed", nodeId, resultPath, result }));
+      const resultPath = await this.journal.writeResult(nodeId, result, node.agentSessionId ?? undefined);
+      await this.durableApply(this.event({ type: "agent.completed", nodeId, agentSessionId: node.agentSessionId, resultPath, result }));
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
@@ -88,11 +102,13 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
 
   /** 将作者 Phase 切换作为耐久事实记录；状态机的节点归属由请求内捕获的 Phase 决定。 */
   phase(title: string): void {
+    if (this.replay) return;
     void this.captureBackgroundFailure(this.durableApply(this.event({ type: "phase.changed", nodeId: null, title })));
   }
 
   /** 将作者日志追加为耐久事实；不从文本推断业务状态。 */
   log(message: string): void {
+    if (this.replay) return;
     void this.captureBackgroundFailure(this.durableApply(this.event({ type: "log.written", nodeId: null, message })));
   }
 
@@ -132,4 +148,15 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       this.#backgroundFailure ??= error instanceof Error ? error : new Error(String(error));
     }
   }
+}
+
+/** JSON-safe 请求的键排序指纹；字段写入顺序不能影响 resume 是否复用。 */
+function fingerprint(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return `[${value.map(fingerprint).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${fingerprint(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }

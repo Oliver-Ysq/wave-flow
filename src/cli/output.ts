@@ -22,10 +22,12 @@ export const helpText = `wave-flow 本机工作流 CLI
   wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--tmux-tui-input]
   wave-flow serve
   wave-flow inspect <run-id>
+  wave-flow resume <run-id>
   wave-flow capabilities [--json]
-  wave-flow block --need-help <text> [--answer-schema <json>]
+  wave-flow complete --summary <text> --result-file <absolute-json-path> --run-id <id> --node-id <id> --agent-session-id <id>
+  wave-flow block --need-help <text> [--answer-schema <json>] --run-id <id> --node-id <id> --agent-session-id <id>
   wave-flow answer <block-request-id> --value <json>
-  wave-flow continue --block-request-id <id>
+  wave-flow continue --block-request-id <id> --run-id <id> --node-id <id> --agent-session-id <id>
 
 start 确保当前用户的全局 daemon 已启动并健康后立即退出，不创建 Run。
 run 默认使用 App Server 的 turn/start ACK 投递首条任务，并保留 tmux 中的 Codex viewer 供人工查看和交互。

@@ -189,6 +189,8 @@ async function processStatus(pid: number, expected: string): Promise<"live" | "d
     const child = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
     const code = await child.exited;
     const output = (await new Response(child.stdout).text()).trim();
+    // 仅 macOS 已验证的 code=1 + 无输出可证明 PID 已死。其他非零码在 sandbox、
+    // 权限受限或 ps 异常时均可能出现，必须 fail-closed，不能误删未知 daemon 锁。
     if (code === 1 && !output) return "dead";
     if (code !== 0 || !output) return "unknown";
     return output === expected ? "live" : "dead";

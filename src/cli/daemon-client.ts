@@ -1,4 +1,4 @@
-import type { CreateRunRequest, RunResponse } from "../daemon/types";
+import type { CreateRunRequest, ResumeRunRequest, RunResponse } from "../daemon/types";
 import type { CapabilitySnapshot } from "../adapters/capabilities";
 
 /** 仅通过 loopback HTTP 与 daemon 通信的 CLI 客户端。 */
@@ -19,6 +19,11 @@ export class DaemonClient {
   /** 请求 daemon 返回内存或用户级 Journal 重建的 Run 查询视图。 */
   async inspect(runId: string): Promise<RunResponse> {
     return this.request(`/runs/${encodeURIComponent(runId)}`);
+  }
+
+  /** 用户明确授权后请求同一 Run 的调用级 resume。 */
+  async resume(runId: string): Promise<RunResponse> {
+    return this.request(`/runs/${encodeURIComponent(runId)}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ authorized: true } satisfies ResumeRunRequest) });
   }
 
   /** 请求 daemon 返回当前机器的三态能力快照。 */

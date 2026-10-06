@@ -295,6 +295,16 @@ export class CodexAppServerAdapter {
     });
   }
 
+  /** 仅验证旧 App Server 仍持有指定 thread；绝不创建新 turn。 */
+  async verifyExistingThread(threadId: string, signal: AbortSignal): Promise<void> {
+    return this.withExclusiveControlOperation(async () => {
+      if (!threadId.trim()) throw new Error("旧 App Server threadId 不能为空。");
+      await this.initialize(signal);
+      const result = await this.request(this.requireConnection(), "thread/resume", { threadId }, signal);
+      if (readId(result, "thread", "id") !== threadId) throw new Error("旧 App Server 返回的 threadId 与 Journal 不匹配。");
+    });
+  }
+
   /** 请求取消当前 turn；成功仅代表 App Server 已接受取消，不改变 Wave Flow 节点状态。 */
   async interrupt(threadId: string, turnId: string, signal: AbortSignal): Promise<void> {
     return this.withExclusiveControlOperation(async () => {
@@ -359,7 +369,7 @@ export class CodexAppServerAdapter {
 /** 为已验证 thread 创建同一 App Server 的 tmux 原生 viewer；不携带任务 Prompt。 */
 export async function createCodexRemoteViewer(
   sessions: SessionBackend,
-  request: { readonly runId: string; readonly node: AgentNodeSnapshot; readonly identityFile: string },
+  request: { readonly runId: string; readonly node: AgentNodeSnapshot; readonly identityFile: string; readonly reclaimTokenHash?: string; /** 仅注入 viewer 进程的运行环境；不得写入 Journal 或作为 Agent 身份来源。 */ readonly env?: Readonly<Record<string, string>> },
   binding: CodexAppServerBinding,
   codexCommand = "codex",
 ): Promise<SessionIdentity> {
@@ -374,7 +384,9 @@ export async function createCodexRemoteViewer(
     // 严格参考 Botmux remote viewer：viewer 不走受控输入 Gate，启动更新选择器会永久遮挡
     // 人工终端，故以进程级配置关闭它；该配置不写入用户全局 Codex 配置。
     command: [codexCommand, "--remote", binding.endpoint, "-c", "check_for_update_on_startup=false", "resume", "--no-alt-screen", binding.threadId],
+    env: request.env,
     identityFile: request.identityFile,
+    reclaimTokenHash: request.reclaimTokenHash,
   });
 }
 

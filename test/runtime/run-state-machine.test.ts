@@ -31,4 +31,26 @@ describe("Run 状态机", () => {
     duplicateCreation.apply(event({ type: "run.created", runStatus: "running" }));
     expect(() => duplicateCreation.apply(event({ type: "run.created", runStatus: "running" }))).toThrow("run.created 事件无效");
   });
+
+  test("显式 resume 可为 interrupted 节点记录新 attempt，但不能覆盖 completed 结果", () => {
+    const state = new RunStateMachine(manifest);
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd: "/project", prompt: "scan", phase: "scan" };
+    state.apply(event({ type: "run.created", runStatus: "running" }));
+    state.apply(event({ type: "agent.created", nodeId: "scan-auth", sequence: 1, phase: "scan", request }));
+    state.apply(event({ type: "agent.status", nodeId: "scan-auth", agentSessionId: "old", status: "running" }));
+    state.apply(event({ type: "agent.status", nodeId: "scan-auth", agentSessionId: "old", status: "interrupted" }));
+    state.apply(event({ type: "agent.restarted", nodeId: "scan-auth", sequence: 1, newAgentSessionId: "new", invalidatedByPriorRestart: false, request }));
+    expect(state.agent("scan-auth")).toMatchObject({ status: "queued", agentSessionId: "new" });
+  });
+
+  test("旧 completed 节点的 session 不能让 resume 把未投递的新 attempt 当作安全启动", () => {
+    const state = new RunStateMachine(manifest);
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd: "/project", prompt: "scan", phase: "scan" };
+    state.apply(event({ type: "run.created", runStatus: "running" }));
+    state.apply(event({ type: "agent.created", nodeId: "scan-auth", sequence: 1, phase: "scan", request }));
+    state.apply(event({ type: "agent.status", nodeId: "scan-auth", agentSessionId: "old", status: "running" }));
+    state.apply(event({ type: "agent.session", nodeId: "scan-auth", agentSessionId: "old", delivery: "tmux", session: { backend: "tmux", sessionName: "wf", backendRef: "/tmp/wf.sock", runId: manifest.runId, nodeId: "scan-auth", agentSessionId: "old", cli: "codex", createdAt: new Date().toISOString() } }));
+    state.apply(event({ type: "agent.completed", nodeId: "scan-auth", agentSessionId: "old", resultPath: "nodes/x/result.json", result: {} }));
+    expect(state.hasRecordedSession()).toBe(false);
+  });
 });

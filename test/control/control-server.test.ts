@@ -26,7 +26,7 @@ async function fixture(schema?: JsonSchema) {
   await journal.append(running); state.apply(running);
   const capability = "capability-1";
   const control = new ControlServer(journal, state);
-  control.register({ runId: manifest.runId, nodeId: "node", agentSessionId, capability });
+  control.register({ runId: manifest.runId, nodeId: "node", agentSessionId, capability, reclaimTokenHash: "a".repeat(64) });
   await control.recordSession({
     runId: manifest.runId, nodeId: "node", agentSessionId, delivery: "tmux",
     session: { backend: "tmux", sessionName: "wf-control", backendRef: "/tmp/wf-control.sock", runId: manifest.runId, nodeId: "node", agentSessionId, cli: "codex", createdAt: new Date().toISOString() },
@@ -47,7 +47,8 @@ describe("ControlServer complete", () => {
     const value = await fixture({ type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } });
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
     expect(value.state.agent("node")).toMatchObject({ status: "completed", result: { ok: true }, diagnostic: "done", agentSessionId: value.agentSessionId });
-    const validation = JSON.parse(await readFile(join(value.journal.directory, "nodes", nodeDirectoryName("node"), "validation.json"), "utf8"));
+    const completed = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.at(-1)! as Extract<JournalEvent, { type: "agent.completed" }>;
+    const validation = JSON.parse(await readFile(join(value.journal.directory, completed.validationPath!), "utf8"));
     expect(validation).toMatchObject({ nodeId: "node", valid: true, result: { ok: true } });
     const reopened = await RunJournal.open(value.runId, runsRoot(value.cwd));
     expect(reopened.events.at(-1)).toMatchObject({ type: "agent.completed", diagnostic: "done", validationPath: expect.stringContaining("validation.json") });
@@ -93,7 +94,7 @@ describe("ControlServer complete", () => {
   test("首条任务会话坐标未耐久记录时拒绝 complete", async () => {
     const value = await fixture();
     const control = new ControlServer(value.journal, value.state);
-    control.register({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
+    control.register({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, reclaimTokenHash: "a".repeat(64) });
     await expect(control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } })).rejects.toThrow("会话坐标尚未耐久记录");
   });
 
@@ -110,14 +111,16 @@ describe("ControlServer complete", () => {
   test("Control 完成的 validation 记录丢失时，Journal 重开必须拒绝", async () => {
     const value = await fixture();
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
-    await unlink(join(value.journal.directory, "nodes", nodeDirectoryName("node"), "validation.json"));
+    const completed = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.at(-1)! as Extract<JournalEvent, { type: "agent.completed" }>;
+    await unlink(join(value.journal.directory, completed.validationPath!));
     await expect(RunJournal.open(value.runId, runsRoot(value.cwd))).rejects.toThrow("校验记录不可读取");
   });
 
   test("Control 完成的 validation schema 被篡改时，Journal 重开必须拒绝", async () => {
     const value = await fixture({ type: "object", required: ["ok"] });
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
-    const path = join(value.journal.directory, "nodes", nodeDirectoryName("node"), "validation.json");
+    const completed = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.at(-1)! as Extract<JournalEvent, { type: "agent.completed" }>;
+    const path = join(value.journal.directory, completed.validationPath!);
     const validation = JSON.parse(await readFile(path, "utf8"));
     validation.schema = { type: "string" };
     await writeFile(path, JSON.stringify(validation), "utf8");

@@ -1,4 +1,5 @@
 import { DAEMON_PROTOCOL_VERSION, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, type DaemonDescriptor } from "./daemon-descriptor";
+import { runtimeRoot } from "../journal/paths";
 
 /** 已通过 descriptor 与 health 双重校验的全局 daemon 地址。 */
 export type ConnectedDaemon = { readonly baseUrl: string; readonly descriptor: DaemonDescriptor };
@@ -24,15 +25,18 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000): Promise<ConnectedD
 }
 
 /** 读取候选 descriptor 后必须 health 握手；descriptor 本身不可信。 */
-export async function discoverDaemon(): Promise<ConnectedDaemon | null> {
-  const descriptor = await readFreshDescriptor();
+export async function discoverDaemon(
+  root = runtimeRoot(),
+  readProcessStartIdentity: (pid: number) => Promise<string> = currentProcessStartIdentity,
+): Promise<ConnectedDaemon | null> {
+  const descriptor = await readFreshDescriptor(root);
   if (!descriptor) return null;
   const baseUrl = `http://127.0.0.1:${descriptor.port}`;
   try {
     const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1_000) });
     const health = await response.json() as Partial<DaemonDescriptor>;
     if (!response.ok || health.protocolVersion !== descriptor.protocolVersion || health.userIdentity !== descriptor.userIdentity || health.bootInstanceId !== descriptor.bootInstanceId) return null;
-    if (await currentProcessStartIdentity(descriptor.pid).catch(() => null) !== descriptor.processStartIdentity) return null;
+    if (await readProcessStartIdentity(descriptor.pid).catch(() => null) !== descriptor.processStartIdentity) return null;
     return { baseUrl, descriptor };
   } catch { return null; }
 }

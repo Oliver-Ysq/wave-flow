@@ -4,8 +4,8 @@ dist/
 # 全部位于用户级 ~/.wave-flow，不应在项目内生成。
 .wave-flow/*
 !.wave-flow/
-!.wave-flow/workflows/
-!.wave-flow/workflows/**
+# !.wave-flow/workflows/
+# !.wave-flow/workflows/**
 *.tsbuildinfo
 
 docs/
