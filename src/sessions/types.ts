@@ -71,6 +71,8 @@ export interface SessionBackend {
   liveness(identity: SessionIdentity): Promise<SessionLiveness>;
   /** 断开观察者；不得停止底层终端或 CLI 进程。 */
   detach(identity: SessionIdentity): Promise<void>;
+  /** 直接关闭 viewer 会话，不向其中的远程 CLI 写入 Ctrl-C 或其他按键。 */
+  closeViewer?(identity: SessionIdentity): Promise<DestroyResult>;
   /** 请求终止会话；只有确认 missing 才能报告 destroyed 并清理 identity。 */
   destroy(identity: SessionIdentity): Promise<DestroyResult>;
 }

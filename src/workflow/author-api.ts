@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { JsonObject } from "../shared/json";
 import type { AgentOptions, PipelineStage } from "../shared/workflow-types";
-import { requireWorkflowContext, runInConcurrentWorkflowScope, trackWorkflowOperation } from "./execution-context";
+import { createExecutionBatch, currentExecutionBatch, requireWorkflowContext, runInConcurrentWorkflowScope, trackWorkflowOperation } from "./execution-context";
 import { WorkflowContractError } from "./errors";
 
 const agentId = /^[A-Za-z0-9._:/-]{1,120}$/;
@@ -15,9 +15,14 @@ export function agent<T extends JsonObject = JsonObject>(prompt: string, options
   validateAgentOptions(options);
   if (context.agentIds.has(options.id)) throw new WorkflowContractError(`agent() 的 id 在同一 Run 内必须唯一：${options.id}`);
   context.agentIds.add(options.id);
+  // cwd 规范化包含 realpath 的异步等待。必须在进入等待前冻结当前 Phase、阶段访问和
+  // 调度批次，否则作者紧接着 phase() 时会把此前已调用的 agent() 错归到后一个阶段。
+  const phase = context.currentPhase;
+  const phaseVisit = context.currentPhaseVisit ?? { executionAttemptId: 1, phaseVisitId: 0, title: phase ?? "", occurrence: 0 };
+  const executionBatch = currentExecutionBatch();
   return trackWorkflowOperation((async () => {
     const cwd = await normalizeAgentCwd(options.cwd, context.cwd);
-    return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase: context.currentPhase }) as Promise<T | null>;
+    return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase }, executionBatch, phaseVisit) as Promise<T | null>;
   })());
 }
 
@@ -27,13 +32,14 @@ export function phase(title: string): void {
   if (context.concurrentDepth > 0) throw new WorkflowContractError("phase() 不能在 parallel() thunk 或 pipeline() stage 中调用。");
   if (!context.meta.phases.some((item) => item.title === title)) throw new WorkflowContractError(`phase() 必须匹配已声明的阶段：${title}`);
   context.currentPhase = title;
-  context.host.phase(title);
+  context.currentPhaseVisit = context.host.phase(title);
 }
 
 /** 并行启动全部惰性任务；每项失败为 null，不取消其他任务，并保留输入顺序。 */
 export async function parallel<T>(tasks: readonly (() => Promise<T> | T)[]): Promise<Array<T | null>> {
   requireWorkflowContext();
-  const settled = await Promise.allSettled(tasks.map((task) => inConcurrentScope(() => Promise.resolve().then(task))));
+  const batch = createExecutionBatch("parallel");
+  const settled = await Promise.allSettled(tasks.map((task) => inConcurrentScope(batch, () => Promise.resolve().then(task))));
   return settled.map((result) => {
     if (result.status === "fulfilled") return result.value;
     if (result.reason instanceof WorkflowContractError) throw result.reason;
@@ -44,10 +50,11 @@ export async function parallel<T>(tasks: readonly (() => Promise<T> | T)[]): Pro
 /** 让每个 item 独立、串行地通过 stages；某 item 失败后跳过后续 stages 并返回 null。 */
 export async function pipeline<T>(items: readonly T[], ...stages: readonly PipelineStage[]): Promise<Array<unknown | null>> {
   requireWorkflowContext();
-  return Promise.all(items.map((item) => inConcurrentScope(async () => {
+  const batches = stages.map(() => createExecutionBatch("parallel"));
+  return Promise.all(items.map((item) => inConcurrentScope(batches[0] ?? createExecutionBatch("parallel"), async () => {
     let value: unknown = item;
     try {
-      for (const stage of stages) value = await stage(value);
+      for (const [index, stage] of stages.entries()) value = await inConcurrentScope(batches[index], () => Promise.resolve(stage(value)));
       return value;
     } catch (error) {
       if (error instanceof WorkflowContractError) throw error;
@@ -75,8 +82,8 @@ function validateAgentOptions(options: AgentOptions): void {
   if (options.input !== undefined && !isJsonObject(options.input)) throw new WorkflowContractError("agent() 的 input 必须是 JSON-safe 对象。");
 }
 
-async function inConcurrentScope<T>(callback: () => Promise<T>): Promise<T> {
-  return runInConcurrentWorkflowScope(callback);
+async function inConcurrentScope<T>(batch: import("../runtime/workflow-host").ExecutionBatch, callback: () => Promise<T>): Promise<T> {
+  return runInConcurrentWorkflowScope(batch, callback);
 }
 
 async function normalizeAgentCwd(requestedCwd: string | undefined, runCwd: string): Promise<string> {

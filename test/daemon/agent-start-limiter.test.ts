@@ -4,7 +4,7 @@ import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
 
 function node(id: string): AgentNodeSnapshot {
   return {
-    id, phase: "run", sequence: 1, cli: "codex", sandbox: "read-only", cwd: "/tmp", label: id,
+    id, phase: "run", executionAttemptId: 1, phaseVisitId: 1, sequence: 1, executionBatch: { sequence: 1, mode: "serial" }, cli: "codex", sandbox: "read-only", cwd: "/tmp", label: id,
     status: "running", result: null, diagnostic: null, createdAt: new Date().toISOString(), startedAt: null, endedAt: null,
     agentSessionId: `${id}-session`, block: null, request: { id, cli: "codex", cwd: "/tmp", sandbox: "read-only", prompt: id, phase: "run" },
   };
@@ -77,5 +77,23 @@ describe("AgentStartLimiter", () => {
     const second = { ...node("second"), status: "queued" as const, agentSessionId: null };
     await expect(executor.waitForStart!(second)).resolves.toBeUndefined();
     executor.cancelStart!(second);
+  });
+
+  test("pause、recover、stop 与 viewer 坐标透明转发给真实执行器", async () => {
+    const node = { id: "node", agentSessionId: "session" } as AgentNodeSnapshot;
+    const calls: string[] = [];
+    const identity = { sessionName: "viewer" } as import("../../src/sessions/types").SessionIdentity;
+    const limited = new LimitedAgentExecutor({
+      execute: async () => ({}),
+      pause: async () => { calls.push("pause"); },
+      recover: async () => { calls.push("recover"); return {}; },
+      stop: async () => { calls.push("stop"); },
+      viewerSession: () => identity,
+    }, new AgentStartLimiter(1));
+    await limited.pause(node);
+    await limited.recover(node);
+    await limited.stop(node);
+    expect(calls).toEqual(["pause", "recover", "stop"]);
+    expect(limited.viewerSession(node)).toBe(identity);
   });
 });

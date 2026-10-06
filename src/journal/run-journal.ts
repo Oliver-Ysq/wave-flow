@@ -34,7 +34,7 @@ export class RunJournal {
   }
 
   /** 打开已存在 Run，返回 Manifest 与全部有效 Journal 事实；中间损坏必须拒绝。 */
-  static async open(runId: string, root: string): Promise<{ journal: RunJournal; events: readonly JournalEvent[] }> {
+  static async open(runId: string, root = runsRoot()): Promise<{ journal: RunJournal; events: readonly JournalEvent[] }> {
     validateRunId(runId);
     try { await assertProductionStateHome(root); await assertPrivateDirectory(root); } catch (error) {
       const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
@@ -174,6 +174,12 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "run.created":
       if (event.nodeId !== null || event.runStatus !== "running") throw new Error("run.created payload 无效。");
       break;
+    case "execution-attempt.started":
+      if (event.nodeId !== null || !isPositiveInteger(event.executionAttemptId)) throw new Error("execution-attempt.started payload 无效。");
+      break;
+    case "phase.entered":
+      if (event.nodeId !== null || !isPositiveInteger(event.executionAttemptId) || !isPositiveInteger(event.phaseVisitId) || typeof event.title !== "string" || !event.title.trim() || !isPositiveInteger(event.occurrence)) throw new Error("phase.entered payload 无效。");
+      break;
     case "phase.changed":
       if (event.nodeId !== null || typeof event.title !== "string" || !event.title.trim()) throw new Error("phase.changed payload 无效。");
       break;
@@ -181,10 +187,10 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (event.nodeId !== null || typeof event.message !== "string") throw new Error("log.written payload 无效。");
       break;
     case "agent.created":
-      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
+      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
       break;
     case "agent.restarted":
-      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || typeof event.newAgentSessionId !== "string" || !event.newAgentSessionId.trim() || typeof event.invalidatedByPriorRestart !== "boolean" || !isNormalizedRequest(event.request)) throw new Error("agent.restarted payload 无效。");
+      if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || typeof event.newAgentSessionId !== "string" || !event.newAgentSessionId.trim() || typeof event.invalidatedByPriorRestart !== "boolean" || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.restarted payload 无效。");
       break;
     case "agent.status":
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
@@ -193,6 +199,12 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (typeof event.nodeId !== "string" || !isSessionDelivery(event.delivery) || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.session payload 无效。");
       if (event.delivery === "tmux" && event.appServer !== undefined) throw new Error("普通 tmux 投递不得携带 App Server 坐标。");
       if (event.delivery === "codex-rpc" && !isAppServerCoordinate(event.appServer)) throw new Error("App Server 投递缺少有效坐标。");
+      break;
+    case "agent.recovered":
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !isAppServerCoordinate(event.appServer)) throw new Error("agent.recovered payload 无效。 ");
+      break;
+    case "agent.viewer":
+      if (typeof event.nodeId !== "string" || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.viewer payload 无效。 ");
       break;
     case "agent.completed":
       if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result) || (event.validationPath !== undefined && typeof event.validationPath !== "string")) throw new Error("agent.completed payload 无效。");
@@ -225,8 +237,9 @@ function isNormalizedRequest(value: unknown): boolean {
   return (value.phase === undefined || typeof value.phase === "string") && (value.input === undefined || isJsonObject(value.input));
 }
 
-function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "completed" || value === "cancelled" || value === "interrupted"; }
-function isRunStatus(value: unknown): boolean { return value === "running" || value === "completed" || value === "cancelled" || value === "interrupted"; }
+function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
+function isPositiveInteger(value: unknown): value is number { return Number.isInteger(value) && typeof value === "number" && value >= 1; }
+function isRunStatus(value: unknown): boolean { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" { return value === "tmux" || value === "codex-rpc"; }
 
 function isSessionIdentity(value: unknown): value is SessionIdentity {

@@ -16,6 +16,7 @@ import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilit
 /** 默认 Codex 真实执行器：以 App Server ACK 投递首条任务，并创建 tmux remote viewer。 */
 export class RealCodexExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
+  #active = new Map<string, ActiveHybridNode>();
 
   /** @param controlUrl 仅用于当前 daemon 内部注册；不直接注入 Agent 工具环境。 */
   constructor(
@@ -25,7 +26,7 @@ export class RealCodexExecutor implements AgentNodeExecutor {
     private readonly startSession: (sessions: SessionBackend, adapter: CodexInteractiveAdapter, request: InteractiveCliStartRequest) => Promise<{ readonly identity: SessionIdentity }> = defaultStartSession,
     private readonly livenessPollMs = 1_000,
     private readonly codexRpcInput = true,
-    private readonly startHybrid: (sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string) => Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; /** App Server 进程退出时 resolve；fake 启动器可省略。 */ readonly exited?: Promise<number>; stop(): void }> = defaultStartHybrid,
+    private readonly startHybrid: (sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string) => Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; /** 当前 App Server 的控制 Adapter；生产 pause/recover 必须提供，历史 fake 可省略。 */ readonly adapter?: CodexAppServerAdapter; /** App Server 进程退出时 resolve；fake 启动器可省略。 */ readonly exited?: Promise<number>; stop(): void }> = defaultStartHybrid,
   ) {}
 
   /** Runtime 创建 ControlServer 后绑定；未绑定时拒绝启动，避免无 capability 的真实 Agent。 */
@@ -80,14 +81,15 @@ export class RealCodexExecutor implements AgentNodeExecutor {
           started = hybrid;
           stopHybrid = hybrid.stop;
           hybridBinding = hybrid.binding;
+          if (hybrid.adapter) this.#active.set(nodeKey(node), { node, identity: started.identity, binding: hybrid.binding, adapter: hybrid.adapter, sessions: this.sessions, runsRoot: this.runsRoot, env: sessionEnv, reclaimTokenHash, stop: hybrid.stop, reject: rejectCompletion, isSettled: () => settled, paused: false, pauseInProgress: false });
           if (hybrid.exited) {
             void hybrid.exited.then((code) => {
-              if (settled) return;
+              if (settled || this.#active.get(nodeKey(node))?.paused === true || this.#active.get(nodeKey(node))?.pauseInProgress === true) return;
               control.unregister(control.runId, node.id, node.agentSessionId!);
               cleanupHybrid();
               rejectCompletion(new Error(`Codex App Server 进程已退出：${code}`));
             }).catch((error) => {
-              if (settled) return;
+              if (settled || this.#active.get(nodeKey(node))?.paused === true || this.#active.get(nodeKey(node))?.pauseInProgress === true) return;
               control.unregister(control.runId, node.id, node.agentSessionId!);
               cleanupHybrid();
               rejectCompletion(new Error(`Codex App Server 退出状态不可验证：${error instanceof Error ? error.message : String(error)}`));
@@ -104,17 +106,85 @@ export class RealCodexExecutor implements AgentNodeExecutor {
       await control.recordSession(hybridBinding
         ? { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, session: started.identity, delivery: "codex-rpc", appServer: hybridBinding }
         : { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, session: started.identity, delivery: "tmux" });
-      void this.monitorSession(started.identity, () => settled, (error) => {
+      void this.monitorSession(started.identity, () => settled || this.#active.get(nodeKey(node))?.pauseInProgress === true || this.#active.get(nodeKey(node))?.paused === true, (error) => {
         control.unregister(control.runId, node.id, node.agentSessionId!);
         cleanupHybrid();
         rejectCompletion(error);
       });
-      return completionWithFailure.finally(cleanupHybrid);
+      return completionWithFailure.finally(() => { this.#active.delete(nodeKey(node)); cleanupHybrid(); });
     } catch (error) {
       cleanupHybrid();
       control.unregister(control.runId, node.id, node.agentSessionId);
       throw error;
     }
+  }
+
+  /** App Server 当前 turn + 受管背景终端都已停止，并关闭 viewer 防止绕过 recover 输入。 */
+  async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> {
+    const active = this.requireActive(node);
+    active.pauseInProgress = true;
+    try {
+      if (!active.sessions.closeViewer) throw new Error("当前 Session Host 不支持无输入关闭 viewer。 ");
+      await active.sessions.closeViewer(active.identity).then((result) => {
+        if (result.status !== "destroyed") throw new Error(`无法确认关闭 tmux viewer：${result.diagnostic ?? "unknown"}`);
+      });
+      // blocked 节点的原 Agent 正在等待 wave-flow block HTTP；不应对不存在的
+      // active turn 再发 interrupt。关闭 viewer 后保留该等待，recover 时回到 blocked。
+      const control = controlSignal(signal);
+      if (!node.block) await active.adapter.interrupt(active.binding.threadId, active.binding.turnId, control);
+      await active.adapter.cleanBackgroundTerminals(active.binding.threadId, control);
+      const remaining = await active.adapter.listBackgroundTerminals(active.binding.threadId, control);
+      if (remaining.length > 0) throw new Error(`App Server 仍有 ${remaining.length} 个背景终端未停止。`);
+      active.paused = true;
+    } catch (error) {
+      throw new Error(`暂停 Codex App Server 节点失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      active.pauseInProgress = false;
+    }
+  }
+
+  /** 同一 thread 获取新 turn ACK 后重建 viewer；旧 Prompt 不会被重发。 */
+  async recover(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<import("./run-types").AgentRecovery> {
+    const active = this.requireActive(node);
+    if (!active.paused) throw new Error("节点未处于可恢复暂停状态。 ");
+    const submission = node.block
+      ? { binding: active.binding }
+      : await active.adapter.submitRecoveryPrompt(node, active.binding.threadId, recoveryPrompt(node), controlSignal(signal));
+    const identityFile = join(active.runsRoot, this.#control!.runId, "nodes", nodeDirectoryName(node.id), "session.json");
+    const viewer = await createCodexRemoteViewer(active.sessions, { runId: this.#control!.runId, node, identityFile, reclaimTokenHash: active.reclaimTokenHash, env: active.env }, submission.binding);
+    active.identity = viewer;
+    active.binding = submission.binding;
+    active.paused = false;
+    void this.monitorSession(viewer, () => active.isSettled() || active.pauseInProgress || active.paused, active.reject);
+    return node.block ? {} : { appServer: { ...submission.binding, protocolVersion: 1 } };
+  }
+
+  viewerSession(node: AgentNodeSnapshot): SessionIdentity | null { return this.#active.get(nodeKey(node))?.identity ?? null; }
+
+  /** 用户 stop：停止受管 turn / 工具并让 agent() 结束，不保留 recover。 */
+  async stop(node: AgentNodeSnapshot): Promise<void> {
+    const active = this.requireActive(node);
+    if (!active.paused && active.sessions.closeViewer) {
+      const result = await active.sessions.closeViewer(active.identity);
+      if (result.status !== "destroyed") throw new Error(`无法确认关闭 tmux viewer：${result.diagnostic ?? "unknown"}`);
+    }
+    // paused 已完成 interrupt + clean + 空清单验证；再次 stop 不得对旧 turn 重发
+    // interrupt，否则 App Server 可能将“无 active turn”当作错误而阻止用户终止 Run。
+    if (!active.paused) {
+      await active.adapter.interrupt(active.binding.threadId, active.binding.turnId, AbortSignal.timeout(15_000));
+      await active.adapter.cleanBackgroundTerminals(active.binding.threadId, AbortSignal.timeout(15_000));
+      if ((await active.adapter.listBackgroundTerminals(active.binding.threadId, AbortSignal.timeout(15_000))).length > 0) throw new Error("App Server 背景终端仍未停止。 ");
+    }
+    // Runtime 在本次 stop() await 返回后先耐久写入 agent.cancelled。若此处同步
+    // reject，agent() 的 catch 可能抢先写 agent.interrupted，破坏“用户停止”语义。
+    // 下一轮事件循环再结束执行 Promise，届时 Host 会看到 cancelled 而不覆盖状态。
+    setTimeout(() => active.reject(new Error("用户停止 Run。")), 0);
+  }
+
+  private requireActive(node: AgentNodeSnapshot): ActiveHybridNode {
+    const active = this.#active.get(nodeKey(node));
+    if (!active) throw new Error(`节点 ${node.id} 没有可控制的 App Server 会话。`);
+    return active;
   }
 
   private startOrdinary(node: AgentNodeSnapshot, runId: string, identityFile: string, sessionEnv: Readonly<Record<string, string>>, reclaimTokenHash: string, identity: string): Promise<{ readonly identity: SessionIdentity }> {
@@ -143,7 +213,13 @@ function managedPrompt(node: AgentNodeSnapshot, identity: string): string {
 
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
-async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string): Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; readonly exited: Promise<number>; stop(): void }> {
+/** 每个控制调用都有 15 秒上限，且 stop 可提前 abort 当前 pause/recover。 */
+function controlSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(15_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnapshot, prompt: string, identityFile: string, env: Readonly<Record<string, string>>, reclaimTokenHash: string): Promise<{ readonly identity: SessionIdentity; readonly binding: CodexAppServerBinding; readonly adapter: CodexAppServerAdapter; readonly exited: Promise<number>; stop(): void }> {
   const host = new CodexAppServerHost(undefined, "codex", 10_000, env);
   try {
     const endpoint = await host.start(bunCodexAppServerConnection, new AbortController().signal);
@@ -155,9 +231,32 @@ async function defaultStartHybrid(sessions: SessionBackend, node: AgentNodeSnaps
     } catch (error) {
       throw new CodexAppServerAmbiguousSubmissionError(`App Server 已确认首条任务但 remote viewer 创建失败，禁止回退投递：${error instanceof Error ? error.message : String(error)}`);
     }
-    return { identity, binding: submission.binding, exited: host.exited, stop: () => { void adapter.close(); host.stop(); } };
+    return { identity, binding: submission.binding, adapter, exited: host.exited, stop: () => { void adapter.close(); host.stop(); } };
   } catch (error) {
     host.stop();
     throw error;
   }
+}
+
+type ActiveHybridNode = {
+  readonly node: AgentNodeSnapshot;
+  identity: SessionIdentity;
+  binding: CodexAppServerBinding;
+  readonly adapter: CodexAppServerAdapter;
+  readonly sessions: SessionBackend;
+  readonly runsRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly reclaimTokenHash: string;
+  readonly stop: () => void;
+  readonly reject: (error: Error) => void;
+  readonly isSettled: () => boolean;
+  paused: boolean;
+  /** viewer 关闭到 paused 事实落盘之间，liveness 缺失是预期而非会话崩溃。 */
+  pauseInProgress: boolean;
+};
+
+function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.agentSessionId ?? ""}`; }
+
+function recoveryPrompt(node: AgentNodeSnapshot): string {
+  return `这是 Wave Flow 用户授权的恢复。上一回合已经被停止，不能假设它未产生副作用。请先检查当前工作目录、Git 状态、已生成文件、测试和命令结果，从已有现场继续完成原任务“${node.request.prompt}”。不确定某项有副作用步骤是否执行过时，先检查证据；无法安全判断时使用 wave-flow block --need-help 求助。`;
 }

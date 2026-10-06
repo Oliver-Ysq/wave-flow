@@ -4,7 +4,7 @@ import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
 import type { CreateSessionOptions, DestroyResult, SessionBackend, SessionIdentity, SessionLiveness } from "../../src/sessions/types";
 
 const node: AgentNodeSnapshot = {
-  id: "review", phase: "执行", sequence: 1, cli: "codex", sandbox: "workspace-write", cwd: "/workspace", label: "review", status: "running", result: null, diagnostic: null,
+  id: "review", phase: "执行", executionAttemptId: 1, phaseVisitId: 1, sequence: 1, executionBatch: { sequence: 1, mode: "serial" }, cli: "codex", sandbox: "workspace-write", cwd: "/workspace", label: "review", status: "running", result: null, diagnostic: null,
   createdAt: "2026-10-04T00:00:00.000Z", startedAt: "2026-10-04T00:00:00.000Z", endedAt: null, agentSessionId: null, block: null,
   request: { id: "review", cli: "codex", label: "review", cwd: "/workspace", sandbox: "workspace-write", prompt: "检查实现", phase: "执行" },
 };
@@ -126,6 +126,21 @@ describe("CodexAppServerAdapter", () => {
     await expect(subject.interrupt("thr-1", "turn-1", new AbortController().signal)).rejects.toThrow("拒绝并发请求");
     connection.release();
     await expect(first).resolves.toMatchObject({ binding: { turnId: "turn-1" } });
+  });
+
+  test("pause 可精确中断 turn、清理背景终端并确认清单为空", async () => {
+    const { adapter: subject, connection } = adapter([
+      { id: 1, result: {} }, { id: 2, result: {} }, { id: 3, result: {} }, { id: 4, result: { data: [] } },
+    ]);
+    await subject.interrupt("thr-1", "turn-1", new AbortController().signal);
+    await subject.cleanBackgroundTerminals("thr-1", new AbortController().signal);
+    await expect(subject.listBackgroundTerminals("thr-1", new AbortController().signal)).resolves.toEqual([]);
+    expect(connection.sent.map(methodOf)).toEqual(["initialize", "initialized", "turn/interrupt", "thread/backgroundTerminals/clean", "thread/backgroundTerminals/list"]);
+  });
+
+  test("背景终端列表必须是协议对象，拒绝把损坏响应当作已暂停", async () => {
+    const { adapter: subject } = adapter([{ id: 1, result: {} }, { id: 2, result: { data: [{}] } }]);
+    await expect(subject.listBackgroundTerminals("thr-1", new AbortController().signal)).rejects.toThrow("条目无效");
   });
 });
 

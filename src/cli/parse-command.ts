@@ -10,12 +10,19 @@ export type CapabilitiesCommand = { readonly kind: "capabilities"; readonly json
 /** 显式确保当前用户的全局 daemon 已健康启动；成功后立即退出。 */
 export type StartCommand = { readonly kind: "start" };
 export type ServeCommand = { readonly kind: "serve" };
+/** 确保 daemon 后输出同源 Local Web 地址；不自动打开浏览器。 */
+export type WebCliCommand = { readonly kind: "web" };
+/** 显式优雅关闭已验证的当前用户 daemon；不会启动新 daemon。 */
+export type CloseCliCommand = { readonly kind: "close" };
 export type CompleteCommand = { readonly kind: "complete"; readonly argv: readonly string[] };
 export type BlockCliCommand = { readonly kind: "block"; readonly argv: readonly string[] };
 export type AnswerCliCommand = { readonly kind: "answer"; readonly argv: readonly string[] };
 export type ContinueCliCommand = { readonly kind: "continue"; readonly argv: readonly string[] };
 export type ResumeCliCommand = { readonly kind: "resume"; readonly runId: string };
-export type CliCommand = RunCommand | InspectCommand | ResumeCliCommand | CapabilitiesCommand | StartCommand | ServeCommand | CompleteCommand | BlockCliCommand | AnswerCliCommand | ContinueCliCommand | { readonly kind: "help" };
+export type PauseCliCommand = { readonly kind: "pause"; readonly runId: string };
+export type RecoverCliCommand = { readonly kind: "recover"; readonly runId: string };
+export type StopCliCommand = { readonly kind: "stop"; readonly runId: string };
+export type CliCommand = RunCommand | InspectCommand | ResumeCliCommand | PauseCliCommand | RecoverCliCommand | StopCliCommand | CapabilitiesCommand | StartCommand | ServeCommand | WebCliCommand | CloseCliCommand | CompleteCommand | BlockCliCommand | AnswerCliCommand | ContinueCliCommand | { readonly kind: "help" };
 
 /** 解析 4.1 支持的 run / inspect / help 命令与参数。 */
 export function parseCommand(argv: readonly string[], initialCwd: string): CliCommand {
@@ -35,8 +42,15 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
     if (!runId || runId.startsWith("-") || rest.length !== 1) throw new Error("resume 命令需要唯一 run-id。 ");
     return { kind: "resume", runId };
   }
+  if (command === "pause" || command === "recover" || command === "stop") {
+    const runId = rest[0];
+    if (!runId || runId.startsWith("-") || rest.length !== 1) throw new Error(`${command} 命令需要唯一 run-id。 `);
+    return { kind: command, runId };
+  }
   if (command === "start") { if (rest.length > 0) throw new Error("start 不接受参数。"); return { kind: "start" }; }
   if (command === "serve") { if (rest.length > 0) throw new Error("serve 不接受参数。"); return { kind: "serve" }; }
+  if (command === "web") { if (rest.length > 0) throw new Error("web 不接受参数。"); return { kind: "web" }; }
+  if (command === "close") { if (rest.length > 0) throw new Error("close 不接受参数。"); return { kind: "close" }; }
   if (command === "run") {
     const workflowPath = rest[0];
     if (!workflowPath || workflowPath.startsWith("-")) throw new Error("run 命令需要 Workflow 路径。");

@@ -41,6 +41,30 @@ describe("RunRuntime", () => {
     expect(instance.snapshot()).toMatchObject({ status: "completed", phases: [{ title: "scan", agents: [{ id: "scan-auth", status: "completed", result: { ok: true } }] }] });
   });
 
+  test("回溯 phase 会耐久拆分为独立阶段访问，重开后不按标题错误合并", async () => {
+    const loopWorkflow: WorkflowModule<JsonObject, unknown> = {
+      meta: { name: "phase-loop", description: "Loop phases.", phases: [{ title: "guess" }, { title: "analyze" }] },
+      default: async () => {
+        for (let round = 1; round <= 2; round += 1) {
+          phase("guess"); await agent(`guess ${round}`, { id: `guess-${round}`, cli: "codex" });
+          phase("analyze"); await agent(`analyze ${round}`, { id: `analyze-${round}`, cli: "codex" });
+        }
+        return { rounds: 2 };
+      },
+    };
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-phase-loop-")); directories.push(cwd);
+    const workflowPath = join(cwd, "workflow.ts"); await writeFile(workflowPath, "workflow source", "utf8");
+    const instance = await RunRuntime.create({ workflow: loopWorkflow, input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: cwd, workflowPath, storeRoot: runsRoot(join(cwd, "store")), executor: { execute: async (node) => ({ node: node.id }) } });
+    await instance.run(loopWorkflow);
+    const reopened = await RunRuntime.open(instance.snapshot().id, { execute: async () => ({ unused: true }) }, join(instance.journal.directory, ".."));
+    expect(reopened.snapshot().phaseVisits.map((visit) => ({ title: visit.title, occurrence: visit.occurrence, agents: visit.batches.flatMap((batch) => batch.agents.map((agent) => agent.id)) }))).toEqual([
+      { title: "guess", occurrence: 1, agents: ["guess-1"] },
+      { title: "analyze", occurrence: 1, agents: ["analyze-1"] },
+      { title: "guess", occurrence: 2, agents: ["guess-2"] },
+      { title: "analyze", occurrence: 2, agents: ["analyze-2"] },
+    ]);
+  });
+
   test("executor 返回 null 时标记 interrupted，不能伪装为业务失败", async () => {
     const instance = await runtime({ execute: async () => null });
     await expect(instance.run(workflow)).rejects.toThrow("无法验证节点已完成");
@@ -126,6 +150,8 @@ describe("RunRuntime", () => {
     expect(executions).toBe(0);
     const opened = await RunRuntime.open(instance.journal.manifest.runId, { execute: async () => ({ unused: true }) }, join(instance.journal.directory, ".."));
     expect(opened.snapshot().phases[0]?.agents).toHaveLength(1);
+    const journal = await RunJournal.open(instance.journal.manifest.runId, join(instance.journal.directory, ".."));
+    expect(journal.events.filter((event) => event.type === "execution-attempt.started")).toHaveLength(1);
   });
 
   test("Runtime API 拒绝对只读兼容的 v4 Journal 执行 Replay", async () => {
@@ -154,6 +180,8 @@ describe("RunRuntime", () => {
     expect(executions).toBe(1);
     const opened = await RunJournal.open(instance.journal.manifest.runId, join(instance.journal.directory, ".."));
     expect(opened.events.filter((event) => event.type === "agent.restarted")).toHaveLength(1);
+    expect(opened.events.filter((event) => event.type === "execution-attempt.started")).toHaveLength(2);
+    expect(opened.events.filter((event) => event.type === "phase.entered").at(-1)).toMatchObject({ executionAttemptId: 2, title: "scan", occurrence: 1 });
   });
 
   test("resume 的 Agent 请求不匹配时拒绝且不污染旧 Journal", async () => {
@@ -245,6 +273,21 @@ describe("RunRuntime", () => {
     await expect(second.run(flow)).resolves.toEqual({ resumed: "new-branch" });
   });
 
+  test("重开当前尝试时新动态节点的展示序号必须避开旧尝试历史", async () => {
+    const instance = await runtime({ execute: async () => ({ unused: true }) });
+    const request = (id: string) => ({ id, cli: "codex" as const, sandbox: "read-only" as const, cwd: instance.journal.manifest.workflowProjectCwd, prompt: id, phase: "scan" });
+    const base = { at: new Date().toISOString(), runId: instance.journal.manifest.runId, agentSessionId: null, diagnostic: null };
+    const firstAttempt = { type: "agent.created" as const, ...base, nodeId: "old-visible", sequence: 1, phase: "scan", request: request("old-visible") };
+    const hiddenOldBranch = { type: "agent.created" as const, ...base, nodeId: "old-hidden", sequence: 2, phase: "scan", request: request("old-hidden") };
+    for (const event of [firstAttempt, hiddenOldBranch]) { await instance.journal.append(event); instance.state.apply(event); }
+    const reopened = await RunRuntime.open(instance.journal.manifest.runId, { execute: async (node) => ({ node: node.id }) }, join(instance.journal.directory, ".."));
+    const dynamic: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("scan"); return agent("new", { id: "new-node", cli: "codex" }); } };
+    // 让重开 Host 直接执行一个新节点，验证其展示序号来自全部 Journal，而非当前投影视图。
+    await reopened.run(dynamic).catch(() => undefined);
+    const opened = await RunJournal.open(instance.journal.manifest.runId, join(instance.journal.directory, ".."));
+    expect(opened.events.find((event) => event.type === "agent.created" && event.nodeId === "new-node")).toMatchObject({ sequence: 3 });
+  });
+
   test("同步 phase Journal 写入失败会中断 Run，不会静默完成", async () => {
     const instance = await runtime({ execute: async () => ({ ok: true }) });
     instance.journal.failNextAppendForTest();
@@ -276,5 +319,86 @@ describe("RunRuntime", () => {
     const second = await runtime(new LimitedAgentExecutor(base, limiter));
     await expect(first.run(workflow)).resolves.toEqual({ id: "scan-auth" });
     await expect(second.run(workflow)).resolves.toEqual({ id: "scan-auth" });
+  });
+
+  test("pause 阻断后续调度且不结束 agent()，recover 后才在同一调用继续", async () => {
+    const instance = await runtime({ execute: async () => ({ unused: true }) });
+    let finish!: (value: JsonObject) => void;
+    const pending = new Promise<JsonObject>((resolve) => { finish = resolve; });
+    let pauses = 0;
+    let recovers = 0;
+    const subject = await RunRuntime.create({
+      workflow,
+      input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: instance.journal.manifest.workflowProjectCwd, workflowPath: instance.journal.manifest.workflowPath, storeRoot: join(instance.journal.directory, ".."),
+      executor: { execute: async () => pending, pause: async () => { pauses += 1; }, recover: async () => { recovers += 1; finish({ resumed: true }); return {}; } },
+    });
+    const running = subject.run(workflow);
+    while (subject.snapshot().phases[0]?.agents[0]?.status !== "running") await new Promise((resolve) => setTimeout(resolve, 5));
+    await subject.pause();
+    expect(subject.snapshot().status).toBe("paused");
+    expect(subject.snapshot().phases[0]?.agents[0]?.status).toBe("paused");
+    expect(pauses).toBe(1);
+    await subject.recover();
+    await expect(running).resolves.toEqual({ resumed: true });
+    expect(recovers).toBe(1);
+    expect(subject.snapshot().status).toBe("completed");
+  });
+
+  test("stop 先耐久 cancelled，再结束执行 Promise，不能被误记为 interrupted", async () => {
+    const instance = await runtime({ execute: async () => ({ unused: true }) });
+    let reject!: (error: Error) => void;
+    const pending = new Promise<JsonObject>((_, fail) => { reject = fail; });
+    const subject = await RunRuntime.create({
+      workflow, input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: instance.journal.manifest.workflowProjectCwd, workflowPath: instance.journal.manifest.workflowPath, storeRoot: join(instance.journal.directory, ".."),
+      executor: { execute: async () => pending, stop: async () => { setTimeout(() => reject(new Error("stopped")), 0); } },
+    });
+    const running = subject.run(workflow);
+    const outcome = running.then(() => "resolved", (error) => error instanceof Error ? error.message : String(error));
+    while (subject.snapshot().phases[0]?.agents[0]?.status !== "running") await new Promise((resolve) => setTimeout(resolve, 5));
+    await subject.stop();
+    await expect(outcome).resolves.toBe("stopped");
+    expect(subject.snapshot()).toMatchObject({ status: "cancelled", phases: [{ agents: [{ status: "cancelled" }] }] });
+  });
+
+  test("pause 期间执行器异常必须收敛为 interrupted，不能被 stop 保护掩盖", async () => {
+    const instance = await runtime({ execute: async () => ({ unused: true }) });
+    let reject!: (error: Error) => void;
+    const pending = new Promise<JsonObject>((_, fail) => { reject = fail; });
+    const subject = await RunRuntime.create({
+      workflow, input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: instance.journal.manifest.workflowProjectCwd, workflowPath: instance.journal.manifest.workflowPath, storeRoot: join(instance.journal.directory, ".."),
+      executor: { execute: async () => pending, pause: async () => { reject(new Error("pause transport lost")); throw new Error("pause transport lost"); } },
+    });
+    const running = subject.run(workflow).catch(() => undefined);
+    while (subject.snapshot().phases[0]?.agents[0]?.status !== "running") await new Promise((resolve) => setTimeout(resolve, 5));
+    await expect(subject.pause()).rejects.toThrow("pause transport lost");
+    await running;
+    expect(subject.snapshot().status).toBe("interrupted");
+  });
+
+  test("stop 会抢占 pausing 中的控制调用并收敛为 cancelled", async () => {
+    const instance = await runtime({ execute: async () => ({ unused: true }) });
+    let reject!: (error: Error) => void;
+    const pending = new Promise<JsonObject>((_, fail) => { reject = fail; });
+    let pauseStarted!: () => void;
+    const pauseEntered = new Promise<void>((resolve) => { pauseStarted = resolve; });
+    const subject = await RunRuntime.create({
+      workflow, input: {}, workflowSource: "workflow source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: instance.journal.manifest.workflowProjectCwd, workflowPath: instance.journal.manifest.workflowPath, storeRoot: join(instance.journal.directory, ".."),
+      executor: {
+        execute: async () => pending,
+        pause: async (_node, signal) => {
+          pauseStarted();
+          await new Promise<void>((_resolve, fail) => signal?.addEventListener("abort", () => fail(new Error("pause aborted by stop")), { once: true }));
+        },
+        stop: async () => { setTimeout(() => reject(new Error("stopped")), 0); },
+      },
+    });
+    const running = subject.run(workflow).catch(() => undefined);
+    while (subject.snapshot().phases[0]?.agents[0]?.status !== "running") await new Promise((resolve) => setTimeout(resolve, 5));
+    const pausing = subject.pause().then(() => null, (error) => error);
+    await pauseEntered;
+    await expect(subject.stop()).resolves.toMatchObject({ status: "cancelled" });
+    await expect(pausing).resolves.toBeInstanceOf(Error);
+    await running;
+    expect(subject.snapshot()).toMatchObject({ status: "cancelled", phases: [{ agents: [{ status: "cancelled" }] }] });
   });
 });

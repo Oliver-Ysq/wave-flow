@@ -12,7 +12,7 @@
 | `journal/` | Manifest、事件、结果与 Replay 证据 | 回滚外部副作用 |
 | `daemon/` | 仅限 localhost 的 API 与服务生命周期 | 复制 Workflow 规则 |
 | `cli/` | 用户命令及受管 Agent 子命令 | 绕过 daemon 修改状态 |
-| `web/` | Phase → Agent 的本地展示与控制 | 编辑 Workflow 源码 |
+| `web/` | 当前尝试的 Phase 摘要、单轮 Agent 阅读与本地控制 | 编辑 Workflow 源码 |
 | `shared/` | 无业务副作用的类型、ID、哈希、路径与 JSON 工具 | 依赖任一运行层 |
 
 `sessions/backends/` 只放 tmux / PTY 后端；`sessions/bootstrap/` 只放首条 Prompt 的 Ready/Input Gate 编排。后续章节必须在对应目录实现，不能重新建立跨层的平铺模块。

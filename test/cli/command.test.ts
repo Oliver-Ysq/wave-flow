@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main } from "../../src/cli/main";
+import { main, terminateVerifiedLegacyDaemon } from "../../src/cli/main";
 import { parseCommand } from "../../src/cli/parse-command";
 import { DaemonClient } from "../../src/cli/daemon-client";
 
@@ -10,6 +10,17 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("CLI run / inspect", () => {
+  test("旧 daemon close 兼容前再次发现身份变化时拒绝发送终止信号", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalKill = process.kill;
+    let killed = false;
+    globalThis.fetch = (async () => Response.json({ protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "replaced", })) as unknown as typeof fetch;
+    process.kill = (() => { killed = true; return true; }) as typeof process.kill;
+    try {
+      await expect(terminateVerifiedLegacyDaemon({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } })).rejects.toThrow("身份在关闭前发生变化");
+      expect(killed).toBe(false);
+    } finally { globalThis.fetch = originalFetch; process.kill = originalKill; }
+  });
   test("解析 run 输入、cwd 与 inspect", () => {
     expect(parseCommand(["run", "flow.ts", "--input", '{"target":"src"}', "--cwd", "project"], "/workspace")).toEqual({ kind: "run", workflowPath: "flow.ts", cwd: "/workspace/project", input: { target: "src" }, codexRpcInput: true });
     expect(parseCommand(["run", "flow.ts", "--codex-rpc-input"], "/workspace")).toMatchObject({ codexRpcInput: true });
@@ -17,11 +28,17 @@ describe("CLI run / inspect", () => {
     expect(parseCommand(["start"], "/workspace")).toEqual({ kind: "start" });
     expect(() => parseCommand(["start", "unexpected"], "/workspace")).toThrow("start 不接受参数");
     expect(parseCommand(["serve"], "/workspace")).toEqual({ kind: "serve" });
+    expect(parseCommand(["web"], "/workspace")).toEqual({ kind: "web" });
+    expect(parseCommand(["close"], "/workspace")).toEqual({ kind: "close" });
+    expect(() => parseCommand(["close", "unexpected"], "/workspace")).toThrow("close 不接受参数");
     expect(parseCommand(["block", "--need-help", "需要数据库"], "/workspace")).toMatchObject({ kind: "block" });
     expect(parseCommand(["answer", "11111111-1111-4111-8111-111111111111", "--value", "{\"resolved\":true}"], "/workspace")).toMatchObject({ kind: "answer" });
     expect(parseCommand(["continue", "--block-request-id", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "continue" });
     expect(parseCommand(["inspect", "11111111-1111-4111-8111-111111111111"], "/workspace")).toMatchObject({ kind: "inspect" });
     expect(parseCommand(["resume", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "resume", runId: "11111111-1111-4111-8111-111111111111" });
+    expect(parseCommand(["pause", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "pause", runId: "11111111-1111-4111-8111-111111111111" });
+    expect(parseCommand(["recover", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "recover", runId: "11111111-1111-4111-8111-111111111111" });
+    expect(parseCommand(["stop", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "stop", runId: "11111111-1111-4111-8111-111111111111" });
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
     expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
     expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");
@@ -40,6 +57,16 @@ describe("CLI run / inspect", () => {
     await main(["start"], process.cwd(), (line) => { lines.push(line); }, true);
     expect(lines).toEqual([expect.stringContaining("Wave Flow daemon 已就绪：http://127.0.0.1:")]);
   });
+
+  test("web 输出同源 Local Web 地址而不创建 Run", async () => {
+    const lines: string[] = [];
+    await main(["web"], process.cwd(), (line) => { lines.push(line); }, true);
+    expect(lines).toEqual([
+      "已确认 daemon 只监听 loopback，同源 Local Web 静态资源可用。",
+      expect.stringMatching(/^Wave Flow Local Web：http:\/\/127\.0\.0\.1:\d+\/$/),
+    ]);
+  });
+
 
 
   test("创建 Run 的传输层重试复用同一 clientRequestId", async () => {

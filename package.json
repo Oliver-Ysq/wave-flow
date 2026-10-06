@@ -11,11 +11,20 @@
   },
   "scripts": {
     "test": "bun test",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "web:dev": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "web:preview": "vite preview --config web/vite.config.ts"
   },
   "devDependencies": {
     "ajv": "^8.17.1",
     "@types/bun": "latest",
-    "typescript": "^5.9.3"
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.1",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
   }
 }

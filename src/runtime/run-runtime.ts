@@ -33,6 +33,10 @@ export type CreateRunOptions = {
 
 /** 本章 Runtime 的创建、执行与查询入口。 */
 export class RunRuntime {
+  #stopping = false;
+  #controlAbort: AbortController | null = null;
+  #controlSettled: Promise<void> | null = null;
+  #resolveControlSettled: (() => void) | null = null;
   private constructor(
     readonly journal: RunJournal,
     readonly state: RunStateMachine,
@@ -51,6 +55,9 @@ export class RunRuntime {
     const journal = await RunJournal.create(manifest, options.storeRoot ?? runsRoot());
     const state = new RunStateMachine(manifest);
     state.apply({ type: "run.created", at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, runStatus: "running" });
+    const attempt = { type: "execution-attempt.started" as const, at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, executionAttemptId: 1 };
+    await journal.append(attempt);
+    state.apply(attempt);
     return new RunRuntime(journal, state, new RunRuntimeHost(journal, state, options.executor));
   }
 
@@ -59,7 +66,7 @@ export class RunRuntime {
     const opened = await RunJournal.open(runId, storeRoot);
     const state = new RunStateMachine(opened.journal.manifest);
     for (const event of opened.events) state.apply(event);
-    const sequence = state.snapshot().phases.flatMap((phase) => phase.agents).length;
+    const sequence = maximumJournalSequence(opened.events);
     return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, sequence));
   }
 
@@ -73,7 +80,7 @@ export class RunRuntime {
     const state = new RunStateMachine(opened.journal.manifest);
     for (const event of opened.events) state.apply(event);
     if (state.snapshot().status !== "running") throw new Error("只有仍为 running 的 Run 可以 resume。");
-    const historicalSequence = state.snapshot().phases.flatMap((phase) => phase.agents).reduce((maximum, node) => Math.max(maximum, node.sequence), 0);
+    const historicalSequence = maximumJournalSequence(opened.events);
     return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, historicalSequence, true), true);
   }
 
@@ -88,7 +95,7 @@ export class RunRuntime {
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      if (!this.replay && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
+      if (!this.replay && !this.#stopping && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
       throw error;
     }
   }
@@ -119,9 +126,136 @@ export class RunRuntime {
     return new ControlServer(context.journal, context.state);
   }
 
-  private async transitionRun(status: "completed" | "interrupted", diagnostic: string | null): Promise<void> {
+  /** 用户暂停：先耐久 intent 并阻断新调度，再由 Executor 停止既有真实节点。 */
+  async pause(): Promise<RunSnapshot> {
+    if (this.state.snapshot().status !== "running") throw new Error("只有 running 的 Run 可以 pause。 ");
+    await this.transitionRun("pausing", "用户请求暂停。 ");
+    this.host.pauseScheduling();
+    const control = this.beginControl();
+    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked");
+    try {
+      for (const node of targets) {
+        await this.applyAgentStatus(node.id, "pausing", node.agentSessionId, "正在停止当前 Agent 回合与受管工具。 ");
+        await this.host.pauseNode(this.state.agent(node.id), control.signal);
+        await this.applyAgentStatus(node.id, "paused", node.agentSessionId, "当前回合和受管背景终端已停止。 ");
+      }
+      await this.transitionRun("paused", "用户暂停完成。 ");
+      return this.snapshot();
+    } catch (error) {
+      if (this.#stopping && control.signal.aborted) throw error;
+      const diagnostic = `暂停未确认：${error instanceof Error ? error.message : String(error)}`;
+      for (const node of this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((item) => item.status === "pausing")) {
+        await this.applyAgentStatus(node.id, "interrupted", node.agentSessionId, diagnostic);
+      }
+      await this.transitionRun("interrupted", diagnostic);
+      throw error;
+    } finally { this.endControl(control); }
+  }
+
+  /** 用户恢复：同一会话创建新的继续回合，成功后才放开后续 Workflow 调度。 */
+  async recover(): Promise<RunSnapshot> {
+    if (this.state.snapshot().status !== "paused") throw new Error("只有 paused 的 Run 可以 recover。 ");
+    await this.transitionRun("recovering", "用户请求恢复。 ");
+    const control = this.beginControl();
+    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "paused");
+    try {
+      for (const node of targets) {
+        await this.applyAgentStatus(node.id, "recovering", node.agentSessionId, "正在同一会话创建继续回合。 ");
+        const recovery = await this.host.recoverNode(this.state.agent(node.id), control.signal);
+        if (recovery.appServer) {
+          const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 thread 的恢复回合已确认。", appServer: recovery.appServer };
+          await this.journal.append(event);
+          this.state.apply(event);
+        }
+        const viewer = this.host.viewerSession(this.state.agent(node.id));
+        if (viewer) {
+          const event: JournalEvent = { type: "agent.viewer", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "恢复后 viewer 已重建。", session: viewer };
+          await this.journal.append(event);
+          this.state.apply(event);
+        }
+        await this.applyAgentStatus(node.id, node.block ? "blocked" : "running", node.agentSessionId, node.block ? "恢复后继续等待原 block。" : "已在同一会话恢复。 ");
+      }
+      this.host.resumeScheduling();
+      await this.transitionRun("running", "用户恢复完成。 ");
+      return this.snapshot();
+    } catch (error) {
+      if (this.#stopping && control.signal.aborted) throw error;
+      const diagnostic = `恢复未确认：${error instanceof Error ? error.message : String(error)}`;
+      for (const node of this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((item) => item.status === "recovering")) {
+        await this.applyAgentStatus(node.id, "interrupted", node.agentSessionId, diagnostic);
+      }
+      await this.transitionRun("interrupted", diagnostic);
+      throw error;
+    } finally { this.endControl(control); }
+  }
+
+  /** 用户停止是终态；不允许后续 recover 或隐式重跑。 */
+  async stop(): Promise<RunSnapshot> {
+    const status = this.state.snapshot().status;
+    if (status !== "running" && status !== "pausing" && status !== "paused" && status !== "recovering") throw new Error("只有运行中或暂停控制中的 Run 可以 stop。 ");
+    this.host.pauseScheduling();
+    this.#stopping = true;
+    const activeControl = this.#controlAbort;
+    activeControl?.abort();
+    // pause/recover 可能正写入 agent/run 状态；先等待它因 abort 完成 finally 清理，
+    // 再执行 stop，避免两个控制操作并发写状态机。
+    if (activeControl && this.#controlSettled) await this.#controlSettled;
+    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering");
+    try {
+      for (const node of targets) {
+        this.host.beginStop(node.id);
+        await this.host.stopNode(node);
+        await this.applyAgentStatus(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
+      }
+      await this.transitionRun("cancelled", "用户停止 Run。 ");
+      return this.snapshot();
+    } catch (error) {
+      const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
+      await this.transitionRun("interrupted", diagnostic);
+      throw error;
+    } finally {
+      this.#stopping = false;
+    }
+  }
+
+  /** daemon 在排队 stop 前立刻抢占 App Server 控制调用，避免等待其 15 秒超时。 */
+  requestStop(): void {
+    this.#stopping = true;
+    this.#controlAbort?.abort();
+  }
+
+  /** pause/recover 各自拥有一个可被 stop 抢占的控制信号。 */
+  private beginControl(): AbortController {
+    if (this.#controlAbort) throw new Error("已有 Run 控制操作正在进行。 ");
+    const controller = new AbortController();
+    this.#controlAbort = controller;
+    this.#controlSettled = new Promise<void>((resolve) => { this.#resolveControlSettled = resolve; });
+    return controller;
+  }
+
+  private endControl(controller: AbortController): void {
+    if (this.#controlAbort === controller) {
+      this.#controlAbort = null;
+      this.#resolveControlSettled?.();
+      this.#resolveControlSettled = null;
+      this.#controlSettled = null;
+    }
+  }
+
+  private async applyAgentStatus(nodeId: string, status: import("./run-types").AgentNodeStatus, agentSessionId: string | null, diagnostic: string): Promise<void> {
+    const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic, status };
+    await this.journal.append(event);
+    this.state.apply(event);
+  }
+
+  private async transitionRun(status: import("./run-types").RunStatus, diagnostic: string | null): Promise<void> {
     const event: JournalEvent = { type: "run.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic, status };
     await this.journal.append(event);
     this.state.apply(event);
   }
+}
+
+/** 当前尝试视图会隐藏旧分支；展示序号必须始终从整个 Journal 的历史最大值续写。 */
+function maximumJournalSequence(events: readonly JournalEvent[]): number {
+  return events.reduce((maximum, event) => event.type === "agent.created" ? Math.max(maximum, event.sequence) : maximum, 0);
 }

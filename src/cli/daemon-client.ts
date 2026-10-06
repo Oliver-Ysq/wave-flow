@@ -1,5 +1,10 @@
-import type { CreateRunRequest, ResumeRunRequest, RunResponse } from "../daemon/types";
+import type { CloseDaemonResponse, CreateRunRequest, ResumeRunRequest, RunResponse } from "../daemon/types";
 import type { CapabilitySnapshot } from "../adapters/capabilities";
+
+/** 仅表示已验证 daemon 明确不认识新版关闭接口，供 CLI 做受限旧版兼容。 */
+export class UnsupportedDaemonCloseEndpointError extends Error {
+  constructor() { super("当前 daemon 不支持优雅关闭接口。"); }
+}
 
 /** 仅通过 loopback HTTP 与 daemon 通信的 CLI 客户端。 */
 export class DaemonClient {
@@ -26,6 +31,30 @@ export class DaemonClient {
     return this.request(`/runs/${encodeURIComponent(runId)}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ authorized: true } satisfies ResumeRunRequest) });
   }
 
+  /** 暂停当前 daemon 持有的 Run；daemon 负责真实会话控制和状态耐久化。 */
+  async pause(runId: string): Promise<RunResponse> {
+    return this.request(`/runs/${encodeURIComponent(runId)}/pause`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  }
+
+  /** 在原 thread 创建新回合继续；不得重发原 Prompt。 */
+  async recover(runId: string): Promise<RunResponse> {
+    return this.request(`/runs/${encodeURIComponent(runId)}/recover`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  }
+
+  /** 停止当前 Run；终态不可 recover，只能用户显式 resume/replay。 */
+  async stop(runId: string): Promise<RunResponse> {
+    return this.request(`/runs/${encodeURIComponent(runId)}/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  }
+
+  /** 请求已验证 daemon 优雅关闭；旧版明确不支持接口时由调用方决定是否安全兼容。 */
+  async closeDaemon(): Promise<CloseDaemonResponse> {
+    const response = await fetch(`${this.baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const value = await response.json() as CloseDaemonResponse | { error: string };
+    if (response.status === 404 && "error" in value && value.error === "未知 daemon API 路径或方法。") throw new UnsupportedDaemonCloseEndpointError();
+    if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
+    return value;
+  }
+
   /** 请求 daemon 返回当前机器的三态能力快照。 */
   async capabilities(): Promise<CapabilitySnapshot> {
     const response = await fetch(`${this.baseUrl}/capabilities`);
@@ -46,7 +75,7 @@ export class DaemonClient {
         // 快照裁决：已终结就显示最终状态；仍运行则短暂退避后重新订阅。
         const snapshot = await this.inspect(runId);
         onSnapshot(snapshot);
-        if (snapshot.snapshot.status !== "running") return;
+        if (snapshot.snapshot.status !== "running" && snapshot.snapshot.status !== "pausing" && snapshot.snapshot.status !== "recovering") return;
         await abortableDelay(200, signal);
       }
     }
@@ -70,7 +99,7 @@ export class DaemonClient {
           if (!data) continue;
           const snapshot = JSON.parse(data) as RunResponse;
           onSnapshot(snapshot);
-          if (snapshot.snapshot.status !== "running") return true;
+          if (snapshot.snapshot.status !== "running" && snapshot.snapshot.status !== "pausing" && snapshot.snapshot.status !== "recovering") return true;
         }
       }
     } finally { reader.releaseLock(); }

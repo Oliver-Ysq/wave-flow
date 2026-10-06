@@ -16,14 +16,16 @@ const meta: WorkflowMeta = {
 
 class MemoryHost implements WorkflowExecutionHost {
   readonly agents: NormalizedAgentRequest[] = [];
+  readonly batches: Array<{ sequence: number; mode: "serial" | "parallel" }> = [];
   readonly phases: string[] = [];
   readonly logs: string[] = [];
   constructor(private readonly respond: (request: NormalizedAgentRequest) => Promise<JsonObject | null> = async (request) => ({ id: request.id })) {}
-  async agent(request: NormalizedAgentRequest): Promise<JsonObject | null> {
+  async agent(request: NormalizedAgentRequest, batch: import("../../src/runtime/workflow-host").ExecutionBatch): Promise<JsonObject | null> {
     this.agents.push(request);
+    this.batches.push(batch);
     return this.respond(request);
   }
-  phase(title: string): void { this.phases.push(title); }
+  phase(title: string): import("../../src/runtime/workflow-host").PhaseVisit { this.phases.push(title); return { executionAttemptId: 1, phaseVisitId: this.phases.length, title, occurrence: this.phases.filter((value) => value === title).length }; }
   log(message: string): void { this.logs.push(message); }
 }
 
@@ -80,6 +82,22 @@ describe("Workflow 作者 API", () => {
     expect(right.agents[0].id).toBe("right");
   });
 
+  test("agent() 在异步 cwd 解析前冻结当前阶段访问，后续 phase 不得重归类已调用节点", async () => {
+    const host = new MemoryHost();
+    const directory = await mkdtemp(join(tmpdir(), "wave-flow-phase-capture-"));
+    try {
+      await executeWorkflow(workflow(async () => {
+        phase("scan");
+        const first = agent("first", { id: "first", cli: "codex", cwd: directory });
+        phase("summarize");
+        await first;
+        return agent("second", { id: "second", cli: "codex", cwd: directory });
+      }), undefined, host, { cwd: directory });
+      expect(host.agents.map((request) => ({ id: request.id, phase: request.phase }))).toEqual([{ id: "first", phase: "scan" }, { id: "second", phase: "summarize" }]);
+      expect(host.batches.map((batch) => batch.sequence)).toEqual([1, 2]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   test("parallel 同时启动任务、保持输入顺序并隔离失败", async () => {
     const started: string[] = [];
     let releaseFirst: (() => void) | undefined;
@@ -96,6 +114,31 @@ describe("Workflow 作者 API", () => {
       return running;
     }), undefined, new MemoryHost());
     expect(result).toEqual(["one", null, "three"]);
+  });
+
+  test("顺序调用、parallel 与 pipeline 将真实调度域传给宿主", async () => {
+    const host = new MemoryHost();
+    await executeWorkflow(workflow(async () => {
+      phase("scan");
+      await agent("first", { id: "first", cli: "codex" });
+      await parallel([
+        () => agent("left", { id: "left", cli: "codex" }),
+        () => agent("right", { id: "right", cli: "codex" }),
+      ]);
+      await pipeline(["a", "b"],
+        async (item) => { await agent(`prepare ${item}`, { id: `prepare-${item}`, cli: "codex" }); return item; },
+        async (item) => { await agent(`finish ${item}`, { id: `finish-${item as string}`, cli: "codex" }); return item; },
+      );
+      return agent("last", { id: "last", cli: "codex" });
+    }), undefined, host);
+    expect(host.agents.map((item) => item.id)).toEqual(["first", "left", "right", "prepare-a", "prepare-b", "finish-a", "finish-b", "last"]);
+    expect(host.batches).toEqual([
+      { sequence: 1, mode: "serial" },
+      { sequence: 2, mode: "parallel" }, { sequence: 2, mode: "parallel" },
+      { sequence: 3, mode: "parallel" }, { sequence: 3, mode: "parallel" },
+      { sequence: 4, mode: "parallel" }, { sequence: 4, mode: "parallel" },
+      { sequence: 5, mode: "serial" },
+    ]);
   });
 
   test("pipeline 对每个 item 串行、跨 item 并行，并跳过失败 item 的后续 stage", async () => {

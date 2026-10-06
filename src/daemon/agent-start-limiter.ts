@@ -77,6 +77,24 @@ export class LimitedAgentExecutor implements AgentNodeExecutor {
   }
 
   requiredCapabilities(node: AgentNodeSnapshot) { return this.delegate.requiredCapabilities?.(node) ?? {}; }
+
+  /** 控制能力不消耗或归还名额；只透明转发给实际 Adapter。 */
+  pause(node: AgentNodeSnapshot, signal?: AbortSignal) {
+    if (!this.delegate.pause) throw new Error(`节点 ${node.id} 的执行器不支持 pause。`);
+    return this.delegate.pause(node, signal);
+  }
+
+  recover(node: AgentNodeSnapshot, signal?: AbortSignal) {
+    if (!this.delegate.recover) throw new Error(`节点 ${node.id} 的执行器不支持 recover。`);
+    return this.delegate.recover(node, signal);
+  }
+
+  viewerSession(node: AgentNodeSnapshot) { return this.delegate.viewerSession?.(node) ?? null; }
+
+  stop(node: AgentNodeSnapshot) {
+    if (!this.delegate.stop) throw new Error(`节点 ${node.id} 的执行器不支持 stop。`);
+    return this.delegate.stop(node);
+  }
 }
 
 // 每个 Run 都创建独立 LimitedAgentExecutor，且节点 id 在 Run 内唯一；不能把

@@ -233,6 +233,8 @@ export class ControlServer {
     if (this.#answering.has(submission.blockRequestId)) throw new Error("该 block 正在处理答案，拒绝并发 answer。");
     this.#answering.add(submission.blockRequestId);
     try {
+    const snapshot = this.state.agentForBlock(submission.blockRequestId);
+    if (snapshot?.status === "paused" || snapshot?.status === "pausing" || snapshot?.status === "recovering") throw new Error("Agent 当前处于暂停中；请先 wave-flow recover 后再交付答案。 ");
     const pending = this.#blocks.validateAnswer(submission);
     const event: JournalEvent = {
       type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,

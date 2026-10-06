@@ -7,6 +7,10 @@ import { RealCodexExecutor } from "../../src/runtime/real-codex-executor";
 import type { DestroyResult, SessionBackend, SessionIdentity } from "../../src/sessions/types";
 import { runsRoot } from "../../src/journal/paths";
 import { DaemonClient } from "../../src/cli/daemon-client";
+import { RunRuntime } from "../../src/runtime/run-runtime";
+import { DeterministicExecutor } from "../../src/runtime/deterministic-executor";
+import type { WorkflowModule } from "../../src/shared/workflow-types";
+import type { JsonObject } from "../../src/shared/json";
 
 const directories: string[] = [];
 const daemons: LocalDaemon[] = [];
@@ -151,6 +155,78 @@ describe("LocalDaemon", () => {
     expect(body.snapshot).toMatchObject({ status: "completed", phases: [{ agents: [{ result: { nodeId: "scan-auth" } }] }] });
     const inspect = await fetch(`${baseUrl}/runs/${body.runId}?cwd=${encodeURIComponent(cwd)}`);
     await expect(inspect.json()).resolves.toMatchObject({ runId: body.runId, snapshot: { status: "completed" } });
+    const listed = await fetch(`${baseUrl}/api/runs`).then((value) => value.json() as Promise<Array<Record<string, unknown>>>);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ runId: body.runId, workflow: { name: "daemon-check" }, status: "completed" });
+    expect(listed[0]).not.toHaveProperty("snapshot");
+    expect(listed[0]).not.toHaveProperty("phases");
+  });
+
+  test("阶段摘要、单轮详情与分页执行记录按当前尝试返回，并默认隐藏空切换", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-history-api-")); directories.push(cwd);
+    const workflowPath = join(cwd, "history.ts");
+    await writeFile(workflowPath, `import { agent, phase } from "wave-flow";
+export const meta = { name: "history", description: "History API.", phases: [{ title: "guess" }, { title: "analyze" }] };
+export default async function run(_args: {}) { phase("guess"); await agent("g1", { id: "g1", cli: "codex" }); phase("analyze"); phase("guess"); await agent("g2", { id: "g2", cli: "codex" }); return {}; }`, "utf8");
+    const daemon = await testDaemon(); const { baseUrl } = daemon.start();
+    const created = await fetch(`${baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: {} }) }).then((value) => value.json() as Promise<{ runId: string }>);
+    const summary = await fetch(`${baseUrl}/runs/${created.runId}/attempts/current`).then((value) => value.json() as Promise<{ summary: { executionAttemptId: number; phases: Array<{ title: string; visits: number; agents: number; latestVisitId: number | null }> } }>);
+    expect(summary.summary).toMatchObject({ executionAttemptId: 1, phases: [{ title: "guess", visits: 2, agents: 2, latestVisitId: 3 }, { title: "analyze", visits: 1, agents: 0, latestVisitId: null }] });
+    const defaultPage = await fetch(`${baseUrl}/runs/${created.runId}/phase-visits?limit=1`).then((value) => value.json() as Promise<{ runId: string; executionAttemptId: number; items: Array<{ executionAttemptId: number; phaseVisitId: number; title: string; occurrence: number; batches: unknown[]; createdAt: string }>; nextCursor: number | null }>);
+    expect(defaultPage).toEqual({ runId: created.runId, executionAttemptId: 1, items: [{ executionAttemptId: 1, phaseVisitId: 1, title: "guess", occurrence: 1, batches: expect.any(Array), createdAt: expect.any(String) }], nextCursor: 1 });
+    const nextPage = await fetch(`${baseUrl}/runs/${created.runId}/phase-visits?cursor=${defaultPage.nextCursor}`).then((value) => value.json() as Promise<{ items: Array<{ phaseVisitId: number }> }>);
+    expect(nextPage.items.map((item) => item.phaseVisitId)).toEqual([3]);
+    const audit = await fetch(`${baseUrl}/runs/${created.runId}/phase-visits?includeEmpty=true`).then((value) => value.json() as Promise<{ items: Array<{ title: string; phaseVisitId: number }> }>);
+    expect(audit.items.map((item) => `${item.title}:${item.phaseVisitId}`)).toEqual(["guess:1", "analyze:2", "guess:3"]);
+    const detail = await fetch(`${baseUrl}/runs/${created.runId}/phase-visits/3`).then((value) => value.json() as Promise<{ visit: { title: string; batches: Array<{ agents: Array<{ id: string }> }> } }>);
+    expect(detail.visit).toMatchObject({ title: "guess", batches: [{ agents: [{ id: "g2" }] }] });
+    await expect(fetch(`${baseUrl}/runs/${created.runId}/phase-visits?limit=101`).then((value) => value.json())).resolves.toMatchObject({ error: "limit 不能超过 100。 " });
+    await expect(fetch(`${baseUrl}/runs/${created.runId}/phase-visits?attempt=999`).then((value) => value.json())).resolves.toMatchObject({ error: "指定执行尝试不存在。 " });
+  });
+
+  test("Local Web 只由 loopback daemon 同源提供，并返回当前 Run 总览", async () => {
+    const server = new LocalDaemon({ deterministicForTest: true, storeRoot: await mkdtemp(join(tmpdir(), "wave-flow-web-store-")) }).start();
+    try {
+      const pageResponse = await fetch(`${server.baseUrl}/`);
+      const page = await pageResponse.text();
+      expect(pageResponse.headers.get("content-type")).toContain("text/html");
+      const asset = page.match(/src="(\/assets\/[^\"]+\.js)"/)?.[1];
+      expect(asset).toBeDefined();
+      await expect(fetch(`${server.baseUrl}${asset}`).then((value) => value.headers.get("content-type"))).resolves.toContain("text/javascript");
+      await expect(fetch(`${server.baseUrl}${asset}`, { method: "HEAD" }).then((value) => value.status)).resolves.toBe(200);
+      await expect(fetch(`${server.baseUrl}/api/runs`).then((value) => value.json())).resolves.toEqual([]);
+    } finally { server.stop(); }
+  });
+
+  test("daemon close 先确认响应，再调用受控关闭回调", async () => {
+    let closed = 0;
+    const server = new LocalDaemon({ deterministicForTest: true, storeRoot: await mkdtemp(join(tmpdir(), "wave-flow-close-store-")), scheduleClose: () => { closed += 1; } }).start();
+    try {
+      await expect(fetch(`${server.baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).then((value) => value.json())).resolves.toEqual({ closing: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(closed).toBe(1);
+    } finally { server.stop(); }
+  });
+
+
+  test("重启 daemon 会把缺失 Workflow 调用栈的 paused Run 收敛为 interrupted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-paused-reconcile-")); directories.push(root);
+    const sourcePath = join(root, "paused.ts"); await writeFile(sourcePath, "export {}", "utf8");
+    const testWorkflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "paused", description: "Paused run.", phases: [{ title: "scan" }] }, default: async () => null };
+    const instance = await RunRuntime.create({ workflow: testWorkflow, input: {}, workflowSource: "source", clientRequestId: crypto.randomUUID(), workflowProjectCwd: root, workflowPath: sourcePath, storeRoot: root, executor: new DeterministicExecutor() });
+    const journal = instance.journal;
+    const request = { id: "node", cli: "codex" as const, sandbox: "read-only" as const, cwd: root, prompt: "work", phase: "scan" };
+    for (const event of [
+      { type: "agent.created" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "node", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request },
+      { type: "agent.status" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "node", agentSessionId: "session", diagnostic: null, status: "running" as const },
+      { type: "run.status" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "pause", status: "pausing" as const },
+      { type: "agent.status" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "node", agentSessionId: "session", diagnostic: "pause", status: "pausing" as const },
+      { type: "agent.status" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "node", agentSessionId: "session", diagnostic: "paused", status: "paused" as const },
+      { type: "run.status" as const, at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "paused", status: "paused" as const },
+    ]) { await journal.append(event); }
+    const daemon = new LocalDaemon({ deterministicForTest: true, storeRoot: root });
+    await daemon.reconcileRunControl();
+    await expect(fetch(daemon.start().baseUrl + `/runs/${journal.manifest.runId}`).then((value) => value.json())).resolves.toMatchObject({ snapshot: { status: "interrupted" } });
   });
 
   test("resume 拒绝已封存 Run", async () => {
@@ -289,7 +365,7 @@ describe("LocalDaemon", () => {
     expect(firstNode?.agentSessionId).toBeString();
   });
 
-  test("Run 事件流推送权威快照，并在 completed 后关闭", async () => {
+  test("Run 事件流推送轻量当前尝试摘要，并在 completed 后关闭", async () => {
     const { cwd, workflowPath } = await fixture();
     let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
     const backend: SessionBackend = {
@@ -311,6 +387,12 @@ describe("LocalDaemon", () => {
     const text = await reading;
     expect(text).toContain('"status":"running"');
     expect(text).toContain('"status":"completed"');
+    expect(text).toContain('"summary"');
+    expect(text).not.toContain('"snapshot"');
+    expect(text).toContain('"phases"');
+    expect(text).not.toContain('"batches"');
+    expect(text).not.toContain('"result"');
+    expect(text).not.toContain('"id":"scan-auth"');
   });
 
   test("SSE 提前断开时客户端回查 completed 快照，而不把正常完成报错", async () => {

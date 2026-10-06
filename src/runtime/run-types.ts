@@ -3,10 +3,10 @@ import type { AgentCli, AgentSandbox, NormalizedAgentRequest, WorkflowMeta } fro
 import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilities";
 
 /** Agent 节点在一次 Run 内可见的状态；终态不可回退。 */
-export type AgentNodeStatus = "queued" | "running" | "blocked" | "completed" | "cancelled" | "interrupted";
+export type AgentNodeStatus = "queued" | "running" | "blocked" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
 
 /** Run 的聚合终态；由节点终态与顶层 Workflow 诊断决定。 */
-export type RunStatus = "running" | "completed" | "cancelled" | "interrupted";
+export type RunStatus = "running" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
 
 /** 注入 Runtime 的可控节点执行器；本阶段不启动 CLI 或读取终端。 */
 export type AgentNodeExecutor = {
@@ -22,6 +22,20 @@ export type AgentNodeExecutor = {
   probeCapabilities?(): Promise<CapabilitySnapshot>;
   /** 节点启动所需的能力项；返回 unknown 或 unavailable 时 Runtime 必须 fail closed。 */
   requiredCapabilities?(node: AgentNodeSnapshot): Readonly<Record<string, (snapshot: CapabilitySnapshot) => CapabilityStatus>>;
+  /** 停止当前节点的真实执行；成功后 Executor 必须保留同一会话用于 recover。 */
+  pause?(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void>;
+  /** 在原会话中创建新的继续回合；成功后节点才可重新进入 running。 */
+  recover?(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<AgentRecovery>;
+  /** recover 后当前 viewer 坐标；没有 viewer 的 Adapter 返回 null。 */
+  viewerSession?(node: AgentNodeSnapshot): import("../sessions/types").SessionIdentity | null;
+  /** 终止当前节点，不保留 recover 能力。 */
+  stop?(node: AgentNodeSnapshot): Promise<void>;
+};
+
+/** recover 成功后可耐久记录的最新执行坐标；当前 Codex App Server 必须返回新 turn。 */
+export type AgentRecovery = {
+  /** 同一 App Server thread 的新 turn 坐标；缺失代表该 Adapter 没有可记录的回合标识。 */
+  readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; readonly protocolVersion: 1 };
 };
 
 /** Agent 节点对执行器与查询层公开的不可变快照。 */
@@ -30,8 +44,14 @@ export type AgentNodeSnapshot = {
   readonly id: string;
   /** 调用 agent() 时捕获的 Phase；未设置 Phase 时为 null。 */
   readonly phase: string | null;
+  /** 节点所属执行尝试；旧 Journal 兼容投影为 1。 */
+  readonly executionAttemptId: number;
+  /** 节点所属阶段访问；同一 Phase 的不同回溯轮次不可混淆。 */
+  readonly phaseVisitId: number;
   /** 同一 Run 内实际 agent() 调用顺序，从 1 开始。 */
   readonly sequence: number;
+  /** Runtime 已知的调度批次；只表示串行/并行调度，不表示数据依赖。 */
+  readonly executionBatch: import("./workflow-host").ExecutionBatch;
   /** 节点实际使用的 CLI。 */
   readonly cli: AgentCli;
   /** 节点实际使用的 sandbox。 */
@@ -58,6 +78,48 @@ export type AgentNodeSnapshot = {
   readonly request: NormalizedAgentRequest;
 };
 
+/** 某次实际进入已声明 Phase 的耐久查询视图。 */
+export type PhaseVisitSnapshot = {
+  /** 所属执行尝试。 */
+  readonly executionAttemptId: number;
+  /** 尝试内稳定阶段访问 id。 */
+  readonly phaseVisitId: number;
+  /** Phase 标题。 */
+  readonly title: string;
+  /** 同标题在本次尝试中的第几轮。 */
+  readonly occurrence: number;
+  /** 本轮创建的执行批次。 */
+  readonly batches: readonly ExecutionBatchSnapshot[];
+  /** 本轮创建时间。 */
+  readonly createdAt: string;
+};
+
+/** 当前执行尝试中一个 Phase 的轻量摘要；不内联全部历史节点。 */
+export type PhaseSummary = {
+  /** Phase 标题。 */
+  readonly title: string;
+  /** 当前尝试内进入次数。 */
+  readonly visits: number;
+  /** 当前尝试内累计创建的 Agent 数。 */
+  readonly agents: number;
+  /** 各节点状态的聚合计数。 */
+  readonly statusCounts: Readonly<Partial<Record<AgentNodeStatus, number>>>;
+  /** 当前运行轮；没有活跃轮时为 null。 */
+  readonly currentVisitId: number | null;
+  /** 最近一个包含 Agent 的轮；没有时为 null。 */
+  readonly latestVisitId: number | null;
+};
+
+/** 默认首页和 SSE 使用的当前尝试摘要。 */
+export type CurrentAttemptSummary = {
+  /** 当前执行尝试号。 */
+  readonly executionAttemptId: number;
+  /** 每个声明 Phase 的统计摘要。 */
+  readonly phases: readonly PhaseSummary[];
+  /** 最近一次发生变化的阶段访问；没有阶段访问时为 null。 */
+  readonly latestPhaseVisitId: number | null;
+};
+
 /** Phase → Agent 视图中可展示的 pending block 摘要。 */
 export type BlockSnapshot = {
   /** 用于 answer / continue 绑定的稳定请求 id。 */
@@ -73,6 +135,18 @@ export type PhaseSnapshot = {
   /** Workflow meta 声明的唯一 Phase 标题。 */
   readonly title: string;
   /** 属于该 Phase 的节点，按调用序号排列。 */
+  readonly agents: readonly AgentNodeSnapshot[];
+  /** 按 Runtime 耐久批次分组的节点；Web 用于表达串行与并行布局。 */
+  readonly batches: readonly ExecutionBatchSnapshot[];
+};
+
+/** 同一 Phase 内的一个已知调度批次。 */
+export type ExecutionBatchSnapshot = {
+  /** Run 内递增批次号。 */
+  readonly sequence: number;
+  /** serial 或 parallel 调度模式。 */
+  readonly mode: "serial" | "parallel";
+  /** 批次内按节点调用序排列。 */
   readonly agents: readonly AgentNodeSnapshot[];
 };
 
@@ -93,4 +167,8 @@ export type RunSnapshot = {
   readonly diagnostic: string | null;
   /** Phase → Agent 主视图。 */
   readonly phases: readonly PhaseSnapshot[];
+  /** 当前耐久执行尝试；首次运行固定为 1。 */
+  readonly currentExecutionAttemptId: number;
+  /** 当前尝试的阶段访问；后续摘要 API 会替代完整内联历史。 */
+  readonly phaseVisits: readonly PhaseVisitSnapshot[];
 };

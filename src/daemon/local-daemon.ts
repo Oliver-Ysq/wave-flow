@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { CreateRunRequest, ResumeRunRequest, RunResponse } from "./types";
+import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse } from "./types";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -22,6 +22,7 @@ import { AgentStartLimiter, LimitedAgentExecutor } from "./agent-start-limiter";
 import { TmuxSessionBackend } from "../sessions/backends/tmux-session-backend";
 import { TmuxCommandClient } from "../sessions/backends/tmux-command";
 import { CodexAppServerAdapter, bunCodexAppServerConnection } from "../adapters/codex-app-server";
+import { serveWebAsset } from "../web/static-assets";
 
 /** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
 export type RealCodexExecutorFactory = (args: {
@@ -49,6 +50,8 @@ export type LocalDaemonOptions = {
   readonly maxActiveAgents?: number;
   /** 验证旧 Journal 会话是否可被当前 daemon 安全认领；生产默认同时验证 tmux 与 App Server。 */
   readonly verifyReclaimSession?: (session: import("../sessions/types").SessionIdentity, appServer: { readonly endpoint: string; readonly threadId: string } | undefined) => Promise<boolean>;
+  /** 常驻 daemon 接收 close 后调用；测试 daemon 省略时只关闭本地 HTTP 服务。 */
+  readonly scheduleClose?: () => void;
 };
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
@@ -59,6 +62,8 @@ export class LocalDaemon {
   #createRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的并发 resume 只允许一个授权重放事务，防止重复新 attempt。 */
   #resumeRequests = new Map<string, Promise<RunResponse>>();
+  /** 同一 Run 的用户控制必须串行；不同动作不能误复用彼此的成功结果。 */
+  #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly promise: Promise<RunResponse> }>();
   #server: ReturnType<typeof Bun.serve> | null = null;
   readonly instanceId = crypto.randomUUID();
   bootInstanceId: string | null = null;
@@ -69,6 +74,7 @@ export class LocalDaemon {
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
   private readonly verifyReclaimSession: NonNullable<LocalDaemonOptions["verifyReclaimSession"]>;
+  private readonly scheduleClose: () => void;
 
   /**
    * @param options 自动测试可选择稳定或 fake 真实执行器；省略时启动真正 tmux/Codex。
@@ -83,6 +89,7 @@ export class LocalDaemon {
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
     this.verifyReclaimSession = normalized.verifyReclaimSession ?? verifyReclaimSession;
+    this.scheduleClose = normalized.scheduleClose ?? (() => this.stop());
   }
 
   /** 启动 HTTP 服务；默认随机端口，严格绑定 127.0.0.1。 */
@@ -98,6 +105,27 @@ export class LocalDaemon {
   /** 停止短生命周期 daemon；不会删除 Journal 或本地结果文件。 */
   stop(): void { this.#server?.stop(true); this.#server = null; }
 
+  /** 新 daemon 启动后收敛上次在 pause/recover 中断的 Run；绝不创建新 turn。 */
+  async reconcileRunControl(): Promise<void> {
+    let runIds: string[];
+    try { runIds = await readdir(this.storeRoot); } catch { return; }
+    for (const runId of runIds) {
+      try {
+        const opened = await RunJournal.open(runId, this.storeRoot);
+        const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
+        const status = runtime.snapshot().status;
+        if (status !== "pausing" && status !== "paused" && status !== "recovering") continue;
+        // 旧 daemon 的 App Server 连接和 Workflow 调用栈均已丢失；即便 thread 还活着，
+        // 新 daemon 也不能在没有原 agent() Promise 的情况下伪造 recover。不得重发
+        // interrupt、clean 或 turn/start，耐久状态只能诚实收敛为 interrupted。
+        const event: import("../journal/types").JournalEvent = { type: "run.status", at: new Date().toISOString(), runId, nodeId: null, agentSessionId: null, diagnostic: `daemon 在 ${status} 中断；原 Workflow 调用栈不可恢复。`, status: "interrupted" };
+        await opened.journal.append(event);
+        runtime.state.apply(event);
+        this.#runs.set(runId, runtime);
+      } catch { /* 单个损坏或不可读 Run 不阻止 daemon 服务其余用户任务。 */ }
+    }
+  }
+
   /** 注册一个真实 Run 的 ControlServer；必须与当前 daemon 中的同一 Run 绑定。 */
   registerControl(runId: string, control: ControlServer): void {
     const runtime = this.#runs.get(runId);
@@ -111,6 +139,8 @@ export class LocalDaemon {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
       if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
+      if (request.method === "POST" && url.pathname === "/daemon/close") return this.closeDaemon(await this.readJson(request));
+      if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
       if (request.method === "POST" && url.pathname === "/runs") return this.json(await this.createRun(await this.readJson(request)));
       const resumeMatch = url.pathname.match(/^\/runs\/([^/]+)\/resume$/);
       if (request.method === "POST" && resumeMatch) {
@@ -118,10 +148,24 @@ export class LocalDaemon {
         try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "resume 路径中的 RunId 无效。 "); }
         return this.json(await this.resume(runId, await this.readJson(request)));
       }
+      const pauseMatch = url.pathname.match(/^\/runs\/([^/]+)\/pause$/);
+      if (request.method === "POST" && pauseMatch) return this.json(await this.pause(decodeURIComponent(pauseMatch[1]), await this.readJson(request)));
+      const recoverMatch = url.pathname.match(/^\/runs\/([^/]+)\/recover$/);
+      if (request.method === "POST" && recoverMatch) return this.json(await this.recover(decodeURIComponent(recoverMatch[1]), await this.readJson(request)));
+      const stopMatch = url.pathname.match(/^\/runs\/([^/]+)\/stop$/);
+      if (request.method === "POST" && stopMatch) return this.json(await this.stopRun(decodeURIComponent(stopMatch[1]), await this.readJson(request)));
       if (request.method === "GET" && /^\/runs\/[^/]+$/.test(url.pathname)) {
         const runId = decodeURIComponent(url.pathname.slice("/runs/".length));
         return this.json(await this.inspect(runId));
       }
+      const currentAttemptMatch = url.pathname.match(/^\/runs\/([^/]+)\/attempts\/current$/);
+      if (request.method === "GET" && currentAttemptMatch) return this.json(await this.currentAttempt(decodeURIComponent(currentAttemptMatch[1])));
+      const attemptsMatch = url.pathname.match(/^\/runs\/([^/]+)\/attempts$/);
+      if (request.method === "GET" && attemptsMatch) return this.json(await this.executionAttempts(decodeURIComponent(attemptsMatch[1])));
+      const phaseVisitMatch = url.pathname.match(/^\/runs\/([^/]+)\/phase-visits\/(\d+)$/);
+      if (request.method === "GET" && phaseVisitMatch) return this.json(await this.phaseVisit(decodeURIComponent(phaseVisitMatch[1]), Number(phaseVisitMatch[2]), parseAttempt(url)));
+      const phaseVisitsMatch = url.pathname.match(/^\/runs\/([^/]+)\/phase-visits$/);
+      if (request.method === "GET" && phaseVisitsMatch) return this.json(await this.phaseVisits(decodeURIComponent(phaseVisitsMatch[1]), url));
       const eventsMatch = url.pathname.match(/^\/runs\/([^/]+)\/events$/);
       if (request.method === "GET" && eventsMatch) return this.streamRunEvents(decodeURIComponent(eventsMatch[1]));
       const completeMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/complete$/);
@@ -162,12 +206,23 @@ export class LocalDaemon {
         const control = await this.reclaimControl(body);
         return handleReclaimContinueHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
       }
+      if (request.method === "GET" || request.method === "HEAD") {
+        const asset = serveWebAsset(url.pathname);
+        if (asset) return request.method === "HEAD" ? new Response(null, { status: asset.status, headers: asset.headers }) : asset;
+      }
       throw new DaemonRequestError(404, "未知 daemon API 路径或方法。");
     } catch (error) {
       const status = error instanceof DaemonRequestError ? error.status : 400;
       const message = error instanceof Error ? error.message : String(error);
       return this.json({ error: message }, status);
     }
+  }
+
+  /** 先发送确认响应，再由常驻 daemon 自己清理 descriptor、lock 与 HTTP 服务。 */
+  private closeDaemon(value: unknown): Response {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "daemon close 不接受请求字段。 ");
+    queueMicrotask(() => this.scheduleClose());
+    return this.json({ closing: true } satisfies CloseDaemonResponse);
   }
 
   private async createRun(value: unknown): Promise<RunResponse> {
@@ -182,11 +237,69 @@ export class LocalDaemon {
       const active = [...this.#runs.values()].find((runtime) => runtime.journal.manifest.clientRequestId === value.clientRequestId);
       if (active) return { runId: active.snapshot().id, snapshot: active.snapshot() };
       const durable = await this.findByClientRequestId(value.clientRequestId);
-      if (!durable && [...this.#runs.values()].filter((runtime) => runtime.snapshot().status === "running").length >= this.maxActiveRuns) throw new DaemonRequestError(429, `全局运行中 Run 已达到上限：${this.maxActiveRuns}。`);
+      if (!durable && [...this.#runs.values()].filter((runtime) => isLiveRunStatus(runtime.snapshot().status)).length >= this.maxActiveRuns) throw new DaemonRequestError(429, `全局运行中 Run 已达到上限：${this.maxActiveRuns}。`);
       return durable ?? this.createRunOnce(value);
     })().finally(() => this.#createRequests.delete(value.clientRequestId));
     this.#createRequests.set(value.clientRequestId, task);
     return task;
+  }
+
+  /** Local Web 总览：当前 daemon 内存中的 Run 为权威；不扫描或接管其他 daemon 的活跃任务。 */
+  private async listRuns(): Promise<readonly RunListItem[]> {
+    const views = new Map<string, RunListItem>();
+    for (const [runId, runtime] of this.#runs) views.set(runId, listItem(runtime));
+    try {
+      for (const runId of await readdir(this.storeRoot)) {
+        if (views.has(runId)) continue;
+        try {
+          const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
+          views.set(runId, listItem(runtime));
+        } catch { /* 无关文件、损坏或不兼容历史档案不影响其他 Run 总览。 */ }
+      }
+    } catch { /* 用户级目录尚未创建时返回当前内存 Run。 */ }
+    return [...views.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  /** 返回当前尝试首页摘要；按需从 Journal 重开，不创建或接管 Agent。 */
+  private async currentAttempt(runId: string): Promise<CurrentAttemptResponse> {
+    const runtime = await this.readRuntime(runId);
+    return { runId, status: runtime.snapshot().status, summary: runtime.state.currentAttemptSummary() };
+  }
+
+  private async executionAttempts(runId: string): Promise<ExecutionAttemptsResponse> {
+    const runtime = await this.readRuntime(runId);
+    const currentExecutionAttemptId = runtime.snapshot().currentExecutionAttemptId;
+    return { runId, currentExecutionAttemptId, executionAttemptIds: runtime.state.executionAttemptIds() };
+  }
+
+  /** 返回一轮完整批次 / Agent；默认只允许当前尝试。 */
+  private async phaseVisit(runId: string, phaseVisitId: number, attempt: number | null): Promise<PhaseVisitResponse> {
+    if (!isPositiveInteger(phaseVisitId)) throw new DaemonRequestError(400, "phaseVisitId 无效。 ");
+    const runtime = await this.readRuntime(runId);
+    const executionAttemptId = attempt ?? runtime.snapshot().currentExecutionAttemptId;
+    if (!runtime.state.hasExecutionAttempt(executionAttemptId)) throw new DaemonRequestError(404, "指定执行尝试不存在。 ");
+    const visit = runtime.state.phaseVisitDetail(phaseVisitId, executionAttemptId);
+    if (!visit) throw new DaemonRequestError(404, "指定阶段轮次不存在。 ");
+    return { runId, executionAttemptId, visit };
+  }
+
+  /** 读取稳定 cursor 分页执行记录；默认隐藏无 Agent 的阶段切换。 */
+  private async phaseVisits(runId: string, url: URL): Promise<PhaseVisitPageResponse> {
+    const runtime = await this.readRuntime(runId);
+    const attempt = parseAttempt(url) ?? runtime.snapshot().currentExecutionAttemptId;
+    if (!runtime.state.hasExecutionAttempt(attempt)) throw new DaemonRequestError(404, "指定执行尝试不存在。 ");
+    const cursor = parseOptionalPositiveInteger(url.searchParams.get("cursor"), "cursor");
+    const limit = parseOptionalPositiveInteger(url.searchParams.get("limit"), "limit") ?? 20;
+    if (limit > 100) throw new DaemonRequestError(400, "limit 不能超过 100。 ");
+    const includeEmpty = url.searchParams.get("includeEmpty") === "true";
+    if (url.searchParams.has("includeEmpty") && !["true", "false"].includes(url.searchParams.get("includeEmpty")!)) throw new DaemonRequestError(400, "includeEmpty 必须为 true 或 false。 ");
+    const page = runtime.state.listPhaseVisits(attempt, cursor, limit, includeEmpty);
+    return { runId, executionAttemptId: attempt, ...page };
+  }
+
+  private async readRuntime(runId: string): Promise<RunRuntime> {
+    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
+    return this.#runs.get(runId) ?? RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
   }
 
   private async createRunOnce(value: CreateRunRequest): Promise<RunResponse> {
@@ -222,6 +335,56 @@ export class LocalDaemon {
     // 新 attempt，突破“一个 Run 同时只允许一条重放”的副作用边界。
     const task = this.resumeOnce(runId).finally(() => this.#resumeRequests.delete(runId));
     this.#resumeRequests.set(runId, task);
+    return task;
+  }
+
+  /** 只允许当前 daemon 持有的真实 Run 暂停；离线 Journal 不可伪造暂停。 */
+  private async pause(runId: string, value: unknown): Promise<RunResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "pause 不接受请求字段。 ");
+    return this.runControl(runId, "pause", async (runtime) => {
+      if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "只有 running 的 Run 可以 pause。 ");
+      const snapshot = await runtime.pause();
+      return { runId, snapshot };
+    });
+  }
+
+  /** recover 只能针对当前 daemon 保留的 paused 会话，拒绝离线或历史 Run。 */
+  private async recover(runId: string, value: unknown): Promise<RunResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "recover 不接受请求字段。 ");
+    return this.runControl(runId, "recover", async (runtime) => {
+      if (runtime.snapshot().status !== "paused") throw new DaemonRequestError(409, "只有 paused 的 Run 可以 recover。 ");
+      const snapshot = await runtime.recover();
+      return { runId, snapshot };
+    });
+  }
+
+  private async stopRun(runId: string, value: unknown): Promise<RunResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "stop 不接受请求字段。 ");
+    const active = this.#runControlRequests.get(runId);
+    if (active && active.kind !== "stop") {
+      const runtime = this.#runs.get(runId);
+      if (!runtime) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可控制生命周期内。 ");
+      // stop 优先于 pause/recover：先取消正在等待的 App Server RPC，待其清理完
+      // 控制锁后再执行真正终止，避免两个操作同时改写同一状态机。
+      runtime.requestStop();
+      await active.promise.catch(() => undefined);
+    }
+    return this.runControl(runId, "stop", async (runtime) => ({ runId, snapshot: await runtime.stop() }));
+  }
+
+  private async runControl(runId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunResponse>): Promise<RunResponse> {
+    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
+    const active = this.#runControlRequests.get(runId);
+    if (active) {
+      if (active.kind === kind) return active.promise;
+      throw new DaemonRequestError(409, `该 Run 正在执行 ${active.kind}，不能同时执行 ${kind}。`);
+    }
+    const task = (async () => {
+      const runtime = this.#runs.get(runId);
+      if (!runtime || !this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可控制生命周期内。 ");
+      return operation(runtime);
+    })().finally(() => this.#runControlRequests.delete(runId));
+    this.#runControlRequests.set(runId, { kind, promise: task });
     return task;
   }
 
@@ -276,7 +439,9 @@ export class LocalDaemon {
     for (const node of runtime.snapshot().phases.flatMap((phase) => phase.agents)) {
       if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;
       const sessionEvent = sessionFor(events, node.id, node.agentSessionId);
-      const verified = !!sessionEvent && await this.verifyReclaimSession(sessionEvent.session, sessionEvent.appServer ? { endpoint: sessionEvent.appServer.endpoint, threadId: sessionEvent.appServer.threadId } : undefined);
+      const viewer = runtime.state.viewerSession(node.id) ?? sessionEvent?.session;
+      const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
+      const verified = !!viewer && await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined);
       if (verified) throw new DaemonRequestError(409, `resume 遇到仍可验证的旧会话：${node.id}；仅恢复 Control，不创建新 attempt。`);
       unverifiable.push(node);
     }
@@ -297,7 +462,7 @@ export class LocalDaemon {
         const opened = await RunJournal.open(runId, this.storeRoot);
         if (opened.journal.manifest.clientRequestId !== clientRequestId) continue;
         const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
-        if (runtime.snapshot().status === "running") throw new DaemonRequestError(409, "相同创建请求的 Run 仍在运行，但当前 daemon 未持有其权威状态；请启动或恢复 daemon。");
+        if (isLiveRunStatus(runtime.snapshot().status)) throw new DaemonRequestError(409, "相同创建请求的 Run 仍在受管生命周期内，但当前 daemon 未持有其权威状态；请启动或恢复 daemon。");
         this.#runs.set(runId, runtime);
         return { runId, snapshot: runtime.snapshot() };
       } catch (error) {
@@ -311,7 +476,7 @@ export class LocalDaemon {
     const memory = this.#runs.get(runId);
     if (memory) return { runId, snapshot: memory.snapshot() };
     const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
-    if (runtime.snapshot().status === "running") throw new DaemonRequestError(409, "Run 仍在运行，但当前 daemon 未持有其权威状态；请启动或恢复 daemon。");
+    if (isLiveRunStatus(runtime.snapshot().status)) throw new DaemonRequestError(409, "Run 仍在受管生命周期内，但当前 daemon 未持有其权威状态；请启动或恢复 daemon。");
     this.#runs.set(runId, runtime);
     return { runId, snapshot: runtime.snapshot() };
   }
@@ -333,11 +498,13 @@ export class LocalDaemon {
     if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId)) return active;
     const opened = await RunJournal.open(request.runId, this.storeRoot);
     const sessionEvent = sessionFor(opened.events, request.nodeId, request.agentSessionId);
-    if (!sessionEvent?.session.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能跨 daemon 认领。");
+    const viewer = runtime.state.viewerSession(request.nodeId) ?? sessionEvent?.session;
+    const binding = runtime.state.appServerBinding(request.nodeId) ?? sessionEvent?.appServer;
+    if (!viewer?.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能跨 daemon 认领。");
     const snapshot = runtime.state.agent(request.nodeId);
     if ((snapshot.status !== "running" && snapshot.status !== "blocked") || snapshot.agentSessionId !== request.agentSessionId) throw new DaemonRequestError(409, "只能认领当前 running 或 blocked 的旧 Agent 会话。");
-    if (!await this.verifyReclaimSession(sessionEvent.session, sessionEvent.appServer ? { endpoint: sessionEvent.appServer.endpoint, threadId: sessionEvent.appServer.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，拒绝认领。");
-    return this.restoreControl(runtime, opened, snapshot, sessionEvent);
+    if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，拒绝认领。");
+    return this.restoreControl(runtime, opened, snapshot, viewer);
   }
 
   /**
@@ -354,23 +521,25 @@ export class LocalDaemon {
         const node = runtime.snapshot().phases.flatMap((phase) => phase.agents).find((agent) => agent.status === "blocked" && agent.block?.blockRequestId === blockRequestId);
         if (!node?.agentSessionId) continue;
         const sessionEvent = sessionFor(opened.events, node.id, node.agentSessionId);
-        if (!sessionEvent?.session.reclaimTokenHash) continue;
-        if (!await this.verifyReclaimSession(sessionEvent.session, sessionEvent.appServer ? { endpoint: sessionEvent.appServer.endpoint, threadId: sessionEvent.appServer.threadId } : undefined)) continue;
+        const viewer = runtime.state.viewerSession(node.id) ?? sessionEvent?.session;
+        const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
+        if (!viewer?.reclaimTokenHash) continue;
+        if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) continue;
         this.#runs.set(runId, runtime);
-        return this.restoreControl(runtime, opened, runtime.state.agent(node.id), sessionEvent);
+        return this.restoreControl(runtime, opened, runtime.state.agent(node.id), viewer);
       } catch { /* 某个无关或损坏 Run 不得阻止其他 pending block 的精确路由。 */ }
     }
     return null;
   }
 
   /** 已验证 Session 后重建单个 Control；只恢复内存索引和 pending block。 */
-  private restoreControl(runtime: RunRuntime, opened: Awaited<ReturnType<typeof RunJournal.open>>, snapshot: import("../runtime/run-types").AgentNodeSnapshot, sessionEvent: Extract<import("../journal/types").JournalEvent, { type: "agent.session" }>): ControlServer {
+  private restoreControl(runtime: RunRuntime, opened: Awaited<ReturnType<typeof RunJournal.open>>, snapshot: import("../runtime/run-types").AgentNodeSnapshot, viewer: import("../sessions/types").SessionIdentity): ControlServer {
     const existing = this.#controls.get(runtime.snapshot().id);
     if (existing?.hasNode(runtime.snapshot().id, snapshot.id, snapshot.agentSessionId!)) return existing;
     const block = snapshot.status === "blocked" ? recoveredBlock(opened.events, runtime.snapshot().id, snapshot.id, snapshot.agentSessionId!, snapshot.block?.blockRequestId) : undefined;
     if (snapshot.status === "blocked" && !block) throw new DaemonRequestError(409, "旧 blocked 节点缺少可恢复的 Journal block。");
     const control = existing ?? runtime.createControlServer();
-    control.restore({ runId: runtime.snapshot().id, nodeId: snapshot.id, agentSessionId: snapshot.agentSessionId!, reclaimTokenHash: sessionEvent.session.reclaimTokenHash!, session: sessionEvent.session, ...(block ? { block } : {}) });
+    control.restore({ runId: runtime.snapshot().id, nodeId: snapshot.id, agentSessionId: snapshot.agentSessionId!, reclaimTokenHash: viewer.reclaimTokenHash!, session: viewer, ...(block ? { block } : {}) });
     if (!existing) this.#controls.set(runtime.snapshot().id, control);
     return control;
   }
@@ -395,18 +564,18 @@ export class LocalDaemon {
             controller.error(new Error("Run 不再由当前 daemon 管理。"));
             return;
           }
-          const response: RunResponse = { runId, snapshot: runtime.snapshot() };
+          const response: RunProgressEvent = { runId, status: runtime.snapshot().status, summary: runtime.state.currentAttemptSummary() };
           const serialized = JSON.stringify(response);
           if (serialized === previous) return;
           previous = serialized;
           controller.enqueue(encoder.encode(`event: snapshot\ndata: ${serialized}\n\n`));
-          if (response.snapshot.status !== "running") {
+          if (response.status !== "running" && response.status !== "pausing" && response.status !== "recovering") {
             if (timer) clearInterval(timer);
             controller.close();
           }
         };
         publish();
-        if (initial.snapshot.status === "running") timer = setInterval(publish, 200);
+        if (initial.snapshot.status === "running" || initial.snapshot.status === "pausing" || initial.snapshot.status === "recovering") timer = setInterval(publish, 200);
       },
       cancel: () => { if (timer) clearInterval(timer); },
     });
@@ -450,14 +619,36 @@ async function verifyReclaimSession(session: import("../sessions/types").Session
  */
 export async function inspectStoredRun(runId: string, storeRoot = runsRoot()): Promise<RunResponse> {
   const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), storeRoot);
-  if (runtime.snapshot().status === "running") throw new DaemonRequestError(409, "Run 仍在运行，但当前没有可验证的 daemon；请先启动或恢复 daemon。" );
+  if (isLiveRunStatus(runtime.snapshot().status)) throw new DaemonRequestError(409, "Run 仍在受管生命周期内，但当前没有可验证的 daemon；请先启动或恢复 daemon。" );
   return { runId, snapshot: runtime.snapshot() };
 }
 
 class DaemonRequestError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
+function isEmptyObject(value: unknown): value is Record<string, never> {
+  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
 function isCreateRunRequest(value: unknown): value is CreateRunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
   return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean");
+}
+
+function listItem(runtime: RunRuntime): RunListItem {
+  const snapshot = runtime.snapshot();
+  const summary = runtime.state.currentAttemptSummary();
+  return { runId: snapshot.id, workflow: { name: snapshot.workflow.name, description: snapshot.workflow.description }, status: snapshot.status, cwd: snapshot.cwd, createdAt: snapshot.createdAt, endedAt: snapshot.endedAt, diagnostic: snapshot.diagnostic, hasBlockedAgent: summary.phases.some((phase) => (phase.statusCounts.blocked ?? 0) > 0) };
+}
+
+function isPositiveInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value >= 1; }
+function parseOptionalPositiveInteger(value: string | null, label: string): number | null {
+  if (value === null) return null;
+  if (!/^\d+$/.test(value) || !isPositiveInteger(Number(value))) throw new DaemonRequestError(400, `${label} 必须是正整数。 `);
+  return Number(value);
+}
+function parseAttempt(url: URL): number | null { return parseOptionalPositiveInteger(url.searchParams.get("attempt"), "attempt"); }
+
+function isLiveRunStatus(status: import("../runtime/run-types").RunStatus): boolean {
+  return status === "running" || status === "pausing" || status === "paused" || status === "recovering";
 }

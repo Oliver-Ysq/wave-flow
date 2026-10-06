@@ -89,6 +89,22 @@ export class TmuxSessionBackend implements SessionBackend {
   /** detached tmux 会话没有观察者需要断开；该操作是幂等 no-op。 */
   async detach(_identity: SessionIdentity): Promise<void> {}
 
+  /** pause 专用：销毁 tmux viewer 而不把 Ctrl-C 写入 App Server remote viewer。 */
+  async closeViewer(identity: SessionIdentity): Promise<DestroyResult> {
+    const live = await this.liveness(identity);
+    if (live === "missing") { await removeIdentity(identity); return { status: "destroyed", diagnostic: null }; }
+    if (live === "unknown") return { status: "termination-unconfirmed", diagnostic: "tmux viewer 身份无法验证，拒绝关闭。" };
+    try { await this.client.killSession(identity.sessionName); } catch (error) { return { status: "termination-unconfirmed", diagnostic: error instanceof Error ? error.message : String(error) }; }
+    const deadline = Date.now() + this.destroyTimeoutMs;
+    while (Date.now() < deadline) {
+      await delay(this.destroyPollMs);
+      const current = await this.client.liveness(identity.sessionName);
+      if (current === "missing") { await removeIdentity(identity); return { status: "destroyed", diagnostic: null }; }
+      if (current === "unknown") return { status: "termination-unconfirmed", diagnostic: "tmux viewer 关闭探测无结论。" };
+    }
+    return { status: "termination-unconfirmed", diagnostic: "tmux viewer 未确认关闭。" };
+  }
+
   /** 请求中断并等待明确 missing；无结论时保留 identity，禁止误报已销毁。 */
   async destroy(identity: SessionIdentity): Promise<DestroyResult> {
     const live = await this.liveness(identity);

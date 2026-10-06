@@ -313,6 +313,32 @@ export class CodexAppServerAdapter {
     });
   }
 
+  /** 列出 App Server 可枚举的 thread 背景终端；仅实验协议已显式协商时可用。 */
+  async listBackgroundTerminals(threadId: string, signal: AbortSignal): Promise<readonly { readonly processId: string; readonly command: string }[]> {
+    return this.withExclusiveControlOperation(async () => {
+      await this.initialize(signal);
+      const result = await this.request(this.requireConnection(), "thread/backgroundTerminals/list", { threadId }, signal) as { data?: unknown };
+      if (!Array.isArray(result?.data)) throw new Error("App Server backgroundTerminals/list 返回无效。 ");
+      return result.data.map((item) => {
+        if (!item || typeof item !== "object" || typeof (item as { processId?: unknown }).processId !== "string" || typeof (item as { command?: unknown }).command !== "string") throw new Error("App Server background terminal 条目无效。 ");
+        return { processId: (item as { processId: string }).processId, command: (item as { command: string }).command };
+      });
+    });
+  }
+
+  /** 停止该 thread 所有 App Server 受管背景终端；调用后必须再次 list 确认空清单。 */
+  async cleanBackgroundTerminals(threadId: string, signal: AbortSignal): Promise<void> {
+    return this.withExclusiveControlOperation(async () => {
+      await this.initialize(signal);
+      await this.request(this.requireConnection(), "thread/backgroundTerminals/clean", { threadId }, signal);
+    });
+  }
+
+  /** 同一 thread 的恢复回合；ACK 不明必须按 ambiguous 处理，禁止重发。 */
+  async submitRecoveryPrompt(node: AgentNodeSnapshot, threadId: string, prompt: string, signal: AbortSignal): Promise<CodexAppServerSubmission> {
+    return this.submitInitialPrompt(node, prompt, signal, threadId);
+  }
+
   /** 关闭控制连接；保留 thread/turn 的不确定性给调用方 Journal 处理。 */
   async close(): Promise<void> {
     const connection = this.#connection;

@@ -4,9 +4,9 @@ import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { SessionIdentity } from "../sessions/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 5;
+export const RUNTIME_VERSION = 6;
 /** 当前实现可安全读取的历史耐久格式；旧格式只读兼容，不允许追加新的 Replay attempt。 */
-export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, RUNTIME_VERSION] as const;
+export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, 5, RUNTIME_VERSION] as const;
 
 /** 一次 Run 创建后不可变的耐久身份信息。 */
 export type RunManifest = {
@@ -49,6 +49,22 @@ export type JournalEvent = JournalBase & ({
   readonly type: "run.created";
   readonly runStatus: "running";
 } | {
+  /** 一次实际执行路径的开始；纯复用 resume 不产生该事实。 */
+  readonly type: "execution-attempt.started";
+  /** Run 内递增的执行尝试号；首次运行固定为 1。 */
+  readonly executionAttemptId: number;
+} | {
+  /** 一次进入已声明 Phase 的耐久事实；即使本轮没有 Agent 也保留。 */
+  readonly type: "phase.entered";
+  /** 所属执行尝试。 */
+  readonly executionAttemptId: number;
+  /** 尝试内递增、稳定的阶段访问 id。 */
+  readonly phaseVisitId: number;
+  /** 已声明的 Phase 标题。 */
+  readonly title: string;
+  /** 同标题在本次尝试中的进入轮次，从 1 开始。 */
+  readonly occurrence: number;
+} | {
   readonly type: "phase.changed";
   readonly title: string;
 } | {
@@ -61,6 +77,12 @@ export type JournalEvent = JournalBase & ({
   /** Workflow 中本次实际 agent() 调用位置；v3/v4 省略时等于 sequence。 */
   readonly logicalSequence?: number;
   readonly phase: string | null;
+  /** 创建该节点的实际执行尝试。 */
+  readonly executionAttemptId?: number;
+  /** 节点所属的稳定阶段访问；旧 Journal 缺失时只读兼容投影。 */
+  readonly phaseVisitId?: number;
+  /** Runtime 已知的调度批次；v5 缺失时只读兼容投影为单节点 serial 批次。 */
+  readonly executionBatch?: import("../runtime/workflow-host").ExecutionBatch;
   readonly request: NormalizedAgentRequest;
 } | {
   /** 用户显式 resume 后，为同一逻辑节点创建新的真实执行尝试。 */
@@ -73,6 +95,10 @@ export type JournalEvent = JournalBase & ({
   readonly newAgentSessionId: string;
   /** true 表示此前已有节点不能复用，当前 completed 旧结果也必须随下游重新执行。 */
   readonly invalidatedByPriorRestart: boolean;
+  /** 新 attempt 所属执行尝试。 */
+  readonly executionAttemptId?: number;
+  /** 新 attempt 所属阶段访问。 */
+  readonly phaseVisitId?: number;
   /** 当前重新执行时验证到的请求；必须与原请求完全一致。 */
   readonly request: NormalizedAgentRequest;
 } | {
@@ -92,6 +118,21 @@ export type JournalEvent = JournalBase & ({
     readonly turnId: string;
     readonly protocolVersion: 1;
   };
+} | {
+  /** paused 后同一 thread 的新继续回合；不创建新 Agent attempt。 */
+  readonly type: "agent.recovered";
+  /** 原 session 不变，只有当前 App Server turn 坐标更新。 */
+  readonly appServer: {
+    readonly endpoint: string;
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly protocolVersion: 1;
+  };
+} | {
+  /** recover 后重建的 tmux viewer；替换旧 viewer 坐标，不改变 Agent session 身份。 */
+  readonly type: "agent.viewer";
+  /** 新 viewer 的完整受管会话身份，用于 daemon 重启后的精确认领。 */
+  readonly session: SessionIdentity;
 } | {
   readonly type: "agent.completed";
   readonly resultPath: string;

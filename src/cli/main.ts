@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { DaemonClient } from "./daemon-client";
+import { DaemonClient, UnsupportedDaemonCloseEndpointError } from "./daemon-client";
 import { formatCapabilities, formatSnapshot, helpText } from "./output";
 import { parseCommand } from "./parse-command";
 import { discoverDaemon, ensureGlobalDaemon } from "../daemon/daemon-lifecycle";
@@ -25,15 +25,33 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
   // 前者只允许读取已终结 Run 的耐久证据；后者必须交给仍持有原等待者的 daemon。
   const daemon = deterministicForTest
     ? null
-    : command.kind === "inspect" || command.kind === "answer"
+    : command.kind === "inspect" || command.kind === "answer" || command.kind === "close"
       ? await discoverDaemon()
-      : await ensureGlobalDaemon();
+      : await ensureGlobalDaemon(10_000, command.kind === "web" ? write : undefined);
   const testServer = testDaemon?.start();
   try {
     const baseUrl = daemon?.baseUrl ?? testServer?.baseUrl;
     if (command.kind === "start") {
       if (!baseUrl) throw new Error("无法连接 Wave Flow daemon。");
       write(`Wave Flow daemon 已就绪：${baseUrl}`);
+      return;
+    }
+    if (command.kind === "web") {
+      if (!baseUrl) throw new Error("无法连接 Wave Flow daemon。 ");
+      write("已确认 daemon 只监听 loopback，同源 Local Web 静态资源可用。");
+      write(`Wave Flow Local Web：${baseUrl}/`);
+      return;
+    }
+    if (command.kind === "close") {
+      if (!daemon) throw new Error("没有可验证的 Wave Flow daemon 可关闭。 ");
+      try {
+        await new DaemonClient(daemon.baseUrl).closeDaemon();
+        write("Wave Flow daemon 已接受关闭请求。");
+      } catch (error) {
+        if (!(error instanceof UnsupportedDaemonCloseEndpointError)) throw error;
+        await terminateVerifiedLegacyDaemon(daemon);
+        write("旧版 Wave Flow daemon 已安全终止。");
+      }
       return;
     }
     if (command.kind === "serve") {
@@ -54,6 +72,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
     const client = new DaemonClient(baseUrl);
     if (command.kind === "answer") { await executeAnswer(parseAnswerCommand(command.argv), baseUrl); write("答案已交付给等待中的 Agent。"); return; }
     if (command.kind === "resume") { const response = await client.resume(command.runId); write(formatSnapshot(response.snapshot)); return; }
+    if (command.kind === "pause") { const response = await client.pause(command.runId); write(formatSnapshot(response.snapshot)); return; }
+    if (command.kind === "recover") { const response = await client.recover(command.runId); write(formatSnapshot(response.snapshot)); return; }
+    if (command.kind === "stop") { const response = await client.stop(command.runId); write(formatSnapshot(response.snapshot)); return; }
     if (command.kind === "capabilities") {
       const snapshot = await client.capabilities();
       write(command.json ? JSON.stringify(snapshot, null, 2) : formatCapabilities(snapshot));
@@ -70,6 +91,25 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
   } finally {
     // 生产 daemon 属于用户级后台服务，CLI 绝不停止它。测试 daemon 是本调用私有的。
     testServer?.stop();
+  }
+}
+
+/**
+ * 旧 daemon 没有 `/daemon/close` 时的唯一兼容出口。
+ * 再次发现并逐字段比对，避免 descriptor 在 HTTP 请求与信号之间被新 daemon 替换。
+ */
+export async function terminateVerifiedLegacyDaemon(daemon: NonNullable<Awaited<ReturnType<typeof discoverDaemon>>>): Promise<void> {
+  const current = await discoverDaemon();
+  if (!current
+    || current.baseUrl !== daemon.baseUrl
+    || current.descriptor.pid !== daemon.descriptor.pid
+    || current.descriptor.bootInstanceId !== daemon.descriptor.bootInstanceId
+    || current.descriptor.processStartIdentity !== daemon.descriptor.processStartIdentity
+    || current.descriptor.userIdentity !== daemon.descriptor.userIdentity) {
+    throw new Error("旧 daemon 的身份在关闭前发生变化，拒绝终止。请重新执行 wave-flow close。");
+  }
+  try { process.kill(current.descriptor.pid, "SIGTERM"); } catch (error) {
+    throw new Error(`无法终止已验证的旧 daemon：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
