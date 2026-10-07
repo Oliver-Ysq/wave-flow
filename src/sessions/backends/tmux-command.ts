@@ -38,11 +38,33 @@ export class TmuxCommandClient {
     if (result.exitCode !== 0) throw new Error(`tmux 发送特殊键失败：${trimDiagnostic(result.stderr)}`);
   }
 
+  /** 写入浏览器终端产生的原始按键字节；调用方必须先完成会话 identity 核验。 */
+  async sendRawText(sessionName: string, text: string): Promise<void> {
+    const result = await this.runner.run(["-S", this.socketPath, "send-keys", "-l", "-t", sessionName, text], this.timeoutMs);
+    if (result.exitCode !== 0) throw new Error(`tmux 写入终端按键失败：${trimDiagnostic(result.stderr)}`);
+  }
+
   /** 捕获会话近期屏幕内容，仅供诊断。 */
   async capture(sessionName: string, lines: number): Promise<string> {
     const result = await this.runner.run(["-S", this.socketPath, "capture-pane", "-p", "-t", sessionName, "-S", `-${lines}`], this.timeoutMs);
     if (result.exitCode !== 0) throw new Error(`tmux 读取屏幕失败：${trimDiagnostic(result.stderr)}`);
     return result.stdout;
+  }
+
+  /** 捕获带 ANSI 转义序列的有限 scrollback，供 Web Terminal 复现真实 TUI 画面。 */
+  async captureAnsi(sessionName: string, lines: number): Promise<string> {
+    const result = await this.runner.run(["-S", this.socketPath, "capture-pane", "-e", "-p", "-t", sessionName, "-S", `-${lines}`], this.timeoutMs);
+    if (result.exitCode !== 0) throw new Error(`tmux 读取 ANSI 屏幕失败：${trimDiagnostic(result.stderr)}`);
+    return result.stdout;
+  }
+
+  /** 读取 tmux 当前 pane 光标；失败返回 null，调用方仍可安全显示首屏。 */
+  async cursor(sessionName: string): Promise<{ readonly x: number; readonly y: number } | null> {
+    try {
+      const result = await this.runner.run(["-S", this.socketPath, "display-message", "-p", "-t", sessionName, "#{cursor_x} #{cursor_y}"], this.timeoutMs);
+      const [x, y] = result.stdout.trim().split(/\s+/).map(Number);
+      return result.exitCode === 0 && Number.isInteger(x) && x >= 0 && Number.isInteger(y) && y >= 0 ? { x, y } : null;
+    } catch { return null; }
   }
 
   /** 明确区分会话存在、缺失和 tmux 控制面无结论。 */

@@ -76,3 +76,4 @@ export type PhaseVisitPageResponse = { runId: string; executionAttemptId: number
 
 export type RunResponse = { runId: string; snapshot: RunSnapshot };
 export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean };
+export type TerminalOpenResponse = { runId: string; nodeId: string; cli: "codex"; initialScreen: string; outputSequence: number; wsPath: string };

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Terminal } from "@xterm/xterm";
 import { api } from "./api";
 import type { AgentSnapshot, CurrentAttemptResponse, PhaseVisit, RunListItem, RunResponse, RunSnapshot } from "./types";
 
@@ -150,7 +151,7 @@ function RunDetail({ run, busy, onControl, onAnswer }: { run: RunListItem; busy:
     <div className="run-meta"><Status status={run.status} /><span>创建于 {localeTime(run.createdAt)}</span><span>结束于 {localeTime(run.endedAt)}</span><span className="path">{run.cwd}</span></div>
     {run.diagnostic && <div className="diagnostic">{run.diagnostic}</div>}
     <div className="phase-list">{attempt ? <><div className="attempt-label">当前执行尝试 #{attempt.summary.executionAttemptId}</div>{attempt.summary.phases.map((phase, index) => <section className={`phase ${phase.currentVisitId !== null ? "current" : ""}`} key={phase.title}><PhaseHeader phase={phase} index={index} loading={visitLoading === (phase.currentVisitId ?? phase.latestVisitId)} onOpen={async (phaseVisitId) => { setVisitLoading(phaseVisitId); try { setVisit((await api.phaseVisit(run.runId, phaseVisitId)).visit); } finally { setVisitLoading(null); } }} />{visit?.title === phase.title && <PhaseVisitDetail visit={visit} view={defaultView} busy={busy} onAnswer={onAnswer} onOpen={setExpanded} onClose={() => setVisit(null)} />}</section>)}<section className="history-panel"><div><strong>执行记录</strong><span>{includeEmpty ? "包含没有创建 Agent 的阶段切换" : "仅显示包含 Agent 的阶段轮次"}</span></div><label><input type="checkbox" checked={includeEmpty} onChange={(event) => { setIncludeEmpty(event.target.checked); setHistory(null); setHistoryCursor(null); }} /> 显示没有 Agent 的阶段切换</label>{attemptIds && <label>执行尝试 <select value={historyAttempt ?? attempt.summary.executionAttemptId} onChange={(event) => { setHistoryAttempt(Number(event.target.value)); setHistory(null); setHistoryCursor(null); }} >{attemptIds.map((attemptId) => <option key={attemptId} value={attemptId}>{attemptId === attempt.summary.executionAttemptId ? `当前尝试 #${attemptId}` : `历史尝试 #${attemptId}`}</option>)}</select></label>}<button disabled={historyLoading} onClick={async () => { setHistoryLoading(true); try { const attempts = attemptIds ?? (await api.executionAttempts(run.runId)).executionAttemptIds; if (!attemptIds) setAttemptIds(attempts); const selectedAttempt = historyAttempt ?? attempt.summary.executionAttemptId; const page = await api.phaseVisits(run.runId, history === null ? { includeEmpty, attempt: selectedAttempt } : { cursor: historyCursor ?? undefined, includeEmpty, attempt: selectedAttempt }); setHistory(current => [...(current ?? []), ...page.items]); setHistoryCursor(page.nextCursor); } finally { setHistoryLoading(false); } }}>{history === null ? "查看执行记录" : historyLoading ? "正在加载…" : historyCursor === null ? "没有更多记录" : "加载更早记录"}</button>{history && <ol>{history.map((item) => <li key={`${item.executionAttemptId}:${item.phaseVisitId}`}><button onClick={() => setVisit(item)}>{item.title} · 第 {item.occurrence} 轮 <small>{item.batches.reduce((count, batch) => count + batch.agents.length, 0)} 名 Agent</small></button></li>)}</ol>}</section></> : <div className="empty-phase">正在读取当前执行摘要…</div>}</div>
-    {expanded && <AgentDetailModal agent={expanded} busy={busy} onAnswer={onAnswer} onClose={() => setExpanded(null)} />}
+    {expanded && <AgentDetailModal runId={run.runId} agent={expanded} busy={busy} onAnswer={onAnswer} onClose={() => setExpanded(null)} />}
   </>;
 }
 
@@ -196,8 +197,32 @@ function AgentCard({ agent, busy, onAnswer, onOpen, expanded = false }: { agent:
   </article>;
 }
 
-function AgentDetailModal({ agent, busy, onAnswer, onClose }: { agent: AgentSnapshot; busy: string | null; onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>; onClose: () => void }) {
-  return <div className="agent-modal-backdrop" role="presentation" onMouseDown={onClose}><section className="agent-modal" role="dialog" aria-modal="true" aria-label={`${agent.label} 完整信息`} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><span>Agent 完整信息</span><strong>{agent.label}</strong></div><button onClick={onClose} aria-label="关闭完整信息">×</button></div><AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded /></section></div>;
+function AgentDetailModal({ runId, agent, busy, onAnswer, onClose }: { runId: string; agent: AgentSnapshot; busy: string | null; onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>; onClose: () => void }) {
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  return <div className="agent-modal-backdrop" role="presentation" onMouseDown={onClose}><section className={`agent-modal ${terminalOpen ? "with-terminal" : ""}`} role="dialog" aria-modal="true" aria-label={`${agent.label} 完整信息`} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><span>Agent 完整信息</span><strong>{agent.label}</strong></div><div className="modal-actions">{["running", "blocked"].includes(agent.status) && <button className="terminal-toggle" onClick={() => setTerminalOpen(open => !open)}>{terminalOpen ? "收起终端" : "打开终端"}</button>}<button onClick={onClose} aria-label="关闭完整信息">×</button></div></div><AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded />{terminalOpen && <WebTerminal runId={runId} agent={agent} />}</section></div>;
+}
+
+function WebTerminal({ runId, agent }: { runId: string; agent: AgentSnapshot }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [state, setState] = useState("正在连接受管终端…");
+  useEffect(() => {
+    if (!host.current) return;
+    let socket: WebSocket | null = null, disposed = false;
+    const xterm = new Terminal({ convertEol: false, cursorBlink: true, fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", theme: { background: "#141924", foreground: "#dbe5f3", cursor: "#b9c7ff" } });
+    xterm.open(host.current);
+    const input = xterm.onData((data) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data })); });
+    void api.terminal(runId, agent.id).then((opened) => {
+      if (disposed) return;
+      xterm.write(opened.initialScreen);
+      socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${opened.wsPath}?after=${opened.outputSequence}`);
+      socket.onopen = () => setState("已连接 · 可直接输入");
+      socket.onmessage = (event) => { try { const message = JSON.parse(String(event.data)) as { type?: string; data?: string; reason?: string; message?: string }; if (message.type === "output" && typeof message.data === "string") xterm.write(message.data); if (message.type === "closed") setState(`连接已关闭：${message.reason ?? "终端不可用"}`); if (message.type === "error") setState(message.message ?? "终端输入被拒绝"); } catch { setState("终端收到无效消息。"); } };
+      socket.onclose = () => { if (!disposed) setState(current => current.startsWith("连接已关闭") ? current : "实时连接已断开"); };
+      socket.onerror = () => setState("实时连接失败");
+    }).catch((error) => setState(error instanceof Error ? error.message : "无法打开终端"));
+    return () => { disposed = true; input.dispose(); socket?.close(); xterm.dispose(); };
+  }, [agent.id, runId]);
+  return <section className="web-terminal"><div className="web-terminal-head"><strong>Codex 终端</strong><span>{state}</span></div><div ref={host} className="xterm-host" /></section>;
 }
 
 function Status({ status }: { status: string }) { return <span className={`status ${status}`}>{statusLabel(status)}</span>; }

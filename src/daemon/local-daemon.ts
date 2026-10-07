@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse } from "./types";
+import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, TerminalOpenResponse } from "./types";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -23,6 +23,8 @@ import { TmuxSessionBackend } from "../sessions/backends/tmux-session-backend";
 import { TmuxCommandClient } from "../sessions/backends/tmux-command";
 import { CodexAppServerAdapter, bunCodexAppServerConnection } from "../adapters/codex-app-server";
 import { serveWebAsset } from "../web/static-assets";
+import { TmuxTerminalObserver } from "../sessions/terminal-observer";
+import type { ServerWebSocket } from "bun";
 
 /** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
 export type RealCodexExecutorFactory = (args: {
@@ -64,6 +66,12 @@ export class LocalDaemon {
   #resumeRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的用户控制必须串行；不同动作不能误复用彼此的成功结果。 */
   #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly promise: Promise<RunResponse> }>();
+  /** 每个 Agent 只复用一条 pipe-pane，多个浏览器 WebSocket 共享输出而不重复订阅。 */
+  #terminals = new Map<string, { readonly observer: TmuxTerminalObserver; readonly sockets: Set<ServerWebSocket<TerminalSocketData>>; readonly unsubscribe: () => void }>();
+  /** 同一 Agent 的 observer 启动与关闭必须单飞，避免旧 close 误关刚重建的 pipe-pane。 */
+  #terminalOpenings = new Map<string, Promise<{ readonly observer: TmuxTerminalObserver; readonly sockets: Set<ServerWebSocket<TerminalSocketData>>; readonly unsubscribe: () => void }>>();
+  #terminalClosings = new Map<string, Promise<void>>();
+  #terminalClosingKeys = new Set<string>();
   #server: ReturnType<typeof Bun.serve> | null = null;
   readonly instanceId = crypto.randomUUID();
   bootInstanceId: string | null = null;
@@ -95,7 +103,11 @@ export class LocalDaemon {
   /** 启动 HTTP 服务；默认随机端口，严格绑定 127.0.0.1。 */
   start(port = 0): { readonly baseUrl: string; stop(): void } {
     if (this.#server) throw new Error("Local daemon 已启动。");
-    this.#server = Bun.serve({ hostname: "127.0.0.1", port, fetch: (request) => this.fetch(request) });
+    this.#server = Bun.serve<TerminalSocketData>({ hostname: "127.0.0.1", port, fetch: (request, server) => this.fetch(request, server), websocket: {
+      open: (socket) => this.openTerminalSocket(socket),
+      message: (socket, message) => { void this.receiveTerminalInput(socket, typeof message === "string" ? message : new TextDecoder().decode(message)); },
+      close: (socket) => this.closeTerminalSocket(socket),
+    } });
     return { baseUrl: `http://127.0.0.1:${this.#server.port}`, stop: () => this.stop() };
   }
 
@@ -103,7 +115,7 @@ export class LocalDaemon {
   setBootInstanceId(value: string): void { if (!value.trim() || this.bootInstanceId) throw new Error("daemon 启动身份无效或已设置。"); this.bootInstanceId = value; }
 
   /** 停止短生命周期 daemon；不会删除 Journal 或本地结果文件。 */
-  stop(): void { this.#server?.stop(true); this.#server = null; }
+  stop(): void { for (const key of [...this.#terminals.keys()]) void this.closeTerminal(key, "daemon-closed"); this.#server?.stop(true); this.#server = null; }
 
   /** 新 daemon 启动后收敛上次在 pause/recover 中断的 Run；绝不创建新 turn。 */
   async reconcileRunControl(): Promise<void> {
@@ -134,13 +146,24 @@ export class LocalDaemon {
     this.#controls.set(runId, control);
   }
 
-  private async fetch(request: Request): Promise<Response> {
+  private async fetch(request: Request, server?: ReturnType<typeof Bun.serve<TerminalSocketData>>): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
       if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
       if (request.method === "POST" && url.pathname === "/daemon/close") return this.closeDaemon(await this.readJson(request));
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
+      const terminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal$/);
+      if (request.method === "GET" && terminalMatch) return this.json(await this.openTerminal(decodeURIComponent(terminalMatch[1]), decodeURIComponent(terminalMatch[2])));
+      const terminalStreamMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/stream$/);
+      if (request.method === "GET" && terminalStreamMatch) {
+        const runId = decodeURIComponent(terminalStreamMatch[1]); const nodeId = decodeURIComponent(terminalStreamMatch[2]);
+        const terminal = await this.requireTerminal(runId, nodeId);
+        const after = Number(url.searchParams.get("after") ?? "0");
+        if (!Number.isInteger(after) || after < 0) throw new DaemonRequestError(400, "终端输出序号无效。 ");
+        if (!server?.upgrade(request, { data: { key: terminal.key, runId, nodeId, after } })) return new Response("WebSocket upgrade failed", { status: 400 });
+        return undefined as never;
+      }
       if (request.method === "POST" && url.pathname === "/runs") return this.json(await this.createRun(await this.readJson(request)));
       const resumeMatch = url.pathname.match(/^\/runs\/([^/]+)\/resume$/);
       if (request.method === "POST" && resumeMatch) {
@@ -320,7 +343,7 @@ export class LocalDaemon {
     }
     const runId = runtime.snapshot().id;
     this.#runs.set(runId, runtime);
-    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); });
+    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); void this.closeRunTerminals(runId, "run-finished"); });
     this.#runTasks.set(runId, task);
     await runtime.waitForSafeLaunch();
     return { runId: runtime.snapshot().id, snapshot: runtime.snapshot() };
@@ -343,6 +366,7 @@ export class LocalDaemon {
     if (!isEmptyObject(value)) throw new DaemonRequestError(400, "pause 不接受请求字段。 ");
     return this.runControl(runId, "pause", async (runtime) => {
       if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "只有 running 的 Run 可以 pause。 ");
+      await this.closeRunTerminals(runId, "paused");
       const snapshot = await runtime.pause();
       return { runId, snapshot };
     });
@@ -369,7 +393,7 @@ export class LocalDaemon {
       runtime.requestStop();
       await active.promise.catch(() => undefined);
     }
-    return this.runControl(runId, "stop", async (runtime) => ({ runId, snapshot: await runtime.stop() }));
+    return this.runControl(runId, "stop", async (runtime) => { await this.closeRunTerminals(runId, "stopped"); return { runId, snapshot: await runtime.stop() }; });
   }
 
   private async runControl(runId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunResponse>): Promise<RunResponse> {
@@ -385,6 +409,100 @@ export class LocalDaemon {
       return operation(runtime);
     })().finally(() => this.#runControlRequests.delete(runId));
     this.#runControlRequests.set(runId, { kind, promise: task });
+    return task;
+  }
+
+  /** 返回首屏并确保该 Agent 的唯一 pipe-pane 观察器已就绪。 */
+  private async openTerminal(runId: string, nodeId: string): Promise<TerminalOpenResponse> {
+    const terminal = await this.requireTerminal(runId, nodeId);
+    const initial = await terminal.observer.initialScreen();
+    return { runId, nodeId, cli: terminal.node.cli, initialScreen: initial.screen, outputSequence: initial.sequence, wsPath: `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/stream` };
+  }
+
+  /** 每次 HTTP 打开和 WebSocket 收发均重新确认当前 Run、节点状态和 tmux identity。 */
+  private async requireTerminal(runId: string, nodeId: string): Promise<{ readonly key: string; readonly node: import("../runtime/run-types").AgentNodeSnapshot; readonly observer: TmuxTerminalObserver }> {
+    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
+    const runtime = this.#runs.get(runId);
+    if (!runtime || !this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可观察生命周期内。 ");
+    const controlling = this.#runControlRequests.get(runId);
+    if (controlling) throw new DaemonRequestError(409, `该 Run 正在执行 ${controlling.kind}，暂不允许打开终端。`);
+    if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "当前 Run 状态不允许打开终端。 ");
+    let node: import("../runtime/run-types").AgentNodeSnapshot;
+    try { node = runtime.state.agent(nodeId); } catch { throw new DaemonRequestError(404, "该 Run 中不存在 Agent 节点。 "); }
+    if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) throw new DaemonRequestError(409, "当前 Agent 状态不允许打开终端。 ");
+    const session = runtime.state.viewerSession(nodeId);
+    if (!session || session.agentSessionId !== node.agentSessionId) throw new DaemonRequestError(409, "该 Agent 缺少当前受管终端会话。 ");
+    const key = terminalKey(runId, nodeId, node.agentSessionId);
+    await this.#terminalClosings.get(key)?.catch(() => {});
+    const existing = this.#terminals.get(key);
+    if (existing) { await existing.observer.verify(); return { key, node, observer: existing.observer }; }
+    let opening = this.#terminalOpenings.get(key);
+    if (!opening) {
+      opening = (async () => {
+        const observer = new TmuxTerminalObserver(session);
+        await observer.start();
+        const sockets = new Set<ServerWebSocket<TerminalSocketData>>();
+        const unsubscribe = observer.subscribe((data) => { for (const socket of sockets) socket.send(JSON.stringify({ type: "output", data })); });
+        observer.onClose(() => { void this.closeTerminal(key, "session-unavailable"); });
+        const entry = { observer, sockets, unsubscribe };
+        this.#terminals.set(key, entry);
+        return entry;
+      })().finally(() => this.#terminalOpenings.delete(key));
+      this.#terminalOpenings.set(key, opening);
+    }
+    const created = await opening;
+    return { key, node, observer: created.observer };
+  }
+
+  private openTerminalSocket(socket: ServerWebSocket<TerminalSocketData>): void {
+    const terminal = this.#terminals.get(socket.data.key);
+    if (!terminal) { socket.send(JSON.stringify({ type: "closed", reason: "terminal-unavailable" })); socket.close(); return; }
+    terminal.sockets.add(socket);
+    void terminal.observer.verify().then(() => {
+      if (!terminal.sockets.has(socket)) return;
+      for (const data of terminal.observer.replayAfter(socket.data.after)) socket.send(JSON.stringify({ type: "output", data }));
+      socket.send(JSON.stringify({ type: "ready" }));
+    }).catch(() => { socket.send(JSON.stringify({ type: "closed", reason: "session-unavailable" })); socket.close(); });
+  }
+
+  private async receiveTerminalInput(socket: ServerWebSocket<TerminalSocketData>, raw: string): Promise<void> {
+    let message: unknown;
+    try { message = JSON.parse(raw); } catch { socket.send(JSON.stringify({ type: "error", message: "终端消息必须是 JSON。" })); return; }
+    if (!isTerminalInput(message)) { socket.send(JSON.stringify({ type: "error", message: "终端消息无效。" })); return; }
+    try {
+      const terminal = await this.requireTerminal(socket.data.runId, socket.data.nodeId);
+      if (terminal.key !== socket.data.key) throw new DaemonRequestError(409, "终端会话已变化。 ");
+      await terminal.observer.input(message.data);
+    } catch (error) { socket.send(JSON.stringify({ type: "closed", reason: error instanceof Error ? error.message : "terminal-unavailable" })); socket.close(); }
+  }
+
+  private closeTerminalSocket(socket: ServerWebSocket<TerminalSocketData>): void {
+    const terminal = this.#terminals.get(socket.data.key);
+    if (!terminal) return;
+    terminal.sockets.delete(socket);
+    if (terminal.sockets.size === 0) void this.closeTerminal(socket.data.key, "no-viewers");
+  }
+
+  private async closeRunTerminals(runId: string, reason: string): Promise<void> {
+    await Promise.all([...this.#terminals.entries()].filter(([key]) => key.startsWith(`${runId}:`)).map(([key]) => this.closeTerminal(key, reason)));
+  }
+
+  /** 关闭 WebSocket 与 pipe-pane；绝不调用 tmux interrupt 或销毁 Agent。 */
+  private async closeTerminal(key: string, reason: string): Promise<void> {
+    if (this.#terminalClosingKeys.has(key)) return this.#terminalClosings.get(key);
+    const closing = this.#terminalClosings.get(key);
+    if (closing) return closing;
+    const terminal = this.#terminals.get(key);
+    if (!terminal) { await this.#terminalOpenings.get(key)?.catch(() => {}); if (this.#terminals.has(key)) return this.closeTerminal(key, reason); return; }
+    this.#terminals.delete(key);
+    this.#terminalClosingKeys.add(key);
+    const task = (async () => {
+      terminal.unsubscribe();
+      for (const socket of terminal.sockets) { socket.send(JSON.stringify({ type: "closed", reason })); socket.close(); }
+      terminal.sockets.clear();
+      await terminal.observer.close().catch(() => {});
+    })().finally(() => { this.#terminalClosingKeys.delete(key); this.#terminalClosings.delete(key); });
+    this.#terminalClosings.set(key, task);
     return task;
   }
 
@@ -588,6 +706,16 @@ export class LocalDaemon {
   }
 
   private json(value: unknown, status = 200): Response { return Response.json(value, { status }); }
+}
+
+type TerminalSocketData = { readonly key: string; readonly runId: string; readonly nodeId: string; readonly after: number };
+
+function terminalKey(runId: string, nodeId: string, agentSessionId: string): string { return `${runId}:${nodeId}:${agentSessionId}`; }
+
+function isTerminalInput(value: unknown): value is { readonly type: "input"; readonly data: string } {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (value as { type?: unknown }).type === "input"
+    && typeof (value as { data?: unknown }).data === "string";
 }
 
 /** 从已验证的 Journal 事实重建一个仍 pending 的 block，不写入任何新事件。 */

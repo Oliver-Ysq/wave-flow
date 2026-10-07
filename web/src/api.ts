@@ -1,4 +1,4 @@
-import type { CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse } from "./types";
+import type { CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse } from "./types";
 
 async function json<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? undefined : {
@@ -31,4 +31,5 @@ export const api = {
   stop: (runId: string) => json<RunResponse>(`/runs/${encodeURIComponent(runId)}/stop`, {}),
   resume: (runId: string) => json<RunResponse>(`/runs/${encodeURIComponent(runId)}/resume`, { authorized: true }),
   answer: (blockId: string, answer: Record<string, unknown>) => json(`/blocks/${encodeURIComponent(blockId)}/answer`, { answer }),
+  terminal: (runId: string, nodeId: string) => json<TerminalOpenResponse>(`/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal`),
 };

@@ -111,3 +111,19 @@ export type CloseDaemonResponse = {
   /** true 表示 daemon 已接受关闭安排，响应发送后将自行退出。 */
   readonly closing: true;
 };
+
+/** Web Terminal 建立前返回的首屏与同源实时通道坐标。 */
+export type TerminalOpenResponse = {
+  /** 所属 Run。 */
+  readonly runId: string;
+  /** 当前受管 Agent 节点。 */
+  readonly nodeId: string;
+  /** Agent CLI，供页面选择正确的终端呈现方式。 */
+  readonly cli: "codex";
+  /** 由 tmux capture-pane 生成的 ANSI 首屏，不是状态证据。 */
+  readonly initialScreen: string;
+  /** 首屏截取时的输出序号；WebSocket 用它补发建立连接前的实时字节。 */
+  readonly outputSequence: number;
+  /** 同源 WebSocket 相对路径；浏览器不得绕过 daemon 直连 tmux。 */
+  readonly wsPath: string;
+};
