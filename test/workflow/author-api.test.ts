@@ -131,7 +131,12 @@ describe("Workflow 作者 API", () => {
       );
       return agent("last", { id: "last", cli: "codex" });
     }), undefined, host);
-    expect(host.agents.map((item) => item.id)).toEqual(["first", "left", "right", "prepare-a", "prepare-b", "finish-a", "finish-b", "last"]);
+    // parallel / pipeline 内的启动先后由异步 cwd 解析决定，作者 API 只承诺同批次
+    // 并发与每个 item 自身阶段顺序，不能把某次调度恰好 left 先于 right 当作契约。
+    expect(host.agents.map((item) => item.id)).toEqual(["first", expect.stringMatching(/^(left|right)$/), expect.stringMatching(/^(left|right)$/), expect.stringMatching(/^prepare-[ab]$/), expect.stringMatching(/^prepare-[ab]$/), expect.stringMatching(/^finish-[ab]$/), expect.stringMatching(/^finish-[ab]$/), "last"]);
+    expect(new Set(host.agents.slice(1, 3).map((item) => item.id))).toEqual(new Set(["left", "right"]));
+    expect(new Set(host.agents.slice(3, 5).map((item) => item.id))).toEqual(new Set(["prepare-a", "prepare-b"]));
+    expect(new Set(host.agents.slice(5, 7).map((item) => item.id))).toEqual(new Set(["finish-a", "finish-b"]));
     expect(host.batches).toEqual([
       { sequence: 1, mode: "serial" },
       { sequence: 2, mode: "parallel" }, { sequence: 2, mode: "parallel" },

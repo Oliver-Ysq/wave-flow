@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { api } from "./api";
 import type { AgentSnapshot, CurrentAttemptResponse, PhaseVisit, RunListItem, RunResponse, RunSnapshot } from "./types";
 
@@ -9,6 +10,10 @@ type Filter = typeof filters[number];
 const localeTime = (value: string | null) => value ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(value)) : "—";
 
 export function App() {
+  const locationQuery = new URLSearchParams(window.location.search);
+  const terminalRunId = locationQuery.get("terminalRunId");
+  const terminalNodeId = locationQuery.get("terminalNodeId");
+  if (terminalRunId && terminalNodeId) return <TerminalPage runId={terminalRunId} nodeId={terminalNodeId} />;
   const demo = import.meta.env.DEV;
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -106,7 +111,7 @@ function toRunListItem(response: RunResponse): RunListItem { const snapshot = re
 function RunItem({ run, active, onClick }: { run: RunListItem; active: boolean; onClick: () => void }) { return <button onClick={onClick} className={`run-item ${active ? "selected" : ""}`}><span className={`dot ${run.status}`} /><div><strong>{run.workflow.name}</strong><small>{run.runId.slice(0, 8)} / {localeTime(run.createdAt)}</small></div><Status status={run.status} /></button>; }
 
 function RunDetail({ run, busy, onControl, onAnswer }: { run: RunListItem; busy: string | null; onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>; onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void> }) {
-  const active = ["running", "pausing", "recovering"].includes(run.status);
+  const active = !run.observationOnly && ["running", "pausing", "recovering"].includes(run.status);
   const [defaultView, setDefaultView] = usePersistedView();
   const [expanded, setExpanded] = useState<AgentSnapshot | null>(null);
   const [attempt, setAttempt] = useState<CurrentAttemptResponse | null>(null);
@@ -146,9 +151,10 @@ function RunDetail({ run, busy, onControl, onAnswer }: { run: RunListItem; busy:
       {run.status === "running" && <Action label="暂停" icon="Ⅱ" tone="secondary" loading={busy === "pause"} onClick={() => void onControl("pause")} />}
       {run.status === "paused" && <Action label="恢复执行" icon="▶" tone="primary" loading={busy === "recover"} onClick={() => void onControl("recover")} />}
       {run.status === "interrupted" && <Action label="重新执行" icon="↻" tone="primary" loading={busy === "resume"} onClick={() => void onControl("resume")} />}
-      {(active || run.status === "paused") && <Action label="停止 Run" icon="■" tone="danger" loading={busy === "stop"} onClick={() => void onControl("stop")} />}
+      {(active || (!run.observationOnly && run.status === "paused")) && <Action label="停止 Run" icon="■" tone="danger" loading={busy === "stop"} onClick={() => void onControl("stop")} />}
     </div><ViewSwitcher value={defaultView} onChange={setDefaultView} label="默认视图" /></div>
     <div className="run-meta"><Status status={run.status} /><span>创建于 {localeTime(run.createdAt)}</span><span>结束于 {localeTime(run.endedAt)}</span><span className="path">{run.cwd}</span></div>
+    {run.observationOnly && <div className="observation-notice">已重新连接旧会话：可以观察、回答和继续该 Agent，但当前 daemon 未恢复 Workflow 调度。</div>}
     {run.diagnostic && <div className="diagnostic">{run.diagnostic}</div>}
     <div className="phase-list">{attempt ? <><div className="attempt-label">当前执行尝试 #{attempt.summary.executionAttemptId}</div>{attempt.summary.phases.map((phase, index) => <section className={`phase ${phase.currentVisitId !== null ? "current" : ""}`} key={phase.title}><PhaseHeader phase={phase} index={index} loading={visitLoading === (phase.currentVisitId ?? phase.latestVisitId)} onOpen={async (phaseVisitId) => { setVisitLoading(phaseVisitId); try { setVisit((await api.phaseVisit(run.runId, phaseVisitId)).visit); } finally { setVisitLoading(null); } }} />{visit?.title === phase.title && <PhaseVisitDetail visit={visit} view={defaultView} busy={busy} onAnswer={onAnswer} onOpen={setExpanded} onClose={() => setVisit(null)} />}</section>)}<section className="history-panel"><div><strong>执行记录</strong><span>{includeEmpty ? "包含没有创建 Agent 的阶段切换" : "仅显示包含 Agent 的阶段轮次"}</span></div><label><input type="checkbox" checked={includeEmpty} onChange={(event) => { setIncludeEmpty(event.target.checked); setHistory(null); setHistoryCursor(null); }} /> 显示没有 Agent 的阶段切换</label>{attemptIds && <label>执行尝试 <select value={historyAttempt ?? attempt.summary.executionAttemptId} onChange={(event) => { setHistoryAttempt(Number(event.target.value)); setHistory(null); setHistoryCursor(null); }} >{attemptIds.map((attemptId) => <option key={attemptId} value={attemptId}>{attemptId === attempt.summary.executionAttemptId ? `当前尝试 #${attemptId}` : `历史尝试 #${attemptId}`}</option>)}</select></label>}<button disabled={historyLoading} onClick={async () => { setHistoryLoading(true); try { const attempts = attemptIds ?? (await api.executionAttempts(run.runId)).executionAttemptIds; if (!attemptIds) setAttemptIds(attempts); const selectedAttempt = historyAttempt ?? attempt.summary.executionAttemptId; const page = await api.phaseVisits(run.runId, history === null ? { includeEmpty, attempt: selectedAttempt } : { cursor: historyCursor ?? undefined, includeEmpty, attempt: selectedAttempt }); setHistory(current => [...(current ?? []), ...page.items]); setHistoryCursor(page.nextCursor); } finally { setHistoryLoading(false); } }}>{history === null ? "查看执行记录" : historyLoading ? "正在加载…" : historyCursor === null ? "没有更多记录" : "加载更早记录"}</button>{history && <ol>{history.map((item) => <li key={`${item.executionAttemptId}:${item.phaseVisitId}`}><button onClick={() => setVisit(item)}>{item.title} · 第 {item.occurrence} 轮 <small>{item.batches.reduce((count, batch) => count + batch.agents.length, 0)} 名 Agent</small></button></li>)}</ol>}</section></> : <div className="empty-phase">正在读取当前执行摘要…</div>}</div>
     {expanded && <AgentDetailModal runId={run.runId} agent={expanded} busy={busy} onAnswer={onAnswer} onClose={() => setExpanded(null)} />}
@@ -199,30 +205,80 @@ function AgentCard({ agent, busy, onAnswer, onOpen, expanded = false }: { agent:
 
 function AgentDetailModal({ runId, agent, busy, onAnswer, onClose }: { runId: string; agent: AgentSnapshot; busy: string | null; onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>; onClose: () => void }) {
   const [terminalOpen, setTerminalOpen] = useState(false);
-  return <div className="agent-modal-backdrop" role="presentation" onMouseDown={onClose}><section className={`agent-modal ${terminalOpen ? "with-terminal" : ""}`} role="dialog" aria-modal="true" aria-label={`${agent.label} 完整信息`} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><span>Agent 完整信息</span><strong>{agent.label}</strong></div><div className="modal-actions">{["running", "blocked"].includes(agent.status) && <button className="terminal-toggle" onClick={() => setTerminalOpen(open => !open)}>{terminalOpen ? "收起终端" : "打开终端"}</button>}<button onClick={onClose} aria-label="关闭完整信息">×</button></div></div><AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded />{terminalOpen && <WebTerminal runId={runId} agent={agent} />}</section></div>;
+  const canOpenTerminal = ["running", "blocked"].includes(agent.status);
+  const openInNewTab = () => window.open(`${location.pathname}?terminalRunId=${encodeURIComponent(runId)}&terminalNodeId=${encodeURIComponent(agent.id)}`, "_blank", "noopener,noreferrer");
+  return <div className="agent-modal-backdrop" role="presentation" onMouseDown={onClose}><section className={`agent-modal ${terminalOpen ? "with-terminal" : ""}`} role="dialog" aria-modal="true" aria-label={`${agent.label} 完整信息`} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><span>Agent 完整信息</span><strong>{agent.label}</strong></div><div className="modal-actions">{canOpenTerminal && <><button className="terminal-toggle" onClick={() => setTerminalOpen(open => !open)}>{terminalOpen ? "收起终端" : "打开终端"}</button><button className="terminal-new-tab" onClick={openInNewTab}>新标签页打开 ↗</button></>}<button onClick={onClose} aria-label="关闭完整信息">×</button></div></div><AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded />{terminalOpen && <WebTerminal runId={runId} agent={agent} />}</section></div>;
 }
 
-function WebTerminal({ runId, agent }: { runId: string; agent: AgentSnapshot }) {
+function TerminalPage({ runId, nodeId }: { runId: string; nodeId: string }) {
+  const [backAvailable] = useState(() => window.opener !== null || history.length > 1);
+  return <main className="terminal-page"><header className="terminal-page-head"><div className="brand"><span className="brand-mark">W</span><div><strong>Wave Flow Terminal</strong><span>独立 Agent 终端</span></div></div><div className="terminal-page-actions">{backAvailable && <button onClick={() => history.back()}>← 返回控制台</button>}<code>{nodeId}</code></div></header><section className="terminal-page-body"><WebTerminal runId={runId} agent={{ id: nodeId, label: nodeId, cli: "codex", status: "running", cwd: "", result: null, diagnostic: null, block: null }} standalone /></section></main>;
+}
+
+function WebTerminal({ runId, agent, standalone = false }: { runId: string; agent: AgentSnapshot; standalone?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState("正在连接受管终端…");
+  const [needsReclaim, setNeedsReclaim] = useState(false);
+  const [reclaiming, setReclaiming] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   useEffect(() => {
     if (!host.current) return;
+    host.current.replaceChildren();
     let socket: WebSocket | null = null, disposed = false;
-    const xterm = new Terminal({ convertEol: false, cursorBlink: true, fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", theme: { background: "#141924", foreground: "#dbe5f3", cursor: "#b9c7ff" } });
-    xterm.open(host.current);
-    const input = xterm.onData((data) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data })); });
+    let xterm: Terminal | null = null;
+    let input: { dispose(): void } | null = null;
+    if (import.meta.env.DEV && runId.startsWith("demo-")) {
+      xterm = new Terminal({ cols: 120, rows: 32, cursorBlink: true, fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", theme: { background: "#141924", foreground: "#dbe5f3", cursor: "#b9c7ff" } });
+      xterm.open(host.current);
+      xterm.write("\x1b[36mWave Flow 开发演示终端\x1b[0m\r\n\r\n这里用于检查终端布局、标签页与滚动条样式。\r\n开发演示不会连接 tmux，输入也不会发送给 Agent。\r\n\r\n› ");
+      setState("开发演示 · 未连接真实 Agent");
+      input = xterm.onData((data) => xterm?.write(data === "\r" ? "\r\n› " : data));
+      return () => { disposed = true; input?.dispose(); xterm?.dispose(); };
+    }
     void api.terminal(runId, agent.id).then((opened) => {
       if (disposed) return;
+      xterm = new Terminal({ cols: opened.cols, rows: opened.rows, convertEol: false, cursorBlink: true, fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", theme: { background: "#141924", foreground: "#dbe5f3", cursor: "#b9c7ff" } });
+      const fit = new FitAddon(); xterm.loadAddon(fit);
+      xterm.open(host.current!);
+      const terminal = xterm;
+      input = terminal.onData((data) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data })); });
       xterm.write(opened.initialScreen);
       socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${opened.wsPath}?after=${opened.outputSequence}`);
-      socket.onopen = () => setState("已连接 · 可直接输入");
-      socket.onmessage = (event) => { try { const message = JSON.parse(String(event.data)) as { type?: string; data?: string; reason?: string; message?: string }; if (message.type === "output" && typeof message.data === "string") xterm.write(message.data); if (message.type === "closed") setState(`连接已关闭：${message.reason ?? "终端不可用"}`); if (message.type === "error") setState(message.message ?? "终端输入被拒绝"); } catch { setState("终端收到无效消息。"); } };
+      let sentCols: number | null = null, sentRows: number | null = null;
+      let resizeTimer: number | null = null;
+      const resize = () => {
+        fit.fit();
+        // 只在浏览器窗口真正变化时同步一次。绝不监听 xterm 自己的 DOM 变化，
+        // 否则 reset/reflow 又会触发 resize，形成不断重绘与滚动条抖动的循环。
+        if (socket?.readyState === WebSocket.OPEN && terminal.cols >= 20 && terminal.rows >= 5 && (terminal.cols !== sentCols || terminal.rows !== sentRows)) {
+          sentCols = terminal.cols; sentRows = terminal.rows;
+          socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
+        }
+      };
+      const requestResize = () => { if (resizeTimer !== null) window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(resize, 180); };
+      socket.onopen = () => { requestAnimationFrame(resize); setState("已连接 · 可直接输入"); };
+      socket.onmessage = (event) => { try { const message = JSON.parse(String(event.data)) as { type?: string; data?: string; screen?: string; cols?: number; rows?: number; reason?: string; message?: string }; if (message.type === "output" && typeof message.data === "string") terminal.write(message.data); if (message.type === "reset" && typeof message.screen === "string") { // 必须先采用 tmux 已确认的新网格，再写 capture-pane 首屏；反过来写会让超长逻辑行在旧列数上永久裁断。
+          if (typeof message.cols === "number" && typeof message.rows === "number") { sentCols = message.cols; sentRows = message.rows; terminal.resize(message.cols, message.rows); }
+          terminal.reset(); terminal.write(message.screen);
+        } if (message.type === "closed") setState(`连接已关闭：${message.reason ?? "终端不可用"}`); if (message.type === "error") setState(message.message ?? "终端输入被拒绝"); } catch { setState("终端收到无效消息。"); } };
       socket.onclose = () => { if (!disposed) setState(current => current.startsWith("连接已关闭") ? current : "实时连接已断开"); };
       socket.onerror = () => setState("实时连接失败");
-    }).catch((error) => setState(error instanceof Error ? error.message : "无法打开终端"));
-    return () => { disposed = true; input.dispose(); socket?.close(); xterm.dispose(); };
-  }, [agent.id, runId]);
-  return <section className="web-terminal"><div className="web-terminal-head"><strong>Codex 终端</strong><span>{state}</span></div><div ref={host} className="xterm-host" /></section>;
+      window.addEventListener("resize", requestResize);
+      const oldDispose = input.dispose.bind(input); input.dispose = () => { window.removeEventListener("resize", requestResize); if (resizeTimer !== null) window.clearTimeout(resizeTimer); oldDispose(); };
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : "无法打开终端";
+      setState(message);
+      setNeedsReclaim(message.includes("可观察生命周期"));
+    });
+    return () => { disposed = true; input?.dispose(); socket?.close(); xterm?.dispose(); };
+  }, [agent.id, runId, connectionAttempt]);
+  async function reclaim() {
+    setReclaiming(true); setState("正在验证旧 tmux 与 Codex 会话…");
+    try { await api.reclaimTerminal(runId, agent.id); setNeedsReclaim(false); setConnectionAttempt(value => value + 1); }
+    catch (error) { setState(error instanceof Error ? error.message : "旧会话无法重新连接"); }
+    finally { setReclaiming(false); }
+  }
+  return <section className={`web-terminal ${standalone ? "standalone" : ""}`}><div className="web-terminal-head"><strong>Codex 终端</strong><span>{state}</span>{needsReclaim && <button className="reclaim-terminal" disabled={reclaiming} onClick={() => void reclaim()}>{reclaiming ? "正在验证…" : "重新连接旧会话"}</button>}</div><div ref={host} className="xterm-host" /></section>;
 }
 
 function Status({ status }: { status: string }) { return <span className={`status ${status}`}>{statusLabel(status)}</span>; }

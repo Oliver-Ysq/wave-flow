@@ -41,6 +41,8 @@ export type RunListItem = {
   readonly diagnostic: string | null;
   /** 当前尝试内是否有需要协助的节点。 */
   readonly hasBlockedAgent: boolean;
+  /** true 表示当前 daemon 只认领了旧会话的观察与 Control，未恢复 Workflow 调度。 */
+  readonly observationOnly?: boolean;
 };
 
 /** Run 当前执行尝试的轻量首页数据，不包含全部历史 Agent。 */
@@ -122,8 +124,15 @@ export type TerminalOpenResponse = {
   readonly cli: "codex";
   /** 由 tmux capture-pane 生成的 ANSI 首屏，不是状态证据。 */
   readonly initialScreen: string;
+  /** 当前 tmux pane 的真实列数；浏览器按此渲染，不擅自重排 Codex 当前画面。 */
+  readonly cols: number;
+  /** 当前 tmux pane 的真实行数；浏览器按此渲染，不擅自改变会话尺寸。 */
+  readonly rows: number;
   /** 首屏截取时的输出序号；WebSocket 用它补发建立连接前的实时字节。 */
   readonly outputSequence: number;
   /** 同源 WebSocket 相对路径；浏览器不得绕过 daemon 直连 tmux。 */
   readonly wsPath: string;
 };
+
+/** 用户显式认领旧受管会话后的终端首屏；成功不代表 Workflow 调度已恢复。 */
+export type ReclaimTerminalResponse = TerminalOpenResponse;

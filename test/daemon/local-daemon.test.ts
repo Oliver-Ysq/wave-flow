@@ -34,6 +34,79 @@ async function testDaemon(options: ConstructorParameters<typeof LocalDaemon>[0] 
 }
 
 describe("LocalDaemon", () => {
+  test("daemon 重启后只在用户显式请求时重新认领可验证的 Web Terminal", async () => {
+    const { cwd, workflowPath } = await fixture();
+    let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
+    const backend: SessionBackend = {
+      async create(value) { options = value; return identity(value.runId, value.nodeId, value.agentSessionId!, value.reclaimTokenHash); },
+      async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "exists"; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const store = await mkdtemp(join(tmpdir(), "wave-flow-terminal-reclaim-store-")); directories.push(store);
+    const first = new LocalDaemon({ storeRoot: runsRoot(store), createRealExecutor: ({ controlUrl, runsRoot: root }) => new RealCodexExecutor(backend, controlUrl, root, async (_sessions, adapter, request) => {
+      const plan = await adapter.launch(request, new AbortController().signal);
+      return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
+    }) });
+    daemons.push(first); const firstServer = first.start();
+    const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);
+    await waitFor(() => options !== null); first.stop();
+    const observer = {
+      async start() {}, async verify() {}, async initialScreen() { return { screen: "old session", sequence: 0, cols: 80, rows: 24 }; },
+      subscribe() { return () => {}; }, onClose() { return () => {}; }, replayAfter() { return []; }, async input() {}, async resize(cols: number, rows: number) { return { cols, rows }; }, async close() {},
+    } as unknown as import("../../src/sessions/terminal-observer").TmuxTerminalObserver;
+    const second = new LocalDaemon({ storeRoot: runsRoot(store), verifyReclaimSession: async () => true, createTerminalObserver: () => observer }); daemons.push(second); const secondServer = second.start();
+    const before = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal`);
+    expect(before.status).toBe(409);
+    const reclaimed = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal/reclaim`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(reclaimed.status).toBe(200);
+    await expect(reclaimed.json()).resolves.toMatchObject({ runId: created.runId, nodeId: "scan-auth", initialScreen: "old session" });
+    const after = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal`);
+    expect(after.status).toBe(200);
+  });
+
+  test("旧会话核验失败后不能留下可观察资格", async () => {
+    const { cwd, workflowPath } = await fixture();
+    let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
+    const backend: SessionBackend = {
+      async create(value) { options = value; return identity(value.runId, value.nodeId, value.agentSessionId!, value.reclaimTokenHash); },
+      async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "exists"; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const store = await mkdtemp(join(tmpdir(), "wave-flow-terminal-reclaim-failed-store-")); directories.push(store);
+    const first = new LocalDaemon({ storeRoot: runsRoot(store), createRealExecutor: ({ controlUrl, runsRoot: root }) => new RealCodexExecutor(backend, controlUrl, root, async (_sessions, adapter, request) => {
+      const plan = await adapter.launch(request, new AbortController().signal);
+      return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
+    }) });
+    daemons.push(first); const firstServer = first.start();
+    const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);
+    await waitFor(() => options !== null); first.stop();
+    const second = new LocalDaemon({ storeRoot: runsRoot(store), verifyReclaimSession: async () => false }); daemons.push(second); const secondServer = second.start();
+    const reclaimed = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal/reclaim`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(reclaimed.status).toBe(409);
+    const terminal = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal`);
+    expect(terminal.status).toBe(409);
+  });
+
+  test("认领一个旧 Agent 不会放宽同一 Run 其他节点的终端资格", async () => {
+    const { cwd, workflowPath } = await fixture();
+    let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
+    const backend: SessionBackend = {
+      async create(value) { options = value; return identity(value.runId, value.nodeId, value.agentSessionId!, value.reclaimTokenHash); },
+      async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "exists"; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const store = await mkdtemp(join(tmpdir(), "wave-flow-terminal-reclaim-scope-store-")); directories.push(store);
+    const first = new LocalDaemon({ storeRoot: runsRoot(store), createRealExecutor: ({ controlUrl, runsRoot: root }) => new RealCodexExecutor(backend, controlUrl, root, async (_sessions, adapter, request) => {
+      const plan = await adapter.launch(request, new AbortController().signal);
+      return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
+    }) });
+    daemons.push(first); const firstServer = first.start();
+    const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);
+    await waitFor(() => options !== null); first.stop();
+    const observer = { async start() {}, async verify() {}, async initialScreen() { return { screen: "old session", sequence: 0, cols: 80, rows: 24 }; }, subscribe() { return () => {}; }, onClose() { return () => {}; }, replayAfter() { return []; }, async input() {}, async resize(cols: number, rows: number) { return { cols, rows }; }, async close() {} } as unknown as import("../../src/sessions/terminal-observer").TmuxTerminalObserver;
+    const second = new LocalDaemon({ storeRoot: runsRoot(store), verifyReclaimSession: async () => true, createTerminalObserver: () => observer }); daemons.push(second); const secondServer = second.start();
+    await expect(fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal/reclaim`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).resolves.toMatchObject({ status: 200 });
+    // scan-other 从未写入 Journal session；它不能因为同一 Run 的另一个节点被认领而获得观察权限。
+    const other = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-other/terminal`);
+    expect(other.status).toBe(404);
+  });
   test("新 daemon 从 Journal 重建旧 running 会话后，可凭稳定身份完成且不创建新 Agent", async () => {
     const { cwd, workflowPath } = await fixture();
     let options: import("../../src/sessions/types").CreateSessionOptions | null = null;

@@ -20,11 +20,12 @@ export class TmuxTerminalObserver {
   constructor(private readonly identity: SessionIdentity, private readonly client = new TmuxCommandClient(identity.backendRef)) {}
 
   /** 读取 ANSI 首屏，按 Botmux 路径修正 tmux 裸换行并恢复当前光标。 */
-  async initialScreen(lines = 2_000): Promise<{ readonly screen: string; readonly sequence: number }> {
+  async initialScreen(lines = 2_000): Promise<{ readonly screen: string; readonly sequence: number; readonly cols: number; readonly rows: number }> {
     await this.requireLive();
-    const [screen, cursor] = await Promise.all([this.client.captureAnsi(this.identity.sessionName, Math.max(1, Math.min(lines, 10_000))), this.client.cursor(this.identity.sessionName)]);
+    const [screen, cursor, dimensions] = await Promise.all([this.client.captureAnsi(this.identity.sessionName, Math.max(1, Math.min(lines, 10_000))), this.client.cursor(this.identity.sessionName), this.client.dimensions(this.identity.sessionName)]);
+    if (!dimensions) throw new Error("tmux pane 尺寸无法安全读取。");
     const normalised = screen.replace(/\r?\n/g, "\r\n").replace(/\r\n$/, "");
-    return { screen: cursor ? `${normalised}\x1b[${cursor.y + 1};${cursor.x + 1}H` : normalised, sequence: this.#sequence };
+    return { screen: cursor ? `${normalised}\x1b[${cursor.y + 1};${cursor.x + 1}H` : normalised, sequence: this.#sequence, ...dimensions };
   }
 
   /** 开始 pipe-pane 订阅；同一 observer 只创建一条 tmux 输出管道。 */
@@ -86,6 +87,12 @@ export class TmuxTerminalObserver {
       if (part === "\r" || part === "\n") await this.client.sendSpecialKey(this.identity.sessionName, "Enter");
       else await this.client.sendRawText(this.identity.sessionName, part);
     }
+  }
+
+  /** 浏览器请求的尺寸只作用于受管 tmux viewer；不会改变业务状态或创建新回合。 */
+  async resize(cols: number, rows: number): Promise<{ readonly cols: number; readonly rows: number }> {
+    await this.requireLive();
+    return this.client.resize(this.identity.sessionName, cols, rows);
   }
 
   /** 取消 pipe-pane 观察；不会停止 pane、Codex 或 Run。 */

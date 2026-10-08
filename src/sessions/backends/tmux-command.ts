@@ -67,6 +67,31 @@ export class TmuxCommandClient {
     } catch { return null; }
   }
 
+  /** 读取 pane 实际网格尺寸；Web 只按它渲染，不能擅自改变正在运行的 CLI 换行宽度。 */
+  async dimensions(sessionName: string): Promise<{ readonly cols: number; readonly rows: number } | null> {
+    try {
+      const result = await this.runner.run(["-S", this.socketPath, "display-message", "-p", "-t", sessionName, "#{pane_width} #{pane_height}"], this.timeoutMs);
+      const [cols, rows] = result.stdout.trim().split(/\s+/).map(Number);
+      return result.exitCode === 0 && Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0 ? { cols, rows } : null;
+    } catch { return null; }
+  }
+
+  /** 调整 Wave Flow 私有 viewer 的网格；调用方必须已验证 injected identity。 */
+  async resize(sessionName: string, cols: number, rows: number): Promise<{ readonly cols: number; readonly rows: number }> {
+    if (!Number.isInteger(cols) || cols < 20 || cols > 500 || !Number.isInteger(rows) || rows < 5 || rows > 200) throw new Error("tmux 终端尺寸超出允许范围。");
+    const args = ["-S", this.socketPath, "resize-window", "-t", sessionName, "-x", String(cols), "-y", String(rows)] as const;
+    const result = await this.runner.run(args, this.timeoutMs);
+    // 对齐 Botmux：tmux 2.8 不支持 resize-window；Wave Flow 私有 session 只有
+    // 当前 Agent 一个 pane，可安全以 resize-pane 作为兼容回退。
+    if (result.exitCode !== 0 && /unknown command|ambiguous command|resize-window/i.test(`${result.stdout}\n${result.stderr}`)) {
+      const fallback = await this.runner.run(["-S", this.socketPath, "resize-pane", "-t", sessionName, "-x", String(cols), "-y", String(rows)], this.timeoutMs);
+      if (fallback.exitCode !== 0) throw new Error(`tmux 调整终端尺寸失败：${trimDiagnostic(fallback.stderr)}`);
+    } else if (result.exitCode !== 0) throw new Error(`tmux 调整终端尺寸失败：${trimDiagnostic(result.stderr)}`);
+    const actual = await this.dimensions(sessionName);
+    if (!actual) throw new Error("tmux 调整后无法确认 pane 尺寸。");
+    return actual;
+  }
+
   /** 明确区分会话存在、缺失和 tmux 控制面无结论。 */
   async liveness(sessionName: string): Promise<SessionLiveness> {
     try {

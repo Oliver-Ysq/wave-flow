@@ -75,5 +75,6 @@ export type PhaseVisitResponse = { runId: string; executionAttemptId: number; vi
 export type PhaseVisitPageResponse = { runId: string; executionAttemptId: number; items: PhaseVisit[]; nextCursor: number | null };
 
 export type RunResponse = { runId: string; snapshot: RunSnapshot };
-export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean };
-export type TerminalOpenResponse = { runId: string; nodeId: string; cli: "codex"; initialScreen: string; outputSequence: number; wsPath: string };
+export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean; observationOnly?: boolean };
+export type TerminalOpenResponse = { runId: string; nodeId: string; cli: "codex"; initialScreen: string; cols: number; rows: number; outputSequence: number; wsPath: string };
+export type ReclaimTerminalResponse = TerminalOpenResponse;

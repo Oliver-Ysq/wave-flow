@@ -63,4 +63,16 @@ describe("TmuxTerminalObserver", () => {
     await expect(observer.verify()).rejects.toThrow("不可安全使用");
     await observer.close();
   });
+
+  test("浏览器 resize 只调整已验证 viewer 的 tmux 网格，且不终止 Agent", async () => {
+    const { backend, identity } = await fixture();
+    const observer = new TmuxTerminalObserver(identity);
+    await observer.start();
+    await observer.resize(120, 40);
+    const screen = await observer.initialScreen();
+    expect(screen.cols).toBe(120);
+    expect(screen.rows).toBe(40);
+    await expect(backend.liveness(identity)).resolves.toBe("exists");
+    await observer.close();
+  });
 });

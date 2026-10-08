@@ -31,4 +31,16 @@ describe("TmuxCommandClient", () => {
     await new TmuxCommandClient("/private/socket", runner).sendSpecialKey("wf-test", "Enter");
     expect(calls).toEqual([["-S", "/private/socket", "send-keys", "-t", "wf-test", "Enter"]]);
   });
+
+  test("旧 tmux 不支持 resize-window 时回退到私有单 pane 的 resize-pane", async () => {
+    const calls: string[][] = [];
+    const runner: TmuxCommandRunner = { run: async (args) => {
+      calls.push([...args]);
+      if (args.includes("resize-window")) return { exitCode: 1, stdout: "", stderr: "unknown command: resize-window" };
+      if (args.includes("display-message")) return { exitCode: 0, stdout: "120 40\n", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    } };
+    await expect(new TmuxCommandClient("/private/socket", runner).resize("wf-test", 120, 40)).resolves.toEqual({ cols: 120, rows: 40 });
+    expect(calls.map((args) => args[2])).toEqual(["resize-window", "resize-pane", "display-message"]);
+  });
 });

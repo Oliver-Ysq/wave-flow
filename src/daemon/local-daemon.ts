@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, TerminalOpenResponse } from "./types";
+import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -52,6 +52,8 @@ export type LocalDaemonOptions = {
   readonly maxActiveAgents?: number;
   /** 验证旧 Journal 会话是否可被当前 daemon 安全认领；生产默认同时验证 tmux 与 App Server。 */
   readonly verifyReclaimSession?: (session: import("../sessions/types").SessionIdentity, appServer: { readonly endpoint: string; readonly threadId: string } | undefined) => Promise<boolean>;
+  /** 仅测试注入终端观察器；生产默认使用真实 tmux pipe-pane。 */
+  readonly createTerminalObserver?: (session: import("../sessions/types").SessionIdentity) => TmuxTerminalObserver;
   /** 常驻 daemon 接收 close 后调用；测试 daemon 省略时只关闭本地 HTTP 服务。 */
   readonly scheduleClose?: () => void;
 };
@@ -61,6 +63,12 @@ export class LocalDaemon {
   #runs = new Map<string, RunRuntime>();
   #controls = new Map<string, ControlServer>();
   #runTasks = new Map<string, Promise<unknown>>();
+  /** 用户显式验证并认领的旧会话；资格精确绑定 node/session，不能放宽到整个 Run。 */
+  #observedSessions = new Set<string>();
+  /** 同一旧会话的并发认领单飞，防止两份 Runtime/Control 状态机互相覆盖。 */
+  #terminalReclaims = new Map<string, Promise<ReclaimTerminalResponse>>();
+  /** 同一 Run 的不同节点认领串行执行；不同 Run 仍可并行。 */
+  #runReclaimLocks = new Map<string, Promise<void>>();
   #createRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的并发 resume 只允许一个授权重放事务，防止重复新 attempt。 */
   #resumeRequests = new Map<string, Promise<RunResponse>>();
@@ -82,6 +90,7 @@ export class LocalDaemon {
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
   private readonly verifyReclaimSession: NonNullable<LocalDaemonOptions["verifyReclaimSession"]>;
+  private readonly createTerminalObserver: NonNullable<LocalDaemonOptions["createTerminalObserver"]>;
   private readonly scheduleClose: () => void;
 
   /**
@@ -97,6 +106,7 @@ export class LocalDaemon {
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
     this.verifyReclaimSession = normalized.verifyReclaimSession ?? verifyReclaimSession;
+    this.createTerminalObserver = normalized.createTerminalObserver ?? ((session) => new TmuxTerminalObserver(session));
     this.scheduleClose = normalized.scheduleClose ?? (() => this.stop());
   }
 
@@ -155,6 +165,8 @@ export class LocalDaemon {
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
       const terminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal$/);
       if (request.method === "GET" && terminalMatch) return this.json(await this.openTerminal(decodeURIComponent(terminalMatch[1]), decodeURIComponent(terminalMatch[2])));
+      const reclaimTerminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/reclaim$/);
+      if (request.method === "POST" && reclaimTerminalMatch) return this.json(await this.reclaimTerminal(decodeURIComponent(reclaimTerminalMatch[1]), decodeURIComponent(reclaimTerminalMatch[2]), await this.readJson(request)));
       const terminalStreamMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/stream$/);
       if (request.method === "GET" && terminalStreamMatch) {
         const runId = decodeURIComponent(terminalStreamMatch[1]); const nodeId = decodeURIComponent(terminalStreamMatch[2]);
@@ -270,13 +282,13 @@ export class LocalDaemon {
   /** Local Web 总览：当前 daemon 内存中的 Run 为权威；不扫描或接管其他 daemon 的活跃任务。 */
   private async listRuns(): Promise<readonly RunListItem[]> {
     const views = new Map<string, RunListItem>();
-    for (const [runId, runtime] of this.#runs) views.set(runId, listItem(runtime));
+    for (const [runId, runtime] of this.#runs) views.set(runId, this.listItem(runtime));
     try {
       for (const runId of await readdir(this.storeRoot)) {
         if (views.has(runId)) continue;
         try {
           const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
-          views.set(runId, listItem(runtime));
+          views.set(runId, this.listItem(runtime));
         } catch { /* 无关文件、损坏或不兼容历史档案不影响其他 Run 总览。 */ }
       }
     } catch { /* 用户级目录尚未创建时返回当前内存 Run。 */ }
@@ -287,6 +299,12 @@ export class LocalDaemon {
   private async currentAttempt(runId: string): Promise<CurrentAttemptResponse> {
     const runtime = await this.readRuntime(runId);
     return { runId, status: runtime.snapshot().status, summary: runtime.state.currentAttemptSummary() };
+  }
+
+  private listItem(runtime: RunRuntime): RunListItem {
+    const item = listItem(runtime);
+    const observationOnly = !this.#runTasks.has(item.runId) && [...this.#observedSessions].some((key) => key.startsWith(`${item.runId}:`));
+    return observationOnly ? { ...item, observationOnly: true } : item;
   }
 
   private async executionAttempts(runId: string): Promise<ExecutionAttemptsResponse> {
@@ -416,14 +434,52 @@ export class LocalDaemon {
   private async openTerminal(runId: string, nodeId: string): Promise<TerminalOpenResponse> {
     const terminal = await this.requireTerminal(runId, nodeId);
     const initial = await terminal.observer.initialScreen();
-    return { runId, nodeId, cli: terminal.node.cli, initialScreen: initial.screen, outputSequence: initial.sequence, wsPath: `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/stream` };
+    return { runId, nodeId, cli: terminal.node.cli, initialScreen: initial.screen, cols: initial.cols, rows: initial.rows, outputSequence: initial.sequence, wsPath: `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/stream` };
+  }
+
+  /**
+   * 用户明确请求后才认领旧会话用于观察。它不恢复 Workflow 调用栈，也不会发新 turn。
+   * 成功后仅让当前 daemon 能建立 observer 与已有 Control 索引。
+   */
+  private async reclaimTerminal(runId: string, nodeId: string, value: unknown): Promise<ReclaimTerminalResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "重新连接旧会话不接受请求字段。 ");
+    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
+    const requestKey = `${runId}:${nodeId}`;
+    const active = this.#terminalReclaims.get(requestKey);
+    if (active) return active;
+    const previous = this.#runReclaimLocks.get(runId) ?? Promise.resolve();
+    const task = previous.catch(() => {}).then(() => this.reclaimTerminalOnce(runId, nodeId)).finally(() => this.#terminalReclaims.delete(requestKey));
+    const lock = task.then(() => undefined, () => undefined).finally(() => { if (this.#runReclaimLocks.get(runId) === lock) this.#runReclaimLocks.delete(runId); });
+    this.#runReclaimLocks.set(runId, lock);
+    this.#terminalReclaims.set(requestKey, task);
+    return task;
+  }
+
+  private async reclaimTerminalOnce(runId: string, nodeId: string): Promise<ReclaimTerminalResponse> {
+    let runtime = this.#runs.get(runId);
+    const opened = await RunJournal.open(runId, this.storeRoot);
+    if (!runtime) runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
+    let node: import("../runtime/run-types").AgentNodeSnapshot;
+    try { node = runtime.state.agent(nodeId); } catch { throw new DaemonRequestError(404, "该 Run 中不存在 Agent 节点。 "); }
+    if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) throw new DaemonRequestError(409, "只有旧 running 或 blocked Agent 可以重新连接。 ");
+    const sessionEvent = sessionFor(opened.events, nodeId, node.agentSessionId);
+    const viewer = runtime.state.viewerSession(nodeId) ?? sessionEvent?.session;
+    const binding = runtime.state.appServerBinding(nodeId) ?? sessionEvent?.appServer;
+    if (!viewer?.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能重新连接。 ");
+    if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，不能重新连接。 ");
+    // 先恢复 Control。blocked 节点还会校验完整的 block Journal；任一步失败都
+    // 不能让 Run 落入“已可观察”的半认领状态。
+    this.restoreControl(runtime, opened, node, viewer);
+    this.#runs.set(runId, runtime);
+    this.#observedSessions.add(terminalKey(runId, nodeId, node.agentSessionId));
+    return this.openTerminal(runId, nodeId);
   }
 
   /** 每次 HTTP 打开和 WebSocket 收发均重新确认当前 Run、节点状态和 tmux identity。 */
   private async requireTerminal(runId: string, nodeId: string): Promise<{ readonly key: string; readonly node: import("../runtime/run-types").AgentNodeSnapshot; readonly observer: TmuxTerminalObserver }> {
     try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
     const runtime = this.#runs.get(runId);
-    if (!runtime || !this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可观察生命周期内。 ");
+    if (!runtime) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可观察生命周期内。请先显式重新连接旧会话。 ");
     const controlling = this.#runControlRequests.get(runId);
     if (controlling) throw new DaemonRequestError(409, `该 Run 正在执行 ${controlling.kind}，暂不允许打开终端。`);
     if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "当前 Run 状态不允许打开终端。 ");
@@ -433,13 +489,14 @@ export class LocalDaemon {
     const session = runtime.state.viewerSession(nodeId);
     if (!session || session.agentSessionId !== node.agentSessionId) throw new DaemonRequestError(409, "该 Agent 缺少当前受管终端会话。 ");
     const key = terminalKey(runId, nodeId, node.agentSessionId);
+    if (!this.#runTasks.has(runId) && !this.#observedSessions.has(key)) throw new DaemonRequestError(409, "该 Agent 不在当前 daemon 的可观察生命周期内。请先显式重新连接旧会话。 ");
     await this.#terminalClosings.get(key)?.catch(() => {});
     const existing = this.#terminals.get(key);
     if (existing) { await existing.observer.verify(); return { key, node, observer: existing.observer }; }
     let opening = this.#terminalOpenings.get(key);
     if (!opening) {
       opening = (async () => {
-        const observer = new TmuxTerminalObserver(session);
+        const observer = this.createTerminalObserver(session);
         await observer.start();
         const sockets = new Set<ServerWebSocket<TerminalSocketData>>();
         const unsubscribe = observer.subscribe((data) => { for (const socket of sockets) socket.send(JSON.stringify({ type: "output", data })); });
@@ -468,11 +525,22 @@ export class LocalDaemon {
   private async receiveTerminalInput(socket: ServerWebSocket<TerminalSocketData>, raw: string): Promise<void> {
     let message: unknown;
     try { message = JSON.parse(raw); } catch { socket.send(JSON.stringify({ type: "error", message: "终端消息必须是 JSON。" })); return; }
-    if (!isTerminalInput(message)) { socket.send(JSON.stringify({ type: "error", message: "终端消息无效。" })); return; }
+    // 浏览器终端在初始化、失焦或扩展交接时可能出现非业务帧。它们既不是
+    // input 也不是 resize：直接忽略，绝不转发给 tmux，也不把无害噪声显示给用户。
+    // 真正可改变终端的两类消息仍在下面经过完整 shape 与 identity 校验。
+    if (!isTerminalInput(message) && !isTerminalResize(message)) return;
     try {
       const terminal = await this.requireTerminal(socket.data.runId, socket.data.nodeId);
       if (terminal.key !== socket.data.key) throw new DaemonRequestError(409, "终端会话已变化。 ");
-      await terminal.observer.input(message.data);
+      if (isTerminalInput(message)) await terminal.observer.input(message.data);
+      else {
+        await terminal.observer.resize(message.cols, message.rows);
+        // tmux resize 会触发 Codex 重绘，但浏览器不能靠“等下一帧”猜它何时到达。
+        // 这里主动取同一 pane 的新快照，作为 resize 后的完整、可显示基线。
+        await Bun.sleep(80);
+        const refreshed = await terminal.observer.initialScreen();
+        socket.send(JSON.stringify({ type: "reset", screen: refreshed.screen, cols: refreshed.cols, rows: refreshed.rows }));
+      }
     } catch (error) { socket.send(JSON.stringify({ type: "closed", reason: error instanceof Error ? error.message : "terminal-unavailable" })); socket.close(); }
   }
 
@@ -605,15 +673,18 @@ export class LocalDaemon {
    */
   private async reclaimControl(request: Pick<ReclaimCompletionSubmission, "runId" | "nodeId" | "agentSessionId">): Promise<ControlServer> {
     let runtime = this.#runs.get(request.runId);
+    const wasInMemory = !!runtime;
     if (!runtime) {
       runtime = await RunRuntime.open(request.runId, new DeterministicExecutor(), this.storeRoot);
-      this.#runs.set(request.runId, runtime);
     }
     // 同一 daemon 内的节点已由短期 capability 注册；显式稳定身份仅用于定位，
     // 不应再次探测真实 tmux/App Server，避免短暂探测错误影响正常控制调用。
     // 影响正常运行中的 block / complete。并行 Run 的另一个未注册节点才继续恢复。
     const active = this.#controls.get(request.runId);
-    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId)) return active;
+    // 当前 daemon 自己启动的节点已有短期 capability 与活跃执行器，不能因一次
+    // 探测瞬断中断正常控制；但跨 daemon 认领的旧会话没有这些内存保证，每次
+    // complete/block/continue 都必须重新验证 tmux identity 与原 App Server thread。
+    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId) && this.#runTasks.has(request.runId)) return active;
     const opened = await RunJournal.open(request.runId, this.storeRoot);
     const sessionEvent = sessionFor(opened.events, request.nodeId, request.agentSessionId);
     const viewer = runtime.state.viewerSession(request.nodeId) ?? sessionEvent?.session;
@@ -622,7 +693,10 @@ export class LocalDaemon {
     const snapshot = runtime.state.agent(request.nodeId);
     if ((snapshot.status !== "running" && snapshot.status !== "blocked") || snapshot.agentSessionId !== request.agentSessionId) throw new DaemonRequestError(409, "只能认领当前 running 或 blocked 的旧 Agent 会话。");
     if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，拒绝认领。");
-    return this.restoreControl(runtime, opened, snapshot, viewer);
+    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId)) return active;
+    const control = this.restoreControl(runtime, opened, snapshot, viewer);
+    if (!wasInMemory) this.#runs.set(request.runId, runtime);
+    return control;
   }
 
   /**
@@ -643,8 +717,9 @@ export class LocalDaemon {
         const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
         if (!viewer?.reclaimTokenHash) continue;
         if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) continue;
+        const control = this.restoreControl(runtime, opened, runtime.state.agent(node.id), viewer);
         this.#runs.set(runId, runtime);
-        return this.restoreControl(runtime, opened, runtime.state.agent(node.id), viewer);
+        return control;
       } catch { /* 某个无关或损坏 Run 不得阻止其他 pending block 的精确路由。 */ }
     }
     return null;
@@ -716,6 +791,14 @@ function isTerminalInput(value: unknown): value is { readonly type: "input"; rea
   return !!value && typeof value === "object" && !Array.isArray(value)
     && (value as { type?: unknown }).type === "input"
     && typeof (value as { data?: unknown }).data === "string";
+}
+
+function isTerminalResize(value: unknown): value is { readonly type: "resize"; readonly cols: number; readonly rows: number } {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (value as { type?: unknown }).type === "resize"
+    && Number.isInteger((value as { cols?: unknown }).cols) && Number.isInteger((value as { rows?: unknown }).rows)
+    && (value as { cols: number }).cols >= 20 && (value as { cols: number }).cols <= 500
+    && (value as { rows: number }).rows >= 5 && (value as { rows: number }).rows <= 200;
 }
 
 /** 从已验证的 Journal 事实重建一个仍 pending 的 block，不写入任何新事件。 */
