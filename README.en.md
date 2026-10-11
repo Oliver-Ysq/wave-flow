@@ -18,18 +18,29 @@
 - `wave-flow resume <run-id>` is user-authorized call-level recovery: it strictly reuses a matching completed prefix and creates a new attempt from the first unverifiable node.
 - Use `wave-flow pause / recover / stop <run-id>` to control a managed Run: pause stops the active turn and managed background terminals, recover creates a continuation turn in the same thread, and stop is terminal.
 - The daemon serves a same-origin Local Web overview for Runs, phases, agents, results, and pending human help.
+- A Tauri desktop app is available for the current macOS Apple Silicon build. It safely discovers or starts the loopback daemon and lets users view and create Runs directly.
 - Persist Runs, events, session coordinates, and results in the local daemon, which manages sessions in a private tmux socket.
 
 ## Current boundaries
 
 - Only `agent(..., { cli: "codex" })` is supported today.
 - Wave Flow is for one local user; its daemon runs locally.
-- Web Terminal, TraeX, Retry, and Herdr / PTY backends are not implemented.
+- TraeX, Retry, and Herdr / PTY backends are not implemented.
 - By default, initial-task delivery is confirmed by the Codex App Server `turn/start` ACK. tmux is a viewer for the interactive session; neither delivery nor completion is inferred from terminal text.
 
 ## Quick start
 
-Requirements: [Bun](https://bun.sh/), the Codex CLI, and tmux.
+CLI development requires [Bun](https://bun.sh/), the Codex CLI, and tmux.
+
+Desktop users do not need to start the daemon or run `wave-flow start` manually. Build the current macOS Apple Silicon desktop app in a development environment:
+
+```bash
+bun install
+bun run desktop:build
+# Open src-tauri/target/release/bundle/macos/Wave Flow.app
+```
+
+The desktop app safely discovers an existing daemon or starts a bundled Bun sidecar. Closing its window does not stop the daemon or active Runs; reopening it shows the user-level Run archive again.
 
 Link the package locally:
 

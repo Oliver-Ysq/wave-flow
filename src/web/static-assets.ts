@@ -1,8 +1,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, join, normalize } from "node:path";
 
 /** Vite 构建产物目录；生产 daemon 仅同源读取这里的静态文件。 */
-const webDist = new URL("./dist/", import.meta.url).pathname;
+const bundledWebDist = process.env.WF_WEB_DIST;
+if (bundledWebDist !== undefined && !isAbsolute(bundledWebDist)) throw new Error("WF_WEB_DIST 必须是绝对目录。 ");
+const webDist = bundledWebDist ?? new URL("./dist/", import.meta.url).pathname;
 
 const mimeByExtension: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",

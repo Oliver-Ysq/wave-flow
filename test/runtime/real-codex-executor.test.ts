@@ -84,6 +84,10 @@ describe("RealCodexExecutor", () => {
     expect(submittedPrompt).toContain("wave-flow block");
     expect(submittedPrompt).toContain("wave-flow continue");
     expect(submittedPrompt).toContain("wave-flow complete");
+    await waitFor(async () => {
+      const reopened = await RunJournal.open(value.manifest.runId, runsRoot(value.cwd));
+      return reopened.events.some((event) => event.type === "agent.session" && event.nodeId === "node" && event.agentSessionId === value.agentSessionId);
+    });
     await value.control.completeReclaimed({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.agentSessionId, summary: "done", result: { ok: true } });
     await expect(completing).resolves.toEqual({ ok: true });
   });
@@ -161,9 +165,9 @@ describe("RealCodexExecutor", () => {
   });
 });
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error("等待真实执行器创建会话超时。");
     await Bun.sleep(5);
   }

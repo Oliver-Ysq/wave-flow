@@ -10,6 +10,9 @@ dist/
 # !.wave-flow/workflows/
 # !.wave-flow/workflows/**
 *.tsbuildinfo
+src-tauri/target/
+src-tauri/binaries/*
+src-tauri/gen/
 .playwright-mcp/
 .agents/
 docs/

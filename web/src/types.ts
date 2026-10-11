@@ -75,6 +75,8 @@ export type PhaseVisitResponse = { runId: string; executionAttemptId: number; vi
 export type PhaseVisitPageResponse = { runId: string; executionAttemptId: number; items: PhaseVisit[]; nextCursor: number | null };
 
 export type RunResponse = { runId: string; snapshot: RunSnapshot };
+/** 桌面端创建 Run 的最小 loopback 请求；路径仍由 daemon 做最终 realpath 与信任校验。 */
+export type CreateRunRequest = { clientRequestId: string; workflowPath: string; cwd: string; input: Record<string, unknown>; codexRpcInput?: boolean };
 export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean; observationOnly?: boolean };
 export type TerminalOpenResponse = { runId: string; nodeId: string; cli: "codex"; initialScreen: string; cols: number; rows: number; outputSequence: number; wsPath: string };
 export type ReclaimTerminalResponse = TerminalOpenResponse;

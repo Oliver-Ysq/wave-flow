@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wave Flow",
+  "version": "0.1.0",
+  "identifier": "com.wave-flow.desktop",
+  "build": {
+    "beforeDevCommand": "bun run desktop:prepare && bun run web:dev",
+    "beforeBuildCommand": "bun run desktop:prepare",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../src/web/dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "Wave Flow", "width": 1280, "height": 860, "minWidth": 980, "minHeight": 700 }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "../src/web/dist": "web-dist"
+    },
+    "externalBin": ["binaries/wave-flow-daemon", "binaries/wave-flow-desktop-bridge"],
+    "macOS": { "minimumSystemVersion": "12.0" }
+  }
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { api } from "./api";
@@ -22,6 +22,7 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("全部");
+  const [creating, setCreating] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -79,6 +80,19 @@ export function App() {
     finally { setBusy(null); }
   }
 
+  async function createRun(value: { workflowPath: string; cwd: string; input: Record<string, unknown> }) {
+    setBusy("create");
+    try {
+      const response = await api.createRun({ ...value, clientRequestId: crypto.randomUUID() });
+      const item = toRunListItem(response);
+      setRuns(current => [item, ...current.filter(run => run.runId !== item.runId)]);
+      setSelectedId(response.runId);
+      setCreating(false);
+      setError(null);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(null); }
+  }
+
   return <main className="shell">
     <header className="topbar">
       <div className="brand"><span className="brand-mark">W</span><div><strong>Wave Flow</strong><span>Local orchestration console</span></div></div>
@@ -93,6 +107,7 @@ export function App() {
     <div className="workspace">
       <aside className="sidebar">
         <div className="sidebar-head"><div><span className="sidebar-kicker">我的工作流</span><strong>Runs</strong></div><button onClick={() => void refresh()} aria-label="刷新 Run 列表">↻</button></div>
+        <button className="new-run" onClick={() => setCreating(true)}>＋ 新建 Run</button>
         <label className="search"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Workflow 名称" /></label>
         <div className="filter-row" aria-label="按状态筛选">{filters.map(item => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div>
         <div className="list-caption">显示 {visibleRuns.length} / {runs.length} 条 Run</div>
@@ -103,7 +118,33 @@ export function App() {
         {selected ? <RunDetail run={selected} busy={busy} onControl={control} onAnswer={async (blockId, answer) => { setBusy(`answer:${blockId}`); try { await api.answer(blockId, answer); await refresh(); } finally { setBusy(null); } }} /> : <EmptyState />}
       </section>
     </div>
+    {creating && <CreateRunModal busy={busy === "create"} onCreate={createRun} onClose={() => setCreating(false)} />}
   </main>;
+}
+
+function CreateRunModal({ busy, onCreate, onClose }: { busy: boolean; onCreate: (value: { workflowPath: string; cwd: string; input: Record<string, unknown> }) => Promise<void>; onClose: () => void }) {
+  const [workflowPath, setWorkflowPath] = useState("");
+  const [cwd, setCwd] = useState("");
+  const [input, setInput] = useState("{}");
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("输入必须是 JSON 对象。 ");
+      if (!workflowPath.trim() || !cwd.trim()) throw new Error("请填写 workflow 路径和项目目录。 ");
+      setError(null);
+      await onCreate({ workflowPath: workflowPath.trim(), cwd: cwd.trim(), input: parsed as Record<string, unknown> });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+  return <div className="create-backdrop" role="presentation" onMouseDown={onClose}><form className="create-run" aria-label="新建 Run" onSubmit={event => void submit(event)} onMouseDown={event => event.stopPropagation()}>
+    <div className="create-head"><div><span>新建任务</span><strong>从本地 workflow 启动</strong></div><button type="button" onClick={onClose} aria-label="关闭">×</button></div>
+    <label>Workflow 路径<input value={workflowPath} onChange={event => setWorkflowPath(event.target.value)} placeholder="/绝对路径/flow.ts 或项目内相对路径" autoFocus /></label>
+    <label>项目目录 cwd<input value={cwd} onChange={event => setCwd(event.target.value)} placeholder="/绝对路径/项目目录" /></label>
+    <label>输入 JSON<textarea value={input} onChange={event => setInput(event.target.value)} spellCheck={false} /></label>
+    {error && <div className="create-error">{error}</div>}
+    <div className="create-actions"><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={busy} type="submit">{busy ? "正在创建…" : "创建 Run"}</button></div>
+  </form></div>;
 }
 
 function Metric({ label, value, tone }: { label: string; value: number; tone: string }) { return <div className={`metric ${tone}`}><span>{label}</span><strong>{String(value).padStart(2, "0")}</strong></div>; }

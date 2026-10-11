@@ -14,20 +14,25 @@
     "check": "tsc --noEmit",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
-    "web:preview": "vite preview --config web/vite.config.ts"
+    "web:preview": "vite preview --config web/vite.config.ts",
+    "desktop:prepare": "bun run web:build && bun build src/daemon/daemon-main.ts --compile --outfile src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin && bun build src/desktop/bridge.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-bridge-aarch64-apple-darwin",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
   },
   "devDependencies": {
-    "ajv": "^8.17.1",
+    "@tauri-apps/cli": "^2.12.2",
     "@types/bun": "latest",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.1",
+    "ajv": "^8.17.1",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "typescript": "^5.9.3",
     "vite": "^7.2.6"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.12.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0"
   }

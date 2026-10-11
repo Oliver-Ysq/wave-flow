@@ -16,8 +16,10 @@ const requiredDirectories = [
   "src/control",
   "src/journal",
   "src/daemon",
+  "src/desktop",
   "src/cli",
   "src/web",
+  "src-tauri",
   "src/shared",
 ] as const;
 
@@ -39,5 +41,23 @@ describe("新架构目录与历史实现边界", () => {
     await expect(access(join(projectRoot, "src/adapters/testing"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/runtime/runner.ts"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/cli/run-lifecycle.ts"))).rejects.toThrow();
+  });
+
+  test("桌面端只作为 daemon loopback 客户端，不承载新的业务状态目录", async () => {
+    const cargo = await Bun.file(join(projectRoot, "src-tauri", "Cargo.toml")).text();
+    const desktop = await Bun.file(join(projectRoot, "src-tauri", "src", "main.rs")).text();
+    const bridge = await Bun.file(join(projectRoot, "src", "desktop", "bridge.ts")).text();
+    expect(cargo).toContain('name = "wave-flow-desktop"');
+    expect(desktop).toContain('sidecar("wave-flow-desktop-bridge")');
+    expect(desktop).toContain('resource_dir()');
+    expect(desktop).toContain('.join("web-dist")');
+    expect(desktop).toContain('env!("CARGO_MANIFEST_DIR")');
+    expect(bridge).toContain("ensureGlobalDaemon");
+    const desktopEntry = await Bun.file(join(projectRoot, "web", "src", "main.tsx")).text();
+    expect(desktopEntry).toContain('invoke<{ baseUrl: string }>("ensure_daemon")');
+    expect(desktopEntry).toContain("connection.baseUrl");
+    expect(desktop).not.toContain("RunJournal");
+    expect(desktop).not.toContain("LocalDaemon");
+    expect(desktop).not.toContain("shell:allow-execute");
   });
 });

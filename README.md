@@ -20,18 +20,29 @@
 - `wave-flow resume <run-id>` 由用户授权后重放调用轨迹：严格复用连续匹配的 completed 前缀，从第一个不可验证节点开始创建新 attempt。
 - `wave-flow pause / recover / stop <run-id>` 管理当前受管 Run：暂停停止当前 turn 和该 thread 的受管背景终端，恢复在同一 thread 新开继续回合，停止使 Run 进入终态。
 - daemon 同源提供 Local Web 总览，展示 Run、Phase、Agent、结果和待处理的人工协助。
+- 提供 Tauri 桌面端（当前 macOS Apple Silicon 构建），桌面端通过随包 bridge 安全发现或启动 loopback daemon；用户可直接查看和创建 Run。
 - 本地 daemon 持久化 Run、事件、会话坐标与结果，并管理私有 tmux socket 中的受管会话。
 
 ## 当前边界
 
 - 当前仅支持 `agent(..., { cli: "codex" })`。
 - 当前面向本机单用户；daemon 仅在本机运行。
-- Web Terminal、TraeX 与 Retry 尚未实现。
+- TraeX 与 Retry 尚未实现。
 - 默认路径通过 Codex App Server 的 `turn/start` ACK 确认首条任务已投递；tmux 是查看和交互会话的 viewer，不以终端文本判断投递或完成。
 
 ## 快速开始
 
-要求：已安装 [Bun](https://bun.sh/)、Codex CLI 和 tmux。
+CLI 开发要求：已安装 [Bun](https://bun.sh/)、Codex CLI 和 tmux。
+
+桌面端使用者无需手动启动 daemon 或运行 `wave-flow start`。当前可在 macOS Apple Silicon 开发环境构建应用：
+
+```bash
+bun install
+bun run desktop:build
+# 打开 src-tauri/target/release/bundle/macos/Wave Flow.app
+```
+
+桌面端会安全发现已有 daemon，或使用随包 Bun sidecar 启动新的 loopback daemon。关闭桌面窗口不会停止 daemon 或已运行的 Run；再次打开会重新展示用户级 Run 档案。
 
 先将当前包注册到本机：
 

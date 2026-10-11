@@ -1,4 +1,5 @@
 import { DAEMON_PROTOCOL_VERSION, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, type DaemonDescriptor } from "./daemon-descriptor";
+import { isAbsolute } from "node:path";
 import { runtimeRoot } from "../journal/paths";
 
 /** 已通过 descriptor 与 health 双重校验的全局 daemon 地址。 */
@@ -8,7 +9,7 @@ export type ConnectedDaemon = { readonly baseUrl: string; readonly descriptor: D
 export type DaemonEnsureProgress = (message: string) => void;
 
 /** 发现或启动当前用户唯一 daemon；客户端退出不停止后台进程。 */
-export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEnsureProgress): Promise<ConnectedDaemon> {
+export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEnsureProgress, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>): Promise<ConnectedDaemon> {
   progress?.("检查 daemon descriptor、heartbeat、PID 启动身份与 /health…");
   const existing = await discoverDaemon();
   if (existing) {
@@ -19,9 +20,10 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
   if (legacyProtocol !== null && legacyProtocol !== DAEMON_PROTOCOL_VERSION) throw new Error(`现有 Wave Flow daemon 协议版本为 ${legacyProtocol}，当前 CLI 需要 ${DAEMON_PROTOCOL_VERSION}；请先停止旧 daemon 后重试。`);
   const incompatibleProtocol = await readIncompatibleFreshDescriptor();
   if (incompatibleProtocol !== null) throw new Error(`检测到协议版本为 ${incompatibleProtocol} 但 descriptor 格式过旧的 Wave Flow daemon；请先停止旧 daemon 后重试。`);
+  if (daemonExecutable !== undefined && !isAbsolute(daemonExecutable)) throw new Error("桌面 daemon sidecar 必须使用绝对路径。");
   const entry = new URL("./daemon-main.ts", import.meta.url).pathname;
   progress?.("未发现可复用 daemon，启动新的 loopback daemon…");
-  const child = Bun.spawn([process.execPath, entry], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true });
+  const child = Bun.spawn(daemonExecutable ? [daemonExecutable] : [process.execPath, entry], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true, ...(daemonEnv ? { env: { ...process.env, ...daemonEnv } } : {}) });
   child.unref();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

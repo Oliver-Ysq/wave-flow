@@ -1,4 +1,4 @@
-import type { CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
+import type { CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
 
 async function json<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? undefined : {
@@ -15,6 +15,7 @@ async function json<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  createRun: (request: CreateRunRequest) => json<RunResponse>("/runs", request),
   listRuns: () => json<RunListItem[]>("/api/runs"),
   currentAttempt: (runId: string) => json<CurrentAttemptResponse>(`/runs/${encodeURIComponent(runId)}/attempts/current`),
   executionAttempts: (runId: string) => json<ExecutionAttemptsResponse>(`/runs/${encodeURIComponent(runId)}/attempts`),
