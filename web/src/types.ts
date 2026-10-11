@@ -80,3 +80,14 @@ export type CreateRunRequest = { clientRequestId: string; workflowPath: string; 
 export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean; observationOnly?: boolean };
 export type TerminalOpenResponse = { runId: string; nodeId: string; cli: "codex"; initialScreen: string; cols: number; rows: number; outputSequence: number; wsPath: string };
 export type ReclaimTerminalResponse = TerminalOpenResponse;
+
+/** 独立主控会话状态；不等同于 Workflow Run 状态。 */
+export type HarnessStatus = "idle" | "running" | "interrupted";
+/** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
+export type HarnessMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
+export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null };
+/** daemon 权威 Harness 会话快照。 */
+export type HarnessSnapshot = { harnessRunId: string; cwd: string; status: HarnessStatus; diagnostic: string | null; createdAt: string; messages: HarnessMessage[]; workflowRevisions: WorkflowRevision[] };
+export type HarnessRunResponse = { harness: HarnessSnapshot };
+export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
+export type HarnessConfigResponse = { configured: boolean; model: string | null; baseUrl: string | null };

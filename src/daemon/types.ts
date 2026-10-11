@@ -1,4 +1,6 @@
 import type { JsonObject } from "../shared/json";
+import type { HarnessMessage, HarnessSnapshot, HarnessStatus } from "../harness/types";
+import type { HarnessConfigStatus, ResolvedHarnessModelConfig } from "../harness/config";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
 
 /** 创建 Run 的 loopback API 请求；Workflow 路径相对于 cwd 解析。 */
@@ -138,3 +140,26 @@ export type TerminalOpenResponse = {
 
 /** 用户显式认领旧受管会话后的终端首屏；成功不代表 Workflow 调度已恢复。 */
 export type ReclaimTerminalResponse = TerminalOpenResponse;
+
+/** 创建只读 Harness 主控会话的 loopback 请求；不创建 Workflow Run 或 Worker。 */
+export type CreateHarnessRunRequest = {
+  /** 用户选择的本地项目目录；daemon 必须 realpath 校验。 */
+  readonly cwd: string;
+};
+
+/** Harness 主控会话的 daemon 权威响应。 */
+export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
+/** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
+export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
+/** Harness 非敏感模型配置状态；绝不返回 API Key。 */
+export type HarnessConfigResponse = HarnessConfigStatus;
+/** 本机保存的 OpenAI-compatible 模型配置；仅 loopback daemon 接收，API Key 不会回显。 */
+export type UpdateHarnessConfigRequest = ResolvedHarnessModelConfig;
+/** 发送一条用户消息；响应只确认已耐久接收，流内容通过 SSE 返回。 */
+export type HarnessMessageRequest = { readonly text: string };
+/** Harness 对话分页的最小响应；一期返回全部已耐久完整消息。 */
+export type HarnessMessagesResponse = { readonly harnessRunId: string; readonly status: HarnessStatus; readonly messages: readonly HarnessMessage[] };
+/** 提交主控会话中的 workflow.ts 草案；仅耐久提案，不执行。 */
+export type ProposeWorkflowRevisionRequest = { readonly source: string };
+/** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
+export type AcceptWorkflowRevisionRequest = { readonly revision: number };

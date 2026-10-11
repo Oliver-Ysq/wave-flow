@@ -1,4 +1,4 @@
-import type { CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
+import type { CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, HarnessConfigResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
 
 async function json<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? undefined : {
@@ -17,6 +17,9 @@ async function json<T>(path: string, body?: unknown): Promise<T> {
 export const api = {
   createRun: (request: CreateRunRequest) => json<RunResponse>("/runs", request),
   listRuns: () => json<RunListItem[]>("/api/runs"),
+  listHarnesses: () => json<HarnessRunListResponse>("/api/harness-runs"),
+  harnessConfig: () => json<HarnessConfigResponse>("/harness-config"),
+  updateHarnessConfig: (value: { model: string; baseUrl: string; apiKey: string }) => json<HarnessConfigResponse>("/harness-config", value),
   currentAttempt: (runId: string) => json<CurrentAttemptResponse>(`/runs/${encodeURIComponent(runId)}/attempts/current`),
   executionAttempts: (runId: string) => json<ExecutionAttemptsResponse>(`/runs/${encodeURIComponent(runId)}/attempts`),
   phaseVisit: (runId: string, phaseVisitId: number) => json<PhaseVisitResponse>(`/runs/${encodeURIComponent(runId)}/phase-visits/${phaseVisitId}`),
@@ -34,4 +37,10 @@ export const api = {
   answer: (blockId: string, answer: Record<string, unknown>) => json(`/blocks/${encodeURIComponent(blockId)}/answer`, { answer }),
   terminal: (runId: string, nodeId: string) => json<TerminalOpenResponse>(`/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal`),
   reclaimTerminal: (runId: string, nodeId: string) => json<ReclaimTerminalResponse>(`/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/reclaim`, {}),
+  createHarness: (cwd: string) => json<HarnessRunResponse>("/harness-runs", { cwd }),
+  harness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}`),
+  sendHarnessMessage: (harnessRunId: string, text: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/messages`, { text }),
+  abortHarness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/abort`, {}),
+  proposeWorkflowRevision: (harnessRunId: string, source: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions`, { source }),
+  acceptWorkflowRevision: (harnessRunId: string, revision: number) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions/${revision}/accept`, {}),
 };

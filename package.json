@@ -34,6 +34,10 @@
   "dependencies": {
     "@agentclientprotocol/codex-acp": "2.2.2",
     "@agentclientprotocol/sdk": "1.8.0",
+    "@assistant-ui/react": "0.15.27",
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1",
+    "@opentelemetry/api": "1.9.1",
     "@tauri-apps/api": "^2.12.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0"

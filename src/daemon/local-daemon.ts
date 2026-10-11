@@ -3,7 +3,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { CloseDaemonResponse, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
+import type { AcceptWorkflowRevisionRequest, CloseDaemonResponse, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, HarnessConfigResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse, UpdateHarnessConfigRequest } from "./types";
+import { saveHarnessConfig } from "../harness/config";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -15,7 +16,7 @@ import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import type { AgentNodeExecutor } from "../runtime/run-types";
 import { RealCodexExecutor } from "../runtime/real-codex-executor";
 import { AcpWorkerExecutor } from "../runtime/acp-worker-executor";
-import { runsRoot, validateRunId } from "../journal/paths";
+import { harnessRunsRoot, runsRoot, validateRunId } from "../journal/paths";
 import { DAEMON_PROTOCOL_VERSION, daemonUserIdentity } from "./daemon-descriptor";
 import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION } from "../journal/types";
@@ -26,6 +27,8 @@ import { CodexAppServerAdapter, bunCodexAppServerConnection } from "../adapters/
 import { serveWebAsset } from "../web/static-assets";
 import { TmuxTerminalObserver } from "../sessions/terminal-observer";
 import type { ServerWebSocket } from "bun";
+import { HarnessService } from "../harness/service";
+import type { HarnessStreamEvent } from "../harness/types";
 
 /** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
@@ -50,6 +53,8 @@ export type LocalDaemonOptions = {
   readonly createRealExecutor?: RealCodexExecutorFactory;
   /** 用户级 Run Store 根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/runs。 */
   readonly storeRoot?: string;
+  /** Harness 对话档案根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/harness-runs。 */
+  readonly harnessRoot?: string;
   /** 全局同时运行 Run 上限；生产默认保守值，测试可缩小。 */
   readonly maxActiveRuns?: number;
   /** 全局同时启动的真实 Agent 上限，同时限制 tmux 会话与 App Server 进程。 */
@@ -67,6 +72,7 @@ export class LocalDaemon {
   #runs = new Map<string, RunRuntime>();
   #controls = new Map<string, ControlServer>();
   #runTasks = new Map<string, Promise<unknown>>();
+  #harness: HarnessService;
   /** 用户显式验证并认领的旧会话；资格精确绑定 node/session，不能放宽到整个 Run。 */
   #observedSessions = new Set<string>();
   /** 同一旧会话的并发认领单飞，防止两份 Runtime/Control 状态机互相覆盖。 */
@@ -108,6 +114,7 @@ export class LocalDaemon {
     this.createRealExecutor = normalized.createRealExecutor ?? createRealCodexExecutor;
     this.hasCustomRealExecutor = normalized.createRealExecutor !== undefined;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
+    this.#harness = new HarnessService(normalized.harnessRoot ?? harnessRunsRoot());
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
@@ -169,6 +176,28 @@ export class LocalDaemon {
       if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
       if (request.method === "POST" && url.pathname === "/daemon/close") return this.closeDaemon(await this.readJson(request));
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
+      if (request.method === "GET" && url.pathname === "/api/harness-runs") return this.json(await this.listHarnesses());
+      if (url.pathname === "/harness-config") {
+        if (request.method === "GET") return this.json(await this.harnessConfig());
+        if (request.method === "POST") return this.json(await this.updateHarnessConfig(await this.readJson(request)));
+      }
+      if (request.method === "POST" && url.pathname === "/harness-runs") return this.json(await this.createHarness(await this.readJson(request)));
+      const harnessMatch = url.pathname.match(/^\/harness-runs\/([^/]+)$/);
+      if (request.method === "GET" && harnessMatch) return this.json(await this.harnessSnapshot(decodeURIComponent(harnessMatch[1])));
+      const harnessMessagesMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/messages$/);
+      if (harnessMessagesMatch) {
+        const harnessRunId = decodeURIComponent(harnessMessagesMatch[1]);
+        if (request.method === "GET") return this.json(await this.harnessMessages(harnessRunId));
+        if (request.method === "POST") return this.json(await this.sendHarnessMessage(harnessRunId, await this.readJson(request)));
+      }
+      const harnessAbortMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/abort$/);
+      if (request.method === "POST" && harnessAbortMatch) return this.json(await this.abortHarness(decodeURIComponent(harnessAbortMatch[1]), await this.readJson(request)));
+      const workflowRevisionMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/workflow-revisions$/);
+      if (request.method === "POST" && workflowRevisionMatch) return this.json(await this.proposeWorkflowRevision(decodeURIComponent(workflowRevisionMatch[1]), await this.readJson(request)));
+      const workflowAcceptMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/workflow-revisions\/(\d+)\/accept$/);
+      if (request.method === "POST" && workflowAcceptMatch) return this.json(await this.acceptWorkflowRevision(decodeURIComponent(workflowAcceptMatch[1]), Number(workflowAcceptMatch[2]), await this.readJson(request)));
+      const harnessEventsMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/events$/);
+      if (request.method === "GET" && harnessEventsMatch) return this.harnessEvents(decodeURIComponent(harnessEventsMatch[1]));
       const terminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal$/);
       if (request.method === "GET" && terminalMatch) return this.json(await this.openTerminal(decodeURIComponent(terminalMatch[1]), decodeURIComponent(terminalMatch[2])));
       const reclaimTerminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/reclaim$/);
@@ -271,6 +300,44 @@ export class LocalDaemon {
       const message = error instanceof Error ? error.message : String(error);
       return this.json({ error: message }, status);
     }
+  }
+
+  /** 创建独立 Harness 对话，不创建 Workflow Run、Worker 或 Control。 */
+  private async createHarness(value: unknown): Promise<HarnessRunResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessRunRequest).cwd !== "string") throw new DaemonRequestError(400, "创建 Harness 请求无效。 ");
+    return { harness: await this.#harness.create((value as CreateHarnessRunRequest).cwd) };
+  }
+
+  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { return { harness: await this.#harness.snapshot(harnessRunId) }; }
+  private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: await this.#harness.list() }; }
+  private async harnessConfig(): Promise<HarnessConfigResponse> { return this.#harness.configStatus(); }
+  private async updateHarnessConfig(value: unknown): Promise<HarnessConfigResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new DaemonRequestError(400, "Harness 模型配置请求无效。 ");
+    try { const status = await saveHarnessConfig(value as UpdateHarnessConfigRequest); this.#harness.invalidateModelSessions(); return status; } catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+  private async harnessMessages(harnessRunId: string): Promise<HarnessMessagesResponse> { const harness = await this.#harness.snapshot(harnessRunId); return { harnessRunId, status: harness.status, messages: harness.messages }; }
+  private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as HarnessMessageRequest).text !== "string") throw new DaemonRequestError(400, "Harness 消息请求无效。 ");
+    await this.#harness.send(harnessRunId, (value as HarnessMessageRequest).text);
+    return { harness: await this.#harness.snapshot(harnessRunId) };
+  }
+  private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new DaemonRequestError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
+  private async proposeWorkflowRevision(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ProposeWorkflowRevisionRequest).source !== "string") throw new DaemonRequestError(400, "Workflow 草案请求无效。 "); return { harness: await this.#harness.proposeWorkflowRevision(harnessRunId, (value as ProposeWorkflowRevisionRequest).source) }; }
+  private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new DaemonRequestError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
+  /** SSE 只传递当前回合的 reasoning/text delta；订阅断开绝不取消 Pi turn。 */
+  private async harnessEvents(harnessRunId: string): Promise<Response> {
+    await this.#harness.snapshot(harnessRunId);
+    const harness = this.#harness;
+    const encoder = new TextEncoder();
+    let unsubscribe: (() => void) | null = null;
+    return new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (event: HarnessStreamEvent) => controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
+        unsubscribe = await harness.subscribe(harnessRunId, send);
+        controller.enqueue(encoder.encode(`event: snapshot\ndata: ${JSON.stringify(await harness.snapshot(harnessRunId))}\n\n`));
+      },
+      cancel() { unsubscribe?.(); },
+    }), { headers: { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" } });
   }
 
   /** 先发送确认响应，再由常驻 daemon 自己清理 descriptor、lock 与 HTTP 服务。 */

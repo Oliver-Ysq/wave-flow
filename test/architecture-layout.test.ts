@@ -51,6 +51,8 @@ describe("新架构目录与历史实现边界", () => {
     expect(desktop).toContain('sidecar("wave-flow-desktop-bridge")');
     expect(desktop).toContain('resource_dir()');
     expect(desktop).toContain('.join("web-dist")');
+    expect(desktop).toContain('WAVE_FLOW_HARNESS_API_KEY');
+    expect(desktop).toContain('.envs(harness_env())');
     expect(desktop).toContain('env!("CARGO_MANIFEST_DIR")');
     expect(bridge).toContain("ensureGlobalDaemon");
     const desktopEntry = await Bun.file(join(projectRoot, "web", "src", "main.tsx")).text();
