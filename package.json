@@ -15,7 +15,7 @@
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "web:preview": "vite preview --config web/vite.config.ts",
-    "desktop:prepare": "bun run web:build && bun build src/daemon/daemon-main.ts --compile --outfile src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin && bun build src/desktop/bridge.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-bridge-aarch64-apple-darwin",
+    "desktop:prepare": "bun run web:build && bun build src/daemon/daemon-main.ts --compile --outfile src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin && cp src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin src-tauri/binaries/wave-flow-aarch64-apple-darwin && bun build src/desktop/bridge.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-bridge-aarch64-apple-darwin && cp node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex src-tauri/binaries/wave-flow-codex-aarch64-apple-darwin && cp node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host src-tauri/binaries/codex-code-mode-host-aarch64-apple-darwin && chmod 755 src-tauri/binaries/wave-flow-aarch64-apple-darwin src-tauri/binaries/wave-flow-codex-aarch64-apple-darwin src-tauri/binaries/codex-code-mode-host-aarch64-apple-darwin",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build"
   },
@@ -32,6 +32,8 @@
     "vite": "^7.2.6"
   },
   "dependencies": {
+    "@agentclientprotocol/codex-acp": "2.2.2",
+    "@agentclientprotocol/sdk": "1.8.0",
     "@tauri-apps/api": "^2.12.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0"

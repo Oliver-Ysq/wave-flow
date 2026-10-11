@@ -57,6 +57,7 @@ export class RealCodexExecutor implements AgentNodeExecutor {
         WF_RUN_ID: control.runId,
         WF_NODE_ID: node.id,
         WF_AGENT_SESSION_ID: node.agentSessionId,
+        WF_CONTROL_CAPABILITY: capability,
       };
     let settled = false;
     let resolveCompletion!: (result: JsonObject) => void;

@@ -3,7 +3,7 @@ import type { JsonObject, JsonValue } from "./json";
 /** Workflow 当前可使用的正常交互式 CLI；TraeX 在其 Adapter、测试与能力探测完成后再加入。 */
 export type AgentCli = "codex";
 
-/** Agent CLI 的可写范围；默认 read-only，影响后续 Adapter 的 sandbox 启动参数。 */
+/** Agent CLI 的可写范围；默认 read-only，当前 Codex ACP Worker 尚不以该声明可靠限制真实权限。 */
 export type AgentSandbox = "read-only" | "workspace-write";
 
 /** 节点结果的 JSON Schema；本层仅传递，后续 Control Server 负责运行时校验。 */
@@ -41,7 +41,7 @@ export type AgentOptions = {
   readonly model?: string;
   /** 可选节点结果 Schema；由后续 Control Server 校验 complete 结果。 */
   readonly schema?: JsonSchema;
-  /** CLI sandbox 权限；省略时规范化为 read-only，禁止其他权限值。 */
+  /** CLI sandbox 权限；省略时规范化为 read-only，允许值仅为 read-only 或 workspace-write。 */
   readonly sandbox?: AgentSandbox;
   /** 显式上游 JSON 输入；参与后续 Prompt 构造和 replay 指纹。 */
   readonly input?: JsonObject;

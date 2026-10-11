@@ -45,7 +45,8 @@ export async function executeBlock(
     const daemon = await discover();
     if (!daemon) { await Bun.sleep(500); continue; }
     try {
-      const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/block`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
+      const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/${capability ? "block-active" : "block"}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, ...(capability ? { capability } : {}) }) });
       const value = await response.json() as BlockResolution | { error?: string };
       if (response.ok && "answer" in value && "blockRequestId" in value) return value;
       // 明确的业务/身份拒绝不可靠重试掩盖；仅连接中断才重连。

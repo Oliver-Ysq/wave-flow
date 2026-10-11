@@ -122,7 +122,11 @@ export async function removeOwnDescriptor(bootInstanceId: string, root = runtime
 type DaemonLock = { readonly pid: number; readonly processStartIdentity: string; readonly bootInstanceId: string };
 
 /** 取得单实例启动锁；已确认失效的旧 lock 才能移除，未知归属一律拒绝。 */
-export async function acquireDaemonLock(bootInstanceId: string, root = runtimeRoot()): Promise<boolean> {
+export async function acquireDaemonLock(
+  bootInstanceId: string,
+  root = runtimeRoot(),
+  inspectProcess: (pid: number, expected: string) => Promise<"live" | "dead" | "unknown"> = processStatus,
+): Promise<boolean> {
   await ensureDaemonRuntimeRoot(root);
   const path = lockPath(root);
   try {
@@ -144,10 +148,10 @@ export async function acquireDaemonLock(bootInstanceId: string, root = runtimeRo
   }
   const previous = await readLock(path);
   if (!previous) throw new Error("Wave Flow daemon 启动锁损坏或权限不安全，拒绝接管。");
-  const status = await processStatus(previous.pid, previous.processStartIdentity);
+  const status = await inspectProcess(previous.pid, previous.processStartIdentity);
   if (status === "dead") {
     await removeOwnLock(previous.bootInstanceId, root);
-    return acquireDaemonLock(bootInstanceId, root);
+    return acquireDaemonLock(bootInstanceId, root, inspectProcess);
   }
   if (status === "unknown") throw new Error("无法验证现有 Wave Flow daemon 启动锁所属进程，拒绝接管。");
   return false;

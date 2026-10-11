@@ -72,6 +72,6 @@ describe("全局 daemon descriptor", () => {
   test("无法验证旧 lock 进程时必须拒绝接管", async () => {
     const directory = await root();
     await writeFile(lockPath(directory), JSON.stringify({ pid: 999_999_999, processStartIdentity: "old", bootInstanceId: "dead-boot" }), { mode: 0o600 });
-    await expect(acquireDaemonLock("new-boot", directory)).rejects.toThrow("无法验证");
+    await expect(acquireDaemonLock("new-boot", directory, async () => "unknown")).rejects.toThrow("无法验证");
   });
 });

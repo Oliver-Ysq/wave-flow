@@ -40,13 +40,15 @@ export function parseCompleteCommand(argv: readonly string[]): CompleteCommand {
 export async function executeComplete(
   command: CompleteCommand,
   discover: () => Promise<{ readonly baseUrl: string } | null> = discoverDaemon,
+  requestFetch: typeof fetch = fetch,
 ): Promise<void> {
   const result = await readResult(command.resultFile);
   const daemon = await discover();
   if (!daemon) throw new Error("没有可验证的 Wave Flow daemon，无法认领并完成旧 Agent 会话。");
-  const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/reclaim-complete`, {
+  const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
+  const response = await requestFetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/${capability ? "complete" : "reclaim-complete"}`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...command.identity, summary: command.summary, result }),
+    body: JSON.stringify({ ...command.identity, ...(capability ? { capability } : {}), summary: command.summary, result }),
   });
   const value = await response.json() as { error?: string };
   if (!response.ok) throw new Error(value.error ?? `Control complete 请求失败：${response.status}`);

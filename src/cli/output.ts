@@ -14,12 +14,12 @@ export function formatSnapshot(snapshot: RunSnapshot): string {
   return lines.join("\n");
 }
 
-/** 本机 CLI 帮助；真实 Run 默认通过 App Server 投递并保留 tmux viewer。 */
+/** 本机 CLI 帮助；真实 Run 默认通过 Codex ACP Worker 执行。 */
 export const helpText = `wave-flow 本机工作流 CLI
 
 用法:
   wave-flow start
-  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--tmux-tui-input]
+  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--codex-app-server|--tmux-tui-input]
   wave-flow serve
   wave-flow web
   wave-flow close
@@ -38,9 +38,11 @@ export const helpText = `wave-flow 本机工作流 CLI
 start 确保当前用户的全局 daemon 已启动并健康后立即退出，不创建 Run。
 close 只关闭已通过 descriptor、PID 启动身份与 /health 验证的当前用户 daemon；不会盲目终止 PID。
 web 会显示 daemon 的发现、启动或复用、health 验证过程，然后输出同源 Local Web 地址。
-run 默认使用 App Server 的 turn/start ACK 投递首条任务，并保留 tmux 中的 Codex viewer 供人工查看和交互。
---tmux-tui-input 显式使用普通 tmux TUI 的 paste/history 投递兼容路径。
---codex-rpc-input 仍接受，但已是默认行为。`;
+run 默认使用固定依赖的 Codex ACP Worker；Worker 具有 workflow 指派的完整读写执行权限。
+--codex-app-server 显式使用旧 App Server + tmux 兼容路径。
+--tmux-tui-input 仅与 --codex-app-server 一起使用普通 tmux TUI 的 paste/history 投递兼容路径。
+--codex-rpc-input 仅为旧兼容路径保留。
+--codex-acp 显式声明默认 ACP Worker；当前不支持跨 daemon ACP reclaim。`;
 
 /** 渲染人类可读能力摘要；仅显示被当前实现证明的能力。 */
 export function formatCapabilities(snapshot: CapabilitySnapshot): string {

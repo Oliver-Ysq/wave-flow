@@ -13,6 +13,8 @@ export type CreateRunRequest = {
   readonly input: JsonObject;
   /** 是否使用 Botmux 风格 App Server hybrid 投递；默认 true，Workflow 源码不可设置。 */
   readonly codexRpcInput?: boolean;
+  /** Worker 会话底座；省略时默认 Codex ACP，App Server + tmux 仅为显式兼容路径。 */
+  readonly workerTransport?: "codex-app-server" | "codex-acp";
 };
 
 /** 创建或查询 Run 的 loopback API 响应。 */

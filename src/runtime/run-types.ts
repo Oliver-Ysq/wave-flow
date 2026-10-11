@@ -36,6 +36,8 @@ export type AgentNodeExecutor = {
 export type AgentRecovery = {
   /** 同一 App Server thread 的新 turn 坐标；缺失代表该 Adapter 没有可记录的回合标识。 */
   readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; readonly protocolVersion: 1 };
+  /** 同一 ACP session 已启动恢复回合；用于耐久化恢复投递事实，不是业务完成依据。 */
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; };
 };
 
 /** Agent 节点对执行器与查询层公开的不可变快照。 */

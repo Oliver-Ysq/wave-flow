@@ -16,6 +16,7 @@ export class RunStateMachine {
   #recordedSessions = new Set<string>();
   #viewerSessions = new Map<string, import("../sessions/types").SessionIdentity>();
   #appServerBindings = new Map<string, { readonly endpoint: string; readonly threadId: string; readonly turnId: string; readonly protocolVersion: 1 }>();
+  #acpBindings = new Map<string, { readonly launcherId: string; readonly sessionId: string; }>();
   #blockSchemas = new Map<string, JsonSchema | undefined>();
   #currentExecutionAttemptId = 0;
   #phaseVisits = new Map<string, PhaseVisitSnapshot>();
@@ -242,6 +243,7 @@ export class RunStateMachine {
     // 旧 attempt 的 agent.session 不能证明新 attempt 已安全投递；resume CLI 必须等候
     // 新会话自己的 session 事实，不能因旧记录提前返回。
     this.#recordedSessions.delete(event.nodeId);
+    this.#acpBindings.delete(event.nodeId);
     const executionAttemptId = event.executionAttemptId ?? agent.executionAttemptId;
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
@@ -252,20 +254,26 @@ export class RunStateMachine {
     if (!event.nodeId || !event.agentSessionId) throw new Error("agent.session 缺少节点或会话身份。");
     const agent = this.#agents.get(event.nodeId);
     if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("agent.session 必须属于当前 running 节点。");
-    if (event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId || event.session.cli !== agent.cli) throw new Error("agent.session 会话坐标与节点不匹配。");
+    if (event.delivery !== "acp" && (!event.session || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId || event.session.cli !== agent.cli)) throw new Error("agent.session 会话坐标与节点不匹配。");
     if (this.#recordedSessions.has(event.nodeId)) throw new Error("同一 Agent 节点只能记录一次 agent.session。");
     this.#recordedSessions.add(event.nodeId);
-    this.#viewerSessions.set(event.nodeId, event.session);
+    if (event.session) this.#viewerSessions.set(event.nodeId, event.session);
     if (event.appServer) this.#appServerBindings.set(event.nodeId, event.appServer);
+    if (event.acp) this.#acpBindings.set(event.nodeId, { launcherId: event.acp.launcherId, sessionId: event.acp.sessionId });
   }
 
   #applyAgentRecovered(event: Extract<JournalEvent, { type: "agent.recovered" }>): void {
     if (!event.nodeId || !event.agentSessionId) throw new Error("agent.recovered 缺少节点或会话身份。 ");
     const agent = this.#agents.get(event.nodeId);
     if (!agent || agent.status !== "recovering" || agent.agentSessionId !== event.agentSessionId || !this.#recordedSessions.has(event.nodeId)) throw new Error("agent.recovered 必须属于 recovering 的已记录会话。 ");
-    const previous = this.#appServerBindings.get(event.nodeId);
-    if (!previous || previous.threadId !== event.appServer.threadId || previous.endpoint !== event.appServer.endpoint) throw new Error("agent.recovered 不得替换 App Server thread。 ");
-    this.#appServerBindings.set(event.nodeId, event.appServer);
+    if (event.appServer) {
+      const previous = this.#appServerBindings.get(event.nodeId);
+      if (!previous || previous.threadId !== event.appServer.threadId || previous.endpoint !== event.appServer.endpoint) throw new Error("agent.recovered 不得替换 App Server thread。 ");
+      this.#appServerBindings.set(event.nodeId, event.appServer);
+      return;
+    }
+    const binding = this.#acpBindings.get(event.nodeId);
+    if (!binding || !event.acp || binding.launcherId !== event.acp.launcherId || binding.sessionId !== event.acp.sessionId) throw new Error("agent.recovered 不得替换 ACP session。 ");
   }
 
   #applyAgentViewer(event: Extract<JournalEvent, { type: "agent.viewer" }>): void {

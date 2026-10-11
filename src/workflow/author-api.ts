@@ -22,6 +22,8 @@ export function agent<T extends JsonObject = JsonObject>(prompt: string, options
   const executionBatch = currentExecutionBatch();
   return trackWorkflowOperation((async () => {
     const cwd = await normalizeAgentCwd(options.cwd, context.cwd);
+    // 保持已发布 Journal 的默认指纹稳定。当前 Codex ACP Worker 的实际权限不由这个
+    // 声明字段收窄；它作为任务意图留给支持可靠 sandbox 的后续 Adapter。
     return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase }, executionBatch, phaseVisit) as Promise<T | null>;
   })());
 }

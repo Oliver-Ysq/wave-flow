@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { basename, dirname, join } from "node:path";
 import { DaemonClient, UnsupportedDaemonCloseEndpointError } from "./daemon-client";
 import { formatCapabilities, formatSnapshot, helpText } from "./output";
 import { parseCommand } from "./parse-command";
@@ -27,7 +28,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
     ? null
     : command.kind === "inspect" || command.kind === "answer" || command.kind === "close"
       ? await discoverDaemon()
-      : await ensureGlobalDaemon(10_000, command.kind === "web" ? write : undefined);
+      : await ensureGlobalDaemon(20_000, command.kind === "web" ? write : undefined, packagedDaemonExecutable());
   const testServer = testDaemon?.start();
   try {
     const baseUrl = daemon?.baseUrl ?? testServer?.baseUrl;
@@ -81,7 +82,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
       return;
     }
     const response = command.kind === "run"
-      ? await client.createRun({ clientRequestId: crypto.randomUUID(), workflowPath: command.workflowPath, cwd: command.cwd, input: command.input, codexRpcInput: command.codexRpcInput })
+      ? await client.createRun({ clientRequestId: crypto.randomUUID(), workflowPath: command.workflowPath, cwd: command.cwd, input: command.input, codexRpcInput: command.codexRpcInput, workerTransport: command.workerTransport })
       : await client.inspect(command.runId);
     write(formatSnapshot(response.snapshot));
     if (command.kind === "run" && response.snapshot.status === "running" && !deterministicForTest) {
@@ -95,11 +96,25 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
 }
 
 /**
+ * 打包的 `wave-flow` 是给 Worker 与诊断使用的控制 sidecar，本身不是 daemon。
+ * 冷启动时必须启动同目录的 `wave-flow-daemon`，不能把当前 CLI binary 再启动一次。
+ * 源码模式返回 undefined，仍由 Bun 以 daemon-main.ts 启动开发 daemon。
+ */
+function packagedDaemonExecutable(): string | undefined {
+  if (!import.meta.dir.startsWith("/$bunfs/") || basename(process.execPath) !== "wave-flow") return undefined;
+  return join(dirname(process.execPath), "wave-flow-daemon");
+}
+
+/**
  * 旧 daemon 没有 `/daemon/close` 时的唯一兼容出口。
  * 再次发现并逐字段比对，避免 descriptor 在 HTTP 请求与信号之间被新 daemon 替换。
  */
-export async function terminateVerifiedLegacyDaemon(daemon: NonNullable<Awaited<ReturnType<typeof discoverDaemon>>>): Promise<void> {
-  const current = await discoverDaemon();
+export async function terminateVerifiedLegacyDaemon(
+  daemon: NonNullable<Awaited<ReturnType<typeof discoverDaemon>>>,
+  discover: () => ReturnType<typeof discoverDaemon> = discoverDaemon,
+  terminate: typeof process.kill = process.kill,
+): Promise<void> {
+  const current = await discover();
   if (!current
     || current.baseUrl !== daemon.baseUrl
     || current.descriptor.pid !== daemon.descriptor.pid
@@ -108,7 +123,7 @@ export async function terminateVerifiedLegacyDaemon(daemon: NonNullable<Awaited<
     || current.descriptor.userIdentity !== daemon.descriptor.userIdentity) {
     throw new Error("旧 daemon 的身份在关闭前发生变化，拒绝终止。请重新执行 wave-flow close。");
   }
-  try { process.kill(current.descriptor.pid, "SIGTERM"); } catch (error) {
+  try { terminate(current.descriptor.pid, "SIGTERM"); } catch (error) {
     throw new Error(`无法终止已验证的旧 daemon：${error instanceof Error ? error.message : String(error)}`);
   }
 }

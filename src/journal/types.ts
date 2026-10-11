@@ -108,9 +108,12 @@ export type JournalEvent = JournalBase & ({
   /** 已确认首条任务投递的真实会话坐标；必须早于该节点的 complete。 */
   readonly type: "agent.session";
   /** 首条任务的实际投递通道。 */
-  readonly delivery: "tmux" | "codex-rpc";
+  readonly delivery: "tmux" | "codex-rpc" | "acp";
   /** Session Host 返回的完整稳定会话身份。 */
-  readonly session: SessionIdentity;
+  /** tmux/codex-rpc 的终端身份；ACP 投递不伪造此坐标。 */
+  readonly session?: SessionIdentity;
+  /** ACP 投递的 launcher、原生 session 与初始化能力快照。 */
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; };
   /** hybrid 投递的官方 thread/turn 坐标；普通 tmux 投递没有此字段。 */
   readonly appServer?: {
     readonly endpoint: string;
@@ -119,15 +122,17 @@ export type JournalEvent = JournalBase & ({
     readonly protocolVersion: 1;
   };
 } | {
-  /** paused 后同一 thread 的新继续回合；不创建新 Agent attempt。 */
+  /** paused 后同一受管会话的恢复回合；不创建新 Agent attempt。 */
   readonly type: "agent.recovered";
-  /** 原 session 不变，只有当前 App Server turn 坐标更新。 */
-  readonly appServer: {
+  /** App Server 恢复时原 thread 不变，仅更新当前 turn 坐标。 */
+  readonly appServer?: {
     readonly endpoint: string;
     readonly threadId: string;
     readonly turnId: string;
     readonly protocolVersion: 1;
   };
+  /** ACP 恢复时保持同一原生 session；表示新 prompt 已启动。 */
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; };
 } | {
   /** recover 后重建的 tmux viewer；替换旧 viewer 坐标，不改变 Agent session 身份。 */
   readonly type: "agent.viewer";

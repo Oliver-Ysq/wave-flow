@@ -9,8 +9,16 @@ export function validateRunId(runId: string): void {
   }
 }
 
-/** 返回当前用户的 Wave Flow 状态根目录；Run 档案不得放在任一项目或 Agent cwd。 */
-export function waveFlowHome(): string { return join(homedir(), ".wave-flow"); }
+/**
+ * 返回当前用户的 Wave Flow 状态根目录；Run 档案不得放在任一项目或 Agent cwd。
+ * `WAVE_FLOW_HOME` 仅供受控隔离开发/测试覆盖，必须是绝对路径；未设置时为用户默认目录。
+ */
+export function waveFlowHome(): string {
+  const override = process.env.WAVE_FLOW_HOME?.trim();
+  if (!override) return join(homedir(), ".wave-flow");
+  if (!isAbsolute(override)) throw new Error("WAVE_FLOW_HOME 必须是绝对路径。 ");
+  return resolve(override);
+}
 
 /** 返回用户级 Run 档案根目录。root 仅供测试注入，生产调用不传。 */
 export function runsRoot(root = waveFlowHome()): string { return join(root, "runs"); }

@@ -78,7 +78,7 @@ describe("RealCodexExecutor", () => {
     const reclaimToken = capture.createOptions?.env?.WF_RECLAIM_TOKEN;
     expect(reclaimToken).toBeUndefined();
     expect(capture.createOptions?.env?.WF_CONTROL_URL).toBeUndefined();
-    expect(capture.createOptions?.env?.WF_CONTROL_CAPABILITY).toBeUndefined();
+    expect(capture.createOptions?.env?.WF_CONTROL_CAPABILITY).toMatch(/^[0-9a-f-]{36}$/);
     expect(capture.createOptions?.reclaimTokenHash).toMatch(/^[0-9a-f]{64}$/);
     expect(submittedPrompt).toContain(`--run-id ${value.manifest.runId} --node-id node --agent-session-id ${value.agentSessionId}`);
     expect(submittedPrompt).toContain("wave-flow block");

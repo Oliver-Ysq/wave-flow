@@ -5,26 +5,29 @@ import { join } from "node:path";
 import { main, terminateVerifiedLegacyDaemon } from "../../src/cli/main";
 import { parseCommand } from "../../src/cli/parse-command";
 import { DaemonClient } from "../../src/cli/daemon-client";
+import { codexAcpLauncher } from "../../src/daemon/local-daemon";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("CLI run / inspect", () => {
   test("旧 daemon close 兼容前再次发现身份变化时拒绝发送终止信号", async () => {
-    const originalFetch = globalThis.fetch;
-    const originalKill = process.kill;
     let killed = false;
-    globalThis.fetch = (async () => Response.json({ protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "replaced", })) as unknown as typeof fetch;
-    process.kill = (() => { killed = true; return true; }) as typeof process.kill;
-    try {
-      await expect(terminateVerifiedLegacyDaemon({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } })).rejects.toThrow("身份在关闭前发生变化");
-      expect(killed).toBe(false);
-    } finally { globalThis.fetch = originalFetch; process.kill = originalKill; }
+    await expect(terminateVerifiedLegacyDaemon(
+      { baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } },
+      async () => ({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "replaced", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } }),
+      (() => { killed = true; return true; }) as typeof process.kill,
+    )).rejects.toThrow("身份在关闭前发生变化");
+    expect(killed).toBe(false);
   });
   test("解析 run 输入、cwd 与 inspect", () => {
     expect(parseCommand(["run", "flow.ts", "--input", '{"target":"src"}', "--cwd", "project"], "/workspace")).toEqual({ kind: "run", workflowPath: "flow.ts", cwd: "/workspace/project", input: { target: "src" }, codexRpcInput: true });
-    expect(parseCommand(["run", "flow.ts", "--codex-rpc-input"], "/workspace")).toMatchObject({ codexRpcInput: true });
-    expect(parseCommand(["run", "flow.ts", "--tmux-tui-input"], "/workspace")).toMatchObject({ codexRpcInput: false });
+    expect(parseCommand(["run", "flow.ts"], "/workspace")).not.toHaveProperty("workerTransport");
+    expect(parseCommand(["run", "flow.ts", "--codex-rpc-input"], "/workspace")).toMatchObject({ codexRpcInput: true, workerTransport: "codex-app-server" });
+    expect(parseCommand(["run", "flow.ts", "--tmux-tui-input"], "/workspace")).toMatchObject({ codexRpcInput: false, workerTransport: "codex-app-server" });
+    expect(parseCommand(["run", "flow.ts", "--codex-acp"], "/workspace")).not.toHaveProperty("workerTransport");
+    expect(parseCommand(["run", "flow.ts", "--codex-app-server"], "/workspace")).toMatchObject({ workerTransport: "codex-app-server" });
+    expect(() => parseCommand(["run", "flow.ts", "--codex-acp", "--tmux-tui-input"], "/workspace")).toThrow("不能与 --tmux-tui-input");
     expect(parseCommand(["start"], "/workspace")).toEqual({ kind: "start" });
     expect(() => parseCommand(["start", "unexpected"], "/workspace")).toThrow("start 不接受参数");
     expect(parseCommand(["serve"], "/workspace")).toEqual({ kind: "serve" });
@@ -42,6 +45,12 @@ describe("CLI run / inspect", () => {
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
     expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
     expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");
+  });
+
+  test("默认 ACP Worker 的受管控制命令固定指向当前源码入口，不依赖用户 PATH", () => {
+    const launcher = codexAcpLauncher();
+    expect(launcher.env?.WAVE_FLOW_CONTROL_COMMAND).toContain("src/cli/main.ts");
+    expect(launcher.env?.WAVE_FLOW_CONTROL_COMMAND).not.toBe("wave-flow");
   });
 
   test("capabilities --json 输出机器可读的三态快照", async () => {
@@ -70,21 +79,18 @@ describe("CLI run / inspect", () => {
 
 
   test("创建 Run 的传输层重试复用同一 clientRequestId", async () => {
-    const original = globalThis.fetch;
     const bodies: string[] = [];
     let calls = 0;
-    globalThis.fetch = (async (_url, init) => {
+    const requestFetch = (async (_url, init) => {
       bodies.push(String(init?.body));
       calls += 1;
       if (calls === 1) throw new TypeError("socket closed");
       return Response.json({ runId: "11111111-1111-4111-8111-111111111111", snapshot: { id: "11111111-1111-4111-8111-111111111111", status: "completed", workflow: { name: "test", description: "Test.", phases: [{ title: "run" }] }, cwd: "/tmp", createdAt: new Date().toISOString(), endedAt: new Date().toISOString(), diagnostic: null, phases: [] } });
     }) as typeof fetch;
-    try {
-      await new DaemonClient("http://127.0.0.1:1").createRun({ clientRequestId: "22222222-2222-4222-8222-222222222222", workflowPath: "workflow.ts", cwd: "/tmp", input: {} });
-      expect(calls).toBe(2);
-      expect(bodies).toHaveLength(2);
-      expect(bodies[0]).toBe(bodies[1]);
-    } finally { globalThis.fetch = original; }
+    await new DaemonClient("http://127.0.0.1:1", requestFetch).createRun({ clientRequestId: "22222222-2222-4222-8222-222222222222", workflowPath: "workflow.ts", cwd: "/tmp", input: {} });
+    expect(calls).toBe(2);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
   });
 
   test("run 通过 daemon 产生可渲染的开发验证 Run", async () => {

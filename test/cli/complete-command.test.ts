@@ -17,12 +17,12 @@ describe("complete command", () => {
   test("CLI 只上传本地已读取 JSON，不把 result-file 路径交给 daemon", async () => {
     const directory = await mkdtemp(join(tmpdir(), "wave-flow-complete-")); directories.push(directory);
     const path = join(directory, "result.json"); await writeFile(path, '{"ok":true}', "utf8");
-    const originalFetch = globalThis.fetch;
     let body: unknown;
-    globalThis.fetch = (async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }); }) as typeof fetch;
-    try {
-      await executeComplete({ summary: "done", resultFile: path, identity: { runId: "run", nodeId: "node", agentSessionId: "session" } }, async () => ({ baseUrl: "http://127.0.0.1:1234" }));
-    } finally { globalThis.fetch = originalFetch; }
+    await executeComplete(
+      { summary: "done", resultFile: path, identity: { runId: "run", nodeId: "node", agentSessionId: "session" } },
+      async () => ({ baseUrl: "http://127.0.0.1:1234" }),
+      (async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }); }) as typeof fetch,
+    );
     expect(body).toEqual({ runId: "run", nodeId: "node", agentSessionId: "session", summary: "done", result: { ok: true } });
     expect(JSON.stringify(body)).not.toContain(path);
   });

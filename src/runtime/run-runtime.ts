@@ -167,6 +167,11 @@ export class RunRuntime {
           await this.journal.append(event);
           this.state.apply(event);
         }
+        if (recovery.acp) {
+          const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 ACP session 的恢复回合已启动。", acp: recovery.acp };
+          await this.journal.append(event);
+          this.state.apply(event);
+        }
         const viewer = this.host.viewerSession(this.state.agent(node.id));
         if (viewer) {
           const event: JournalEvent = { type: "agent.viewer", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "恢复后 viewer 已重建。", session: viewer };

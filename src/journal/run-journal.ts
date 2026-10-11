@@ -196,12 +196,16 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
       break;
     case "agent.session":
-      if (typeof event.nodeId !== "string" || !isSessionDelivery(event.delivery) || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.session payload 无效。");
+      if (typeof event.nodeId !== "string" || !isSessionDelivery(event.delivery)) throw new Error("agent.session payload 无效。");
+      if (event.delivery === "acp") {
+        if (event.session !== undefined || !isAcpBinding(event.acp)) throw new Error("ACP agent.session payload 无效。");
+      } else if (!isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.session payload 无效。");
       if (event.delivery === "tmux" && event.appServer !== undefined) throw new Error("普通 tmux 投递不得携带 App Server 坐标。");
       if (event.delivery === "codex-rpc" && !isAppServerCoordinate(event.appServer)) throw new Error("App Server 投递缺少有效坐标。");
+      if (event.delivery === "acp" && event.appServer !== undefined) throw new Error("ACP 投递不得携带 App Server 坐标。");
       break;
     case "agent.recovered":
-      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !isAppServerCoordinate(event.appServer)) throw new Error("agent.recovered payload 无效。 ");
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || (isAppServerCoordinate(event.appServer) === isAcpRecovery(event.acp))) throw new Error("agent.recovered payload 无效。 ");
       break;
     case "agent.viewer":
       if (typeof event.nodeId !== "string" || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.viewer payload 无效。 ");
@@ -240,7 +244,16 @@ function isNormalizedRequest(value: unknown): boolean {
 function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isPositiveInteger(value: unknown): value is number { return Number.isInteger(value) && typeof value === "number" && value >= 1; }
 function isRunStatus(value: unknown): boolean { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
-function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" { return value === "tmux" || value === "codex-rpc"; }
+function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" | "acp" { return value === "tmux" || value === "codex-rpc" || value === "acp"; }
+function isAcpBinding(value: unknown): value is { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>> } {
+  return !!value && typeof value === "object" && typeof (value as { launcherId?: unknown }).launcherId === "string" && !!(value as { launcherId: string }).launcherId.trim() && typeof (value as { sessionId?: unknown }).sessionId === "string" && !!(value as { sessionId: string }).sessionId.trim() && !!(value as { capabilities?: unknown }).capabilities && typeof (value as { capabilities: unknown }).capabilities === "object";
+}
+
+function isAcpRecovery(value: unknown): value is { readonly launcherId: string; readonly sessionId: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.launcherId === "string" && item.launcherId.trim() !== "" && typeof item.sessionId === "string" && item.sessionId.trim() !== "";
+}
 
 function isSessionIdentity(value: unknown): value is SessionIdentity {
   if (!isPlainObject(value)) return false;

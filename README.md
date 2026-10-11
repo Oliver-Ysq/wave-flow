@@ -28,7 +28,7 @@
 - 当前仅支持 `agent(..., { cli: "codex" })`。
 - 当前面向本机单用户；daemon 仅在本机运行。
 - TraeX 与 Retry 尚未实现。
-- 默认路径通过 Codex App Server 的 `turn/start` ACK 确认首条任务已投递；tmux 是查看和交互会话的 viewer，不以终端文本判断投递或完成。
+- 默认通过随包 Codex ACP Worker 创建受管会话；ACP 流、turn 结束和终端文字均不作为完成依据，仍只信任 `wave-flow complete` 的 Schema 与 Journal 证据。
 
 ## 快速开始
 
@@ -136,7 +136,7 @@ wave-flow continue --block-request-id <block-request-id> \
 
 暂停依赖当前 daemon 保留的 Workflow 调用栈；如果 daemon 在 `pausing`、`paused` 或 `recovering` 时重启，Wave Flow 会将该 Run 如实标记为 `interrupted`，不会伪造 recover。之后可由用户使用 `resume` 创建新的受控 attempt。
 
-默认路径经本机 App Server 的 `initialize → thread/start → turn/start` ACK 投递首条任务。tmux 中的 Codex 会话仅供人工查看和交互。传入 `--tmux-tui-input` 可显式启用普通 tmux TUI 的 paste/history 兼容路径；两条路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。
+默认路径使用随包 `codex-acp` 与 Codex ACP session 执行 Worker；Worker 具有 Workflow 指派的完整读写权限。传入 `--codex-app-server` 可显式使用旧 App Server + tmux 兼容路径，`--tmux-tui-input` 仅适用于该兼容路径。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`；daemon 重启后，用户 `resume` 创建新 ACP Worker attempt，不认领旧 ACP session。
 
 跨 daemon 的控制恢复只适用于旧 tmux 与 App Server thread 仍能验证的会话：答案可先保存，原 `block` 以相同请求 ID 重连后读取答案，只有 Agent 自己 `continue` 才恢复运行。它不自动发送 Codex 新回合、不重发 Prompt、不重跑节点，也不恢复 Workflow 调用栈。
 

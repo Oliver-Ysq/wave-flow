@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { isJsonObject, type JsonObject } from "../shared/json";
 
 /** CLI 解析后的 run 命令；cwd 和 workflow 路径尚由 daemon 做最终 realpath 校验。 */
-export type RunCommand = { readonly kind: "run"; readonly workflowPath: string; readonly cwd: string; readonly input: JsonObject; /** true 时经 App Server ACK 投递首条任务；默认 true。 */ readonly codexRpcInput: boolean };
+export type RunCommand = { readonly kind: "run"; readonly workflowPath: string; readonly cwd: string; readonly input: JsonObject; /** 仅 App Server 兼容路径使用。 */ readonly codexRpcInput: boolean; /** 省略时 daemon 默认 Codex ACP；可显式选择旧 App Server + tmux。 */ readonly workerTransport?: "codex-app-server" | "codex-acp" };
 /** CLI 解析后的 inspect 命令。 */
 export type InspectCommand = { readonly kind: "inspect"; readonly runId: string };
 /** CLI 解析后的 capabilities 命令；json 为 true 时输出机器可读快照。 */
@@ -55,7 +55,7 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
     const workflowPath = rest[0];
     if (!workflowPath || workflowPath.startsWith("-")) throw new Error("run 命令需要 Workflow 路径。");
     const options = parseOptions(rest.slice(1), initialCwd);
-    return { kind: "run", workflowPath, cwd: options.cwd, input: options.input, codexRpcInput: options.codexRpcInput };
+    return { kind: "run", workflowPath, cwd: options.cwd, input: options.input, codexRpcInput: options.codexRpcInput, ...(options.workerTransport === "codex-app-server" ? { workerTransport: options.workerTransport } : {}) };
   }
   if (command === "inspect") {
     const runId = rest[0];
@@ -66,10 +66,12 @@ export function parseCommand(argv: readonly string[], initialCwd: string): CliCo
   throw new Error(`未知命令：${command}`);
 }
 
-function parseOptions(argv: readonly string[], initialCwd: string): { cwd: string; input: JsonObject; codexRpcInput: boolean } {
+function parseOptions(argv: readonly string[], initialCwd: string): { cwd: string; input: JsonObject; codexRpcInput: boolean; workerTransport: "codex-app-server" | "codex-acp" } {
   let cwd = initialCwd;
   let input: JsonObject = {};
   let codexRpcInput = true;
+  let workerTransport: "codex-app-server" | "codex-acp" = "codex-acp";
+  let explicitlyRequestedAcp = false;
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--cwd") { const value = argv[++index]; if (!value) throw new Error("--cwd 需要路径。"); cwd = resolve(initialCwd, value); continue; }
     if (argv[index] === "--input") {
@@ -77,10 +79,13 @@ function parseOptions(argv: readonly string[], initialCwd: string): { cwd: strin
       try { const parsed = JSON.parse(value) as unknown; if (!isJsonObject(parsed)) throw new Error(); input = parsed; } catch { throw new Error("--input 必须是 JSON-safe 对象。"); }
       continue;
     }
-    // App Server hybrid 是默认策略；保留旧开关为显式兼容别名。
-    if (argv[index] === "--codex-rpc-input") { codexRpcInput = true; continue; }
-    if (argv[index] === "--tmux-tui-input") { codexRpcInput = false; continue; }
+    // App Server/tmux 是显式兼容路径；默认 Worker 为 Codex ACP。
+    if (argv[index] === "--codex-rpc-input") { codexRpcInput = true; workerTransport = "codex-app-server"; continue; }
+    if (argv[index] === "--tmux-tui-input") { codexRpcInput = false; workerTransport = "codex-app-server"; continue; }
+    if (argv[index] === "--codex-acp") { workerTransport = "codex-acp"; explicitlyRequestedAcp = true; continue; }
+    if (argv[index] === "--codex-app-server") { workerTransport = "codex-app-server"; continue; }
     throw new Error(`未知选项：${argv[index]}`);
   }
-  return { cwd, input, codexRpcInput };
+  if (explicitlyRequestedAcp && !codexRpcInput) throw new Error("--codex-acp 不能与 --tmux-tui-input 同时使用。 ");
+  return { cwd, input, codexRpcInput, workerTransport };
 }

@@ -4,6 +4,26 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import type { WorkflowModule } from "../shared/workflow-types";
 import { validateWorkflowMeta } from "./validate-meta";
+import { agent, log, parallel, phase, pipeline } from "./author-api";
+
+const AUTHOR_API_GLOBAL = Symbol.for("wave-flow.author-api");
+const authorApiBridgeUrl = `data:text/javascript;base64,${Buffer.from(`
+const api = globalThis[Symbol.for(${JSON.stringify(AUTHOR_API_GLOBAL.description)})];
+if (!api) throw new Error("Wave Flow 作者 API bridge 不可用。");
+export const agent = (...args) => api.agent(...args);
+export const log = (...args) => api.log(...args);
+export const parallel = (...args) => api.parallel(...args);
+export const phase = (...args) => api.phase(...args);
+export const pipeline = (...args) => api.pipeline(...args);
+`, "utf8").toString("base64")}`;
+
+// 受信任 Workflow 的唯一运行时 import 不应依赖开发 checkout 或编译二进制的 /$bunfs 路径。
+// 仅暴露作者 API；Workflow 仍不获得 Runtime、Journal、Control 或 Session Host 对象。
+Object.defineProperty(globalThis, AUTHOR_API_GLOBAL, {
+  value: Object.freeze({ agent, log, parallel, phase, pipeline }),
+  writable: false,
+  configurable: false,
+});
 
 /** 从项目 cwd 内加载并验证一个受信任的 TypeScript Workflow 模块。 */
 export async function loadWorkflow<Args = unknown, Result = unknown>(workflowPath: string, cwd: string): Promise<WorkflowModule<Args, Result>> {
@@ -32,11 +52,10 @@ export async function loadWorkflow<Args = unknown, Result = unknown>(workflowPat
 /** 将唯一允许的运行时作者 API 导入绑定到当前包入口，避免 Workflow cwd 的同名依赖劫持上下文。 */
 function bindAuthorApiImport(source: string, fileName: string): string {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
-  const authorApiUrl = new URL("../index.ts", import.meta.url).href;
   const replacements = file.statements
     .filter((statement): statement is ts.ImportDeclaration => ts.isImportDeclaration(statement)
       && !statement.importClause?.isTypeOnly && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === "wave-flow")
-    .map((statement) => ({ start: statement.moduleSpecifier.getStart(file), end: statement.moduleSpecifier.getEnd(), value: JSON.stringify(authorApiUrl) }))
+    .map((statement) => ({ start: statement.moduleSpecifier.getStart(file), end: statement.moduleSpecifier.getEnd(), value: JSON.stringify(authorApiBridgeUrl) }))
     .sort((left, right) => right.start - left.start);
   return replacements.reduce((result, replacement) => `${result.slice(0, replacement.start)}${replacement.value}${result.slice(replacement.end)}`, source);
 }

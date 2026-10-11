@@ -8,7 +8,7 @@ export class UnsupportedDaemonCloseEndpointError extends Error {
 
 /** 仅通过 loopback HTTP 与 daemon 通信的 CLI 客户端。 */
 export class DaemonClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(private readonly baseUrl: string, private readonly requestFetch: typeof fetch = fetch) {}
 
   /** 请求 daemon 创建并完成一条开发验证 Run。 */
   async createRun(request: CreateRunRequest): Promise<RunResponse> {
@@ -48,7 +48,7 @@ export class DaemonClient {
 
   /** 请求已验证 daemon 优雅关闭；旧版明确不支持接口时由调用方决定是否安全兼容。 */
   async closeDaemon(): Promise<CloseDaemonResponse> {
-    const response = await fetch(`${this.baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const response = await this.requestFetch(`${this.baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     const value = await response.json() as CloseDaemonResponse | { error: string };
     if (response.status === 404 && "error" in value && value.error === "未知 daemon API 路径或方法。") throw new UnsupportedDaemonCloseEndpointError();
     if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
@@ -57,7 +57,7 @@ export class DaemonClient {
 
   /** 请求 daemon 返回当前机器的三态能力快照。 */
   async capabilities(): Promise<CapabilitySnapshot> {
-    const response = await fetch(`${this.baseUrl}/capabilities`);
+    const response = await this.requestFetch(`${this.baseUrl}/capabilities`);
     const value = await response.json() as CapabilitySnapshot | { error: string };
     if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
     return value;
@@ -82,7 +82,7 @@ export class DaemonClient {
   }
 
   private async followRunOnce(runId: string, onSnapshot: (response: RunResponse) => void, signal: AbortSignal): Promise<boolean> {
-    const response = await fetch(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`, { headers: { accept: "text/event-stream" }, signal });
+    const response = await this.requestFetch(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`, { headers: { accept: "text/event-stream" }, signal });
     if (!response.ok || !response.body) throw new Error(`Run 事件流连接失败：${response.status}`);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -106,7 +106,7 @@ export class DaemonClient {
   }
 
   private async request(path: string, init?: RequestInit): Promise<RunResponse> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const response = await this.requestFetch(`${this.baseUrl}${path}`, init);
     const value = await response.json() as RunResponse | { error: string };
     if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
     return value;

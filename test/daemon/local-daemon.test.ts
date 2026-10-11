@@ -33,7 +33,9 @@ async function testDaemon(options: ConstructorParameters<typeof LocalDaemon>[0] 
   return daemon;
 }
 
-describe("LocalDaemon", () => {
+// 本文件用模块级数组回收长生命周期 loopback server 与临时目录，故必须串行运行。
+// 生产 Runtime 不共享这些资源；这里只避免测试 cleanup 互相停止对方的 daemon。
+describe.serial("LocalDaemon", () => {
   test("daemon 重启后只在用户显式请求时重新认领可验证的 Web Terminal", async () => {
     const { cwd, workflowPath } = await fixture();
     let options: import("../../src/sessions/types").CreateSessionOptions | null = null;

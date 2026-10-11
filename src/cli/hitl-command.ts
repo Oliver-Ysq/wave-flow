@@ -31,7 +31,8 @@ export async function executeContinue(
 ): Promise<void> {
   const daemon = await discover();
   if (!daemon) throw new Error("没有可验证的 Wave Flow daemon，无法认领并继续旧 Agent 会话。");
-  await post(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/continue`, { ...command.identity, blockRequestId: command.blockRequestId });
+  const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
+  await post(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/${capability ? "continue-active" : "continue"}`, { ...command.identity, ...(capability ? { capability } : {}), blockRequestId: command.blockRequestId });
 }
 
 async function post(url: string, body: JsonObject): Promise<void> { const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); const value = await response.json() as { error?: string }; if (!response.ok) throw new Error(value.error ?? `Control 请求失败：${response.status}`); }

@@ -91,4 +91,21 @@ describe("Run 状态机", () => {
     expect(state.appServerBinding("scan-auth")?.turnId).toBe("turn-new");
     expect(state.viewerSession("scan-auth")?.sessionName).toBe("wf-new");
   });
+
+  test("ACP recover 只能确认同一已记录原生 session，不能伪造或切换 binding", () => {
+    const state = new RunStateMachine(manifest);
+    const request = { id: "acp", cli: "codex" as const, sandbox: "workspace-write" as const, cwd: "/project", prompt: "work", phase: "scan" };
+    state.apply(event({ type: "run.created", runStatus: "running" }));
+    state.apply(event({ type: "agent.created", nodeId: "acp", sequence: 1, phase: "scan", request }));
+    state.apply(event({ type: "agent.status", nodeId: "acp", agentSessionId: "same", status: "running" }));
+    state.apply(event({ type: "agent.session", nodeId: "acp", agentSessionId: "same", delivery: "acp", acp: { launcherId: "codex-acp", sessionId: "native-1", capabilities: {} } }));
+    state.apply(event({ type: "run.status", status: "pausing" }));
+    state.apply(event({ type: "agent.status", nodeId: "acp", agentSessionId: "same", status: "pausing" }));
+    state.apply(event({ type: "agent.status", nodeId: "acp", agentSessionId: "same", status: "paused" }));
+    state.apply(event({ type: "run.status", status: "paused" }));
+    state.apply(event({ type: "run.status", status: "recovering" }));
+    state.apply(event({ type: "agent.status", nodeId: "acp", agentSessionId: "same", status: "recovering" }));
+    expect(() => state.apply(event({ type: "agent.recovered", nodeId: "acp", agentSessionId: "same", acp: { launcherId: "codex-acp", sessionId: "native-other" } }))).toThrow("不得替换 ACP session");
+    state.apply(event({ type: "agent.recovered", nodeId: "acp", agentSessionId: "same", acp: { launcherId: "codex-acp", sessionId: "native-1" } }));
+  });
 });

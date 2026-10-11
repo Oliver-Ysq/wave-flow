@@ -70,11 +70,14 @@ export type RecordedAgentSession = {
   /** 与当前 running 节点一致的会话身份。 */
   readonly agentSessionId: string;
   /** Session Host 返回的稳定会话坐标。 */
-  readonly session: SessionIdentity;
+  /** tmux/codex-rpc 的 Session Host 身份；ACP 投递不提供此字段。 */
+  readonly session?: SessionIdentity;
   /** 首条任务的实际投递方式。 */
-  readonly delivery: "tmux" | "codex-rpc";
+  readonly delivery: "tmux" | "codex-rpc" | "acp";
   /** App Server hybrid 的官方 thread/turn 坐标。 */
   readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; };
+  /** ACP Worker 的可审计 binding；不是 capability 或完成证据。 */
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; };
 };
 
 /** Control Server 的最小 complete 协议。 */
@@ -136,14 +139,16 @@ export class ControlServer {
     if (this.#recordedSessions.has(key)) throw new Error("该节点的会话坐标已记录。");
     const snapshot = this.state.agent(record.nodeId);
     if (snapshot.status !== "running" || snapshot.agentSessionId !== record.agentSessionId) throw new Error("只能记录当前 running 节点的会话坐标。");
-    if (record.session.runId !== record.runId || record.session.nodeId !== record.nodeId || record.session.agentSessionId !== record.agentSessionId || record.session.cli !== snapshot.cli) throw new Error("会话坐标与当前节点身份不匹配。");
+    if (record.delivery !== "acp" && (!record.session || record.session.runId !== record.runId || record.session.nodeId !== record.nodeId || record.session.agentSessionId !== record.agentSessionId || record.session.cli !== snapshot.cli)) throw new Error("会话坐标与当前节点身份不匹配。");
     if (record.delivery === "tmux" && record.appServer !== undefined) throw new Error("普通 tmux 投递不得记录 App Server 坐标。");
     if (record.delivery === "codex-rpc" && (!record.appServer || !record.appServer.endpoint || !record.appServer.threadId || !record.appServer.turnId)) throw new Error("App Server 投递缺少 thread/turn 坐标。");
+    if (record.delivery === "acp" && (!record.acp || !record.acp.launcherId || !record.acp.sessionId)) throw new Error("ACP 投递缺少 launcher/session 坐标。");
     const event: JournalEvent = {
       type: "agent.session", at: new Date().toISOString(), runId: record.runId, nodeId: record.nodeId,
       agentSessionId: record.agentSessionId, diagnostic: record.delivery,
-      delivery: record.delivery, session: record.session,
+      delivery: record.delivery, ...(record.session ? { session: record.session } : {}),
       ...(record.appServer ? { appServer: { ...record.appServer, protocolVersion: 1 as const } } : {}),
+      ...(record.acp ? { acp: record.acp } : {}),
     };
     await this.journal.append(event);
     this.state.apply(event);

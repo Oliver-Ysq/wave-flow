@@ -1,5 +1,5 @@
 import { readdir, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
@@ -14,6 +14,7 @@ import { createRealCodexExecutor } from "../runtime/real-codex-factory";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import type { AgentNodeExecutor } from "../runtime/run-types";
 import { RealCodexExecutor } from "../runtime/real-codex-executor";
+import { AcpWorkerExecutor } from "../runtime/acp-worker-executor";
 import { runsRoot, validateRunId } from "../journal/paths";
 import { DAEMON_PROTOCOL_VERSION, daemonUserIdentity } from "./daemon-descriptor";
 import { RunJournal } from "../journal/run-journal";
@@ -27,6 +28,9 @@ import { TmuxTerminalObserver } from "../sessions/terminal-observer";
 import type { ServerWebSocket } from "bun";
 
 /** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
+/** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
+export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
+
 export type RealCodexExecutorFactory = (args: {
   /** 当前 daemon 的 loopback Control 根地址。 */
   readonly controlUrl: string;
@@ -36,7 +40,7 @@ export type RealCodexExecutorFactory = (args: {
   readonly daemonInstanceId: string;
   /** 本次 Run 是否使用 App Server hybrid 投递。 */
   readonly codexRpcInput: boolean;
-}) => RealCodexExecutor;
+}) => ControlBoundExecutor;
 
 /** LocalDaemon 的可选构造配置；生产默认使用真实 Codex 执行器。 */
 export type LocalDaemonOptions = {
@@ -86,6 +90,7 @@ export class LocalDaemon {
 
   private readonly deterministicForTest: boolean;
   private readonly createRealExecutor: RealCodexExecutorFactory;
+  private readonly hasCustomRealExecutor: boolean;
   private readonly storeRoot: string;
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
@@ -101,6 +106,7 @@ export class LocalDaemon {
     const normalized = typeof options === "boolean" ? { deterministicForTest: options } : options;
     this.deterministicForTest = normalized.deterministicForTest === true;
     this.createRealExecutor = normalized.createRealExecutor ?? createRealCodexExecutor;
+    this.hasCustomRealExecutor = normalized.createRealExecutor !== undefined;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
@@ -226,6 +232,13 @@ export class LocalDaemon {
         const control = await this.reclaimControl(body);
         return handleReclaimBlockHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
       }
+      const activeBlockMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/block-active$/);
+      if (activeBlockMatch) {
+        const runId = decodeURIComponent(activeBlockMatch[1]);
+        const control = this.#controls.get(runId);
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleBlockHttp(control, request);
+      }
       const answerMatch = url.pathname.match(/^\/blocks\/([^/]+)\/answer$/);
       if (answerMatch) {
         const blockRequestId = decodeURIComponent(answerMatch[1]);
@@ -240,6 +253,13 @@ export class LocalDaemon {
         if (body.runId !== runId) throw new DaemonRequestError(400, "reclaim continue 路径与请求 Run 不一致。");
         const control = await this.reclaimControl(body);
         return handleReclaimContinueHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
+      }
+      const activeContinueMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/continue-active$/);
+      if (activeContinueMatch) {
+        const runId = decodeURIComponent(activeContinueMatch[1]);
+        const control = this.#controls.get(runId);
+        if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
+        return handleContinueHttp(control, request);
       }
       if (request.method === "GET" || request.method === "HEAD") {
         const asset = serveWebAsset(url.pathname);
@@ -350,10 +370,12 @@ export class LocalDaemon {
     const source = await Bun.file(sourcePath).text();
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: value.codexRpcInput !== false });
+      : value.workerTransport !== "codex-app-server" && !this.hasCustomRealExecutor
+        ? new AcpWorkerExecutor(codexAcpLauncher())
+        : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: value.codexRpcInput !== false });
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
-    if (!this.deterministicForTest && baseExecutor instanceof RealCodexExecutor) {
+    if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
       const control = runtime.createControlServer();
       baseExecutor.bindControl(control);
       this.#runs.set(runtime.snapshot().id, runtime);
@@ -577,6 +599,7 @@ export class LocalDaemon {
   private async resumeOnce(runId: string): Promise<RunResponse> {
     if (this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 仍由当前 daemon 执行，不能重复 resume。 ");
     const opened = await RunJournal.open(runId, this.storeRoot);
+    const resumesAcp = opened.events.some((event) => event.type === "agent.session" && event.delivery === "acp");
     const manifest = opened.journal.manifest;
     if (manifest.runtimeVersion !== RUNTIME_VERSION) throw new DaemonRequestError(409, `resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${manifest.runtimeVersion} 只能读取。`);
     let source: string;
@@ -587,11 +610,13 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(manifest.workflowPath, cwd);
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true });
+      : resumesAcp
+        ? new AcpWorkerExecutor(codexAcpLauncher())
+        : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true });
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
     await this.reconcileResumeSessions(runtime, opened.events);
-    if (!this.deterministicForTest && baseExecutor instanceof RealCodexExecutor) {
+    if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
       const control = runtime.createControlServer();
       baseExecutor.bindControl(control);
       this.registerControlForResume(runId, control, runtime);
@@ -625,6 +650,13 @@ export class LocalDaemon {
     for (const node of runtime.snapshot().phases.flatMap((phase) => phase.agents)) {
       if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;
       const sessionEvent = sessionFor(events, node.id, node.agentSessionId);
+      // ACP 没有可与本机进程/终端身份绑定的跨 daemon reclaim 证据。用户已显式
+      // 授权 resume 时，旧 ACP session 一律 interrupted 并以新的 ACP Worker attempt
+      // 重跑；绝不把 session/load 成功误称为原 Worker 身份认领。
+      if (sessionEvent?.delivery === "acp") {
+        unverifiable.push(node);
+        continue;
+      }
       const viewer = runtime.state.viewerSession(node.id) ?? sessionEvent?.session;
       const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
       const verified = !!viewer && await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined);
@@ -684,9 +716,14 @@ export class LocalDaemon {
     // 当前 daemon 自己启动的节点已有短期 capability 与活跃执行器，不能因一次
     // 探测瞬断中断正常控制；但跨 daemon 认领的旧会话没有这些内存保证，每次
     // complete/block/continue 都必须重新验证 tmux identity 与原 App Server thread。
-    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId) && this.#runTasks.has(request.runId)) return active;
     const opened = await RunJournal.open(request.runId, this.storeRoot);
     const sessionEvent = sessionFor(opened.events, request.nodeId, request.agentSessionId);
+    // ACP 没有 tmux identity 可在重连时验证。当前 daemon 的 ACP Worker 必须携带
+    // 短期 capability 走 active Control；稳定三元组不得退回 reclaim 路由绕过它。
+    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId) && this.#runTasks.has(request.runId)) {
+      if (sessionEvent?.delivery === "acp") throw new DaemonRequestError(409, "当前 ACP Worker 必须携带短期 capability 走 active Control 路由。 ");
+      return active;
+    }
     const viewer = runtime.state.viewerSession(request.nodeId) ?? sessionEvent?.session;
     const binding = runtime.state.appServerBinding(request.nodeId) ?? sessionEvent?.appServer;
     if (!viewer?.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能跨 daemon 认领。");
@@ -785,6 +822,10 @@ export class LocalDaemon {
 
 type TerminalSocketData = { readonly key: string; readonly runId: string; readonly nodeId: string; readonly after: number };
 
+function isControlBoundExecutor(value: AgentNodeExecutor): value is ControlBoundExecutor {
+  return typeof (value as Partial<ControlBoundExecutor>).bindControl === "function";
+}
+
 function terminalKey(runId: string, nodeId: string, agentSessionId: string): string { return `${runId}:${nodeId}:${agentSessionId}`; }
 
 function isTerminalInput(value: unknown): value is { readonly type: "input"; readonly data: string } {
@@ -843,8 +884,37 @@ function isEmptyObject(value: unknown): value is Record<string, never> {
 function isCreateRunRequest(value: unknown): value is CreateRunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
-  return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean");
+  return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean") && (request.workerTransport === undefined || request.workerTransport === "codex-app-server" || request.workerTransport === "codex-acp");
 }
+
+/** 固定使用 lockfile 安装的 Codex ACP adapter，不调用 npx，也不采用用户 PATH 的 adapter。 */
+export function codexAcpLauncher(): import("../adapters/acp-session").AcpLauncher {
+  const compiled = import.meta.dir.startsWith("/$bunfs/");
+  const bundledCodex = compiled ? join(dirname(process.execPath), basename(process.execPath).replace("wave-flow-daemon", "wave-flow-codex")) : undefined;
+  // Worker 的 complete/block/continue 必须回到启动它的这一套 Wave Flow，而不能依赖
+  // 用户 PATH 中可能过期或指向另一 checkout 的全局 CLI。开发态使用当前 Bun 与源码入口；
+  // 桌面编译版使用同目录已打包的 control sidecar。
+  const controlCommand = compiled
+    ? shellQuote(join(dirname(process.execPath), "wave-flow"))
+    : `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "../cli/main.ts"))}`;
+  return {
+    id: "codex-acp",
+    command: process.execPath,
+    args: compiled ? ["__codex-acp"] : [Bun.resolveSync("@agentclientprotocol/codex-acp", import.meta.dir)],
+    // Worker 受 Workflow Runtime 创建；不使用 Harness 的只读/审批策略。
+    env: {
+      INITIAL_AGENT_MODE: "agent-full-access",
+      WAVE_FLOW_CONTROL_COMMAND: controlCommand,
+      ...(bundledCodex ? {
+        CODEX_PATH: bundledCodex,
+        PATH: `${dirname(join(dirname(process.execPath), "wave-flow"))}:${process.env.PATH ?? ""}`,
+      } : {}),
+    },
+  };
+}
+
+function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
+
 
 function listItem(runtime: RunRuntime): RunListItem {
   const snapshot = runtime.snapshot();
