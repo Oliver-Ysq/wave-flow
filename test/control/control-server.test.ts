@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlServer, type CompletionSubmission, type CompleteRequest } from "../../src/control/control-server";
+import { ControlServer, type CompletionSubmission } from "../../src/control/control-server";
 import { RunJournal } from "../../src/journal/run-journal";
 import { nodeDirectoryName, runsRoot } from "../../src/journal/paths";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
@@ -26,23 +26,14 @@ async function fixture(schema?: JsonSchema) {
   await journal.append(running); state.apply(running);
   const capability = "capability-1";
   const control = new ControlServer(journal, state);
-  control.register({ runId: manifest.runId, nodeId: "node", agentSessionId, capability, reclaimTokenHash: "a".repeat(64) });
+  control.register({ runId: manifest.runId, nodeId: "node", agentSessionId, capability });
   await control.recordSession({
-    runId: manifest.runId, nodeId: "node", agentSessionId, delivery: "tmux",
-    session: { backend: "tmux", sessionName: "wf-control", backendRef: "/tmp/wf-control.sock", runId: manifest.runId, nodeId: "node", agentSessionId, cli: "codex", createdAt: new Date().toISOString() },
+    runId: manifest.runId, nodeId: "node", agentSessionId, delivery: "acp", acp: { launcherId: "codex-acp", sessionId: "control", capabilities: {} },
   });
   return { cwd, journal, state, control, runId: manifest.runId, agentSessionId, capability };
 }
 
 describe("ControlServer complete", () => {
-  test("旧 CompleteRequest 导入保持为 CompletionSubmission 的兼容别名", () => {
-    const submission: CompleteRequest = {
-      runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: {},
-    };
-    const current: CompletionSubmission = submission;
-    expect(current.summary).toBe("done");
-  });
-
   test("校验身份后以结果、校验记录、Journal 的顺序完成节点", async () => {
     const value = await fixture({ type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } });
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
@@ -94,7 +85,7 @@ describe("ControlServer complete", () => {
   test("首条任务会话坐标未耐久记录时拒绝 complete", async () => {
     const value = await fixture();
     const control = new ControlServer(value.journal, value.state);
-    control.register({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, reclaimTokenHash: "a".repeat(64) });
+    control.register({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
     await expect(control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } })).rejects.toThrow("会话坐标尚未耐久记录");
   });
 

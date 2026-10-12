@@ -40,20 +40,12 @@ export async function executeBlock(
   discover: () => Promise<{ readonly baseUrl: string } | null> = discoverDaemon,
 ): Promise<BlockResolution> {
   const body = { blockRequestId: crypto.randomUUID(), ...command.identity, needHelp: command.needHelp, ...(command.answerSchema ? { answerSchema: command.answerSchema } : {}) };
-  // daemon 崩溃会中断旧 HTTP 等待；保留同一 request id 重连，绝不另建 block。
-  while (true) {
-    const daemon = await discover();
-    if (!daemon) { await Bun.sleep(500); continue; }
-    try {
-      const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
-      const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/${capability ? "block-active" : "block"}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, ...(capability ? { capability } : {}) }) });
-      const value = await response.json() as BlockResolution | { error?: string };
-      if (response.ok && "answer" in value && "blockRequestId" in value) return value;
-      // 明确的业务/身份拒绝不可靠重试掩盖；仅连接中断才重连。
-      throw new Error("error" in value ? value.error ?? `Control block 请求失败：${response.status}` : `Control block 请求失败：${response.status}`);
-    } catch (error) {
-      if (error instanceof TypeError) { await Bun.sleep(500); continue; }
-      throw error;
-    }
-  }
+  const daemon = await discover();
+  if (!daemon) throw new Error("没有可验证的 Wave Flow daemon，无法创建当前 ACP Worker block。");
+  const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
+  if (!capability) throw new Error("当前 ACP Worker 缺少 daemon capability，拒绝 block。");
+  const response = await fetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/block-active`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, capability }) });
+  const value = await response.json() as BlockResolution | { error?: string };
+  if (response.ok && "answer" in value && "blockRequestId" in value) return value;
+  throw new Error("error" in value ? value.error ?? `Control block 请求失败：${response.status}` : `Control block 请求失败：${response.status}`);
 }

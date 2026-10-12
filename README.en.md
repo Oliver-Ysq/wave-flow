@@ -134,7 +134,7 @@ Default ACP `pause` is not an OS-level process freeze. It requests cancellation 
 
 The default path uses the built-in `codex-acp` adapter with a user-selected, verified local Codex runtime. Only `wave-flow complete` is completion evidence. If delivery cannot be confirmed, the Run becomes `interrupted`; it is never treated as delivered. Same-daemon recovery uses `pause → cancel → recover` in the same ACP session.
 
-After a daemon restart, active ACP nodes become `interrupted`. Wave Flow neither reclaims the old session nor resends its prompt or block answer. Explicit `resume` validates the Workflow source hash, input, cwd, and invocation fingerprint, then starts a new attempt from the first interrupted or mismatched node.
+After a daemon restart, active ACP nodes become `interrupted`. Wave Flow neither resumes the old session nor resends its prompt or block answer. Explicit `resume` validates the Workflow source hash, input, cwd, and invocation fingerprint, then starts a new attempt from the first interrupted or mismatched node.
 
 `resume` is a separate user authorization. It strictly verifies the Workflow source hash, input, project directory, and every `agent()` call's id, order, cwd, CLI, sandbox, model, schema, input, and prompt. A continuous matching completed prefix returns Journal results directly; the first interrupted or unverifiable node creates a new attempt, and later nodes stop reusing old results. A still-verifiable old session is never rerun by resume.
 

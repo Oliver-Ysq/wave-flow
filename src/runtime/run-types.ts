@@ -1,6 +1,5 @@
 import type { JsonObject } from "../shared/json";
 import type { AgentCli, AgentSandbox, NormalizedAgentRequest, WorkflowMeta } from "../shared/workflow-types";
-import type { CapabilitySnapshot, CapabilityStatus } from "../adapters/capabilities";
 
 /** Agent 节点在一次 Run 内可见的状态；终态不可回退。 */
 export type AgentNodeStatus = "queued" | "running" | "blocked" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
@@ -19,23 +18,16 @@ export type AgentNodeExecutor = {
   /** 执行一个已进入 running 的节点；对象表示完成，null 或抛错都表示无法验证完成的中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
   /** 可选的运行期能力重检；真实会话执行器应在节点启动前返回当前环境快照。 */
-  probeCapabilities?(): Promise<CapabilitySnapshot>;
-  /** 节点启动所需的能力项；返回 unknown 或 unavailable 时 Runtime 必须 fail closed。 */
-  requiredCapabilities?(node: AgentNodeSnapshot): Readonly<Record<string, (snapshot: CapabilitySnapshot) => CapabilityStatus>>;
   /** 停止当前节点的真实执行；成功后 Executor 必须保留同一会话用于 recover。 */
   pause?(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void>;
   /** 在原会话中创建新的继续回合；成功后节点才可重新进入 running。 */
   recover?(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<AgentRecovery>;
-  /** recover 后当前 viewer 坐标；没有 viewer 的 Adapter 返回 null。 */
-  viewerSession?(node: AgentNodeSnapshot): import("../sessions/types").SessionIdentity | null;
   /** 终止当前节点，不保留 recover 能力。 */
   stop?(node: AgentNodeSnapshot): Promise<void>;
 };
 
-/** recover 成功后可耐久记录的最新执行坐标；当前 Codex App Server 必须返回新 turn。 */
+/** recover 成功后可耐久记录的同一 ACP session 事实。 */
 export type AgentRecovery = {
-  /** 同一 App Server thread 的新 turn 坐标；缺失代表该 Adapter 没有可记录的回合标识。 */
-  readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; readonly protocolVersion: 1 };
   /** 同一 ACP session 已启动恢复回合；用于耐久化恢复投递事实，不是业务完成依据。 */
   readonly acp?: { readonly launcherId: string; readonly sessionId: string; };
 };

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, terminateVerifiedLegacyDaemon } from "../../src/cli/main";
+import { main } from "../../src/cli/main";
 import { parseCommand } from "../../src/cli/parse-command";
 import { DaemonClient } from "../../src/cli/daemon-client";
 
@@ -10,23 +10,8 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("CLI run / inspect", () => {
-  test("旧 daemon close 兼容前再次发现身份变化时拒绝发送终止信号", async () => {
-    let killed = false;
-    await expect(terminateVerifiedLegacyDaemon(
-      { baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 3, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } },
-      async () => ({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 3, userIdentity: "uid:501", bootInstanceId: "replaced", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } }),
-      (() => { killed = true; return true; }) as typeof process.kill,
-    )).rejects.toThrow("身份在关闭前发生变化");
-    expect(killed).toBe(false);
-  });
   test("解析 run 输入、cwd 与 inspect", () => {
-    expect(parseCommand(["run", "flow.ts", "--input", '{"target":"src"}', "--cwd", "project"], "/workspace")).toEqual({ kind: "run", workflowPath: "flow.ts", cwd: "/workspace/project", input: { target: "src" }, codexRpcInput: true });
-    expect(parseCommand(["run", "flow.ts"], "/workspace")).not.toHaveProperty("workerTransport");
-    expect(parseCommand(["run", "flow.ts", "--codex-rpc-input"], "/workspace")).toMatchObject({ codexRpcInput: true, workerTransport: "codex-app-server" });
-    expect(parseCommand(["run", "flow.ts", "--tmux-tui-input"], "/workspace")).toMatchObject({ codexRpcInput: false, workerTransport: "codex-app-server" });
-    expect(parseCommand(["run", "flow.ts", "--codex-acp"], "/workspace")).not.toHaveProperty("workerTransport");
-    expect(parseCommand(["run", "flow.ts", "--codex-app-server"], "/workspace")).toMatchObject({ workerTransport: "codex-app-server" });
-    expect(() => parseCommand(["run", "flow.ts", "--codex-acp", "--tmux-tui-input"], "/workspace")).toThrow("不能与 --tmux-tui-input");
+    expect(parseCommand(["run", "flow.ts", "--input", '{"target":"src"}', "--cwd", "project"], "/workspace")).toEqual({ kind: "run", workflowPath: "flow.ts", cwd: "/workspace/project", input: { target: "src" } });
     expect(parseCommand(["start"], "/workspace")).toEqual({ kind: "start" });
     expect(() => parseCommand(["start", "unexpected"], "/workspace")).toThrow("start 不接受参数");
     expect(parseCommand(["serve"], "/workspace")).toEqual({ kind: "serve" });
@@ -42,18 +27,9 @@ describe("CLI run / inspect", () => {
     expect(parseCommand(["recover", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "recover", runId: "11111111-1111-4111-8111-111111111111" });
     expect(parseCommand(["stop", "11111111-1111-4111-8111-111111111111"], "/workspace")).toEqual({ kind: "stop", runId: "11111111-1111-4111-8111-111111111111" });
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
-    expect(parseCommand(["capabilities", "--json"], "/workspace")).toEqual({ kind: "capabilities", json: true });
-    expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");
   });
 
 
-  test("capabilities --json 输出机器可读的三态快照", async () => {
-    const lines: string[] = [];
-    await main(["capabilities", "--json"], process.cwd(), (line) => { lines.push(line); }, true);
-    const snapshot = JSON.parse(lines.join("\n")) as { version: number; adapters: { codex: { verifiedPromptDelivery: string } } };
-    expect(snapshot.version).toBe(1);
-    expect(["available", "unavailable", "unknown"]).toContain(snapshot.adapters.codex.verifiedPromptDelivery);
-  });
 
   test("start 只确保测试 daemon 可用，不创建 Run", async () => {
     const lines: string[] = [];

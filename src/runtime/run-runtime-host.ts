@@ -7,7 +7,6 @@ import type { ExecutionBatch, PhaseVisit } from "./workflow-host";
 import type { AgentNodeExecutor } from "./run-types";
 import { RunStateMachine, validateGateAnswer } from "./run-state-machine";
 import { WorkflowContractError } from "../workflow/errors";
-import { requireCapabilities } from "../adapters/capabilities";
 import { isDeepStrictEqual } from "node:util";
 
 /** 将 Workflow 作者 API 映射为耐久 Run 状态事实的 Runtime Host。 */
@@ -61,10 +60,6 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     return this.executor.recover(node, signal);
   }
 
-  /** 恢复后取得新 viewer identity，写入 Journal 供 daemon 重启认领。 */
-  viewerSession(node: import("./run-types").AgentNodeSnapshot): import("../sessions/types").SessionIdentity | null {
-    return this.executor.viewerSession?.(node) ?? null;
-  }
 
   /** 终止真实节点；与 pause 不同，执行器必须让等待中的 agent() 返回错误。 */
   stopNode(node: import("./run-types").AgentNodeSnapshot): Promise<void> {
@@ -117,17 +112,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: request.phase ?? null, executionAttemptId: activeVisit.executionAttemptId, phaseVisitId: activeVisit.phaseVisitId, executionBatch, request });
       await this.durableApply(created);
     }
-    try {
-      await this.checkCapabilities(this.state.agent(nodeId));
-    } catch (error) {
-      const diagnostic = error instanceof Error ? error.message : String(error);
-      if (this.state.agent(nodeId).status === "queued") {
-        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
-      }
-      throw error;
-    }
     // 全局 daemon 的名额必须在节点进入 running 前取得。这样超限节点可被权威
-    // 快照如实显示为 queued，而不会先伪装成已启动的 tmux/App Server 会话。
+    // 快照如实显示为 queued，而不会先伪装成已启动的 ACP Worker。
     await this.executor.waitForStart?.(this.state.agent(nodeId));
     const restartedSession = existing && this.replay ? this.state.agent(nodeId).agentSessionId : null;
     const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: restartedSession ?? crypto.randomUUID() });
@@ -270,14 +256,6 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     this.#phaseVisitSequence = 1;
     this.#phaseOccurrences = new Map([[visit.title, 1]]);
     return visit;
-  }
-
-  private async checkCapabilities(node: import("./run-types").AgentNodeSnapshot): Promise<void> {
-    const requirements = this.executor.requiredCapabilities?.(node);
-    if (!requirements || Object.keys(requirements).length === 0) return;
-    if (!this.executor.probeCapabilities) throw new Error("执行器声明了启动能力需求，但未提供运行期能力重检。");
-    const snapshot = await this.executor.probeCapabilities();
-    requireCapabilities(Object.fromEntries(Object.entries(requirements).map(([name, read]) => [name, read(snapshot)])));
   }
 
   private async captureBackgroundFailure(operation: Promise<void>): Promise<void> {

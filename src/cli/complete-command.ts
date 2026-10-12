@@ -34,8 +34,7 @@ export function parseCompleteCommand(argv: readonly string[]): CompleteCommand {
 }
 
 /**
- * 读取本地 JSON 对象并经当前 daemon 的 reclaim 路由完成。
- * Agent 不保存某一代 daemon URL 或 capability；每次 complete 都重新发现 daemon。
+ * 读取本地 JSON 对象并经当前 daemon 的 active Control 路由完成。
  */
 export async function executeComplete(
   command: CompleteCommand,
@@ -44,11 +43,12 @@ export async function executeComplete(
 ): Promise<void> {
   const result = await readResult(command.resultFile);
   const daemon = await discover();
-  if (!daemon) throw new Error("没有可验证的 Wave Flow daemon，无法认领并完成旧 Agent 会话。");
+  if (!daemon) throw new Error("没有可验证的 Wave Flow daemon，无法完成当前 ACP Worker 会话。");
   const capability = process.env.WF_CONTROL_CAPABILITY?.trim();
-  const response = await requestFetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/${capability ? "complete" : "reclaim-complete"}`, {
+  if (!capability) throw new Error("当前 ACP Worker 缺少 daemon capability，拒绝 complete。");
+  const response = await requestFetch(`${daemon.baseUrl}/runs/${encodeURIComponent(command.identity.runId)}/control/complete`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...command.identity, ...(capability ? { capability } : {}), summary: command.summary, result }),
+    body: JSON.stringify({ ...command.identity, capability, summary: command.summary, result }),
   });
   const value = await response.json() as { error?: string };
   if (!response.ok) throw new Error(value.error ?? `Control complete 请求失败：${response.status}`);

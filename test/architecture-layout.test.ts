@@ -9,9 +9,6 @@ const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const requiredDirectories = [
   "src/workflow",
   "src/runtime",
-  "src/sessions",
-  "src/sessions/backends",
-  "src/sessions/bootstrap",
   "src/adapters",
   "src/control",
   "src/journal",

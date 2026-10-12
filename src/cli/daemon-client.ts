@@ -1,10 +1,4 @@
 import type { CloseDaemonResponse, CreateRunRequest, ResumeRunRequest, RunResponse } from "../daemon/types";
-import type { CapabilitySnapshot } from "../adapters/capabilities";
-
-/** 仅表示已验证 daemon 明确不认识新版关闭接口，供 CLI 做受限旧版兼容。 */
-export class UnsupportedDaemonCloseEndpointError extends Error {
-  constructor() { super("当前 daemon 不支持优雅关闭接口。"); }
-}
 
 /** 仅通过 loopback HTTP 与 daemon 通信的 CLI 客户端。 */
 export class DaemonClient {
@@ -46,19 +40,10 @@ export class DaemonClient {
     return this.request(`/runs/${encodeURIComponent(runId)}/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   }
 
-  /** 请求已验证 daemon 优雅关闭；旧版明确不支持接口时由调用方决定是否安全兼容。 */
+  /** 请求已验证 daemon 优雅关闭。 */
   async closeDaemon(): Promise<CloseDaemonResponse> {
     const response = await this.requestFetch(`${this.baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     const value = await response.json() as CloseDaemonResponse | { error: string };
-    if (response.status === 404 && "error" in value && value.error === "未知 daemon API 路径或方法。") throw new UnsupportedDaemonCloseEndpointError();
-    if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
-    return value;
-  }
-
-  /** 请求 daemon 返回当前机器的三态能力快照。 */
-  async capabilities(): Promise<CapabilitySnapshot> {
-    const response = await this.requestFetch(`${this.baseUrl}/capabilities`);
-    const value = await response.json() as CapabilitySnapshot | { error: string };
     if (!response.ok || "error" in value) throw new Error("error" in value ? value.error : `daemon 请求失败：${response.status}`);
     return value;
   }

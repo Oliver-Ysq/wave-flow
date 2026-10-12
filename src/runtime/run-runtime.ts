@@ -186,19 +186,8 @@ export class RunRuntime {
       for (const node of targets) {
         await this.applyAgentStatus(node.id, "recovering", node.agentSessionId, "正在同一会话创建继续回合。 ");
         const recovery = await this.host.recoverNode(this.state.agent(node.id), control.signal);
-        if (recovery.appServer) {
-          const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 thread 的恢复回合已确认。", appServer: recovery.appServer };
-          await this.journal.append(event);
-          this.state.apply(event);
-        }
         if (recovery.acp) {
           const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 ACP session 的恢复回合已启动。", acp: recovery.acp };
-          await this.journal.append(event);
-          this.state.apply(event);
-        }
-        const viewer = this.host.viewerSession(this.state.agent(node.id));
-        if (viewer) {
-          const event: JournalEvent = { type: "agent.viewer", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "恢复后 viewer 已重建。", session: viewer };
           await this.journal.append(event);
           this.state.apply(event);
         }
@@ -249,7 +238,7 @@ export class RunRuntime {
     }
   }
 
-  /** daemon 在排队 stop 前立刻抢占 App Server 控制调用，避免等待其 15 秒超时。 */
+  /** daemon 在排队 stop 前立刻抢占当前 ACP 控制调用。 */
   requestStop(): void {
     this.#stopping = true;
     this.#controlAbort?.abort();

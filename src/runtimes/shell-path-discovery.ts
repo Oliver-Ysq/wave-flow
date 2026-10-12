@@ -40,7 +40,7 @@ async function runShellPathCommand(shell: string, signal: AbortSignal): Promise<
   const marker = `__WAVE_FLOW_PATH_${crypto.randomUUID()}__`;
   const child = Bun.spawn([shell, "-ilc", `printf '%s\\n' '${marker}'; command env; printf '%s\\n' '${marker}'`], {
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "", USER: process.env.USER ?? "", SHELL: shell, DISABLE_AUTO_UPDATE: "true", ZSH_TMUX_AUTOSTARTED: "true", ZSH_TMUX_AUTOSTART: "false" },
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "", USER: process.env.USER ?? "", SHELL: shell, DISABLE_AUTO_UPDATE: "true" },
   });
   const abort = () => child.kill(); signal.addEventListener("abort", abort, { once: true });
   const [stdout, stderr, exitCode] = await Promise.all([readLimited(child.stdout, 128_000), readLimited(child.stderr, 32_000), child.exited]);

@@ -3,8 +3,7 @@ import { join, resolve } from "node:path";
 import { runtimeRoot } from "../journal/paths";
 import { waveFlowHome } from "../journal/paths";
 
-/** 当前后台发现协议版本；不匹配的 descriptor 绝不复用。 */
-/** v3 新增桌面重启后的受控旧会话认领与 CLI Runtime 自动扫描契约；旧 v2 绝不复用。 */
+/** 当前后台发现协议版本；不匹配的 descriptor 绝不复用或迁移。 */
 export const DAEMON_PROTOCOL_VERSION = 3;
 const HEARTBEAT_STALE_MS = 15_000;
 
@@ -19,12 +18,6 @@ export type DaemonDescriptor = {
   readonly processStartIdentity: string;
   readonly heartbeatAt: string;
 };
-
-/**
- * 仅供受控升级关闭读取的旧 daemon 坐标。它不是连接资格，更不是 Control 授权；
- * 必须再通过同一 PID 启动身份与 loopback `/health` 复核后才可请求优雅关闭。
- */
-export type FreshDaemonCandidate = Omit<DaemonDescriptor, "protocolVersion"> & { readonly protocolVersion: number };
 
 /** 当前 OS 用户的稳定、非敏感身份文本。 */
 export function daemonUserIdentity(): string {
@@ -85,54 +78,9 @@ export async function readFreshDescriptor(root = runtimeRoot(), now = Date.now()
   } catch { return null; }
 }
 
-/** 读取仍新鲜的 descriptor 协议版本，只用于给旧 daemon 提供升级诊断，不用于连接或授权。 */
-export async function readFreshDescriptorProtocol(root = runtimeRoot(), now = Date.now()): Promise<number | null> {
-  try {
-    const runtime = await lstat(root);
-    if (!runtime.isDirectory() || runtime.isSymbolicLink() || (runtime.mode & 0o077) !== 0 || (typeof process.getuid === "function" && runtime.uid !== process.getuid())) return null;
-    const path = descriptorPath(root);
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (typeof process.getuid === "function" && info.uid !== process.getuid())) return null;
-    const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-    if (!Number.isSafeInteger(value.protocolVersion) || value.userIdentity !== daemonUserIdentity() || typeof value.heartbeatAt !== "string" || now - Date.parse(value.heartbeatAt) > HEARTBEAT_STALE_MS) return null;
-    return value.protocolVersion as number;
-  } catch { return null; }
-}
-
-/** 读取任意仍新鲜、字段齐全的 descriptor，用于桌面升级前给旧 daemon 发送自身关闭请求。 */
-export async function readFreshDaemonCandidate(root = runtimeRoot(), now = Date.now()): Promise<FreshDaemonCandidate | null> {
-  try {
-    const runtime = await lstat(root);
-    if (!runtime.isDirectory() || runtime.isSymbolicLink() || (runtime.mode & 0o077) !== 0 || (typeof process.getuid === "function" && runtime.uid !== process.getuid())) return null;
-    const info = await lstat(descriptorPath(root));
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (typeof process.getuid === "function" && info.uid !== process.getuid())) return null;
-    const value = JSON.parse(await readFile(descriptorPath(root), "utf8")) as Record<string, unknown>;
-    if (!Number.isSafeInteger(value.protocolVersion) || value.userIdentity !== daemonUserIdentity() || typeof value.bootInstanceId !== "string" || !value.bootInstanceId || !Number.isSafeInteger(value.port) || (value.port as number) < 1 || (value.port as number) > 65_535 || !Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || typeof value.processStartIdentity !== "string" || !value.processStartIdentity || typeof value.heartbeatAt !== "string" || now - Date.parse(value.heartbeatAt) > HEARTBEAT_STALE_MS) return null;
-    return value as FreshDaemonCandidate;
-  } catch { return null; }
-}
-
-/**
- * 读取仍活跃但不满足当前 descriptor 格式的旧记录。
- * 仅用于把“新 daemon 拿不到旧锁”的超时，转换为可操作的升级诊断；绝不用于连接。
- */
-export async function readIncompatibleFreshDescriptor(root = runtimeRoot(), now = Date.now()): Promise<number | null> {
-  try {
-    const runtime = await lstat(root);
-    if (!runtime.isDirectory() || runtime.isSymbolicLink() || (runtime.mode & 0o077) !== 0 || (typeof process.getuid === "function" && runtime.uid !== process.getuid())) return null;
-    const info = await lstat(descriptorPath(root));
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (typeof process.getuid === "function" && info.uid !== process.getuid())) return null;
-    const value = JSON.parse(await readFile(descriptorPath(root), "utf8")) as Record<string, unknown>;
-    if (!Number.isSafeInteger(value.protocolVersion) || value.userIdentity !== daemonUserIdentity() || typeof value.heartbeatAt !== "string" || now - Date.parse(value.heartbeatAt) > HEARTBEAT_STALE_MS) return null;
-    return isDescriptor(value) ? null : value.protocolVersion as number;
-  } catch { return null; }
-}
-
 /** 优雅退出仅删除自身仍拥有的 descriptor，防止旧 daemon 删除新记录。 */
 export async function removeOwnDescriptor(bootInstanceId: string, root = runtimeRoot()): Promise<void> {
-  // 受控升级时旧 daemon 仍可能是上一协议；若只用 readFreshDescriptor，旧进程
-  // 无法删除自己的 descriptor，新的 bridge 就会误判其仍在存活。
-  const descriptor = await readFreshDaemonCandidate(root);
+  const descriptor = await readFreshDescriptor(root);
   if (descriptor?.bootInstanceId !== bootInstanceId) return;
   try { await unlink(descriptorPath(root)); } catch (error) {
     const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
@@ -198,7 +146,7 @@ export async function removeDeadDaemonArtifacts(
   root = runtimeRoot(),
   readProcessStartIdentity: (pid: number) => Promise<string> = processStartIdentity,
 ): Promise<boolean> {
-  const candidate = await readFreshDaemonCandidate(root);
+  const candidate = await readFreshDescriptor(root);
   if (!candidate) return true;
   let current: string;
   try {

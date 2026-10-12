@@ -1,5 +1,4 @@
 import type { RunSnapshot } from "../runtime/run-types";
-import type { CapabilitySnapshot } from "../adapters/capabilities";
 
 /** 渲染用户可读的 Phase → Agent Run 查询结果。 */
 export function formatSnapshot(snapshot: RunSnapshot): string {
@@ -19,7 +18,7 @@ export const helpText = `wave-flow 本机工作流 CLI
 
 用法:
   wave-flow start
-  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>] [--codex-app-server|--tmux-tui-input]
+  wave-flow run <workflow.ts> [--input <json>] [--cwd <path>]
   wave-flow serve
   wave-flow web
   wave-flow close
@@ -29,7 +28,6 @@ export const helpText = `wave-flow 本机工作流 CLI
   wave-flow recover <run-id>
   wave-flow stop <run-id>
   wave-flow resume <run-id>
-  wave-flow capabilities [--json]
   wave-flow complete --summary <text> --result-file <absolute-json-path> --run-id <id> --node-id <id> --agent-session-id <id>
   wave-flow block --need-help <text> [--answer-schema <json>] --run-id <id> --node-id <id> --agent-session-id <id>
   wave-flow answer <block-request-id> --value <json>
@@ -38,23 +36,4 @@ export const helpText = `wave-flow 本机工作流 CLI
 start 确保当前用户的全局 daemon 已启动并健康后立即退出，不创建 Run。
 close 只关闭已通过 descriptor、PID 启动身份与 /health 验证的当前用户 daemon；不会盲目终止 PID。
 web 会显示 daemon 的发现、启动或复用、health 验证过程，然后输出同源 Local Web 地址。
-run 默认使用固定依赖的 Codex ACP Worker；Worker 具有 workflow 指派的完整读写执行权限。
---codex-app-server 显式使用旧 App Server + tmux 兼容路径。
---tmux-tui-input 仅与 --codex-app-server 一起使用普通 tmux TUI 的 paste/history 投递兼容路径。
---codex-rpc-input 仅为旧兼容路径保留。
---codex-acp 显式声明默认 ACP Worker；当前不支持跨 daemon ACP reclaim。`;
-
-/** 渲染人类可读能力摘要；仅显示被当前实现证明的能力。 */
-export function formatCapabilities(snapshot: CapabilitySnapshot): string {
-  const codex = snapshot.adapters.codex;
-  return [
-    `平台: ${snapshot.host.platform}`,
-    `tmux: ${snapshot.host.tmux.status}`,
-    `tmux 持久会话: ${snapshot.host.tmux.persistentSessions}`,
-    `Codex 命令: ${codex.status}`,
-    `Codex 正常交互会话: ${codex.interactiveSession}`,
-    `Codex 已验证 Prompt 投递: ${codex.verifiedPromptDelivery}`,
-    `Codex read-only sandbox: ${codex.sandbox.readOnly}`,
-    `Codex workspace-write sandbox: ${codex.sandbox.workspaceWrite}`,
-  ].join("\n");
-}
+run 仅使用用户选择并验证的 Codex ACP Worker；Worker 具有 workflow 指派的完整读写执行权限。`;

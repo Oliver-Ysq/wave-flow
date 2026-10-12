@@ -7,7 +7,7 @@ import { harnessRunsRoot, validateRunId } from "../journal/paths";
 import type { JsonObject } from "../shared/json";
 import type { HarnessActionCallbacks } from "./action-tools";
 import { executeReadOnlyProjectQuery, readProjectFile } from "./shell-policy";
-import { PiHarnessSession, type HarnessPiSession } from "./pi-harness";
+import { type HarnessPiSession } from "./pi-harness";
 import type { ResolvedHarnessModelConfig } from "./config";
 
 /** daemon 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。 */
@@ -17,11 +17,6 @@ export class HarnessService {
   #mutations = new Map<string, Promise<void>>();
   /** 回合内 request_user_decision 的等待者；键为 harnessRunId:decisionId。 */
   #decisionWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
-  private readonly createSession: (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
-  /**
-   * 新生产构造器传入 HarnessSession factory。保留旧测试/兼容构造器，以便 Pi
-   * 只作为显式注入后端而非生产默认路径；该兼容层可在迁移稳定后独立删除。
-   */
   constructor(
     private readonly root = harnessRunsRoot(),
     factoryOrResolve: ((harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>) | (() => Promise<ResolvedHarnessModelConfig | null>),
@@ -32,11 +27,13 @@ export class HarnessService {
       const resolve = factoryOrResolve as () => Promise<ResolvedHarnessModelConfig | null>;
       this.createSession = async (_id, cwd, prior, actions) => {
         const config = await resolve();
-        if (!config) throw new Error("兼容主控未配置模型。 ");
+        if (!config) throw new Error("主控未配置模型。 ");
         return legacyCreate(config, cwd, prior, actions);
       };
     } else this.createSession = factoryOrResolve as (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
   }
+
+  private readonly createSession: (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
 
   /** 在已验证项目 cwd 内创建会话；projectId 只由 Project Store 提供。 */
   async create(cwd: string, projectId = "test-project"): Promise<HarnessSnapshot> {

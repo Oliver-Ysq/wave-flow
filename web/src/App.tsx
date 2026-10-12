@@ -8,8 +8,6 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import {
   AssistantRuntimeProvider,
   ChainOfThoughtPrimitive,
@@ -46,21 +44,6 @@ const themeStorageKey = "wave-flow:color-theme:v1";
 function readColorTheme(): ColorTheme {
   return localStorage.getItem(themeStorageKey) === "light" ? "light" : "dark";
 }
-function terminalColors(theme: ColorTheme) {
-  return theme === "light"
-    ? {
-        background: "#f8f9fd",
-        foreground: "#25314a",
-        cursor: "#665ce2",
-        selectionBackground: "#d9ddff",
-      }
-    : {
-        background: "#11141d",
-        foreground: "#d8e0f0",
-        cursor: "#aeb8ff",
-        selectionBackground: "#404875",
-      };
-}
 /** 浏览器入口没有桌面窗口；只在 Tauri 容器中同步 macOS 原生标题栏明暗外观。 */
 function syncNativeWindowTheme(theme: ColorTheme) {
   if (!("__TAURI_INTERNALS__" in window)) return;
@@ -68,11 +51,6 @@ function syncNativeWindowTheme(theme: ColorTheme) {
 }
 
 export function App() {
-  const locationQuery = new URLSearchParams(window.location.search);
-  const terminalRunId = locationQuery.get("terminalRunId");
-  const terminalNodeId = locationQuery.get("terminalNodeId");
-  if (terminalRunId && terminalNodeId)
-    return <TerminalPage runId={terminalRunId} nodeId={terminalNodeId} />;
   const demo = import.meta.env.DEV;
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
@@ -2158,9 +2136,7 @@ function RunDetail({
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
 }) {
-  const active =
-    !run.observationOnly &&
-    ["running", "pausing", "recovering"].includes(run.status);
+  const active = ["running", "pausing", "recovering"].includes(run.status);
   const [defaultView, setDefaultView] = usePersistedView();
   const [expanded, setExpanded] = useState<AgentSnapshot | null>(null);
   const [attempt, setAttempt] = useState<CurrentAttemptResponse | null>(null);
@@ -2264,7 +2240,7 @@ function RunDetail({
               onClick={() => void onControl("resume")}
             />
           )}
-          {(active || (!run.observationOnly && run.status === "paused")) && (
+          {(active || run.status === "paused") && (
             <Action
               label="停止 Run"
               icon="■"
@@ -2286,12 +2262,6 @@ function RunDetail({
         <span>结束于 {localeTime(run.endedAt)}</span>
         <span className="path">{run.cwd}</span>
       </div>
-      {run.observationOnly && (
-        <div className="observation-notice">
-          已重新连接旧会话：可以观察、回答和继续该 Agent，但当前 daemon 未恢复
-          Workflow 调度。
-        </div>
-      )}
       {run.diagnostic && <div className="diagnostic">{run.diagnostic}</div>}
       <div className="phase-list">
         {attempt ? (
@@ -2776,14 +2746,6 @@ function AgentDetailModal({
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
   onClose: () => void;
 }) {
-  const [terminalOpen, setTerminalOpen] = useState(false);
-  const canOpenTerminal = ["running", "blocked"].includes(agent.status);
-  const openInNewTab = () =>
-    window.open(
-      `${location.pathname}?terminalRunId=${encodeURIComponent(runId)}&terminalNodeId=${encodeURIComponent(agent.id)}`,
-      "_blank",
-      "noopener,noreferrer",
-    );
   return (
     <div
       className="agent-modal-backdrop"
@@ -2791,7 +2753,7 @@ function AgentDetailModal({
       onMouseDown={onClose}
     >
       <section
-        className={`agent-modal ${terminalOpen ? "with-terminal" : ""}`}
+        className="agent-modal"
         role="dialog"
         aria-modal="true"
         aria-label={`${agent.label} 完整信息`}
@@ -2803,298 +2765,14 @@ function AgentDetailModal({
             <strong>{agent.label}</strong>
           </div>
           <div className="modal-actions">
-            {canOpenTerminal && (
-              <>
-                <button
-                  className="terminal-toggle"
-                  onClick={() => setTerminalOpen((open) => !open)}
-                >
-                  {terminalOpen ? "收起终端" : "打开终端"}
-                </button>
-                <button className="terminal-new-tab" onClick={openInNewTab}>
-                  新标签页打开 ↗
-                </button>
-              </>
-            )}
             <button onClick={onClose} aria-label="关闭完整信息">
               ×
             </button>
           </div>
         </div>
         <AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded />
-        {terminalOpen && <WebTerminal runId={runId} agent={agent} />}
       </section>
     </div>
-  );
-}
-
-function TerminalPage({ runId, nodeId }: { runId: string; nodeId: string }) {
-  const [backAvailable] = useState(
-    () => window.opener !== null || history.length > 1,
-  );
-  const [theme, setTheme] = useState<ColorTheme>(readColorTheme);
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem(themeStorageKey, theme);
-    syncNativeWindowTheme(theme);
-    window.dispatchEvent(
-      new CustomEvent<ColorTheme>("wave-flow:theme", { detail: theme }),
-    );
-  }, [theme]);
-  return (
-    <main className={`terminal-page theme-${theme}`}>
-      <header className="terminal-page-head">
-        <div className="brand">
-          <span className="brand-mark">W</span>
-          <div>
-            <strong>Wave Flow Terminal</strong>
-            <span>独立 Agent 终端</span>
-          </div>
-        </div>
-        <div className="terminal-page-actions">
-          <button
-            className="theme-toggle"
-            onClick={() =>
-              setTheme((current) => (current === "dark" ? "light" : "dark"))
-            }
-            aria-label={theme === "dark" ? "切换到亮色模式" : "切换到暗色模式"}
-          >
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
-          {backAvailable && (
-            <button onClick={() => history.back()}>← 返回控制台</button>
-          )}
-          <code>{nodeId}</code>
-        </div>
-      </header>
-      <section className="terminal-page-body">
-        <WebTerminal
-          runId={runId}
-          agent={{
-            id: nodeId,
-            label: nodeId,
-            cli: "codex",
-            status: "running",
-            cwd: "",
-            result: null,
-            diagnostic: null,
-            block: null,
-          }}
-          standalone
-          theme={theme}
-        />
-      </section>
-    </main>
-  );
-}
-
-function WebTerminal({
-  runId,
-  agent,
-  standalone = false,
-  theme = readColorTheme(),
-}: {
-  runId: string;
-  agent: AgentSnapshot;
-  standalone?: boolean;
-  theme?: ColorTheme;
-}) {
-  const host = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState("正在连接受管终端…");
-  const [needsReclaim, setNeedsReclaim] = useState(false);
-  const [reclaiming, setReclaiming] = useState(false);
-  const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [terminalTheme, setTerminalTheme] = useState<ColorTheme>(theme);
-  useEffect(() => {
-    setTerminalTheme(theme);
-  }, [theme]);
-  useEffect(() => {
-    const update = (event: Event) =>
-      setTerminalTheme((event as CustomEvent<ColorTheme>).detail);
-    window.addEventListener("wave-flow:theme", update);
-    return () => window.removeEventListener("wave-flow:theme", update);
-  }, []);
-  useEffect(() => {
-    if (!host.current) return;
-    host.current.replaceChildren();
-    let socket: WebSocket | null = null,
-      disposed = false;
-    let xterm: Terminal | null = null;
-    let input: { dispose(): void } | null = null;
-    if (import.meta.env.DEV && runId.startsWith("demo-")) {
-      xterm = new Terminal({
-        cols: 120,
-        rows: 32,
-        cursorBlink: true,
-        fontSize: 12,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        theme: terminalColors(terminalTheme),
-      });
-      xterm.open(host.current);
-      xterm.write(
-        "\x1b[36mWave Flow 开发演示终端\x1b[0m\r\n\r\n这里用于检查终端布局、标签页与滚动条样式。\r\n开发演示不会连接 tmux，输入也不会发送给 Agent。\r\n\r\n› ",
-      );
-      setState("开发演示 · 未连接真实 Agent");
-      input = xterm.onData((data) =>
-        xterm?.write(data === "\r" ? "\r\n› " : data),
-      );
-      return () => {
-        disposed = true;
-        input?.dispose();
-        xterm?.dispose();
-      };
-    }
-    void api
-      .terminal(runId, agent.id)
-      .then((opened) => {
-        if (disposed) return;
-        xterm = new Terminal({
-          cols: opened.cols,
-          rows: opened.rows,
-          convertEol: false,
-          cursorBlink: true,
-          fontSize: 12,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          theme: terminalColors(terminalTheme),
-        });
-        const fit = new FitAddon();
-        xterm.loadAddon(fit);
-        xterm.open(host.current!);
-        const terminal = xterm;
-        input = terminal.onData((data) => {
-          if (socket?.readyState === WebSocket.OPEN)
-            socket.send(JSON.stringify({ type: "input", data }));
-        });
-        xterm.write(opened.initialScreen);
-        socket = new WebSocket(
-          `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${opened.wsPath}?after=${opened.outputSequence}`,
-        );
-        let sentCols: number | null = null,
-          sentRows: number | null = null;
-        let resizeTimer: number | null = null;
-        const resize = () => {
-          fit.fit();
-          // 只在浏览器窗口真正变化时同步一次。绝不监听 xterm 自己的 DOM 变化，
-          // 否则 reset/reflow 又会触发 resize，形成不断重绘与滚动条抖动的循环。
-          if (
-            socket?.readyState === WebSocket.OPEN &&
-            terminal.cols >= 20 &&
-            terminal.rows >= 5 &&
-            (terminal.cols !== sentCols || terminal.rows !== sentRows)
-          ) {
-            sentCols = terminal.cols;
-            sentRows = terminal.rows;
-            socket.send(
-              JSON.stringify({
-                type: "resize",
-                cols: terminal.cols,
-                rows: terminal.rows,
-              }),
-            );
-          }
-        };
-        const requestResize = () => {
-          if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-          resizeTimer = window.setTimeout(resize, 180);
-        };
-        socket.onopen = () => {
-          requestAnimationFrame(resize);
-          setState("已连接 · 可直接输入");
-        };
-        socket.onmessage = (event) => {
-          try {
-            const message = JSON.parse(String(event.data)) as {
-              type?: string;
-              data?: string;
-              screen?: string;
-              cols?: number;
-              rows?: number;
-              reason?: string;
-              message?: string;
-            };
-            if (message.type === "output" && typeof message.data === "string")
-              terminal.write(message.data);
-            if (
-              message.type === "reset" &&
-              typeof message.screen === "string"
-            ) {
-              // 必须先采用 tmux 已确认的新网格，再写 capture-pane 首屏；反过来写会让超长逻辑行在旧列数上永久裁断。
-              if (
-                typeof message.cols === "number" &&
-                typeof message.rows === "number"
-              ) {
-                sentCols = message.cols;
-                sentRows = message.rows;
-                terminal.resize(message.cols, message.rows);
-              }
-              terminal.reset();
-              terminal.write(message.screen);
-            }
-            if (message.type === "closed")
-              setState(`连接已关闭：${message.reason ?? "终端不可用"}`);
-            if (message.type === "error")
-              setState(message.message ?? "终端输入被拒绝");
-          } catch {
-            setState("终端收到无效消息。");
-          }
-        };
-        socket.onclose = () => {
-          if (!disposed)
-            setState((current) =>
-              current.startsWith("连接已关闭") ? current : "实时连接已断开",
-            );
-        };
-        socket.onerror = () => setState("实时连接失败");
-        window.addEventListener("resize", requestResize);
-        const oldDispose = input.dispose.bind(input);
-        input.dispose = () => {
-          window.removeEventListener("resize", requestResize);
-          if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-          oldDispose();
-        };
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : "无法打开终端";
-        setState(message);
-        setNeedsReclaim(message.includes("可观察生命周期"));
-      });
-    return () => {
-      disposed = true;
-      input?.dispose();
-      socket?.close();
-      xterm?.dispose();
-    };
-  }, [agent.id, runId, connectionAttempt, terminalTheme]);
-  async function reclaim() {
-    setReclaiming(true);
-    setState("正在验证旧 tmux 与 Codex 会话…");
-    try {
-      await api.reclaimTerminal(runId, agent.id);
-      setNeedsReclaim(false);
-      setConnectionAttempt((value) => value + 1);
-    } catch (error) {
-      setState(error instanceof Error ? error.message : "旧会话无法重新连接");
-    } finally {
-      setReclaiming(false);
-    }
-  }
-  return (
-    <section className={`web-terminal ${standalone ? "standalone" : ""}`}>
-      <div className="web-terminal-head">
-        <strong>Codex 终端</strong>
-        <span>{state}</span>
-        {needsReclaim && (
-          <button
-            className="reclaim-terminal"
-            disabled={reclaiming}
-            onClick={() => void reclaim()}
-          >
-            {reclaiming ? "正在验证…" : "重新连接旧会话"}
-          </button>
-        )}
-      </div>
-      <div ref={host} className="xterm-host" />
-    </section>
   );
 }
 

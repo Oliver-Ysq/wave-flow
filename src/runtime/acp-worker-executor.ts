@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { renderAgentIdentity } from "../cli/agent-identity";
 import { AcpSessionClient, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
 import type { ControlServer } from "../control/control-server";
@@ -22,7 +21,7 @@ export interface AcpWorkerSession {
  *
  * 仅处理同一 daemon 生命周期内的 Codex ACP Worker。ACP 原生 session binding 在
  * `agent.session` 耐久后才允许 Control complete；ACP turn 结束不等于节点完成。
- * 跨 daemon reclaim 还没有经过 session/load 身份验证，因此本执行器不实现它。
+ * 跨 daemon 不认领 ACP session；用户显式 resume 才会创建新 attempt。
  */
 export class AcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
@@ -48,7 +47,6 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     if (!node.agentSessionId) throw new Error("ACP Worker 节点缺少 agentSessionId。 ");
     if (node.cli !== "codex") throw new Error(`一期 ACP Worker 只支持 cli: codex，收到 ${node.cli}。`);
     const capability = crypto.randomUUID();
-    const reclaimTokenHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
     let settled = false;
     let resolveCompletion!: (result: JsonObject) => void;
     let rejectCompletion!: (error: Error) => void;
@@ -57,7 +55,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       rejectCompletion = (error) => { if (!settled) { settled = true; reject(error); } };
     });
     void completion.catch(() => undefined);
-    control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, reclaimTokenHash, onCompleted: resolveCompletion });
+    control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, onCompleted: resolveCompletion });
     // short-lived capability 只注入本节点 ACP 子进程；稳定三元组只用于定位，不能单独
     // 授权 active daemon 的 complete/block/continue。
     const launcher: AcpLauncher = { ...this.launcher, env: { ...this.launcher.env, WF_CONTROL_CAPABILITY: capability } };

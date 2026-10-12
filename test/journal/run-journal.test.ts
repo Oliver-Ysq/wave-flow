@@ -19,18 +19,16 @@ describe("RunJournal", () => {
     await expect(RunJournal.open("11111111-1111-4111-8111-111111111111", runsRoot(cwd))).rejects.toThrow("指定 Run 不存在或 manifest 不可读取");
   });
 
-  test("兼容读取 v3 Manifest", async () => {
+  test("拒绝旧 v3 Manifest", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const old = { ...manifest(cwd), runtimeVersion: 3 as const };
-    await RunJournal.create(old, runsRoot(cwd));
-    await expect(RunJournal.open(old.runId, runsRoot(cwd))).resolves.toBeDefined();
+    await expect(RunJournal.create(old, runsRoot(cwd))).rejects.toThrow("版本不兼容");
   });
 
-  test("兼容读取 v4 Manifest", async () => {
+  test("拒绝旧 v4 Manifest", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const old = { ...manifest(cwd), runtimeVersion: 4 as const };
-    await RunJournal.create(old, runsRoot(cwd));
-    await expect(RunJournal.open(old.runId, runsRoot(cwd))).resolves.toBeDefined();
+    await expect(RunJournal.create(old, runsRoot(cwd))).rejects.toThrow("版本不兼容");
   });
 
   test("耐久创建 Manifest、事件和 JSON 对象结果", async () => {
@@ -129,21 +127,10 @@ describe("RunJournal", () => {
     const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
     await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
     await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
-    const resultPath = await journal.writeResult("scan-auth", { ok: true });
-    const validationPath = await journal.writeValidation("scan-auth", {}, { ok: true });
+    const resultPath = await journal.writeResult("scan-auth", { ok: true }, "session");
+    const validationPath = await journal.writeValidation("scan-auth", {}, { ok: true }, "session");
     await journal.append({ type: "agent.completed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "done", resultPath, validationPath, result: { ok: true } });
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("缺少先前的 agent.session");
-  });
-
-  test("App Server 坐标接受 URL 语义等价的无尾随斜杠 endpoint", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
-    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
-    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
-    const session = { backend: "tmux" as const, sessionName: "wf-test", backendRef: "/tmp/wf.sock", runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", cli: "codex" as const, createdAt: new Date().toISOString() };
-    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
-    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
-    await journal.append({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "codex-rpc", delivery: "codex-rpc", session, appServer: { endpoint: "ws://127.0.0.1:43180", threadId: "thread", turnId: "turn", protocolVersion: 1 } });
-    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: expect.arrayContaining([expect.objectContaining({ type: "agent.session" })]) });
   });
 
   test("重开时拒绝被篡改为不符合 answer-schema 的 block 答案", async () => {

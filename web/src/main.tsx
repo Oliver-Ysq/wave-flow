@@ -5,7 +5,6 @@ import { listen } from "@tauri-apps/api/event";
 import { App } from "./App";
 import "./styles.css";
 import "./workbench.css";
-import "@xterm/xterm/css/xterm.css";
 
 async function start(): Promise<void> {
   const query = new URLSearchParams(window.location.search);

@@ -5,7 +5,6 @@ import { isJsonObject, type JsonObject } from "../shared/json";
 import { nodeDirectoryName, runDirectory, runsRoot, validateRunId, waveFlowHome } from "./paths";
 import { COMPATIBLE_RUNTIME_VERSIONS, type JournalEvent, type RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
-import type { SessionIdentity } from "../sessions/types";
 
 /** 同一 Run 的 append-only Journal 与结果文件存储；不解释节点状态机。 */
 export class RunJournal {
@@ -202,19 +201,10 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
       break;
     case "agent.session":
-      if (typeof event.nodeId !== "string" || !isSessionDelivery(event.delivery)) throw new Error("agent.session payload 无效。");
-      if (event.delivery === "acp") {
-        if (event.session !== undefined || !isAcpBinding(event.acp)) throw new Error("ACP agent.session payload 无效。");
-      } else if (!isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.session payload 无效。");
-      if (event.delivery === "tmux" && event.appServer !== undefined) throw new Error("普通 tmux 投递不得携带 App Server 坐标。");
-      if (event.delivery === "codex-rpc" && !isAppServerCoordinate(event.appServer)) throw new Error("App Server 投递缺少有效坐标。");
-      if (event.delivery === "acp" && event.appServer !== undefined) throw new Error("ACP 投递不得携带 App Server 坐标。");
+      if (typeof event.nodeId !== "string" || event.delivery !== "acp" || !isAcpBinding(event.acp)) throw new Error("agent.session 必须是有效 ACP binding。");
       break;
     case "agent.recovered":
-      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || (isAppServerCoordinate(event.appServer) === isAcpRecovery(event.acp))) throw new Error("agent.recovered payload 无效。 ");
-      break;
-    case "agent.viewer":
-      if (typeof event.nodeId !== "string" || !isSessionIdentity(event.session) || event.session.runId !== event.runId || event.session.nodeId !== event.nodeId || event.session.agentSessionId !== event.agentSessionId) throw new Error("agent.viewer payload 无效。 ");
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !isAcpRecovery(event.acp)) throw new Error("agent.recovered payload 无效。 ");
       break;
     case "agent.completed":
       if (typeof event.nodeId !== "string" || typeof event.resultPath !== "string" || !isJsonObject(event.result) || (event.validationPath !== undefined && typeof event.validationPath !== "string")) throw new Error("agent.completed payload 无效。");
@@ -256,7 +246,6 @@ function isNormalizedRequest(value: unknown): boolean {
 function isAgentStatus(value: unknown): boolean { return value === "queued" || value === "running" || value === "blocked" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isPositiveInteger(value: unknown): value is number { return Number.isInteger(value) && typeof value === "number" && value >= 1; }
 function isRunStatus(value: unknown): boolean { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
-function isSessionDelivery(value: unknown): value is "tmux" | "codex-rpc" | "acp" { return value === "tmux" || value === "codex-rpc" || value === "acp"; }
 function isAcpBinding(value: unknown): value is { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: import("../runtimes/types").RuntimeProvenance } {
   if (!value || typeof value !== "object" || typeof (value as { launcherId?: unknown }).launcherId !== "string" || !(value as { launcherId: string }).launcherId.trim() || typeof (value as { sessionId?: unknown }).sessionId !== "string" || !(value as { sessionId: string }).sessionId.trim() || !(value as { capabilities?: unknown }).capabilities || typeof (value as { capabilities: unknown }).capabilities !== "object") return false;
   const runtime = (value as { runtime?: unknown }).runtime;
@@ -269,25 +258,6 @@ function isAcpRecovery(value: unknown): value is { readonly launcherId: string; 
   return typeof item.launcherId === "string" && item.launcherId.trim() !== "" && typeof item.sessionId === "string" && item.sessionId.trim() !== "";
 }
 
-function isSessionIdentity(value: unknown): value is SessionIdentity {
-  if (!isPlainObject(value)) return false;
-  return value.backend === "tmux" && typeof value.sessionName === "string" && value.sessionName.trim() !== "" && typeof value.backendRef === "string" && value.backendRef.startsWith("/") && typeof value.runId === "string" && typeof value.nodeId === "string" && typeof value.agentSessionId === "string" && value.agentSessionId.trim() !== "" && value.cli === "codex" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && (value.identityFile === undefined || (typeof value.identityFile === "string" && value.identityFile.startsWith("/"))) && (value.reclaimTokenHash === undefined || (typeof value.reclaimTokenHash === "string" && /^[0-9a-f]{64}$/i.test(value.reclaimTokenHash)));
-}
-
-function isAppServerCoordinate(value: unknown): boolean {
-  if (!isPlainObject(value)) return false;
-  return isLoopbackWebSocketEndpoint(value.endpoint) && typeof value.threadId === "string" && value.threadId.trim() !== "" && typeof value.turnId === "string" && value.turnId.trim() !== "" && value.protocolVersion === 1;
-}
-
-/** URL 会将无尾随斜杠 endpoint 规范化为 `/`；不能用字符串正则把等价坐标拒绝。 */
-function isLoopbackWebSocketEndpoint(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "ws:" && url.hostname === "127.0.0.1" && /^\d+$/.test(url.port) && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/";
-  } catch { return false; }
-}
-
 function isTruncatedJsonTail(line: string): boolean {
   const text = line.trim();
   return text.startsWith("{") || text.startsWith("[") || text.startsWith("\"");
@@ -297,8 +267,7 @@ function isTruncatedJsonTail(line: string): boolean {
 async function validateCompletedResult(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
   if (event.nodeId === null) throw new Error("agent.completed 缺少 nodeId。");
   const expectedPath = attemptPath(event.nodeId, event.agentSessionId ?? undefined, "result.json");
-  const legacyPath = join("nodes", nodeDirectoryName(event.nodeId), "result.json");
-  if (event.resultPath !== expectedPath && event.resultPath !== legacyPath) throw new Error("agent.completed resultPath 不匹配节点目录。");
+  if (event.resultPath !== expectedPath) throw new Error("agent.completed resultPath 不匹配节点目录。");
   let value: unknown;
   try {
     value = JSON.parse(await readFile(join(directory, event.resultPath), "utf8")) as unknown;
@@ -314,8 +283,7 @@ async function validateCompletedResult(directory: string, event: Extract<Journal
 async function validateCompletedValidation(directory: string, event: Extract<JournalEvent, { type: "agent.completed" }>, expectedSchema: unknown): Promise<void> {
   if (event.nodeId === null || event.validationPath === undefined) throw new Error("agent.completed validation 记录无效。");
   const expectedPath = attemptPath(event.nodeId, event.agentSessionId ?? undefined, "validation.json");
-  const legacyPath = join("nodes", nodeDirectoryName(event.nodeId), "validation.json");
-  if (event.validationPath !== expectedPath && event.validationPath !== legacyPath) throw new Error("agent.completed validationPath 不匹配节点目录。");
+  if (event.validationPath !== expectedPath) throw new Error("agent.completed validationPath 不匹配节点目录。");
   let value: unknown;
   try { value = JSON.parse(await readFile(join(directory, event.validationPath), "utf8")) as unknown; } catch (error) { throw new Error(`agent.completed 校验记录不可读取：${error instanceof Error ? error.message : String(error)}`); }
   if (!isPlainObject(value) || value.nodeId !== event.nodeId || value.valid !== true || !isDeepStrictEqual(value.schema, expectedSchema) || !isJsonObject(value.result) || !isDeepStrictEqual(value.result, event.result)) throw new Error("agent.completed 校验记录与节点 schema 或结果不一致。");
@@ -325,7 +293,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
-/** v4 attempt 结果不可覆盖旧 attempt；无 session id 的历史事件保留旧路径兼容。 */
+/** 每个 attempt 的结果与校验文件使用独立路径，禁止覆盖。 */
 function attemptPath(nodeId: string, agentSessionId: string | undefined, file: "result.json" | "validation.json"): string {
   return agentSessionId ? join("nodes", nodeDirectoryName(nodeId), "attempts", nodeDirectoryName(agentSessionId), file) : join("nodes", nodeDirectoryName(nodeId), file);
 }

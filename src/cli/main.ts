@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { basename, dirname, join } from "node:path";
-import { DaemonClient, UnsupportedDaemonCloseEndpointError } from "./daemon-client";
-import { formatCapabilities, formatSnapshot, helpText } from "./output";
+import { DaemonClient } from "./daemon-client";
+import { formatSnapshot, helpText } from "./output";
 import { parseCommand } from "./parse-command";
 import { discoverDaemon, ensureGlobalDaemon } from "../daemon/daemon-lifecycle";
 import { inspectStoredRun, LocalDaemon } from "../daemon/local-daemon";
@@ -45,14 +45,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
     }
     if (command.kind === "close") {
       if (!daemon) throw new Error("没有可验证的 Wave Flow daemon 可关闭。 ");
-      try {
-        await new DaemonClient(daemon.baseUrl).closeDaemon();
-        write("Wave Flow daemon 已接受关闭请求。");
-      } catch (error) {
-        if (!(error instanceof UnsupportedDaemonCloseEndpointError)) throw error;
-        await terminateVerifiedLegacyDaemon(daemon);
-        write("旧版 Wave Flow daemon 已安全终止。");
-      }
+      await new DaemonClient(daemon.baseUrl).closeDaemon();
+      write("Wave Flow daemon 已接受关闭请求。");
       return;
     }
     if (command.kind === "serve") {
@@ -76,13 +70,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
     if (command.kind === "pause") { const response = await client.pause(command.runId); write(formatSnapshot(response.snapshot)); return; }
     if (command.kind === "recover") { const response = await client.recover(command.runId); write(formatSnapshot(response.snapshot)); return; }
     if (command.kind === "stop") { const response = await client.stop(command.runId); write(formatSnapshot(response.snapshot)); return; }
-    if (command.kind === "capabilities") {
-      const snapshot = await client.capabilities();
-      write(command.json ? JSON.stringify(snapshot, null, 2) : formatCapabilities(snapshot));
-      return;
-    }
     const response = command.kind === "run"
-      ? await client.createRun({ clientRequestId: crypto.randomUUID(), workflowPath: command.workflowPath, cwd: command.cwd, input: command.input, codexRpcInput: command.codexRpcInput, workerTransport: command.workerTransport })
+      ? await client.createRun({ clientRequestId: crypto.randomUUID(), workflowPath: command.workflowPath, cwd: command.cwd, input: command.input })
       : await client.inspect(command.runId);
     write(formatSnapshot(response.snapshot));
     if (command.kind === "run" && response.snapshot.status === "running" && !deterministicForTest) {
@@ -103,29 +92,6 @@ export async function main(argv: readonly string[] = process.argv.slice(2), cwd 
 function packagedDaemonExecutable(): string | undefined {
   if (!import.meta.dir.startsWith("/$bunfs/") || basename(process.execPath) !== "wave-flow") return undefined;
   return join(dirname(process.execPath), "wave-flow-daemon");
-}
-
-/**
- * 旧 daemon 没有 `/daemon/close` 时的唯一兼容出口。
- * 再次发现并逐字段比对，避免 descriptor 在 HTTP 请求与信号之间被新 daemon 替换。
- */
-export async function terminateVerifiedLegacyDaemon(
-  daemon: NonNullable<Awaited<ReturnType<typeof discoverDaemon>>>,
-  discover: () => ReturnType<typeof discoverDaemon> = discoverDaemon,
-  terminate: typeof process.kill = process.kill,
-): Promise<void> {
-  const current = await discover();
-  if (!current
-    || current.baseUrl !== daemon.baseUrl
-    || current.descriptor.pid !== daemon.descriptor.pid
-    || current.descriptor.bootInstanceId !== daemon.descriptor.bootInstanceId
-    || current.descriptor.processStartIdentity !== daemon.descriptor.processStartIdentity
-    || current.descriptor.userIdentity !== daemon.descriptor.userIdentity) {
-    throw new Error("旧 daemon 的身份在关闭前发生变化，拒绝终止。请重新执行 wave-flow close。");
-  }
-  try { terminate(current.descriptor.pid, "SIGTERM"); } catch (error) {
-    throw new Error(`无法终止已验证的旧 daemon：${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 /** run 默认实时跟随本次 Run；Ctrl-C 只退出观看器，后台 daemon 与 Agent 继续。 */

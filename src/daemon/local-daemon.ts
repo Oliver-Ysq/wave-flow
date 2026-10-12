@@ -3,29 +3,19 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, TerminalOpenResponse, ReclaimTerminalResponse, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
-import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
-import { handleReclaimCompleteHttp } from "../control/control-http";
-import { handleAnswerHttp, handleBlockHttp, handleContinueHttp, handleReclaimBlockHttp, handleReclaimContinueHttp } from "../control/block-http";
-import type { ControlServer, ReclaimBlockSubmission, ReclaimCompletionSubmission, ReclaimContinueSubmission } from "../control/control-server";
-import { createRealCodexExecutor } from "../runtime/real-codex-factory";
+import { handleAnswerHttp, handleBlockHttp, handleContinueHttp } from "../control/block-http";
+import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import type { AgentNodeExecutor } from "../runtime/run-types";
-import { RealCodexExecutor } from "../runtime/real-codex-executor";
-import { AcpWorkerExecutor } from "../runtime/acp-worker-executor";
 import { harnessRunsRoot, runsRoot, validateRunId } from "../journal/paths";
 import { DAEMON_PROTOCOL_VERSION, daemonUserIdentity } from "./daemon-descriptor";
 import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION } from "../journal/types";
 import { AgentStartLimiter, LimitedAgentExecutor } from "./agent-start-limiter";
-import { TmuxSessionBackend } from "../sessions/backends/tmux-session-backend";
-import { TmuxCommandClient } from "../sessions/backends/tmux-command";
-import { CodexAppServerAdapter, bunCodexAppServerConnection } from "../adapters/codex-app-server";
 import { serveWebAsset } from "../web/static-assets";
-import { TmuxTerminalObserver } from "../sessions/terminal-observer";
-import type { ServerWebSocket } from "bun";
 import { HarnessService } from "../harness/service";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
@@ -39,45 +29,27 @@ import { AcpHarnessSession } from "../harness/acp-harness";
 import { resolveCodexAcpLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { DeterministicHarnessSession } from "../harness/deterministic-session";
 
-/** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
 
 /** 用户本机 CLI 主控的固定系统约束；工具能力由 session-private MCP sidecar 提供。 */
 const HARNESS_SYSTEM_PROMPT = "你是 Wave Flow 主控。你必须基于 session 中提供的 wave-flow-harness MCP 工具处理项目事实、提出 workflow 草案、读取执行结果或请求用户决定。你只能使用该 MCP 的只读查询和四个窄工具；禁止写入业务工作区、直接创建 Worker、直接执行 Workflow、调用 wave-flow complete/block/continue，或仅凭自然语言声称任务已完成。propose_workflow_revision 只产生草案，用户接受后才可能创建 Execution。";
 
-export type RealCodexExecutorFactory = (args: {
-  /** 当前 daemon 的 loopback Control 根地址。 */
-  readonly controlUrl: string;
-  /** 当前项目 Run 耐久目录的根路径。 */
-  readonly runsRoot: string;
-  /** 当前 daemon 的唯一私有 tmux socket 身份。 */
-  readonly daemonInstanceId: string;
-  /** 本次 Run 是否使用 App Server hybrid 投递。 */
-  readonly codexRpcInput: boolean;
-}) => ControlBoundExecutor;
-
-/** LocalDaemon 的可选构造配置；生产默认使用真实 Codex 执行器。 */
+/** LocalDaemon 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
 export type LocalDaemonOptions = {
   /** 仅自动测试使用确定性执行器；不能用于用户 CLI。默认 false。 */
   readonly deterministicForTest?: boolean;
-  /** 替换真实执行器的创建方式，以便验证 daemon/Control 闭环而不连接模型服务。 */
-  readonly createRealExecutor?: RealCodexExecutorFactory;
   /** 用户级 Run Store 根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/runs。 */
   readonly storeRoot?: string;
   /** Harness 对话档案根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/harness-runs。 */
   readonly harnessRoot?: string;
   /** 全局同时运行 Run 上限；生产默认保守值，测试可缩小。 */
   readonly maxActiveRuns?: number;
-  /** 全局同时启动的真实 Agent 上限，同时限制 tmux 会话与 App Server 进程。 */
+  /** 全局同时启动的真实 ACP Worker 上限。 */
   readonly maxActiveAgents?: number;
-  /** 验证旧 Journal 会话是否可被当前 daemon 安全认领；生产默认同时验证 tmux 与 App Server。 */
-  readonly verifyReclaimSession?: (session: import("../sessions/types").SessionIdentity, appServer: { readonly endpoint: string; readonly threadId: string } | undefined) => Promise<boolean>;
-  /** 仅测试注入终端观察器；生产默认使用真实 tmux pipe-pane。 */
-  readonly createTerminalObserver?: (session: import("../sessions/types").SessionIdentity) => TmuxTerminalObserver;
   /** 常驻 daemon 接收 close 后调用；测试 daemon 省略时只关闭本地 HTTP 服务。 */
   readonly scheduleClose?: () => void;
-  /** 自动测试或显式兼容后端注入；生产省略时使用 selected ACP CLI Harness。 */
+  /** 自动测试注入；生产省略时使用 selected ACP CLI Harness。 */
   readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks) => Promise<import("../harness/session").HarnessSession>;
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
@@ -101,53 +73,33 @@ export class LocalDaemon {
   #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
   /** 每条 Harness ACP session 私有 MCP token；只在 daemon 内存存活。 */
   #harnessMcpTokens = new Map<string, string>();
-  /** 用户显式验证并认领的旧会话；资格精确绑定 node/session，不能放宽到整个 Run。 */
-  #observedSessions = new Set<string>();
-  /** 用户确认重启后，当前 daemon 实际认领成功的旧 tmux/App Server 会话数量。 */
-  #reconnectedTerminalSessions = 0;
   /** ACP 缺少跨 daemon identity；仅提供诚实 UI 提示，绝不伪造 session 认领。 */
   #acpWorkersNeedingResume = 0;
-  /** 同一旧会话的并发认领单飞，防止两份 Runtime/Control 状态机互相覆盖。 */
-  #terminalReclaims = new Map<string, Promise<ReclaimTerminalResponse>>();
-  /** 同一 Run 的不同节点认领串行执行；不同 Run 仍可并行。 */
-  #runReclaimLocks = new Map<string, Promise<void>>();
   #createRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的并发 resume 只允许一个授权重放事务，防止重复新 attempt。 */
   #resumeRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的用户控制必须串行；不同动作不能误复用彼此的成功结果。 */
   #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly promise: Promise<RunResponse> }>();
-  /** 每个 Agent 只复用一条 pipe-pane，多个浏览器 WebSocket 共享输出而不重复订阅。 */
-  #terminals = new Map<string, { readonly observer: TmuxTerminalObserver; readonly sockets: Set<ServerWebSocket<TerminalSocketData>>; readonly unsubscribe: () => void }>();
-  /** 同一 Agent 的 observer 启动与关闭必须单飞，避免旧 close 误关刚重建的 pipe-pane。 */
-  #terminalOpenings = new Map<string, Promise<{ readonly observer: TmuxTerminalObserver; readonly sockets: Set<ServerWebSocket<TerminalSocketData>>; readonly unsubscribe: () => void }>>();
-  #terminalClosings = new Map<string, Promise<void>>();
-  #terminalClosingKeys = new Set<string>();
   #server: ReturnType<typeof Bun.serve> | null = null;
   readonly instanceId = crypto.randomUUID();
   bootInstanceId: string | null = null;
 
   private readonly deterministicForTest: boolean;
-  private readonly createRealExecutor: RealCodexExecutorFactory;
-  private readonly hasCustomRealExecutor: boolean;
   private readonly storeRoot: string;
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
-  private readonly verifyReclaimSession: NonNullable<LocalDaemonOptions["verifyReclaimSession"]>;
-  private readonly createTerminalObserver: NonNullable<LocalDaemonOptions["createTerminalObserver"]>;
   private readonly scheduleClose: () => void;
   private readonly hasCustomHarnessSession: boolean;
   private readonly discoverCliRuntimeCandidates: () => Promise<readonly DiscoveredCliCandidate[]>;
   private readonly validateCliRuntimeCandidate: NonNullable<LocalDaemonOptions["validateCliRuntime"]>;
 
   /**
-   * @param options 自动测试可选择稳定或 fake 真实执行器；省略时启动真正 tmux/Codex。
+   * @param options 自动测试可选择确定性执行器；生产只启动用户验证的 ACP Worker。
    * 为保持已有测试调用兼容，也接受历史 boolean 形式；用户 CLI 不会传入该参数。
    */
   constructor(options: LocalDaemonOptions | boolean = {}) {
     const normalized = typeof options === "boolean" ? { deterministicForTest: options } : options;
     this.deterministicForTest = normalized.deterministicForTest === true;
-    this.createRealExecutor = normalized.createRealExecutor ?? createRealCodexExecutor;
-    this.hasCustomRealExecutor = normalized.createRealExecutor !== undefined;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
@@ -184,19 +136,13 @@ export class LocalDaemon {
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
-    this.verifyReclaimSession = normalized.verifyReclaimSession ?? verifyReclaimSession;
-    this.createTerminalObserver = normalized.createTerminalObserver ?? ((session) => new TmuxTerminalObserver(session));
     this.scheduleClose = normalized.scheduleClose ?? (() => this.stop());
   }
 
   /** 启动 HTTP 服务；默认随机端口，严格绑定 127.0.0.1。 */
   start(port = 0): { readonly baseUrl: string; stop(): void } {
     if (this.#server) throw new Error("Local daemon 已启动。");
-    this.#server = Bun.serve<TerminalSocketData>({ hostname: "127.0.0.1", port, fetch: (request, server) => this.fetch(request, server), websocket: {
-      open: (socket) => this.openTerminalSocket(socket),
-      message: (socket, message) => { void this.receiveTerminalInput(socket, typeof message === "string" ? message : new TextDecoder().decode(message)); },
-      close: (socket) => this.closeTerminalSocket(socket),
-    } });
+    this.#server = Bun.serve({ hostname: "127.0.0.1", port, fetch: (request) => this.fetch(request) });
     return { baseUrl: `http://127.0.0.1:${this.#server.port}`, stop: () => this.stop() };
   }
 
@@ -205,7 +151,6 @@ export class LocalDaemon {
 
   /** 停止短生命周期 daemon；不会删除 Journal 或本地结果文件。 */
   stop(): void {
-    for (const key of [...this.#terminals.keys()]) void this.closeTerminal(key, "daemon-closed");
     this.#harness.close();
     this.#harnessMcpTokens.clear();
     this.#server?.stop(true); this.#server = null;
@@ -221,9 +166,8 @@ export class LocalDaemon {
         const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
         const status = runtime.snapshot().status;
         if (status !== "pausing" && status !== "paused" && status !== "recovering") continue;
-        // 旧 daemon 的 App Server 连接和 Workflow 调用栈均已丢失；即便 thread 还活着，
-        // 新 daemon 也不能在没有原 agent() Promise 的情况下伪造 recover。不得重发
-        // interrupt、clean 或 turn/start，耐久状态只能诚实收敛为 interrupted。
+        // 原 Workflow 调用栈已丢失；新 daemon 不得伪造 recover 或重发 prompt，
+        // 耐久状态只能诚实收敛为 interrupted。
         const event: import("../journal/types").JournalEvent = { type: "run.status", at: new Date().toISOString(), runId, nodeId: null, agentSessionId: null, diagnostic: `daemon 在 ${status} 中断；原 Workflow 调用栈不可恢复。`, status: "interrupted" };
         await opened.journal.append(event);
         runtime.state.apply(event);
@@ -232,38 +176,26 @@ export class LocalDaemon {
     }
   }
 
-  /**
-   * 仅由确认后的桌面重启调用：重连可验证的 tmux/App Server 会话。
-   * 不重发 Prompt、不恢复 Workflow 调用栈；ACP 一律保留为显式 resume。
-   */
+  /** daemon 重启后，旧 ACP active 节点一律 interrupted；恢复只能由用户显式 resume 发起。 */
   async reconnectExistingTerminalSessions(): Promise<void> {
     let runIds: string[];
     try { runIds = await readdir(this.storeRoot); } catch { return; }
     for (const runId of runIds) {
       try {
-        const opened = await RunJournal.open(runId, this.storeRoot);
         const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
         let interruptedAcp = false;
         for (const node of runtime.snapshot().phases.flatMap(phase => phase.agents)) {
           if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;
-          const session = sessionFor(opened.events, node.id, node.agentSessionId);
-          if (session?.delivery === "acp") {
-            // ACP 没有能与 tmux/App Server 一样跨 daemon 验证的会话身份。不能将
-            // session/load 误称为原 Worker 认领；只有用户显式 resume 能新建 attempt。
-            const event: import("../journal/types").JournalEvent = {
-              type: "agent.status", at: new Date().toISOString(), runId,
-              nodeId: node.id, agentSessionId: node.agentSessionId,
-              diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。",
-              status: "interrupted",
-            };
-            await runtime.journal.append(event);
-            runtime.state.apply(event);
-            this.#acpWorkersNeedingResume += 1;
-            interruptedAcp = true;
-            continue;
-          }
-          try { await this.reclaimTerminal(runId, node.id, {}); this.#reconnectedTerminalSessions += 1; }
-          catch { /* 不可验证会话保持原 Journal；用户可显式 resume。 */ }
+          const event: import("../journal/types").JournalEvent = {
+            type: "agent.status", at: new Date().toISOString(), runId,
+            nodeId: node.id, agentSessionId: node.agentSessionId,
+            diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。",
+            status: "interrupted",
+          };
+          await runtime.journal.append(event);
+          runtime.state.apply(event);
+          this.#acpWorkersNeedingResume += 1;
+          interruptedAcp = true;
         }
         if (interruptedAcp && runtime.snapshot().status === "running") {
           const event: import("../journal/types").JournalEvent = {
@@ -290,9 +222,7 @@ export class LocalDaemon {
   /** Execution 的底座执行器；Harness 执行只走 Codex ACP Worker 或测试确定性执行器。 */
   private createExecutionExecutor(): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
-    const base: AgentNodeExecutor = this.hasCustomRealExecutor
-      ? this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true })
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -309,14 +239,13 @@ export class LocalDaemon {
     this.#controls.set(runId, control);
   }
 
-  private async fetch(request: Request, server?: ReturnType<typeof Bun.serve<TerminalSocketData>>): Promise<Response> {
+  private async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
       if (request.method === "GET" && url.pathname === "/daemon/status") return this.json(await this.daemonStatus());
       const harnessMcp = url.pathname.match(/^\/harness-mcp\/([^/]+)$/);
       if (request.method === "POST" && harnessMcp) return this.json(await this.harnessMcp(decodeURIComponent(harnessMcp[1]), await this.readJson(request)));
-      if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
       if (request.method === "POST" && url.pathname === "/daemon/close") return this.closeDaemon(await this.readJson(request));
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
       if (request.method === "GET" && url.pathname === "/cli-runtimes") return this.json(await this.listCliRuntimes());
@@ -367,19 +296,6 @@ export class LocalDaemon {
       if (request.method === "POST" && harnessDecisionMatch) return this.json(await this.answerHarnessDecision(decodeURIComponent(harnessDecisionMatch[1]), decodeURIComponent(harnessDecisionMatch[2]), await this.readJson(request)));
       const harnessEventsMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/events$/);
       if (request.method === "GET" && harnessEventsMatch) return this.harnessEvents(decodeURIComponent(harnessEventsMatch[1]));
-      const terminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal$/);
-      if (request.method === "GET" && terminalMatch) return this.json(await this.openTerminal(decodeURIComponent(terminalMatch[1]), decodeURIComponent(terminalMatch[2])));
-      const reclaimTerminalMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/reclaim$/);
-      if (request.method === "POST" && reclaimTerminalMatch) return this.json(await this.reclaimTerminal(decodeURIComponent(reclaimTerminalMatch[1]), decodeURIComponent(reclaimTerminalMatch[2]), await this.readJson(request)));
-      const terminalStreamMatch = url.pathname.match(/^\/runs\/([^/]+)\/nodes\/([^/]+)\/terminal\/stream$/);
-      if (request.method === "GET" && terminalStreamMatch) {
-        const runId = decodeURIComponent(terminalStreamMatch[1]); const nodeId = decodeURIComponent(terminalStreamMatch[2]);
-        const terminal = await this.requireTerminal(runId, nodeId);
-        const after = Number(url.searchParams.get("after") ?? "0");
-        if (!Number.isInteger(after) || after < 0) throw new DaemonRequestError(400, "终端输出序号无效。 ");
-        if (!server?.upgrade(request, { data: { key: terminal.key, runId, nodeId, after } })) return new Response("WebSocket upgrade failed", { status: 400 });
-        return undefined as never;
-      }
       if (request.method === "POST" && url.pathname === "/runs") return this.json(await this.createRun(await this.readJson(request)));
       const resumeMatch = url.pathname.match(/^\/runs\/([^/]+)\/resume$/);
       if (request.method === "POST" && resumeMatch) {
@@ -414,22 +330,6 @@ export class LocalDaemon {
         if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
         return handleCompleteHttp(control, request);
       }
-      const reclaimCompleteMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/reclaim-complete$/);
-      if (reclaimCompleteMatch) {
-        const runId = decodeURIComponent(reclaimCompleteMatch[1]);
-        const body = await this.readJson(request) as ReclaimCompletionSubmission;
-        if (body.runId !== runId) throw new DaemonRequestError(400, "reclaim complete 路径与请求 Run 不一致。");
-        const control = await this.reclaimControl(body);
-        return handleReclaimCompleteHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
-      }
-      const blockMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/block$/);
-      if (blockMatch) {
-        const runId = decodeURIComponent(blockMatch[1]);
-        const body = await this.readJson(request) as ReclaimBlockSubmission;
-        if (body.runId !== runId) throw new DaemonRequestError(400, "reclaim block 路径与请求 Run 不一致。");
-        const control = await this.reclaimControl(body);
-        return handleReclaimBlockHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
-      }
       const activeBlockMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/block-active$/);
       if (activeBlockMatch) {
         const runId = decodeURIComponent(activeBlockMatch[1]);
@@ -440,17 +340,9 @@ export class LocalDaemon {
       const answerMatch = url.pathname.match(/^\/blocks\/([^/]+)\/answer$/);
       if (answerMatch) {
         const blockRequestId = decodeURIComponent(answerMatch[1]);
-        const control = [...this.#controls.values()].find((candidate) => candidate.hasBlock(blockRequestId)) ?? await this.restoreBlockedControl(blockRequestId);
+        const control = [...this.#controls.values()].find((candidate) => candidate.hasBlock(blockRequestId));
         if (!control) throw new DaemonRequestError(404, "该 Run 未注册 ControlServer。");
         return handleAnswerHttp(control, blockRequestId, request);
-      }
-      const continueMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/continue$/);
-      if (continueMatch) {
-        const runId = decodeURIComponent(continueMatch[1]);
-        const body = await this.readJson(request) as ReclaimContinueSubmission;
-        if (body.runId !== runId) throw new DaemonRequestError(400, "reclaim continue 路径与请求 Run 不一致。");
-        const control = await this.reclaimControl(body);
-        return handleReclaimContinueHttp(control, new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify(body) }));
       }
       const activeContinueMatch = url.pathname.match(/^\/runs\/([^/]+)\/control\/continue-active$/);
       if (activeContinueMatch) {
@@ -588,7 +480,7 @@ export class LocalDaemon {
     if (!Number.isInteger(revision) || revision < 1) throw new DaemonRequestError(400, "创建 Execution 必须提供有效 revision 序号。 ");
     if (input !== undefined && !isJsonObject(input)) throw new DaemonRequestError(400, "Execution input 必须是 JSON-safe 对象。 ");
     try {
-      if (!this.deterministicForTest && !this.hasCustomRealExecutor) await this.#cliRuntimes.resolveSelected("codex");
+      if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
       return await this.#executions.createExecution(harnessRunId, revision, input ?? {});
     } catch (error) { throw this.executionError(error); }
   }
@@ -714,7 +606,6 @@ export class LocalDaemon {
       activeRuns: runs.filter(run => isLiveRunStatus(run.status)).length,
       blockedRuns: runs.filter(run => run.hasBlockedAgent).length,
       activeHarnesses: harnesses.harnesses.filter(harness => harness.status === "running").length,
-      reconnectedTerminalSessions: this.#reconnectedTerminalSessions,
       acpWorkersNeedingResume: this.#acpWorkersNeedingResume,
     };
   }
@@ -762,8 +653,7 @@ export class LocalDaemon {
 
   private listItem(runtime: RunRuntime): RunListItem {
     const item = listItem(runtime);
-    const observationOnly = !this.#runTasks.has(item.runId) && [...this.#observedSessions].some((key) => key.startsWith(`${item.runId}:`));
-    return observationOnly ? { ...item, observationOnly: true } : item;
+    return item;
   }
 
   private async executionAttempts(runId: string): Promise<ExecutionAttemptsResponse> {
@@ -807,12 +697,10 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(value.workflowPath, cwd);
     const sourcePath = await realpath(resolve(cwd, value.workflowPath));
     const source = await Bun.file(sourcePath).text();
-    if (!this.deterministicForTest && value.workerTransport !== "codex-app-server" && !this.hasCustomRealExecutor) await this.#cliRuntimes.resolveSelected("codex");
+    if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : value.workerTransport !== "codex-app-server" && !this.hasCustomRealExecutor
-        ? new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand())
-        : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: value.codexRpcInput !== false });
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
@@ -823,7 +711,7 @@ export class LocalDaemon {
     }
     const runId = runtime.snapshot().id;
     this.#runs.set(runId, runtime);
-    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); void this.closeRunTerminals(runId, "run-finished"); });
+    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); });
     this.#runTasks.set(runId, task);
     await runtime.waitForSafeLaunch();
     return { runId: runtime.snapshot().id, snapshot: runtime.snapshot() };
@@ -846,7 +734,6 @@ export class LocalDaemon {
     if (!isEmptyObject(value)) throw new DaemonRequestError(400, "pause 不接受请求字段。 ");
     return this.runControl(runId, "pause", async (runtime) => {
       if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "只有 running 的 Run 可以 pause。 ");
-      await this.closeRunTerminals(runId, "paused");
       const snapshot = await runtime.pause();
       return { runId, snapshot };
     });
@@ -868,12 +755,12 @@ export class LocalDaemon {
     if (active && active.kind !== "stop") {
       const runtime = this.#runs.get(runId);
       if (!runtime) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可控制生命周期内。 ");
-      // stop 优先于 pause/recover：先取消正在等待的 App Server RPC，待其清理完
+      // stop 优先于 pause/recover：先取消正在等待的 ACP 控制调用，待其清理完
       // 控制锁后再执行真正终止，避免两个操作同时改写同一状态机。
       runtime.requestStop();
       await active.promise.catch(() => undefined);
     }
-    return this.runControl(runId, "stop", async (runtime) => { await this.closeRunTerminals(runId, "stopped"); return { runId, snapshot: await runtime.stop() }; });
+    return this.runControl(runId, "stop", async (runtime) => ({ runId, snapshot: await runtime.stop() }));
   }
 
   private async runControl(runId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunResponse>): Promise<RunResponse> {
@@ -892,155 +779,10 @@ export class LocalDaemon {
     return task;
   }
 
-  /** 返回首屏并确保该 Agent 的唯一 pipe-pane 观察器已就绪。 */
-  private async openTerminal(runId: string, nodeId: string): Promise<TerminalOpenResponse> {
-    const terminal = await this.requireTerminal(runId, nodeId);
-    const initial = await terminal.observer.initialScreen();
-    return { runId, nodeId, cli: terminal.node.cli, initialScreen: initial.screen, cols: initial.cols, rows: initial.rows, outputSequence: initial.sequence, wsPath: `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/stream` };
-  }
-
-  /**
-   * 用户明确请求后才认领旧会话用于观察。它不恢复 Workflow 调用栈，也不会发新 turn。
-   * 成功后仅让当前 daemon 能建立 observer 与已有 Control 索引。
-   */
-  private async reclaimTerminal(runId: string, nodeId: string, value: unknown): Promise<ReclaimTerminalResponse> {
-    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "重新连接旧会话不接受请求字段。 ");
-    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
-    const requestKey = `${runId}:${nodeId}`;
-    const active = this.#terminalReclaims.get(requestKey);
-    if (active) return active;
-    const previous = this.#runReclaimLocks.get(runId) ?? Promise.resolve();
-    const task = previous.catch(() => {}).then(() => this.reclaimTerminalOnce(runId, nodeId)).finally(() => this.#terminalReclaims.delete(requestKey));
-    const lock = task.then(() => undefined, () => undefined).finally(() => { if (this.#runReclaimLocks.get(runId) === lock) this.#runReclaimLocks.delete(runId); });
-    this.#runReclaimLocks.set(runId, lock);
-    this.#terminalReclaims.set(requestKey, task);
-    return task;
-  }
-
-  private async reclaimTerminalOnce(runId: string, nodeId: string): Promise<ReclaimTerminalResponse> {
-    let runtime = this.#runs.get(runId);
-    const opened = await RunJournal.open(runId, this.storeRoot);
-    if (!runtime) runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
-    let node: import("../runtime/run-types").AgentNodeSnapshot;
-    try { node = runtime.state.agent(nodeId); } catch { throw new DaemonRequestError(404, "该 Run 中不存在 Agent 节点。 "); }
-    if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) throw new DaemonRequestError(409, "只有旧 running 或 blocked Agent 可以重新连接。 ");
-    const sessionEvent = sessionFor(opened.events, nodeId, node.agentSessionId);
-    const viewer = runtime.state.viewerSession(nodeId) ?? sessionEvent?.session;
-    const binding = runtime.state.appServerBinding(nodeId) ?? sessionEvent?.appServer;
-    if (!viewer?.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能重新连接。 ");
-    if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，不能重新连接。 ");
-    // 先恢复 Control。blocked 节点还会校验完整的 block Journal；任一步失败都
-    // 不能让 Run 落入“已可观察”的半认领状态。
-    this.restoreControl(runtime, opened, node, viewer);
-    this.#runs.set(runId, runtime);
-    this.#observedSessions.add(terminalKey(runId, nodeId, node.agentSessionId));
-    return this.openTerminal(runId, nodeId);
-  }
-
-  /** 每次 HTTP 打开和 WebSocket 收发均重新确认当前 Run、节点状态和 tmux identity。 */
-  private async requireTerminal(runId: string, nodeId: string): Promise<{ readonly key: string; readonly node: import("../runtime/run-types").AgentNodeSnapshot; readonly observer: TmuxTerminalObserver }> {
-    try { validateRunId(runId); } catch { throw new DaemonRequestError(400, "RunId 无效。 "); }
-    const runtime = this.#runs.get(runId);
-    if (!runtime) throw new DaemonRequestError(409, "该 Run 不在当前 daemon 的可观察生命周期内。请先显式重新连接旧会话。 ");
-    const controlling = this.#runControlRequests.get(runId);
-    if (controlling) throw new DaemonRequestError(409, `该 Run 正在执行 ${controlling.kind}，暂不允许打开终端。`);
-    if (runtime.snapshot().status !== "running") throw new DaemonRequestError(409, "当前 Run 状态不允许打开终端。 ");
-    let node: import("../runtime/run-types").AgentNodeSnapshot;
-    try { node = runtime.state.agent(nodeId); } catch { throw new DaemonRequestError(404, "该 Run 中不存在 Agent 节点。 "); }
-    if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) throw new DaemonRequestError(409, "当前 Agent 状态不允许打开终端。 ");
-    const session = runtime.state.viewerSession(nodeId);
-    if (!session || session.agentSessionId !== node.agentSessionId) throw new DaemonRequestError(409, "该 Agent 缺少当前受管终端会话。 ");
-    const key = terminalKey(runId, nodeId, node.agentSessionId);
-    if (!this.#runTasks.has(runId) && !this.#observedSessions.has(key)) throw new DaemonRequestError(409, "该 Agent 不在当前 daemon 的可观察生命周期内。请先显式重新连接旧会话。 ");
-    await this.#terminalClosings.get(key)?.catch(() => {});
-    const existing = this.#terminals.get(key);
-    if (existing) { await existing.observer.verify(); return { key, node, observer: existing.observer }; }
-    let opening = this.#terminalOpenings.get(key);
-    if (!opening) {
-      opening = (async () => {
-        const observer = this.createTerminalObserver(session);
-        await observer.start();
-        const sockets = new Set<ServerWebSocket<TerminalSocketData>>();
-        const unsubscribe = observer.subscribe((data) => { for (const socket of sockets) socket.send(JSON.stringify({ type: "output", data })); });
-        observer.onClose(() => { void this.closeTerminal(key, "session-unavailable"); });
-        const entry = { observer, sockets, unsubscribe };
-        this.#terminals.set(key, entry);
-        return entry;
-      })().finally(() => this.#terminalOpenings.delete(key));
-      this.#terminalOpenings.set(key, opening);
-    }
-    const created = await opening;
-    return { key, node, observer: created.observer };
-  }
-
-  private openTerminalSocket(socket: ServerWebSocket<TerminalSocketData>): void {
-    const terminal = this.#terminals.get(socket.data.key);
-    if (!terminal) { socket.send(JSON.stringify({ type: "closed", reason: "terminal-unavailable" })); socket.close(); return; }
-    terminal.sockets.add(socket);
-    void terminal.observer.verify().then(() => {
-      if (!terminal.sockets.has(socket)) return;
-      for (const data of terminal.observer.replayAfter(socket.data.after)) socket.send(JSON.stringify({ type: "output", data }));
-      socket.send(JSON.stringify({ type: "ready" }));
-    }).catch(() => { socket.send(JSON.stringify({ type: "closed", reason: "session-unavailable" })); socket.close(); });
-  }
-
-  private async receiveTerminalInput(socket: ServerWebSocket<TerminalSocketData>, raw: string): Promise<void> {
-    let message: unknown;
-    try { message = JSON.parse(raw); } catch { socket.send(JSON.stringify({ type: "error", message: "终端消息必须是 JSON。" })); return; }
-    // 浏览器终端在初始化、失焦或扩展交接时可能出现非业务帧。它们既不是
-    // input 也不是 resize：直接忽略，绝不转发给 tmux，也不把无害噪声显示给用户。
-    // 真正可改变终端的两类消息仍在下面经过完整 shape 与 identity 校验。
-    if (!isTerminalInput(message) && !isTerminalResize(message)) return;
-    try {
-      const terminal = await this.requireTerminal(socket.data.runId, socket.data.nodeId);
-      if (terminal.key !== socket.data.key) throw new DaemonRequestError(409, "终端会话已变化。 ");
-      if (isTerminalInput(message)) await terminal.observer.input(message.data);
-      else {
-        await terminal.observer.resize(message.cols, message.rows);
-        // tmux resize 会触发 Codex 重绘，但浏览器不能靠“等下一帧”猜它何时到达。
-        // 这里主动取同一 pane 的新快照，作为 resize 后的完整、可显示基线。
-        await Bun.sleep(80);
-        const refreshed = await terminal.observer.initialScreen();
-        socket.send(JSON.stringify({ type: "reset", screen: refreshed.screen, cols: refreshed.cols, rows: refreshed.rows }));
-      }
-    } catch (error) { socket.send(JSON.stringify({ type: "closed", reason: error instanceof Error ? error.message : "terminal-unavailable" })); socket.close(); }
-  }
-
-  private closeTerminalSocket(socket: ServerWebSocket<TerminalSocketData>): void {
-    const terminal = this.#terminals.get(socket.data.key);
-    if (!terminal) return;
-    terminal.sockets.delete(socket);
-    if (terminal.sockets.size === 0) void this.closeTerminal(socket.data.key, "no-viewers");
-  }
-
-  private async closeRunTerminals(runId: string, reason: string): Promise<void> {
-    await Promise.all([...this.#terminals.entries()].filter(([key]) => key.startsWith(`${runId}:`)).map(([key]) => this.closeTerminal(key, reason)));
-  }
-
-  /** 关闭 WebSocket 与 pipe-pane；绝不调用 tmux interrupt 或销毁 Agent。 */
-  private async closeTerminal(key: string, reason: string): Promise<void> {
-    if (this.#terminalClosingKeys.has(key)) return this.#terminalClosings.get(key);
-    const closing = this.#terminalClosings.get(key);
-    if (closing) return closing;
-    const terminal = this.#terminals.get(key);
-    if (!terminal) { await this.#terminalOpenings.get(key)?.catch(() => {}); if (this.#terminals.has(key)) return this.closeTerminal(key, reason); return; }
-    this.#terminals.delete(key);
-    this.#terminalClosingKeys.add(key);
-    const task = (async () => {
-      terminal.unsubscribe();
-      for (const socket of terminal.sockets) { socket.send(JSON.stringify({ type: "closed", reason })); socket.close(); }
-      terminal.sockets.clear();
-      await terminal.observer.close().catch(() => {});
-    })().finally(() => { this.#terminalClosingKeys.delete(key); this.#terminalClosings.delete(key); });
-    this.#terminalClosings.set(key, task);
-    return task;
-  }
-
   private async resumeOnce(runId: string): Promise<RunResponse> {
     if (this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 仍由当前 daemon 执行，不能重复 resume。 ");
     const opened = await RunJournal.open(runId, this.storeRoot);
-    const resumesAcp = opened.events.some((event) => event.type === "agent.session" && event.delivery === "acp");
-    if (!this.deterministicForTest && resumesAcp) await this.#cliRuntimes.resolveSelected("codex");
+    if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
     const manifest = opened.journal.manifest;
     if (manifest.runtimeVersion !== RUNTIME_VERSION) throw new DaemonRequestError(409, `resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${manifest.runtimeVersion} 只能读取。`);
     let source: string;
@@ -1051,9 +793,7 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(manifest.workflowPath, cwd);
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : resumesAcp
-        ? new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand())
-        : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true });
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
     await this.reconcileResumeSessions(runtime, opened.events);
@@ -1082,32 +822,17 @@ export class LocalDaemon {
     this.#controls.set(runId, control);
   }
 
-  /**
-   * 用户已明确授权 resume 后，才检查旧 running / blocked 会话是否仍可验证。
-   * 存活会话不重跑；不可验证会话先成为耐久 interrupted，再允许 Replay 创建新 attempt。
-   */
-  private async reconcileResumeSessions(runtime: RunRuntime, events: readonly import("../journal/types").JournalEvent[]): Promise<void> {
+  /** 用户显式 resume 前将旧 active ACP 节点耐久收敛为 interrupted。 */
+  private async reconcileResumeSessions(runtime: RunRuntime, _events: readonly import("../journal/types").JournalEvent[]): Promise<void> {
     const unverifiable: import("../runtime/run-types").AgentNodeSnapshot[] = [];
     for (const node of runtime.snapshot().phases.flatMap((phase) => phase.agents)) {
       if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;
-      const sessionEvent = sessionFor(events, node.id, node.agentSessionId);
-      // ACP 没有可与本机进程/终端身份绑定的跨 daemon reclaim 证据。用户已显式
-      // 授权 resume 时，旧 ACP session 一律 interrupted 并以新的 ACP Worker attempt
-      // 重跑；绝不把 session/load 成功误称为原 Worker 身份认领。
-      if (sessionEvent?.delivery === "acp") {
-        unverifiable.push(node);
-        continue;
-      }
-      const viewer = runtime.state.viewerSession(node.id) ?? sessionEvent?.session;
-      const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
-      const verified = !!viewer && await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined);
-      if (verified) throw new DaemonRequestError(409, `resume 遇到仍可验证的旧会话：${node.id}；仅恢复 Control，不创建新 attempt。`);
       unverifiable.push(node);
     }
     // 所有旧会话均已确认不可验证后，才写 interrupted。避免一个并行节点仍存活时，
     // 已遍历到的其他节点被部分修改，随后 resume 又整体被拒绝。
     for (const node of unverifiable) {
-      const event: import("../journal/types").JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: runtime.snapshot().id, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "用户显式 resume 时旧会话无法验证。", status: "interrupted" };
+      const event: import("../journal/types").JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: runtime.snapshot().id, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "用户显式 resume 时不认领旧 ACP 会话。", status: "interrupted" };
       await runtime.journal.append(event);
       runtime.state.apply(event);
     }
@@ -1138,81 +863,6 @@ export class LocalDaemon {
     if (isLiveRunStatus(runtime.snapshot().status)) throw new DaemonRequestError(409, "Run 仍在受管生命周期内，但当前 daemon 未持有其权威状态；请启动或恢复 daemon。");
     this.#runs.set(runId, runtime);
     return { runId, snapshot: runtime.snapshot() };
-  }
-
-  /**
-   * 验证并重建旧受管 Agent 的 Control 节点；不创建 turn、不重发 Prompt。
-   * 仅为本次 reclaim 控制操作恢复内存索引，Workflow 下游调度仍须用户 resume。
-   */
-  private async reclaimControl(request: Pick<ReclaimCompletionSubmission, "runId" | "nodeId" | "agentSessionId">): Promise<ControlServer> {
-    let runtime = this.#runs.get(request.runId);
-    const wasInMemory = !!runtime;
-    if (!runtime) {
-      runtime = await RunRuntime.open(request.runId, new DeterministicExecutor(), this.storeRoot);
-    }
-    // 同一 daemon 内的节点已由短期 capability 注册；显式稳定身份仅用于定位，
-    // 不应再次探测真实 tmux/App Server，避免短暂探测错误影响正常控制调用。
-    // 影响正常运行中的 block / complete。并行 Run 的另一个未注册节点才继续恢复。
-    const active = this.#controls.get(request.runId);
-    // 当前 daemon 自己启动的节点已有短期 capability 与活跃执行器，不能因一次
-    // 探测瞬断中断正常控制；但跨 daemon 认领的旧会话没有这些内存保证，每次
-    // complete/block/continue 都必须重新验证 tmux identity 与原 App Server thread。
-    const opened = await RunJournal.open(request.runId, this.storeRoot);
-    const sessionEvent = sessionFor(opened.events, request.nodeId, request.agentSessionId);
-    // ACP 没有 tmux identity 可在重连时验证。当前 daemon 的 ACP Worker 必须携带
-    // 短期 capability 走 active Control；稳定三元组不得退回 reclaim 路由绕过它。
-    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId) && this.#runTasks.has(request.runId)) {
-      if (sessionEvent?.delivery === "acp") throw new DaemonRequestError(409, "当前 ACP Worker 必须携带短期 capability 走 active Control 路由。 ");
-      return active;
-    }
-    const viewer = runtime.state.viewerSession(request.nodeId) ?? sessionEvent?.session;
-    const binding = runtime.state.appServerBinding(request.nodeId) ?? sessionEvent?.appServer;
-    if (!viewer?.reclaimTokenHash) throw new DaemonRequestError(409, "该旧会话缺少受管 identity，不能跨 daemon 认领。");
-    const snapshot = runtime.state.agent(request.nodeId);
-    if ((snapshot.status !== "running" && snapshot.status !== "blocked") || snapshot.agentSessionId !== request.agentSessionId) throw new DaemonRequestError(409, "只能认领当前 running 或 blocked 的旧 Agent 会话。");
-    if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) throw new DaemonRequestError(409, "旧 tmux 或 App Server thread 无法验证，拒绝认领。");
-    if (active?.hasNode(request.runId, request.nodeId, request.agentSessionId)) return active;
-    const control = this.restoreControl(runtime, opened, snapshot, viewer);
-    if (!wasInMemory) this.#runs.set(request.runId, runtime);
-    return control;
-  }
-
-  /**
-   * 用户答案抵达早于旧 Agent 重连时，从 Journal 恢复唯一 pending block。
-   * 仍先验证旧 tmux / App Server；不会创建 Agent、turn 或新的 block 事实。
-   */
-  private async restoreBlockedControl(blockRequestId: string): Promise<ControlServer | null> {
-    let names: string[];
-    try { names = await readdir(this.storeRoot); } catch { return null; }
-    for (const runId of names) {
-      try {
-        const opened = await RunJournal.open(runId, this.storeRoot);
-        const runtime = this.#runs.get(runId) ?? await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
-        const node = runtime.snapshot().phases.flatMap((phase) => phase.agents).find((agent) => agent.status === "blocked" && agent.block?.blockRequestId === blockRequestId);
-        if (!node?.agentSessionId) continue;
-        const sessionEvent = sessionFor(opened.events, node.id, node.agentSessionId);
-        const viewer = runtime.state.viewerSession(node.id) ?? sessionEvent?.session;
-        const binding = runtime.state.appServerBinding(node.id) ?? sessionEvent?.appServer;
-        if (!viewer?.reclaimTokenHash) continue;
-        if (!await this.verifyReclaimSession(viewer, binding ? { endpoint: binding.endpoint, threadId: binding.threadId } : undefined)) continue;
-        const control = this.restoreControl(runtime, opened, runtime.state.agent(node.id), viewer);
-        this.#runs.set(runId, runtime);
-        return control;
-      } catch { /* 某个无关或损坏 Run 不得阻止其他 pending block 的精确路由。 */ }
-    }
-    return null;
-  }
-
-  /** 已验证 Session 后重建单个 Control；只恢复内存索引和 pending block。 */
-  private restoreControl(runtime: RunRuntime, opened: Awaited<ReturnType<typeof RunJournal.open>>, snapshot: import("../runtime/run-types").AgentNodeSnapshot, viewer: import("../sessions/types").SessionIdentity): ControlServer {
-    const existing = this.#controls.get(runtime.snapshot().id);
-    if (existing?.hasNode(runtime.snapshot().id, snapshot.id, snapshot.agentSessionId!)) return existing;
-    const block = snapshot.status === "blocked" ? recoveredBlock(opened.events, runtime.snapshot().id, snapshot.id, snapshot.agentSessionId!, snapshot.block?.blockRequestId) : undefined;
-    if (snapshot.status === "blocked" && !block) throw new DaemonRequestError(409, "旧 blocked 节点缺少可恢复的 Journal block。");
-    const control = existing ?? runtime.createControlServer();
-    control.restore({ runId: runtime.snapshot().id, nodeId: snapshot.id, agentSessionId: snapshot.agentSessionId!, reclaimTokenHash: viewer.reclaimTokenHash!, session: viewer, ...(block ? { block } : {}) });
-    if (!existing) this.#controls.set(runtime.snapshot().id, control);
-    return control;
   }
 
   /**
@@ -1261,48 +911,8 @@ export class LocalDaemon {
   private json(value: unknown, status = 200): Response { return Response.json(value, { status }); }
 }
 
-type TerminalSocketData = { readonly key: string; readonly runId: string; readonly nodeId: string; readonly after: number };
-
 function isControlBoundExecutor(value: AgentNodeExecutor): value is ControlBoundExecutor {
   return typeof (value as Partial<ControlBoundExecutor>).bindControl === "function";
-}
-
-function terminalKey(runId: string, nodeId: string, agentSessionId: string): string { return `${runId}:${nodeId}:${agentSessionId}`; }
-
-function isTerminalInput(value: unknown): value is { readonly type: "input"; readonly data: string } {
-  return !!value && typeof value === "object" && !Array.isArray(value)
-    && (value as { type?: unknown }).type === "input"
-    && typeof (value as { data?: unknown }).data === "string";
-}
-
-function isTerminalResize(value: unknown): value is { readonly type: "resize"; readonly cols: number; readonly rows: number } {
-  return !!value && typeof value === "object" && !Array.isArray(value)
-    && (value as { type?: unknown }).type === "resize"
-    && Number.isInteger((value as { cols?: unknown }).cols) && Number.isInteger((value as { rows?: unknown }).rows)
-    && (value as { cols: number }).cols >= 20 && (value as { cols: number }).cols <= 500
-    && (value as { rows: number }).rows >= 5 && (value as { rows: number }).rows <= 200;
-}
-
-/** 从已验证的 Journal 事实重建一个仍 pending 的 block，不写入任何新事件。 */
-function recoveredBlock(events: readonly import("../journal/types").JournalEvent[], runId: string, nodeId: string, agentSessionId: string, blockRequestId: string | undefined): { readonly blockRequestId: string; readonly needHelp: string; readonly answerSchema?: import("../shared/workflow-types").JsonSchema; readonly answer: import("../shared/json").JsonObject | null } | null {
-  if (!blockRequestId) return null;
-  const created = events.find((event): event is Extract<import("../journal/types").JournalEvent, { type: "block.created" }> => event.type === "block.created" && event.runId === runId && event.nodeId === nodeId && event.agentSessionId === agentSessionId && event.blockRequestId === blockRequestId);
-  if (!created) return null;
-  const answered = events.find((event): event is Extract<import("../journal/types").JournalEvent, { type: "block.answered" }> => event.type === "block.answered" && event.runId === runId && event.nodeId === nodeId && event.agentSessionId === agentSessionId && event.blockRequestId === blockRequestId);
-  return { blockRequestId, needHelp: created.needHelp, ...(created.answerSchema ? { answerSchema: created.answerSchema } : {}), answer: answered?.answer ?? null };
-}
-
-function sessionFor(events: readonly import("../journal/types").JournalEvent[], nodeId: string, agentSessionId: string): Extract<import("../journal/types").JournalEvent, { type: "agent.session" }> | undefined {
-  return [...events].reverse().find((event): event is Extract<import("../journal/types").JournalEvent, { type: "agent.session" }> => event.type === "agent.session" && event.nodeId === nodeId && event.agentSessionId === agentSessionId);
-}
-
-/** 生产 reclaim 同时验证旧 tmux injected identity 与旧 App Server 的同一 thread；不创建 turn。 */
-async function verifyReclaimSession(session: import("../sessions/types").SessionIdentity, appServer: { readonly endpoint: string; readonly threadId: string } | undefined): Promise<boolean> {
-  const backend = new TmuxSessionBackend(new TmuxCommandClient(session.backendRef));
-  if (await backend.liveness(session) !== "exists") return false;
-  if (!appServer) return true;
-  const adapter = new CodexAppServerAdapter(appServer.endpoint, bunCodexAppServerConnection);
-  try { await adapter.verifyExistingThread(appServer.threadId, new AbortController().signal); return true; } catch { return false; } finally { await adapter.close().catch(() => {}); }
 }
 
 /**
@@ -1325,7 +935,7 @@ function isEmptyObject(value: unknown): value is Record<string, never> {
 function isCreateRunRequest(value: unknown): value is CreateRunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
-  return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean") && (request.workerTransport === undefined || request.workerTransport === "codex-app-server" || request.workerTransport === "codex-acp");
+  return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input);
 }
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
