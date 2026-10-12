@@ -60,7 +60,6 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     return this.executor.recover(node, signal);
   }
 
-
   /** 终止真实节点；与 pause 不同，执行器必须让等待中的 agent() 返回错误。 */
   stopNode(node: import("./run-types").AgentNodeSnapshot): Promise<void> {
     if (!this.executor.stop) throw new Error(`节点 ${node.id} 的执行器不支持 stop。`);

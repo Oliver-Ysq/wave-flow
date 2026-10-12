@@ -17,6 +17,8 @@ export class HarnessService {
   #mutations = new Map<string, Promise<void>>();
   /** 回合内 request_user_decision 的等待者；键为 harnessRunId:decisionId。 */
   #decisionWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
+  /** 每会话的 HarnessSession 工厂；生产注入用户验证的 ACP 主控，测试注入确定性实现。 */
+  private readonly createSession: (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
   constructor(
     private readonly root = harnessRunsRoot(),
     factoryOrResolve: ((harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>) | (() => Promise<ResolvedHarnessModelConfig | null>),
@@ -32,8 +34,6 @@ export class HarnessService {
       };
     } else this.createSession = factoryOrResolve as (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
   }
-
-  private readonly createSession: (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
 
   /** 在已验证项目 cwd 内创建会话；projectId 只由 Project Store 提供。 */
   async create(cwd: string, projectId = "test-project"): Promise<HarnessSnapshot> {

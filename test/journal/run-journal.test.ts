@@ -145,4 +145,21 @@ describe("RunJournal", () => {
     await journal.append({ type: "block.answered", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, blockRequestId, answer: { approved: "yes" } });
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("answer-schema");
   });
+
+  test("重开时拒绝非 ACP 投递的 agent.session 事实", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: "legacy", delivery: "tmux" })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("必须是有效 ACP binding");
+  });
+
+  test("重开时拒绝缺少 ACP 坐标的 agent.recovered 事实", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "agent.recovered", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("agent.recovered payload 无效");
+  });
 });

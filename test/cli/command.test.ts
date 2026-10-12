@@ -29,8 +29,6 @@ describe("CLI run / inspect", () => {
     expect(() => parseCommand(["run", "flow.ts", "--input", "[]"], "/workspace")).toThrow("JSON-safe 对象");
   });
 
-
-
   test("start 只确保测试 daemon 可用，不创建 Run", async () => {
     const lines: string[] = [];
     await main(["start"], process.cwd(), (line) => { lines.push(line); }, true);
@@ -45,8 +43,6 @@ describe("CLI run / inspect", () => {
       expect.stringMatching(/^Wave Flow Local Web：http:\/\/127\.0\.0\.1:\d+\/$/),
     ]);
   });
-
-
 
   test("创建 Run 的传输层重试复用同一 clientRequestId", async () => {
     const bodies: string[] = [];

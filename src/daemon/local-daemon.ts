@@ -177,7 +177,7 @@ export class LocalDaemon {
   }
 
   /** daemon 重启后，旧 ACP active 节点一律 interrupted；恢复只能由用户显式 resume 发起。 */
-  async reconnectExistingTerminalSessions(): Promise<void> {
+  async convergeStaleAcpWorkers(): Promise<void> {
     let runIds: string[];
     try { runIds = await readdir(this.storeRoot); } catch { return; }
     for (const runId of runIds) {
@@ -796,7 +796,7 @@ export class LocalDaemon {
       : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
-    await this.reconcileResumeSessions(runtime, opened.events);
+    await this.reconcileResumeSessions(runtime);
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
       const control = runtime.createControlServer();
       baseExecutor.bindControl(control);
@@ -823,7 +823,7 @@ export class LocalDaemon {
   }
 
   /** 用户显式 resume 前将旧 active ACP 节点耐久收敛为 interrupted。 */
-  private async reconcileResumeSessions(runtime: RunRuntime, _events: readonly import("../journal/types").JournalEvent[]): Promise<void> {
+  private async reconcileResumeSessions(runtime: RunRuntime): Promise<void> {
     const unverifiable: import("../runtime/run-types").AgentNodeSnapshot[] = [];
     for (const node of runtime.snapshot().phases.flatMap((phase) => phase.agents)) {
       if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;

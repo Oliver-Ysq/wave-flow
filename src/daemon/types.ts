@@ -44,7 +44,7 @@ export type RunListItem = {
   readonly hasBlockedAgent: boolean;
 };
 
-/** 菜单栏与桌面升级页读取的 daemon 权威摘要；只暴露计数，不泄露终端或 Journal 内容。 */
+/** 菜单栏读取的 daemon 权威摘要；只暴露计数，不泄露会话或 Journal 内容。 */
 export type DaemonStatusResponse = {
   /** 当前 daemon 的发现协议版本。 */
   readonly protocolVersion: number;

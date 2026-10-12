@@ -55,7 +55,7 @@ test("新 daemon 将旧 ACP active 节点收敛为 interrupted", async () => {
   for (const event of [agent, running, binding]) await journal.append(event);
   const daemon = new LocalDaemon({ deterministicForTest: true, storeRoot: store, harnessRoot: join(root, "harness-runs") }); daemons.push(daemon);
   daemon.start();
-  await daemon.reconnectExistingTerminalSessions();
+  await daemon.convergeStaleAcpWorkers();
   const reopened = await RunJournal.open(manifest.runId, store);
   expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.status", nodeId: "worker", status: "interrupted" }));
   expect(reopened.events).toContainEqual(expect.objectContaining({ type: "run.status", status: "interrupted" }));

@@ -1,4 +1,4 @@
-import { processStartIdentity, readFreshDescriptor, removeDeadDaemonArtifacts, type DaemonDescriptor } from "./daemon-descriptor";
+import { DAEMON_PROTOCOL_VERSION, processStartIdentity, readFreshDaemonCandidate, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeDeadDaemonArtifacts, type DaemonDescriptor } from "./daemon-descriptor";
 import { isAbsolute } from "node:path";
 import { runtimeRoot } from "../journal/paths";
 
@@ -16,6 +16,12 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
     progress?.(`已验证并复用 daemon（PID ${existing.descriptor.pid}）。`);
     return existing;
   }
+  // 桌面升级页靠“协议版本”子串识别可升级旧 daemon（见 web/src/main.tsx）；
+  // 改动这两条诊断文案时必须同步检查该契约，否则用户只会看到无操作的启动超时。
+  const legacyProtocol = await readFreshDescriptorProtocol();
+  if (legacyProtocol !== null && legacyProtocol !== DAEMON_PROTOCOL_VERSION) throw new Error(`现有 Wave Flow daemon 协议版本为 ${legacyProtocol}，当前版本需要 ${DAEMON_PROTOCOL_VERSION}；请在桌面端确认升级重启，或先停止旧 daemon 后重试。`);
+  const incompatibleProtocol = await readIncompatibleFreshDescriptor();
+  if (incompatibleProtocol !== null) throw new Error(`检测到协议版本为 ${incompatibleProtocol} 但 descriptor 格式过旧的 Wave Flow daemon；请先停止旧 daemon 后重试。`);
   if (daemonExecutable !== undefined && !isAbsolute(daemonExecutable)) throw new Error("桌面 daemon sidecar 必须使用绝对路径。");
   const entry = new URL("./daemon-main.ts", import.meta.url).pathname;
   progress?.("未发现可复用 daemon，启动新的 loopback daemon…");
@@ -34,19 +40,24 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
 }
 
 /**
- * 桌面端用户明确确认后才调用。仅当前协议 daemon 可经自身 API 重启；
- * 不能验证的 descriptor 一律拒绝接管。
+ * 桌面端用户明确确认升级后才调用。旧 daemon 必须先以自身 loopback API 优雅退出；
+ * 身份、health 或关闭接口无法验证时 fail closed，绝不盲目杀进程。
  */
 export async function restartGlobalDaemon(timeoutMs = 20_000, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>): Promise<ConnectedDaemon> {
   const current = await discoverDaemon();
   if (current) await requestVerifiedDaemonClose(current.descriptor, current.baseUrl);
-  else throw new Error("没有可验证的当前协议 daemon，拒绝接管或重启未知后台服务。 ");
+  else {
+    // 当前协议不可复用时，仍给字段齐全的旧协议 daemon 一次受控优雅退出机会；
+    // 无法验证身份的旧 daemon 会在下面的遗留清理等待中原样暴露，绝不接管。
+    const legacy = await readFreshDaemonCandidate();
+    if (legacy) await requestVerifiedDaemonClose(legacy, `http://127.0.0.1:${legacy.port}`);
+  }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (await removeDeadDaemonArtifacts()) break;
     await delay(50);
   }
-  if (!await removeDeadDaemonArtifacts()) throw new Error("daemon 未在确认时间内退出；为保护运行任务，拒绝启动第二个后台服务。 ");
+  if (!await removeDeadDaemonArtifacts()) throw new Error("旧 daemon 未在确认时间内退出；为保护运行任务，拒绝启动第二个后台服务。 ");
   return ensureGlobalDaemon(timeoutMs, undefined, daemonExecutable, daemonEnv);
 }
 

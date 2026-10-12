@@ -5,7 +5,11 @@ import type { RuntimeProvenance } from "../runtimes/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
 export const RUNTIME_VERSION = 9;
-/** 当前实现可安全读取的历史耐久格式；旧格式只读兼容，不允许追加新的 Replay attempt。 */
+/**
+ * 当前实现可安全读取的耐久格式。ACP-only 切换后不再读取任何历史版本：
+ * 旧 archive 的 tmux/App Server 事实无法在新格式下验证，只能整体视为不可读，
+ * 而不是只读展示一份无法校验语义的记录。
+ */
 export const COMPATIBLE_RUNTIME_VERSIONS = [RUNTIME_VERSION] as const;
 
 /** Harness 原生 Execution 的来源绑定；受信任作者入口创建的 Run 没有此字段。 */

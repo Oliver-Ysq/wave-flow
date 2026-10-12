@@ -810,7 +810,7 @@ export function App() {
   );
 }
 
-/** 活跃任务也允许用户重启；此确认明确限定“重连终端、不自动重跑”的语义。 */
+/** 活跃任务也允许用户重启；此确认明确限定“收敛为已中断、不自动重跑”的语义。 */
 function DaemonRestartModal({
   onClose,
   onError,
@@ -842,14 +842,14 @@ function DaemonRestartModal({
             <span className="modal-kicker">后台服务</span>
             <strong>现在重启后台服务？</strong>
             <p>
-              工作台会短暂重新连接。正在进行的任务不会重复执行，能恢复的任务会自动回到原来的现场。
+              工作台会短暂重新连接。正在进行的任务不会重复执行，而是明确标记为已中断。
             </p>
           </div>
         </header>
         <section className="connection-form">
           <div className="restart-notice">
             <span>完成后</span>
-            <p>如果某个任务无法自动继续，工作台会告诉你下一步该怎么做。</p>
+            <p>被中断的任务可以在工作台由你显式恢复；Wave Flow 不会自动重跑。</p>
           </div>
           <footer className="modal-actions">
             <button

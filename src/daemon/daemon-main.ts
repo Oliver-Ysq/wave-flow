@@ -26,7 +26,7 @@ if (process.argv[2] === "__codex-acp") {
     const server = daemon.start();
     // ACP 不跨 daemon 认领。每次新 daemon 启动都必须把旧 active 节点耐久收敛为
     // interrupted；不能依赖桌面重启专用环境变量，否则 CLI 重启会留下假 running。
-    await daemon.reconnectExistingTerminalSessions();
+    await daemon.convergeStaleAcpWorkers();
     const startedAt = await processStartIdentity(process.pid);
     const descriptor = () => ({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId, port: Number(new URL(server.baseUrl).port), pid: process.pid, processStartIdentity: startedAt, heartbeatAt: new Date().toISOString() } as const);
     await publishDescriptor(descriptor());
