@@ -2,10 +2,10 @@ import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
 import type { JsonObject } from "../shared/json";
 import type { NormalizedAgentRequest } from "../shared/workflow-types";
-import type { WorkflowExecutionHost } from "./workflow-host";
+import type { DecisionGateRequest, WorkflowExecutionHost } from "./workflow-host";
 import type { ExecutionBatch, PhaseVisit } from "./workflow-host";
 import type { AgentNodeExecutor } from "./run-types";
-import { RunStateMachine } from "./run-state-machine";
+import { RunStateMachine, validateGateAnswer } from "./run-state-machine";
 import { WorkflowContractError } from "../workflow/errors";
 import { requireCapabilities } from "../adapters/capabilities";
 import { isDeepStrictEqual } from "node:util";
@@ -25,6 +25,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #phaseOccurrences = new Map<string, number>();
   #replayAttemptStarted = false;
   #replayPhaseTitle: string | null = null;
+  /** 等待用户答案的决策门；stop 时必须拒绝，避免 Workflow 永远悬挂。 */
+  #gateWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
 
   constructor(
     private readonly journal: RunJournal,
@@ -179,6 +181,50 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   log(message: string): void {
     if (this.replay) return;
     void this.captureBackgroundFailure(this.durableApply(this.event({ type: "log.written", nodeId: null, message })));
+  }
+
+  /**
+   * 脚本显式决策门：先耐久 gate.created 再等待用户答案；replay 时同一 id 的
+   * 问题与 Schema 必须完全一致，已回答的直接返回耐久答案，不重复写入。
+   */
+  async decisionGate(request: DecisionGateRequest, phaseVisit: PhaseVisit | null): Promise<JsonObject> {
+    const existing = this.state.gate(request.id);
+    if (existing) {
+      if (existing.question !== request.question || !isDeepStrictEqual(existing.answerSchema, request.answerSchema)) throw new WorkflowContractError(`decisionGate 与已耐久决策门不匹配：${request.id}`);
+      if (!this.replay) throw new WorkflowContractError(`decisionGate 的 id 在同一 Run 内必须唯一：${request.id}`);
+      if (existing.answer !== null) return existing.answer;
+      return this.waitForGateAnswer(request.id);
+    }
+    const created = this.event({ type: "gate.created", nodeId: null, gateId: request.id, question: request.question, answerSchema: request.answerSchema, executionAttemptId: this.state.snapshot().currentExecutionAttemptId, phaseVisitId: phaseVisit?.phaseVisitId ?? null });
+    await this.durableApply(created);
+    return this.waitForGateAnswer(request.id);
+  }
+
+  /** daemon 答题入口：先于 Journal 写入校验 Schema；答案只唤醒等待同一 gate 的脚本调用。 */
+  async answerGate(gateId: string, answer: JsonObject): Promise<void> {
+    const gate = this.state.gate(gateId);
+    if (!gate) throw new WorkflowContractError(`未知决策门：${gateId}`);
+    if (gate.answer !== null) throw new WorkflowContractError(`决策门已回答：${gateId}`);
+    // Schema 拒绝必须先发生于任何耐久写入，否则坏答案会污染 Journal 并阻断重开。
+    validateGateAnswer(gate.answerSchema, answer);
+    await this.durableApply(this.event({ type: "gate.answered", nodeId: null, gateId, answer }));
+    const waiter = this.#gateWaiters.get(gateId);
+    if (waiter) {
+      this.#gateWaiters.delete(gateId);
+      waiter.resolve(answer);
+    }
+  }
+
+  /** stop 时拒绝全部 pending 决策门，让 Workflow 调用栈随节点一起收敛。 */
+  rejectPendingGates(diagnostic: string): void {
+    for (const [gateId, waiter] of this.#gateWaiters) waiter.reject(new Error(diagnostic));
+    this.#gateWaiters.clear();
+  }
+
+  private waitForGateAnswer(gateId: string): Promise<JsonObject> {
+    return new Promise<JsonObject>((resolve, reject) => {
+      this.#gateWaiters.set(gateId, { resolve, reject });
+    });
   }
 
   /** 等待同步作者 API 排队的 Journal 写入，供 Run 收尾前建立 durable barrier。 */

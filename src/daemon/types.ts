@@ -1,6 +1,7 @@
 import type { JsonObject } from "../shared/json";
-import type { HarnessMessage, HarnessSnapshot, HarnessStatus } from "../harness/types";
+import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord } from "../harness/types";
 import type { HarnessConfigStatus, ResolvedHarnessModelConfig } from "../harness/config";
+import type { HarnessProject } from "../harness/projects";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
 
 /** 创建 Run 的 loopback API 请求；Workflow 路径相对于 cwd 解析。 */
@@ -143,9 +144,22 @@ export type ReclaimTerminalResponse = TerminalOpenResponse;
 
 /** 创建只读 Harness 主控会话的 loopback 请求；不创建 Workflow Run 或 Worker。 */
 export type CreateHarnessRunRequest = {
-  /** 用户选择的本地项目目录；daemon 必须 realpath 校验。 */
-  readonly cwd: string;
+  /** 已选择的耐久项目 id；daemon 从 Project Store 获取 cwd。 */
+  readonly projectId: string;
 };
+/** 首次发送创建 Harness；草稿文本只在浏览器内存中，daemon 仅在此请求抵达后创建档案。 */
+export type StartHarnessConversationRequest = {
+  /** 已选择的耐久项目 id；daemon 从 Project Store 获取 cwd。 */
+  readonly projectId: string;
+  /** 新会话的首条非空用户消息；成功后才产生 Harness manifest 与 Journal。 */
+  readonly text: string;
+};
+/** 创建侧边栏项目；cwd 会 realpath 校验，title 省略时取目录名。 */
+export type CreateHarnessProjectRequest = { readonly cwd: string; readonly title?: string };
+/** 创建或查询单个侧边栏项目。 */
+export type HarnessProjectResponse = { readonly project: HarnessProject };
+/** 当前用户全部耐久项目。 */
+export type HarnessProjectListResponse = { readonly projects: readonly HarnessProject[] };
 
 /** Harness 主控会话的 daemon 权威响应。 */
 export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
@@ -163,3 +177,39 @@ export type HarnessMessagesResponse = { readonly harnessRunId: string; readonly 
 export type ProposeWorkflowRevisionRequest = { readonly source: string };
 /** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
 export type AcceptWorkflowRevisionRequest = { readonly revision: number };
+
+/** 创建 WorkflowExecution 的 loopback 请求；只能绑定已接受冻结的 revision。 */
+export type CreateExecutionRequest = {
+  /** 已接受冻结的 revision 序号；草稿序号必须被拒绝。 */
+  readonly revision: number;
+  /** 传给受限脚本 run(args) 的 JSON-safe 输入；省略时为 {}。 */
+  readonly input?: JsonObject;
+};
+
+/** Execution 创建、控制或答题后的权威响应。 */
+export type ExecutionResponse = {
+  /** Execution 登记事实；终态与摘要由 harness.execution_finished 固定。 */
+  readonly execution: WorkflowExecutionRecord;
+  /** Execution 内嵌 Run 的 daemon 权威快照；gates 字段携带决策门状态。 */
+  readonly snapshot: RunSnapshot;
+};
+
+/** Harness 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */
+export type ExecutionListResponse = {
+  /** 所属 Harness Run id。 */
+  readonly harnessRunId: string;
+  /** 按创建顺序排列的 Execution 登记。 */
+  readonly executions: readonly WorkflowExecutionRecord[];
+};
+
+/** 用户显式恢复中断的 Execution；必须明确授权，daemon 重启绝不自动继续。 */
+export type ResumeExecutionRequest = {
+  /** true 代表用户确认允许同一冻结 revision 创建新的 executionAttempt。 */
+  readonly authorized: true;
+};
+
+/** 用户对脚本决策门或主控决策请求提交 JSON 答案；答案不自动推进任何节点状态。 */
+export type AnswerDecisionRequest = {
+  /** 已通过对应 answerSchema 校验前的原始 JSON 对象；daemon 负责校验。 */
+  readonly answer: JsonObject;
+};

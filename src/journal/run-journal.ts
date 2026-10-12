@@ -160,6 +160,12 @@ export function validateManifest(value: unknown): RunManifest {
   if (!isJsonObject(manifest.input)) throw new Error("Manifest input 必须为 JSON-safe 对象。");
   if (typeof manifest.createdAt !== "string" || Number.isNaN(Date.parse(manifest.createdAt))) throw new Error("Manifest createdAt 无效。");
   if (!isWorkflowMeta(manifest.workflow)) throw new Error("Manifest workflow 无效。");
+  if (manifest.harness !== undefined) {
+    const harness = manifest.harness as Record<string, unknown>;
+    if (!isPlainObject(harness)) throw new Error("Manifest harness 绑定无效。");
+    try { validateRunId(String(harness.harnessRunId)); } catch { throw new Error("Manifest harness.harnessRunId 无效。"); }
+    if (!Number.isInteger(harness.revision) || (harness.revision as number) < 1 || !/^[0-9a-f]{64}$/i.test(String(harness.sourceHash)) || harness.sourceHash !== manifest.workflowHash) throw new Error("Manifest harness 绑定无效。");
+  }
   return manifest as unknown as RunManifest;
 }
 
@@ -221,6 +227,12 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       break;
     case "agent.continued":
       if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim()) throw new Error("agent.continued payload 无效。");
+      break;
+    case "gate.created":
+      if (event.nodeId !== null || event.agentSessionId !== null || typeof event.gateId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(event.gateId) || typeof event.question !== "string" || !event.question.trim() || (event.answerSchema !== undefined && !isJsonObject(event.answerSchema)) || !isPositiveInteger(event.executionAttemptId) || (event.phaseVisitId !== null && !isPositiveInteger(event.phaseVisitId))) throw new Error("gate.created payload 无效。");
+      break;
+    case "gate.answered":
+      if (event.nodeId !== null || event.agentSessionId !== null || typeof event.gateId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(event.gateId) || !isJsonObject(event.answer)) throw new Error("gate.answered payload 无效。");
       break;
     case "run.status":
       if (event.nodeId !== null || !isRunStatus(event.status)) throw new Error("run.status payload 无效。");

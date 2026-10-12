@@ -4,9 +4,10 @@ import type { Model } from "@mariozechner/pi-ai";
 import type { HarnessStreamEvent } from "./types";
 import type { ResolvedHarnessModelConfig } from "./config";
 import { createHarnessReadTools } from "./read-tools";
+import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks, createHarnessActionTools } from "./action-tools";
 import { executeReadOnlyProjectQuery, readProjectFile } from "./shell-policy";
 
-/** Pi Harness 的最小适配器：没有工具，因此模型无法在本阶段读取文件、运行 Shell 或启动 Worker。 */
+/** Pi Harness 的受限适配器：只暴露经过 daemon 校验的只读与行动窄工具。 */
 export class PiHarnessSession {
   readonly #agent: Agent;
   readonly #cwd: string;
@@ -19,7 +20,13 @@ export class PiHarnessSession {
   #successfulReadTools = 0;
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
 
-  constructor(config: ResolvedHarnessModelConfig, cwd: string, systemPrompt: string, priorMessages: readonly { readonly role: "user" | "assistant"; readonly text: string }[] = []) {
+  constructor(
+    config: ResolvedHarnessModelConfig,
+    cwd: string,
+    systemPrompt: string,
+    priorMessages: readonly { readonly role: "user" | "assistant"; readonly text: string }[] = [],
+    actions?: HarnessActionCallbacks,
+  ) {
     this.#cwd = cwd;
     const model: Model<"openai-completions"> = {
       id: config.model, name: config.model, api: "openai-completions", provider: "wave-flow-openai-compatible", baseUrl: config.baseUrl,
@@ -29,7 +36,7 @@ export class PiHarnessSession {
       initialState: {
         systemPrompt,
         model,
-        tools: createHarnessReadTools(cwd),
+        tools: [...createHarnessReadTools(cwd), ...(actions ? createHarnessActionTools(actions) : [])],
         messages: priorMessages.map((message) => message.role === "user"
           ? { role: "user" as const, content: message.text, timestamp: Date.now() }
           : { role: "assistant" as const, content: [{ type: "text" as const, text: message.text }], api: "openai-completions", provider: "wave-flow-openai-compatible", model: config.model, usage: zeroUsage(), stopReason: "stop" as const, timestamp: Date.now() }),
@@ -40,11 +47,11 @@ export class PiHarnessSession {
       // registered read tool actually completed successfully.
       streamFn: ((model, context, options) => streamSimpleOpenAICompletions(model as Model<"openai-completions">, context, options)) as import("@mariozechner/pi-agent-core").StreamFn,
       getApiKey: () => config.apiKey,
-      // 仅注册 read-tools.ts 的两种只读工具；此 hook 作为第二道硬门，防止
-      // 后续错误注入工具时扩大主控的 OS/Worker 权限。
+      // 已注册工具以外一律拒绝。行动工具只提出 Journal 化请求，不能直接
+      // 创建 Worker、改变 Execution 状态或伪造完成。
       beforeToolCall: async ({ toolCall }) => {
-        if (toolCall.name === "read_project_file" || toolCall.name === "query_project") return undefined;
-        return { block: true, reason: "Harness Shell Policy 拒绝未注册或非只读工具。" };
+        if (isHarnessToolAllowed(toolCall.name, !!actions)) return undefined;
+        return { block: true, reason: "Harness 工具策略拒绝未注册或越权工具。" };
       },
     });
     this.#agent.subscribe((event) => {
@@ -150,6 +157,11 @@ export class PiHarnessSession {
   }
   private pushReasoning(delta: string): void { if (delta) { this.#reasoningText += delta; this.emit({ type: "reasoning_delta", delta }); } }
   private pushAssistant(delta: string): void { if (delta) { this.#assistantText += delta; this.emit({ type: "assistant_delta", delta }); } }
+}
+
+/** Pi beforeToolCall 的唯一工具白名单；无行动回调的只读会话不得越权。 */
+export function isHarnessToolAllowed(name: string, hasActions: boolean): boolean {
+  return name === "read_project_file" || name === "query_project" || hasActions && (HARNESS_ACTION_TOOL_NAMES as readonly string[]).includes(name);
 }
 
 /** HarnessService 依赖的 Pi 最小接口，允许在不调用模型的情况下验证耐久边界。 */

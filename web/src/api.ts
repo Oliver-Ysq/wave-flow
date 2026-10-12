@@ -1,4 +1,4 @@
-import type { CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, HarnessConfigResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
+import type { CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessConfigResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
 
 async function json<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? undefined : {
@@ -37,10 +37,20 @@ export const api = {
   answer: (blockId: string, answer: Record<string, unknown>) => json(`/blocks/${encodeURIComponent(blockId)}/answer`, { answer }),
   terminal: (runId: string, nodeId: string) => json<TerminalOpenResponse>(`/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal`),
   reclaimTerminal: (runId: string, nodeId: string) => json<ReclaimTerminalResponse>(`/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/terminal/reclaim`, {}),
-  createHarness: (cwd: string) => json<HarnessRunResponse>("/harness-runs", { cwd }),
+  projects: () => json<HarnessProjectListResponse>("/projects"),
+  createProject: (cwd: string, title?: string) => json<HarnessProjectResponse>("/projects", { cwd, ...(title?.trim() ? { title } : {}) }),
+  startHarnessConversation: (projectId: string, text: string) => json<HarnessRunResponse>(`/projects/${encodeURIComponent(projectId)}/harness-messages`, { projectId, text }),
+  createHarness: (projectId: string) => json<HarnessRunResponse>("/harness-runs", { projectId }),
   harness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}`),
   sendHarnessMessage: (harnessRunId: string, text: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/messages`, { text }),
   abortHarness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/abort`, {}),
   proposeWorkflowRevision: (harnessRunId: string, source: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions`, { source }),
   acceptWorkflowRevision: (harnessRunId: string, revision: number) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions/${revision}/accept`, {}),
+  createExecution: (harnessRunId: string, revision: number, input: Record<string, unknown> = {}) => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions`, { revision, input }),
+  executions: (harnessRunId: string) => json<ExecutionListResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions`),
+  execution: (harnessRunId: string, executionId: string) => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions/${encodeURIComponent(executionId)}`),
+  executionControl: (harnessRunId: string, executionId: string, action: "pause" | "recover" | "stop") => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions/${encodeURIComponent(executionId)}/${action}`, {}),
+  resumeExecution: (harnessRunId: string, executionId: string) => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions/${encodeURIComponent(executionId)}/resume`, { authorized: true }),
+  answerExecutionGate: (harnessRunId: string, executionId: string, gateId: string, answer: Record<string, unknown>) => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions/${encodeURIComponent(executionId)}/gates/${encodeURIComponent(gateId)}/answer`, { answer }),
+  answerHarnessDecision: (harnessRunId: string, decisionId: string, answer: Record<string, unknown>) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/decisions/${encodeURIComponent(decisionId)}/answer`, { answer }),
 };

@@ -9,6 +9,14 @@ struct DaemonConnection {
   base_url: String,
 }
 
+/** 桌面壳可转交给 bridge 的唯一环境键；禁止以任意父进程环境替代此白名单。 */
+const SIDECAR_ENV_KEYS: &[&str] = &[
+  "WAVE_FLOW_HOME",
+  "WAVE_FLOW_HARNESS_API_KEY",
+  "WAVE_FLOW_HARNESS_BASE_URL",
+  "WAVE_FLOW_HARNESS_MODEL",
+];
+
 /**
  * 通过随包 bridge 复用 Bun daemon 的 descriptor/health/PID 校验。
  * Rust 只启动 bridge 并返回结果，绝不读取 Journal 或维护 Run 状态。
@@ -24,10 +32,10 @@ async fn ensure_daemon(app: tauri::AppHandle) -> Result<DaemonConnection, String
     .sidecar("wave-flow-desktop-bridge")
     .map_err(|error| format!("无法定位桌面 bridge：{error}"))?
     .env("WF_WEB_DIST", web_dist)
-    // Harness provider 配置仅从启动桌面应用的本机环境继承，并且只转交给
-    // 本机 sidecar。它不会进入 Web、bridge stdout、Journal 或 daemon API。
-    // 这里不把任意环境变量透传给子进程，避免桌面壳意外扩大配置边界。
-    .envs(harness_env())
+    // Harness provider 配置与受控隔离状态根仅从启动桌面应用的本机环境继承，
+    // 并且只转交给本机 sidecar。它们不会进入 Web、bridge stdout、Journal 或
+    // daemon API；这里不透传任意环境变量，避免桌面壳意外扩大配置边界。
+    .envs(sidecar_env())
     .output()
     .await
     .map_err(|error| format!("无法启动桌面 bridge：{error}"))?;
@@ -43,9 +51,9 @@ async fn ensure_daemon(app: tauri::AppHandle) -> Result<DaemonConnection, String
   Ok(connection)
 }
 
-/** 可由桌面应用安全继承的 Harness 本机模型配置；value 是 secret 时不记录或返回。 */
-fn harness_env() -> Vec<(String, String)> {
-  ["WAVE_FLOW_HARNESS_API_KEY", "WAVE_FLOW_HARNESS_BASE_URL", "WAVE_FLOW_HARNESS_MODEL"]
+/** 可安全转交给 sidecar 的明确环境白名单；secret 不记录或返回。 */
+fn sidecar_env() -> Vec<(String, String)> {
+  SIDECAR_ENV_KEYS
     .iter()
     .filter_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()).map(|value| ((*key).to_string(), value)))
     .collect()
@@ -101,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-  use super::{harness_env, validate_loopback_url};
+  use super::{validate_loopback_url, SIDECAR_ENV_KEYS};
 
   #[test]
   fn only_accepts_plain_ipv4_loopback_daemon_urls() {
@@ -113,8 +121,7 @@ mod tests {
   }
 
   #[test]
-  fn harness_environment_allowlist_is_narrow() {
-    let names = harness_env().into_iter().map(|(key, _)| key).collect::<Vec<_>>();
-    assert!(names.iter().all(|key| ["WAVE_FLOW_HARNESS_API_KEY", "WAVE_FLOW_HARNESS_BASE_URL", "WAVE_FLOW_HARNESS_MODEL"].contains(&key.as_str())));
+  fn sidecar_environment_allowlist_is_narrow() {
+    assert_eq!(SIDECAR_ENV_KEYS, ["WAVE_FLOW_HOME", "WAVE_FLOW_HARNESS_API_KEY", "WAVE_FLOW_HARNESS_BASE_URL", "WAVE_FLOW_HARNESS_MODEL"]);
   }
 }

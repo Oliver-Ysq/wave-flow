@@ -150,6 +150,30 @@ describe("HarnessService", () => {
     await Promise.all([service.proposeWorkflowRevision(created.harnessRunId, "one"), service.proposeWorkflowRevision(created.harnessRunId, "two")]);
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1 }, { revision: 2 }] });
   });
+
+  test("当前主控回合可经窄工具耐久草案，用户 API 仍不得在运行中抢写", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-action-revision-")); directories.push(cwd);
+    let actions: import("../../src/harness/action-tools").HarnessActionCallbacks | null = null;
+    let running = false;
+    const pi: HarnessPiSession = {
+      get isRunning() { return running; },
+      subscribe: () => () => {},
+      async prompt() {
+        running = true;
+        await actions!.proposeWorkflowRevision('const meta = { name: "action-revision", description: "来自主控工具", phases: [{ title: "确认" }] };\nasync function run(_args) { phase("确认"); return {}; }');
+        running = false;
+        return "草案已提交";
+      },
+      abort() { running = false; },
+    };
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior, nextActions) => { actions = nextActions; return pi; });
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "请提出草案");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const snapshot = await service.snapshot(created.harnessRunId);
+    expect(snapshot.workflowRevisions).toMatchObject([{ revision: 1, acceptedAt: null }]);
+    expect(snapshot.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "assistant", text: "草案已提交" })]));
+  });
 });
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 1_000): Promise<void> {

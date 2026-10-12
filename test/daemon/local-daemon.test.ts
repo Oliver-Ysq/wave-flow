@@ -122,7 +122,7 @@ describe.serial("LocalDaemon", () => {
       launches += 1;
       const plan = await adapter.launch(request, new AbortController().signal);
       return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
-    }) });
+    }, 1_000, false) });
     daemons.push(first);
     const firstServer = first.start();
     const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);
@@ -189,7 +189,7 @@ describe.serial("LocalDaemon", () => {
       launches += 1;
       const plan = await adapter.launch(request, new AbortController().signal);
       return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
-    }) });
+    }, 1_000, false) });
     daemons.push(first);
     const firstServer = first.start();
     const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then((response) => response.json() as Promise<{ runId: string }>);

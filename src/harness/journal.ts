@@ -1,15 +1,21 @@
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import Ajv from "ajv";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } from "../journal/paths";
-import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowRevision } from "./types";
+import { isJsonObject, type JsonObject } from "../shared/json";
+import type { HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord, WorkflowRevision } from "./types";
 
-/** 独立 Harness 档案格式；不影响既有 Workflow Run Journal 版本。 */
-export const HARNESS_JOURNAL_VERSION = 1;
+/** 独立 Harness 档案格式；v2 增加 WorkflowExecution 登记与主控决策事实，v1 只读兼容。 */
+export const HARNESS_JOURNAL_VERSION = 3;
+/** 可读取的历史 Harness 档案版本。 */
+export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, HARNESS_JOURNAL_VERSION] as const;
 
 export type HarnessManifest = {
   readonly harnessRunId: string;
-  readonly version: 1;
+  /** 创建该 Harness 的耐久项目；历史档案缺失时按未归类处理。 */
+  readonly projectId?: string;
+  readonly version: number;
   readonly cwd: string;
   readonly modelFingerprint: string;
   readonly createdAt: string;
@@ -23,7 +29,11 @@ type HarnessEvent =
   | { readonly type: "harness.turn_finished"; readonly at: string; readonly harnessRunId: string; readonly messageId: string }
   | { readonly type: "harness.turn_interrupted"; readonly at: string; readonly harnessRunId: string; readonly diagnostic: string }
   | { readonly type: "workflow.revision_proposed"; readonly at: string; readonly harnessRunId: string; readonly revision: WorkflowRevision }
-  | { readonly type: "workflow.revision_accepted"; readonly at: string; readonly harnessRunId: string; readonly revision: number };
+  | { readonly type: "workflow.revision_accepted"; readonly at: string; readonly harnessRunId: string; readonly revision: number }
+  | { readonly type: "workflow.execution_created"; readonly at: string; readonly harnessRunId: string; readonly execution: WorkflowExecutionRecord }
+  | { readonly type: "workflow.execution_finished"; readonly at: string; readonly harnessRunId: string; readonly executionId: string; readonly status: WorkflowExecutionRecord["status"]; readonly diagnostic: string | null; readonly summary: JsonObject | null }
+  | { readonly type: "harness.decision_requested"; readonly at: string; readonly harnessRunId: string; readonly decision: HarnessDecision }
+  | { readonly type: "harness.decision_answered"; readonly at: string; readonly harnessRunId: string; readonly decisionId: string; readonly answer: JsonObject };
 
 /** Harness 的 append-only 耐久档案。reasoning/delta 永远不属于 Journal 事件。 */
 export class HarnessJournal {
@@ -88,6 +98,8 @@ export class HarnessProjection {
   #turnUserMessageId: string | null = null;
   #assistantMessageId: string | null = null;
   #workflowRevisions: WorkflowRevision[] = [];
+  #executions: WorkflowExecutionRecord[] = [];
+  #decisions: HarnessDecision[] = [];
   constructor(private readonly manifest: HarnessManifest) {}
   apply(event: HarnessEvent): void {
     if (event.harnessRunId !== this.manifest.harnessRunId) throw new Error("Harness 事件不属于当前会话。 ");
@@ -100,8 +112,39 @@ export class HarnessProjection {
     if (event.type === "harness.turn_interrupted") { if (this.#status !== "running") throw new Error("Harness turn_interrupted 必须来自运行中回合。 "); this.#status = "interrupted"; this.#diagnostic = event.diagnostic; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
     if (event.type === "workflow.revision_proposed") { if (this.#workflowRevisions.length + 1 !== event.revision.revision || event.revision.acceptedAt !== null) throw new Error("Workflow revision 序号或状态无效。 "); this.#workflowRevisions.push(event.revision); return; }
     if (event.type === "workflow.revision_accepted") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.revision !== event.revision || revision.acceptedAt !== null) throw new Error("Workflow revision 只能按最新未接受草案冻结。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, acceptedAt: event.at }; return; }
+    if (event.type === "workflow.execution_created") {
+      const revision = this.#workflowRevisions.find((item) => item.revision === event.execution.revision);
+      // Execution 只能绑定已接受冻结的 revision；草稿或序号不存在的草案永远不能执行。
+      if (!revision || revision.acceptedAt === null || revision.sourceHash !== event.execution.sourceHash) throw new Error("WorkflowExecution 必须绑定已接受冻结的 revision。 ");
+      if (this.#executions.some((item) => item.executionId === event.execution.executionId)) throw new Error("WorkflowExecution id 重复。 ");
+      // 一个 Harness 顺序拥有多个 Execution：前一个未到终态时不得创建新执行。
+      if (this.#executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束的 WorkflowExecution，不能创建新执行。 ");
+      if (event.execution.finishedAt !== null || event.execution.status !== "running") throw new Error("新建 WorkflowExecution 必须是 running 且未结束。 ");
+      this.#executions.push({ ...event.execution });
+      return;
+    }
+    if (event.type === "workflow.execution_finished") {
+      const index = this.#executions.findIndex((item) => item.executionId === event.executionId);
+      if (index < 0) throw new Error("workflow.execution_finished 指向未知 Execution。 ");
+      const execution = this.#executions[index];
+      if (execution.finishedAt !== null) throw new Error("WorkflowExecution 不能重复结束。 ");
+      const terminal = event.status === "completed" || event.status === "cancelled" || event.status === "interrupted";
+      if (!terminal) throw new Error("workflow.execution_finished 必须是终态。 ");
+      this.#executions[index] = { ...execution, status: event.status, finishedAt: event.at, diagnostic: event.diagnostic, summary: event.summary };
+      return;
+    }
+    if (event.type === "harness.decision_requested") { if (this.#decisions.some((item) => item.decisionId === event.decision.decisionId) || event.decision.answer !== null) throw new Error("Harness 决策请求无效。 "); this.#decisions.push({ ...event.decision }); return; }
+    if (event.type === "harness.decision_answered") {
+      const index = this.#decisions.findIndex((item) => item.decisionId === event.decisionId);
+      if (index < 0) throw new Error("harness.decision_answered 指向未知决策。 ");
+      const decision = this.#decisions[index];
+      if (decision.answer !== null) throw new Error("Harness 决策不能重复回答。 ");
+      validateDecisionAnswer(decision.answerSchema, event.answer);
+      this.#decisions[index] = { ...decision, answer: event.answer, answeredAt: event.at };
+      return;
+    }
   }
-  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, cwd: this.manifest.cwd, status: this.#status, diagnostic: this.#diagnostic, createdAt: this.manifest.createdAt, messages: [...this.#messages], workflowRevisions: [...this.#workflowRevisions] }; }
+  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, status: this.#status, diagnostic: this.#diagnostic, createdAt: this.manifest.createdAt, messages: [...this.#messages], workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
 }
 
 function validateManifest(value: unknown): HarnessManifest {
@@ -109,7 +152,7 @@ function validateManifest(value: unknown): HarnessManifest {
   const item = value as Record<string, unknown>;
   if (typeof item.harnessRunId !== "string") throw new Error("Harness manifest 缺少 id。 ");
   validateRunId(item.harnessRunId);
-  if (item.version !== HARNESS_JOURNAL_VERSION || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt))) throw new Error("Harness manifest 无效。 ");
+  if (!COMPATIBLE_HARNESS_JOURNAL_VERSIONS.includes(item.version as never) || (item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt))) throw new Error("Harness manifest 无效。 ");
   return item as unknown as HarnessManifest;
 }
 
@@ -123,11 +166,33 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.turn_interrupted" && typeof item.diagnostic === "string" && item.diagnostic.trim()) return item as unknown as HarnessEvent;
   if (item.type === "workflow.revision_proposed" && isWorkflowRevision(item.revision)) return item as unknown as HarnessEvent;
   if (item.type === "workflow.revision_accepted" && Number.isInteger(item.revision) && (item.revision as number) > 0) return item as unknown as HarnessEvent;
+  if (item.type === "workflow.execution_created" && isExecutionRecord(item.execution)) return item as unknown as HarnessEvent;
+  if (item.type === "workflow.execution_finished") {
+    if (typeof item.executionId !== "string" || !isExecutionStatus(item.status) || (item.diagnostic !== null && typeof item.diagnostic !== "string") || (item.summary !== null && !isJsonObject(item.summary))) throw new Error("Harness 事件类型或字段无效。 ");
+    return item as unknown as HarnessEvent;
+  }
+  if (item.type === "harness.decision_requested" && isDecision(item.decision)) return item as unknown as HarnessEvent;
+  if (item.type === "harness.decision_answered" && typeof item.decisionId === "string" && item.decisionId.trim() && isJsonObject(item.answer)) return item as unknown as HarnessEvent;
   throw new Error("Harness 事件类型或字段无效。 ");
 }
 
 function isMessage(value: unknown, role: HarnessMessage["role"]): value is HarnessMessage { return plain(value) && value.role === role && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)); }
 function isWorkflowRevision(value: unknown): value is WorkflowRevision { return plain(value) && Number.isInteger(value.revision) && (value.revision as number) > 0 && typeof value.source === "string" && value.source.length > 0 && value.source.length <= 200_000 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.acceptedAt === null; }
+function isExecutionStatus(value: unknown): value is WorkflowExecutionRecord["status"] { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
+function isPolicy(value: unknown): boolean { return plain(value) && Number.isInteger(value.maxNodes) && (value.maxNodes as number) >= 1 && Number.isInteger(value.maxPhaseVisits) && (value.maxPhaseVisits as number) >= 1 && Number.isInteger(value.maxGates) && (value.maxGates as number) >= 1; }
+function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
+  if (!plain(value) || typeof value.executionId !== "string") return false;
+  try { validateRunId(value.executionId); } catch { return false; }
+  return Number.isInteger(value.revision) && (value.revision as number) > 0 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && Number.isInteger(value.runtimeVersion) && isPolicy(value.policy) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && isExecutionStatus(value.status) && (value.finishedAt === null || typeof value.finishedAt === "string") && (value.diagnostic === null || typeof value.diagnostic === "string") && (value.summary === null || isJsonObject(value.summary));
+}
+function isDecision(value: unknown): value is HarnessDecision { return plain(value) && typeof value.decisionId === "string" && value.decisionId.trim() !== "" && typeof value.question === "string" && value.question.trim() !== "" && (value.answerSchema === undefined || isJsonObject(value.answerSchema)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.answer === null && value.answeredAt === null; }
+/** 主控决策答案的 Schema 校验；与 Run 决策门共用同一套 Ajv 纪律。 */
+function validateDecisionAnswer(schema: JsonObject | undefined, answer: JsonObject): void {
+  if (!schema) return;
+  const ajv = new Ajv({ allErrors: true, strict: false });
+  const validator = ajv.compile(schema);
+  if (!validator(answer)) throw new Error(`Harness 决策答案不符合 answerSchema：${ajv.errorsText(validator.errors)}`);
+}
 function plain(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function isTruncatedTail(line: string): boolean { return line.trim().startsWith("{"); }
 async function ensureHome(root: string, create = true): Promise<void> { if (resolve(root) !== resolve(harnessRunsRoot())) return; if (create) await ensurePrivateDirectory(waveFlowHome()); else await assertPrivateDirectory(waveFlowHome()); }

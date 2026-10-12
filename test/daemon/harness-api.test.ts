@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalDaemon } from "../../src/daemon/local-daemon";
@@ -14,7 +14,7 @@ describe.serial("Harness daemon API", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-api-")); directories.push(cwd);
     const store = await mkdtemp(join(tmpdir(), "wave-flow-harness-store-")); directories.push(store);
     const daemon = new LocalDaemon({ storeRoot: runsRoot(store) }); daemons.push(daemon); const server = daemon.start();
-    const response = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) });
+    const response = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: crypto.randomUUID() }) });
     expect(response.status).toBe(400);
     await expect(fetch(`${server.baseUrl}/api/runs`).then((value) => value.json())).resolves.toEqual([]);
   });
@@ -47,7 +47,8 @@ describe.serial("Harness daemon API", () => {
       const body = await saved.json() as Record<string, unknown>;
       expect(body).toEqual({ configured: true, model: "test-model", baseUrl: "https://example.test/v1" });
       expect(JSON.stringify(body)).not.toContain("private-key");
-      const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) });
+      const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) }).then(value => value.json()) as { project: { projectId: string } };
+      const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) });
       expect(created.status).toBe(200);
     } finally {
       if (previousHome === undefined) delete process.env.WAVE_FLOW_HOME; else process.env.WAVE_FLOW_HOME = previousHome;
@@ -88,11 +89,49 @@ describe.serial("Harness daemon API", () => {
     const previousHome = process.env.WAVE_FLOW_HOME; process.env.WAVE_FLOW_HOME = root;
     try {
       await fetch(`${server.baseUrl}/harness-config`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "test-model", baseUrl: "https://example.test/v1", apiKey: "test-key" }) });
-      const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) }).then(value => value.json()) as { harness: { harnessRunId: string } };
+      const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) }).then(value => value.json()) as { project: { projectId: string } };
+      const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) }).then(value => value.json()) as { harness: { harnessRunId: string } };
       const proposed = await fetch(`${server.baseUrl}/harness-runs/${created.harness.harnessRunId}/workflow-revisions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: "export default async function run() {}" }) });
       expect(proposed.status).toBe(200);
       expect((await proposed.json() as { harness: { workflowRevisions: unknown[] } }).harness.workflowRevisions).toHaveLength(1);
       await expect(fetch(`${server.baseUrl}/api/runs`).then(value => value.json())).resolves.toEqual([]);
+    } finally { if (previousHome === undefined) delete process.env.WAVE_FLOW_HOME; else process.env.WAVE_FLOW_HOME = previousHome; }
+  });
+
+  test("项目在侧边栏耐久，同项目可连续创建会话且旧 Harness 未归类", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-project-cwd-")); directories.push(cwd);
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-project-root-")); directories.push(root);
+    const previousHome = process.env.WAVE_FLOW_HOME; process.env.WAVE_FLOW_HOME = root;
+    try {
+      const daemon = new LocalDaemon({ storeRoot: runsRoot(root), harnessRoot: join(root, "harness-runs") }); daemons.push(daemon); const server = daemon.start();
+      await fetch(`${server.baseUrl}/harness-config`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "test", baseUrl: "https://example.test/v1", apiKey: "key" }) });
+      const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, title: "测试项目" }) }).then(value => value.json()) as { project: { projectId: string; cwd: string; title: string } };
+      expect(project.project).toMatchObject({ cwd: await realpath(cwd), title: "测试项目" });
+      const first = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) }).then(value => value.json()) as { harness: { projectId: string } };
+      const second = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) }).then(value => value.json()) as { harness: { projectId: string } };
+      expect(first.harness.projectId).toBe(project.project.projectId);
+      expect(second.harness.projectId).toBe(project.project.projectId);
+      await expect(fetch(`${server.baseUrl}/projects`).then(value => value.json())).resolves.toMatchObject({ projects: [{ projectId: project.project.projectId, title: "测试项目" }] });
+    } finally { if (previousHome === undefined) delete process.env.WAVE_FLOW_HOME; else process.env.WAVE_FLOW_HOME = previousHome; }
+  });
+
+  test("新会话草稿不经 daemon 落盘，首次发送才创建唯一 Harness 并归属项目", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-first-message-cwd-")); directories.push(cwd);
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-harness-first-message-root-")); directories.push(root);
+    const previousHome = process.env.WAVE_FLOW_HOME; process.env.WAVE_FLOW_HOME = root;
+    try {
+      const daemon = new LocalDaemon({ storeRoot: runsRoot(root), harnessRoot: join(root, "harness-runs") }); daemons.push(daemon); const server = daemon.start();
+      await fetch(`${server.baseUrl}/harness-config`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "test", baseUrl: "https://example.test/v1", apiKey: "key" }) });
+      const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, title: "首发项目" }) }).then(value => value.json()) as { project: { projectId: string } };
+      // UI 草稿不会调用任何创建接口；仅查看耐久列表必须保持为空。
+      await expect(fetch(`${server.baseUrl}/api/harness-runs`).then(value => value.json())).resolves.toEqual({ harnesses: [] });
+      const started = await fetch(`${server.baseUrl}/projects/${project.project.projectId}/harness-messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId, text: "请先分析当前项目" }) });
+      expect(started.status).toBe(200);
+      const body = await started.json() as { harness: { harnessRunId: string; projectId: string; messages: Array<{ role: string; text: string }> } };
+      expect(body.harness).toMatchObject({ projectId: project.project.projectId, messages: [{ role: "user", text: "请先分析当前项目" }] });
+      await expect(fetch(`${server.baseUrl}/api/harness-runs`).then(value => value.json())).resolves.toMatchObject({ harnesses: [{ harnessRunId: body.harness.harnessRunId, projectId: project.project.projectId }] });
+      const mismatch = await fetch(`${server.baseUrl}/projects/${project.project.projectId}/harness-messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: crypto.randomUUID(), text: "不应创建" }) });
+      expect(mismatch.status).toBe(400);
     } finally { if (previousHome === undefined) delete process.env.WAVE_FLOW_HOME; else process.env.WAVE_FLOW_HOME = previousHome; }
   });
 });

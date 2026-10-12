@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import type { JournalEvent, RunManifest } from "../journal/types";
-import type { AgentNodeSnapshot, AgentNodeStatus, CurrentAttemptSummary, ExecutionBatchSnapshot, PhaseSnapshot, PhaseSummary, PhaseVisitSnapshot, RunSnapshot, RunStatus } from "./run-types";
+import type { AgentNodeSnapshot, AgentNodeStatus, CurrentAttemptSummary, DecisionGateSnapshot, ExecutionBatchSnapshot, PhaseSnapshot, PhaseSummary, PhaseVisitSnapshot, RunSnapshot, RunStatus } from "./run-types";
 import type { JsonSchema } from "../shared/workflow-types";
 
 const terminalAgentStatuses = new Set<AgentNodeStatus>(["completed", "cancelled", "interrupted"]);
@@ -12,6 +12,7 @@ export class RunStateMachine {
   #diagnostic: string | null = null;
   #endedAt: string | null = null;
   #agents = new Map<string, AgentNodeSnapshot>();
+  #gates = new Map<string, DecisionGateSnapshot>();
   #logicalSequences = new Map<string, number>();
   #recordedSessions = new Set<string>();
   #viewerSessions = new Map<string, import("../sessions/types").SessionIdentity>();
@@ -75,6 +76,12 @@ export class RunStateMachine {
       case "agent.continued":
         this.#applyBlockContinued(event);
         return;
+      case "gate.created":
+        this.#applyGateCreated(event);
+        return;
+      case "gate.answered":
+        this.#applyGateAnswered(event);
+        return;
       case "run.status":
         this.#applyRunStatus(event.status, event.at, event.diagnostic);
         return;
@@ -103,7 +110,19 @@ export class RunStateMachine {
       phases,
       currentExecutionAttemptId: this.#currentExecutionAttemptId,
       phaseVisits,
+      gates: [...this.#gates.values()].map((gate) => ({ ...gate })),
     };
+  }
+
+  /** 读取指定决策门；不存在时返回 null，供 Host 区分创建与 replay 复用。 */
+  gate(gateId: string): DecisionGateSnapshot | null {
+    const gate = this.#gates.get(gateId);
+    return gate ? { ...gate } : null;
+  }
+
+  /** 尚未回答的决策门；daemon API 与 Web 据此渲染待答问题。 */
+  pendingGates(): readonly DecisionGateSnapshot[] {
+    return [...this.#gates.values()].filter((gate) => gate.answer === null).map((gate) => ({ ...gate }));
   }
 
   /** 供首页与 SSE 使用的轻量当前尝试摘要。 */
@@ -330,6 +349,24 @@ export class RunStateMachine {
     this.#blockSchemas.delete(event.blockRequestId);
   }
 
+  /** 决策门只表达脚本声明的用户决策点；它不创建节点，也不改变任何 Agent 状态。 */
+  #applyGateCreated(event: Extract<JournalEvent, { type: "gate.created" }>): void {
+    if (this.#status !== "running") throw new Error("非运行中 Run 不能创建决策门。 ");
+    if (this.#gates.has(event.gateId)) throw new Error(`决策门 id 重复：${event.gateId}`);
+    if (event.executionAttemptId !== this.#currentExecutionAttemptId) throw new Error("gate.created 不属于当前执行尝试。 ");
+    if (event.phaseVisitId !== null && !this.#phaseVisits.has(visitKey(event.executionAttemptId, event.phaseVisitId))) throw new Error("gate.created 阶段访问不存在。 ");
+    this.#gates.set(event.gateId, { gateId: event.gateId, question: event.question, answerSchema: event.answerSchema, executionAttemptId: event.executionAttemptId, phaseVisitId: event.phaseVisitId, createdAt: event.at, answeredAt: null, answer: null });
+  }
+
+  /** 重开 Journal 时必须重新验证答案，防止篡改 gate.answered 绕过原 answerSchema。 */
+  #applyGateAnswered(event: Extract<JournalEvent, { type: "gate.answered" }>): void {
+    const gate = this.#gates.get(event.gateId);
+    if (!gate) throw new Error(`gate.answered 指向未知决策门：${event.gateId}`);
+    if (gate.answer !== null) throw new Error(`决策门不能重复回答：${event.gateId}`);
+    validateGateAnswer(gate.answerSchema, event.answer);
+    this.#gates.set(event.gateId, { ...gate, answeredAt: event.at, answer: event.answer });
+  }
+
   #applyRunStatus(status: RunStatus, at: string, diagnostic: string | null): void {
     if (!canRunTransition(this.#status, status)) throw new Error(`非法 Run 状态转移：${this.#status} → ${status}`);
     if (status === "completed" && [...this.#agents.values()].some((agent) => agent.status !== "completed")) throw new Error("Run completed 前所有 Agent 必须完成。");
@@ -398,4 +435,12 @@ function validateBlockAnswer(schema: JsonSchema | undefined, answer: import("../
   if (!schema) return;
   const validator = new Ajv({ allErrors: true, strict: false }).compile(schema);
   if (!validator(answer)) throw new Error(`block.answered 结果不符合 answer-schema：${new Ajv({ allErrors: true, strict: false }).errorsText(validator.errors)}`);
+}
+
+/** gate.answered 与 block.answered 共用同一套 Ajv 校验纪律；Host 写入前也调用它避免污染 Journal。 */
+export function validateGateAnswer(schema: JsonSchema | undefined, answer: import("../shared/json").JsonObject): void {
+  if (!schema) return;
+  const ajv = new Ajv({ allErrors: true, strict: false });
+  const validator = ajv.compile(schema);
+  if (!validator(answer)) throw new Error(`gate.answered 结果不符合 answerSchema：${ajv.errorsText(validator.errors)}`);
 }

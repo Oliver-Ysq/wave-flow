@@ -115,7 +115,8 @@ function isExportedMeta(statement: ts.Statement): statement is ts.VariableStatem
   return declarations.length === 1 && ts.isIdentifier(declarations[0].name) && declarations[0].name.text === "meta";
 }
 
-function isPureLiteral(expression: ts.Expression): boolean {
+/** 校验 meta 等声明只含纯字面量；受限 Runtime 的脚本校验复用同一规则。 */
+export function isPureLiteral(expression: ts.Expression): boolean {
   if (ts.isStringLiteral(expression) || ts.isNumericLiteral(expression) || expression.kind === ts.SyntaxKind.TrueKeyword
     || expression.kind === ts.SyntaxKind.FalseKeyword || expression.kind === ts.SyntaxKind.NullKeyword) return true;
   if (ts.isArrayLiteralExpression(expression)) return expression.elements.every((element) => ts.isExpression(element) && isPureLiteral(element));

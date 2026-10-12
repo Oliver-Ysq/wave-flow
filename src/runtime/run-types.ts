@@ -132,6 +132,25 @@ export type BlockSnapshot = {
   readonly answered: boolean;
 };
 
+/** 受限 Workflow 脚本声明的业务决策门的查询视图；不属于任何 Agent 节点。 */
+export type DecisionGateSnapshot = {
+  /** Run 内稳定唯一的决策门 id。 */
+  readonly gateId: string;
+  /** 面向用户的问题说明。 */
+  readonly question: string;
+  /** 可选答案 JSON Schema；daemon answer API 按它校验。 */
+  readonly answerSchema: JsonObject | undefined;
+  /** 创建该 gate 的执行尝试与阶段访问；未进入阶段时为 null。 */
+  readonly executionAttemptId: number;
+  readonly phaseVisitId: number | null;
+  /** 创建时间。 */
+  readonly createdAt: string;
+  /** 答案耐久时间；未回答时为 null。 */
+  readonly answeredAt: string | null;
+  /** 已耐久的 JSON 答案；未回答时为 null。 */
+  readonly answer: JsonObject | null;
+};
+
 /** 一个 Phase 的查询投影；顺序与 Workflow meta 完全一致。 */
 export type PhaseSnapshot = {
   /** Workflow meta 声明的唯一 Phase 标题。 */
@@ -173,4 +192,6 @@ export type RunSnapshot = {
   readonly currentExecutionAttemptId: number;
   /** 当前尝试的阶段访问；后续摘要 API 会替代完整内联历史。 */
   readonly phaseVisits: readonly PhaseVisitSnapshot[];
+  /** 脚本声明的全部业务决策门；答案已耐久的 gate 一并保留供审计。 */
+  readonly gates: readonly DecisionGateSnapshot[];
 };

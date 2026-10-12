@@ -4,9 +4,19 @@ import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { SessionIdentity } from "../sessions/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 6;
+export const RUNTIME_VERSION = 7;
 /** 当前实现可安全读取的历史耐久格式；旧格式只读兼容，不允许追加新的 Replay attempt。 */
-export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, 5, RUNTIME_VERSION] as const;
+export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, 5, 6, RUNTIME_VERSION] as const;
+
+/** Harness 原生 Execution 的来源绑定；受信任作者入口创建的 Run 没有此字段。 */
+export type RunHarnessOrigin = {
+  /** 所属 Harness Run id；用户可见任务身份。 */
+  readonly harnessRunId: string;
+  /** 绑定的已接受冻结 revision 序号。 */
+  readonly revision: number;
+  /** 冻结源码的 SHA-256；必须等于 workflowHash。 */
+  readonly sourceHash: string;
+};
 
 /** 一次 Run 创建后不可变的耐久身份信息。 */
 export type RunManifest = {
@@ -26,6 +36,8 @@ export type RunManifest = {
   readonly workflowProjectCwd: string;
   /** 本次 Workflow 的 JSON-safe 输入。 */
   readonly input: JsonObject;
+  /** Harness 原生 Execution 的来源绑定；省略表示受信任作者入口的独立 Run。 */
+  readonly harness?: RunHarnessOrigin;
   /** Run 创建时间。 */
   readonly createdAt: string;
 };
@@ -164,6 +176,25 @@ export type JournalEvent = JournalBase & ({
   /** 原 Agent 确认已可继续，唯一合法的 blocked → running 迁移。 */
   readonly type: "agent.continued";
   readonly blockRequestId: string;
+} | {
+  /** 受限 Workflow 脚本显式声明的业务决策门；nodeId 固定为 null，不属于任何 Agent 会话。 */
+  readonly type: "gate.created";
+  /** Run 内稳定唯一的决策门 id；replay 按它对齐旧事实。 */
+  readonly gateId: string;
+  /** 面向用户的完整问题说明：为什么必须有人类决定才能安全继续。 */
+  readonly question: string;
+  /** 可选答案 JSON Schema；只约束答案形状，不承担业务说明。 */
+  readonly answerSchema?: JsonObject;
+  /** 创建该 gate 的执行尝试；必须属于当前尝试。 */
+  readonly executionAttemptId: number;
+  /** 创建时所属的阶段访问；脚本尚未调用 phase() 时为 null。 */
+  readonly phaseVisitId: number | null;
+} | {
+  /** 用户答案已耐久写入；只唤醒等待同一 gate 的脚本调用，不改变任何节点状态。 */
+  readonly type: "gate.answered";
+  readonly gateId: string;
+  /** 已按 gate.created 的 answerSchema 校验的 JSON 答案。 */
+  readonly answer: JsonObject;
 } | {
   readonly type: "run.status";
   readonly status: RunStatus;

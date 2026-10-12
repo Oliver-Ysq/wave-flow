@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { App } from "./App";
 import "./styles.css";
+import "./workbench.css";
 import "@xterm/xterm/css/xterm.css";
 
 async function start(): Promise<void> {

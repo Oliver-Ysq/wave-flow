@@ -6,6 +6,7 @@ import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../journal
 import type { JsonObject } from "../shared/json";
 import type { WorkflowModule } from "../shared/workflow-types";
 import { executeWorkflow } from "../workflow/execute-workflow";
+import { PolicyEnforcingHost } from "./policy-host";
 import { RunRuntimeHost } from "./run-runtime-host";
 import { RunStateMachine } from "./run-state-machine";
 import type { AgentNodeExecutor, RunSnapshot } from "./run-types";
@@ -29,6 +30,16 @@ export type CreateRunOptions = {
   readonly storeRoot?: string;
   /** 本章可控 Agent 执行器；不启动真实 CLI。 */
   readonly executor: AgentNodeExecutor;
+  /** Harness 原生 Execution 的来源绑定；受信任作者入口省略。 */
+  readonly harness?: import("../journal/types").RunHarnessOrigin;
+  /** 固定 Run id；仅 Harness Execution 用来让登记 id 与内嵌 Journal runId 一致，省略时生成随机 UUID。 */
+  readonly runId?: string;
+};
+
+/** RunRuntime.run 的可选执行约束。 */
+export type RunExecutionOptions = {
+  /** 受限脚本的资源护栏；提供时以 PolicyEnforcingHost 包装内部宿主。 */
+  readonly policy?: import("./policy-host").WorkflowPolicy;
 };
 
 /** 本章 Runtime 的创建、执行与查询入口。 */
@@ -49,8 +60,8 @@ export class RunRuntime {
     const workflowProjectCwd = await realpath(options.workflowProjectCwd);
     const workflowPath = await realpath(options.workflowPath);
     const manifest: RunManifest = {
-      runId: crypto.randomUUID(), clientRequestId: options.clientRequestId, runtimeVersion: RUNTIME_VERSION, workflow: options.workflow.meta,
-      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), workflowPath, workflowProjectCwd, input: options.input, createdAt: new Date().toISOString(),
+      runId: options.runId ?? crypto.randomUUID(), clientRequestId: options.clientRequestId, runtimeVersion: RUNTIME_VERSION, workflow: options.workflow.meta,
+      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), workflowPath, workflowProjectCwd, input: options.input, harness: options.harness, createdAt: new Date().toISOString(),
     };
     const journal = await RunJournal.create(manifest, options.storeRoot ?? runsRoot());
     const state = new RunStateMachine(manifest);
@@ -84,10 +95,11 @@ export class RunRuntime {
     return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, historicalSequence, true), true);
   }
 
-  /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。 */
-  async run(workflow: WorkflowModule<JsonObject, unknown>): Promise<unknown> {
+  /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。options.policy 用于受限脚本的资源护栏。 */
+  async run(workflow: WorkflowModule<JsonObject, unknown>, options: RunExecutionOptions = {}): Promise<unknown> {
+    const host: import("./workflow-host").WorkflowExecutionHost = options.policy ? new PolicyEnforcingHost(this.host, options.policy) : this.host;
     try {
-      const result = await executeWorkflow(workflow, this.journal.manifest.input, this.host, { cwd: this.journal.manifest.workflowProjectCwd });
+      const result = await executeWorkflow(workflow, this.journal.manifest.input, host, { cwd: this.journal.manifest.workflowProjectCwd });
       await this.host.flush();
       const nodes = this.state.snapshot().phases.flatMap((phase) => phase.agents);
       if (nodes.some((agent) => agent.status !== "completed")) throw new Error("Workflow 返回时仍有未完成 Agent 节点。");
@@ -119,6 +131,9 @@ export class RunRuntime {
 
   /** 供 daemon 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return this.host.controlContext(); }
+
+  /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后才唤醒等待中的脚本。 */
+  answerGate(gateId: string, answer: JsonObject): Promise<void> { return this.host.answerGate(gateId, answer); }
 
   /** 为当前 Run 创建唯一 ControlServer；真实执行器须在节点启动前绑定它。 */
   createControlServer(): ControlServer {
@@ -200,6 +215,8 @@ export class RunRuntime {
     if (status !== "running" && status !== "pausing" && status !== "paused" && status !== "recovering") throw new Error("只有运行中或暂停控制中的 Run 可以 stop。 ");
     this.host.pauseScheduling();
     this.#stopping = true;
+    // 等待用户答案的决策门不属于任何节点；stop 必须主动拒绝它们，Workflow 调用栈才能退出。
+    this.host.rejectPendingGates("用户停止 Run，决策门不再等待答案。 ");
     const activeControl = this.#controlAbort;
     activeControl?.abort();
     // pause/recover 可能正写入 agent/run 状态；先等待它因 abort 完成 finally 清理，

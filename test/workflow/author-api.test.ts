@@ -27,6 +27,9 @@ class MemoryHost implements WorkflowExecutionHost {
   }
   phase(title: string): import("../../src/runtime/workflow-host").PhaseVisit { this.phases.push(title); return { executionAttemptId: 1, phaseVisitId: this.phases.length, title, occurrence: this.phases.filter((value) => value === title).length }; }
   log(message: string): void { this.logs.push(message); }
+  async decisionGate(request: import("../../src/runtime/workflow-host").DecisionGateRequest): Promise<JsonObject> {
+    return { gate: request.id };
+  }
 }
 
 function workflow<Result>(run: () => Promise<Result>): WorkflowModule<undefined, Result> {
