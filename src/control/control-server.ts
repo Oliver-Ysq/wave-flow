@@ -1,6 +1,7 @@
 import Ajv from "ajv";
 import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
+import type { RuntimeProvenance } from "../runtimes/types";
 import type { RunStateMachine } from "../runtime/run-state-machine";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
@@ -77,7 +78,7 @@ export type RecordedAgentSession = {
   /** App Server hybrid 的官方 thread/turn 坐标。 */
   readonly appServer?: { readonly endpoint: string; readonly threadId: string; readonly turnId: string; };
   /** ACP Worker 的可审计 binding；不是 capability 或完成证据。 */
-  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; };
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: RuntimeProvenance; };
 };
 
 /** Control Server 的最小 complete 协议。 */

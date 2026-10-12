@@ -52,7 +52,31 @@ class DeferredPi implements HarnessPiSession {
   abort() { this.isRunning = false; this.#resolve?.(""); }
 }
 
+class ClosablePi extends FakePi {
+  closed = false;
+  close() { this.closed = true; }
+}
+
 describe("HarnessService", () => {
+  test("关闭服务释放已复用的主控 session，不写入额外 Journal 事实", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-close-")); directories.push(cwd);
+    const pi = new ClosablePi();
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "hello");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const before = await service.snapshot(created.harnessRunId);
+    service.close();
+    expect(pi.closed).toBe(true);
+    await expect(service.snapshot(created.harnessRunId)).resolves.toEqual(before);
+  });
+  test("创建 Harness 时冻结 session fingerprint，非法 fingerprint 不产生档案", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-fingerprint-")); directories.push(cwd);
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi(), undefined, async () => ({ fingerprint: "a".repeat(64) }));
+    await expect(service.create(cwd)).resolves.toMatchObject({ harnessRunId: expect.any(String) });
+    const invalid = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi(), undefined, async () => ({ fingerprint: "not-a-fingerprint" }));
+    await expect(invalid.create(cwd)).rejects.toThrow("fingerprint");
+  });
   test("reasoning 只流式展示，完整 assistant 回答才耐久", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-service-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
@@ -98,7 +122,7 @@ describe("HarnessService", () => {
     const created = await service.create(cwd);
     await service.send(created.harnessRunId, "hello");
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "interrupted");
-    await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ messages: [{ role: "user", text: "hello" }], diagnostic: "Pi 主控回答只包含非持久 reasoning。 " });
+    await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ messages: [{ role: "user", text: "hello" }], diagnostic: "主控回答只包含非持久 reasoning。 " });
   });
 
   test("项目事实未由只读工具验证时不耐久 assistant 结论", async () => {

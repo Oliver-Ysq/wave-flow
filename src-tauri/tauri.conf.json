@@ -20,7 +20,7 @@
     "resources": {
       "../src/web/dist": "web-dist"
     },
-    "externalBin": ["binaries/wave-flow-daemon", "binaries/wave-flow", "binaries/wave-flow-desktop-bridge", "binaries/wave-flow-codex", "binaries/codex-code-mode-host"],
+    "externalBin": ["binaries/wave-flow-daemon", "binaries/wave-flow", "binaries/wave-flow-desktop-bridge"],
     "macOS": { "minimumSystemVersion": "12.0" }
   }
 }

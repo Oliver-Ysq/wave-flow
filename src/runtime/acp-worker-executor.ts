@@ -4,6 +4,7 @@ import { AcpSessionClient, type AcpLauncher, type AcpSessionBinding } from "../a
 import type { ControlServer } from "../control/control-server";
 import type { JsonObject } from "../shared/json";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
+import type { RuntimeProvenance } from "../runtimes/types";
 
 /** ACP Worker 会话的最小使用面，便于在不依赖真实模型的情况下验证 Runtime/Control 边界。 */
 export interface AcpWorkerSession {
@@ -31,6 +32,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly launcher: AcpLauncher,
     // Worker 是 Runtime 已授权的真实执行面，读写与 shell 权限不由 Harness Shell Policy 限制。
     private readonly createSession: (launcher: AcpLauncher) => AcpWorkerSession = (value) => new AcpSessionClient(value, undefined, "allow"),
+    /** 已验证用户 CLI 的来源；遗留 Journal 可省略，新的 Runtime 路径必须提供。 */
+    private readonly runtime?: RuntimeProvenance,
   ) {}
 
   /** Runtime 创建当前 Run 的 Control 后调用；缺失时绝不启动真实 Agent。 */
@@ -71,7 +74,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         nodeId: node.id,
         agentSessionId: node.agentSessionId,
         delivery: "acp",
-        acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities },
+        acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities, ...(this.runtime ? { runtime: this.runtime } : {}) },
       });
       const turn = this.runTurn(active, managedPrompt(node, renderAgentIdentity({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId }), launcher.env?.WAVE_FLOW_CONTROL_COMMAND ?? "wave-flow"), signal.signal);
       // Control complete 是 Worker 的业务完成边界。某些 ACP Agent 在工具调用后会继续

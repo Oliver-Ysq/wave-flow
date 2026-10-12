@@ -111,9 +111,9 @@ export class AcpSessionClient {
   }
 
   /** 创建新 ACP session；只有成功响应后才发布 binding。 */
-  async createSession(cwd: string, signal: AbortSignal): Promise<AcpSessionBinding> {
+  async createSession(cwd: string, signal: AbortSignal, mcpServers: acp.McpServer[] = []): Promise<AcpSessionBinding> {
     const connection = this.requireConnection();
-    const created = await connection.agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [] }, { cancellationSignal: signal });
+    const created = await connection.agent.request(acp.methods.agent.session.new, { cwd, mcpServers }, { cancellationSignal: signal });
     if (!created.sessionId.trim()) throw new Error("ACP session/new 返回空 sessionId。 ");
     const capabilities = await this.requireCapabilities(signal);
     const binding = { launcherId: this.launcher.id, sessionId: created.sessionId, capabilities } as const;
@@ -207,7 +207,9 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...launcher.env },
+    // launcher.env 必须由 WorkerLauncherResolver 白名单构造，禁止将 daemon 完整
+    // 环境（例如 discovery shell、认证 token）透传给用户 CLI。
+    env: launcher.env ?? {},
   });
   const stderr = new Response(child.stderr).text().catch(() => "");
   const exited = child.exited.then(async (code) => {

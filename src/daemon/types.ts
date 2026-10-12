@@ -1,7 +1,7 @@
 import type { JsonObject } from "../shared/json";
 import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord } from "../harness/types";
-import type { HarnessConfigStatus, ResolvedHarnessModelConfig } from "../harness/config";
 import type { HarnessProject } from "../harness/projects";
+import type { CliRuntimeView, DiscoveredCliCandidate } from "../runtimes/types";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
 
 /** 创建 Run 的 loopback API 请求；Workflow 路径相对于 cwd 解析。 */
@@ -165,10 +165,6 @@ export type HarnessProjectListResponse = { readonly projects: readonly HarnessPr
 export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
 /** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
 export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
-/** Harness 非敏感模型配置状态；绝不返回 API Key。 */
-export type HarnessConfigResponse = HarnessConfigStatus;
-/** 本机保存的 OpenAI-compatible 模型配置；仅 loopback daemon 接收，API Key 不会回显。 */
-export type UpdateHarnessConfigRequest = ResolvedHarnessModelConfig;
 /** 发送一条用户消息；响应只确认已耐久接收，流内容通过 SSE 返回。 */
 export type HarnessMessageRequest = { readonly text: string };
 /** Harness 对话分页的最小响应；一期返回全部已耐久完整消息。 */
@@ -213,3 +209,12 @@ export type AnswerDecisionRequest = {
   /** 已通过对应 answerSchema 校验前的原始 JSON 对象；daemon 负责校验。 */
   readonly answer: JsonObject;
 };
+
+/** 当前用户的本机 CLI Runtime 与默认选择；不含 inode、PATH 或环境变量。 */
+export type CliRuntimeListResponse = { readonly selectedByCli: Readonly<Partial<Record<"codex", string>>>; readonly runtimes: readonly CliRuntimeView[] };
+/** 用户明确扫描 PATH 后返回的候选；候选尚未经过 ACP 验证。 */
+export type DiscoverCliRuntimesResponse = { readonly candidates: readonly DiscoveredCliCandidate[] };
+/** 验证发现候选或手动绝对路径；成功不会自动成为默认。 */
+export type ValidateCliRuntimeRequest = { readonly executablePath: string; readonly discoveredFrom?: "shell-path" | "gui-path" | "manual"; readonly discoveredShell?: string | null };
+/** 设置默认 Runtime 的响应。 */
+export type SelectCliRuntimeResponse = { readonly runtime: CliRuntimeView };

@@ -6,6 +6,7 @@ import type { ResolvedHarnessModelConfig } from "./config";
 import { createHarnessReadTools } from "./read-tools";
 import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks, createHarnessActionTools } from "./action-tools";
 import { executeReadOnlyProjectQuery, readProjectFile } from "./shell-policy";
+import type { HarnessSession } from "./session";
 
 /** Pi Harness 的受限适配器：只暴露经过 daemon 校验的只读与行动窄工具。 */
 export class PiHarnessSession {
@@ -165,7 +166,7 @@ export function isHarnessToolAllowed(name: string, hasActions: boolean): boolean
 }
 
 /** HarnessService 依赖的 Pi 最小接口，允许在不调用模型的情况下验证耐久边界。 */
-export type HarnessPiSession = Pick<PiHarnessSession, "subscribe" | "prompt" | "abort" | "isRunning">;
+export type HarnessPiSession = HarnessSession;
 
 /** 默认本机 OpenAI-compatible Harness 配置；key 只从环境读取。 */
 function zeroUsage() { return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }; }

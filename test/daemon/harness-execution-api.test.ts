@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalDaemon } from "../../src/daemon/local-daemon";
+import { DeterministicHarnessSession } from "../../src/harness/deterministic-session";
 import { runsRoot } from "../../src/journal/paths";
 
 const directories: string[] = [];
@@ -30,13 +31,11 @@ async function fixture(): Promise<{ baseUrl: string; harnessRunId: string }> {
   const previousHome = process.env.WAVE_FLOW_HOME;
   process.env.WAVE_FLOW_HOME = root;
   try {
-    const daemon = new LocalDaemon({ deterministicForTest: true, storeRoot: runsRoot(root), harnessRoot: join(root, "harness-runs") });
+    const daemon = new LocalDaemon({ deterministicForTest: true, storeRoot: runsRoot(root), harnessRoot: join(root, "harness-runs"), createHarnessSession: async () => new DeterministicHarnessSession() });
     daemons.push(daemon);
     const server = daemon.start();
     const baseUrl = server.baseUrl;
     const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const configured = await post("/harness-config", { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" });
-    expect(configured.status).toBe(200);
     const project = await post("/projects", { cwd: root });
     expect(project.status).toBe(200);
     const { project: createdProject } = await project.json() as { project: { projectId: string } };

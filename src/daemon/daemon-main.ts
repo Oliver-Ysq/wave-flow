@@ -6,6 +6,9 @@ import { basename } from "node:path";
 // 由同一受控二进制以专用子命令启动；普通 daemon 永不 import 该 CLI entry。
 if (process.argv[2] === "__codex-acp") {
   await import("@agentclientprotocol/codex-acp");
+} else if (process.argv[2] === "__harness-mcp") {
+  const { runHarnessMcpServer } = await import("../harness/mcp-server");
+  await runHarnessMcpServer();
 } else if (process.argv[2] === "__wave-flow-cli" || basename(process.execPath) === "wave-flow") {
   const { main } = await import("../cli/main");
   // Bun compiled executable 的 argv[1] 是 /$bunfs 内部脚本路径，不是用户命令。

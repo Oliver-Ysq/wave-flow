@@ -23,6 +23,8 @@ export type HarnessSnapshot = {
   readonly projectId: string | null;
   /** 已验证的项目 cwd。 */
   readonly cwd: string;
+  /** 创建时冻结的主控 runtime 来源；历史档案未知时为 null。 */
+  readonly runtime: import("../runtimes/types").RuntimeProvenance | null;
   /** 当前对话回合状态。 */
   readonly status: HarnessStatus;
   /** 最近一条 turn 的诊断；正常 idle 时为 null。 */

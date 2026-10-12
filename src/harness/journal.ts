@@ -5,11 +5,12 @@ import Ajv from "ajv";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } from "../journal/paths";
 import { isJsonObject, type JsonObject } from "../shared/json";
 import type { HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord, WorkflowRevision } from "./types";
+import type { RuntimeProvenance } from "../runtimes/types";
 
 /** 独立 Harness 档案格式；v2 增加 WorkflowExecution 登记与主控决策事实，v1 只读兼容。 */
-export const HARNESS_JOURNAL_VERSION = 3;
+export const HARNESS_JOURNAL_VERSION = 4;
 /** 可读取的历史 Harness 档案版本。 */
-export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, HARNESS_JOURNAL_VERSION] as const;
+export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, 3, HARNESS_JOURNAL_VERSION] as const;
 
 export type HarnessManifest = {
   readonly harnessRunId: string;
@@ -18,6 +19,8 @@ export type HarnessManifest = {
   readonly version: number;
   readonly cwd: string;
   readonly modelFingerprint: string;
+  /** 创建时冻结的安全 CLI runtime 来源；v1-v3 历史档案缺失时为未知。 */
+  readonly runtime?: RuntimeProvenance;
   readonly createdAt: string;
 };
 
@@ -144,7 +147,7 @@ export class HarnessProjection {
       return;
     }
   }
-  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, status: this.#status, diagnostic: this.#diagnostic, createdAt: this.manifest.createdAt, messages: [...this.#messages], workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
+  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, createdAt: this.manifest.createdAt, messages: [...this.#messages], workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
 }
 
 function validateManifest(value: unknown): HarnessManifest {
@@ -152,7 +155,7 @@ function validateManifest(value: unknown): HarnessManifest {
   const item = value as Record<string, unknown>;
   if (typeof item.harnessRunId !== "string") throw new Error("Harness manifest 缺少 id。 ");
   validateRunId(item.harnessRunId);
-  if (!COMPATIBLE_HARNESS_JOURNAL_VERSIONS.includes(item.version as never) || (item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt))) throw new Error("Harness manifest 无效。 ");
+  if (!COMPATIBLE_HARNESS_JOURNAL_VERSIONS.includes(item.version as never) || (item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt)) || (item.runtime !== undefined && !isRuntimeProvenance(item.runtime))) throw new Error("Harness manifest 无效。 ");
   return item as unknown as HarnessManifest;
 }
 
@@ -186,6 +189,7 @@ function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
   return Number.isInteger(value.revision) && (value.revision as number) > 0 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && Number.isInteger(value.runtimeVersion) && isPolicy(value.policy) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && isExecutionStatus(value.status) && (value.finishedAt === null || typeof value.finishedAt === "string") && (value.diagnostic === null || typeof value.diagnostic === "string") && (value.summary === null || isJsonObject(value.summary));
 }
 function isDecision(value: unknown): value is HarnessDecision { return plain(value) && typeof value.decisionId === "string" && value.decisionId.trim() !== "" && typeof value.question === "string" && value.question.trim() !== "" && (value.answerSchema === undefined || isJsonObject(value.answerSchema)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.answer === null && value.answeredAt === null; }
+function isRuntimeProvenance(value: unknown): value is RuntimeProvenance { return plain(value) && typeof value.runtimeId === "string" && !!value.runtimeId && value.cli === "codex" && typeof value.executablePath === "string" && value.executablePath.startsWith("/") && typeof value.version === "string" && !!value.version && value.adapterId === "codex-acp" && typeof value.adapterVersion === "string" && !!value.adapterVersion && typeof value.verifiedAt === "string" && !Number.isNaN(Date.parse(value.verifiedAt)); }
 /** 主控决策答案的 Schema 校验；与 Run 决策门共用同一套 Ajv 纪律。 */
 function validateDecisionAnswer(schema: JsonObject | undefined, answer: JsonObject): void {
   if (!schema) return;

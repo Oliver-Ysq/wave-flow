@@ -1,10 +1,9 @@
 import { readdir, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessConfigResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, StartHarnessConversationRequest, TerminalOpenResponse, ReclaimTerminalResponse, UpdateHarnessConfigRequest } from "./types";
-import { saveHarnessConfig } from "../harness/config";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, TerminalOpenResponse, ReclaimTerminalResponse, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -31,10 +30,20 @@ import { HarnessService } from "../harness/service";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
 import type { HarnessStreamEvent } from "../harness/types";
+import { CliRuntimeRegistry } from "../runtimes/registry";
+import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
+import { validateCodexRuntime } from "../runtimes/codex-runtime-validator";
+import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
+import { AcpHarnessSession } from "../harness/acp-harness";
+import { resolveCodexAcpLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
+import { DeterministicHarnessSession } from "../harness/deterministic-session";
 
 /** 真实 Codex 执行器的 daemon 内部工厂；仅用于生产构造与无模型服务的端到端测试注入。 */
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
+
+/** 用户本机 CLI 主控的固定系统约束；工具能力由 session-private MCP sidecar 提供。 */
+const HARNESS_SYSTEM_PROMPT = "你是 Wave Flow 主控。你必须基于 session 中提供的 wave-flow-harness MCP 工具处理项目事实、提出 workflow 草案、读取执行结果或请求用户决定。你只能使用该 MCP 的只读查询和四个窄工具；禁止写入业务工作区、直接创建 Worker、直接执行 Workflow、调用 wave-flow complete/block/continue，或仅凭自然语言声称任务已完成。propose_workflow_revision 只产生草案，用户接受后才可能创建 Execution。";
 
 export type RealCodexExecutorFactory = (args: {
   /** 当前 daemon 的 loopback Control 根地址。 */
@@ -67,6 +76,8 @@ export type LocalDaemonOptions = {
   readonly createTerminalObserver?: (session: import("../sessions/types").SessionIdentity) => TmuxTerminalObserver;
   /** 常驻 daemon 接收 close 后调用；测试 daemon 省略时只关闭本地 HTTP 服务。 */
   readonly scheduleClose?: () => void;
+  /** 自动测试或显式兼容后端注入；生产省略时使用 selected ACP CLI Harness。 */
+  readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks) => Promise<import("../harness/session").HarnessSession>;
 };
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
@@ -79,6 +90,10 @@ export class LocalDaemon {
   #projects: HarnessProjectStore;
   /** Harness 生成脚本的 WorkflowExecution 服务；Execution 不进入 Run 列表。 */
   #executions: HarnessExecutionService;
+  /** 所有 ACP Worker 必须使用用户确认且启动前复核的本机 CLI Runtime。 */
+  #cliRuntimes: CliRuntimeRegistry;
+  /** 每条 Harness ACP session 私有 MCP token；只在 daemon 内存存活。 */
+  #harnessMcpTokens = new Map<string, string>();
   /** 用户显式验证并认领的旧会话；资格精确绑定 node/session，不能放宽到整个 Run。 */
   #observedSessions = new Set<string>();
   /** 同一旧会话的并发认领单飞，防止两份 Runtime/Control 状态机互相覆盖。 */
@@ -109,6 +124,7 @@ export class LocalDaemon {
   private readonly verifyReclaimSession: NonNullable<LocalDaemonOptions["verifyReclaimSession"]>;
   private readonly createTerminalObserver: NonNullable<LocalDaemonOptions["createTerminalObserver"]>;
   private readonly scheduleClose: () => void;
+  private readonly hasCustomHarnessSession: boolean;
 
   /**
    * @param options 自动测试可选择稳定或 fake 真实执行器；省略时启动真正 tmux/Codex。
@@ -121,8 +137,29 @@ export class LocalDaemon {
     this.hasCustomRealExecutor = normalized.createRealExecutor !== undefined;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
-    this.#harness = new HarnessService(harnessRoot);
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
+    this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
+    this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
+    const harnessFactory = normalized.createHarnessSession ?? (this.deterministicForTest
+      ? async () => new DeterministicHarnessSession()
+      : async (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], _actions: import("../harness/action-tools").HarnessActionCallbacks, frozenRuntime?: import("../runtimes/types").RuntimeProvenance) => {
+      const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness("codex");
+      const token = crypto.randomUUID(); this.#harnessMcpTokens.set(token, harnessRunId);
+      const compiled = import.meta.dir.startsWith("/$bunfs/");
+      const command = process.execPath;
+      const args = compiled ? ["__harness-mcp"] : [join(import.meta.dir, "daemon-main.ts"), "__harness-mcp"];
+      const mcpServer = { name: "wave-flow-harness", command, args, env: [
+        { name: "WF_HARNESS_MCP_BASE_URL", value: `http://127.0.0.1:${this.#server!.port}` }, { name: "WF_HARNESS_MCP_TOKEN", value: token },
+      ] } as any;
+      const session = new AcpHarnessSession(resolveCodexAcpLauncher(runtime, this.currentControlCommand()), cwd, HARNESS_SYSTEM_PROMPT, prior, mcpServer);
+      const close = session.close.bind(session); session.close = () => { this.#harnessMcpTokens.delete(token); close(); };
+      return session;
+    });
+    this.#harness = new HarnessService(harnessRoot, harnessFactory, undefined, async () => {
+      if (this.hasCustomHarnessSession) return { fingerprint: "injected-harness-session" };
+      const runtime = await this.#cliRuntimes.resolveSelectedHarness("codex");
+      return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
+    });
     this.#executions = new HarnessExecutionService(this.#harness, () => this.createExecutionExecutor(), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
       // Execution 已写入终态后不再允许 Control 接口接收其旧 Worker 上报；释放
@@ -152,7 +189,12 @@ export class LocalDaemon {
   setBootInstanceId(value: string): void { if (!value.trim() || this.bootInstanceId) throw new Error("daemon 启动身份无效或已设置。"); this.bootInstanceId = value; }
 
   /** 停止短生命周期 daemon；不会删除 Journal 或本地结果文件。 */
-  stop(): void { for (const key of [...this.#terminals.keys()]) void this.closeTerminal(key, "daemon-closed"); this.#server?.stop(true); this.#server = null; }
+  stop(): void {
+    for (const key of [...this.#terminals.keys()]) void this.closeTerminal(key, "daemon-closed");
+    this.#harness.close();
+    this.#harnessMcpTokens.clear();
+    this.#server?.stop(true); this.#server = null;
+  }
 
   /** 新 daemon 启动后收敛上次在 pause/recover 中断的 Run；绝不创建新 turn。 */
   async reconcileRunControl(): Promise<void> {
@@ -188,7 +230,7 @@ export class LocalDaemon {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
     const base: AgentNodeExecutor = this.hasCustomRealExecutor
       ? this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true })
-      : new AcpWorkerExecutor(codexAcpLauncher());
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -209,18 +251,23 @@ export class LocalDaemon {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
+      const harnessMcp = url.pathname.match(/^\/harness-mcp\/([^/]+)$/);
+      if (request.method === "POST" && harnessMcp) return this.json(await this.harnessMcp(decodeURIComponent(harnessMcp[1]), await this.readJson(request)));
       if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
       if (request.method === "POST" && url.pathname === "/daemon/close") return this.closeDaemon(await this.readJson(request));
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
+      if (request.method === "GET" && url.pathname === "/cli-runtimes") return this.json(await this.listCliRuntimes());
+      if (request.method === "POST" && url.pathname === "/cli-runtimes/discover") return this.json(await this.discoverCliRuntimes(await this.readJson(request)));
+      if (request.method === "POST" && url.pathname === "/cli-runtimes/validate") return this.json(await this.validateCliRuntime(await this.readJson(request)));
+      const cliRuntimeSelect = url.pathname.match(/^\/cli-runtimes\/([^/]+)\/select$/);
+      if (request.method === "POST" && cliRuntimeSelect) return this.json(await this.selectCliRuntime(decodeURIComponent(cliRuntimeSelect[1]), await this.readJson(request)));
+      const cliRuntimeDelete = url.pathname.match(/^\/cli-runtimes\/([^/]+)$/);
+      if (request.method === "DELETE" && cliRuntimeDelete) return this.json(await this.deleteCliRuntime(decodeURIComponent(cliRuntimeDelete[1])));
       if (request.method === "GET" && url.pathname === "/api/harness-runs") return this.json(await this.listHarnesses());
       if (request.method === "GET" && url.pathname === "/projects") return this.json(await this.listProjects());
       if (request.method === "POST" && url.pathname === "/projects") return this.json(await this.createProject(await this.readJson(request)));
       const projectFirstMessageMatch = url.pathname.match(/^\/projects\/([^/]+)\/harness-messages$/);
       if (request.method === "POST" && projectFirstMessageMatch) return this.json(await this.startHarnessConversation(decodeURIComponent(projectFirstMessageMatch[1]), await this.readJson(request)));
-      if (url.pathname === "/harness-config") {
-        if (request.method === "GET") return this.json(await this.harnessConfig());
-        if (request.method === "POST") return this.json(await this.updateHarnessConfig(await this.readJson(request)));
-      }
       if (request.method === "POST" && url.pathname === "/harness-runs") return this.json(await this.createHarness(await this.readJson(request)));
       const harnessMatch = url.pathname.match(/^\/harness-runs\/([^/]+)$/);
       if (request.method === "GET" && harnessMatch) return this.json(await this.harnessSnapshot(decodeURIComponent(harnessMatch[1])));
@@ -365,6 +412,7 @@ export class LocalDaemon {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessRunRequest).projectId !== "string") throw new DaemonRequestError(400, "创建 Harness 请求无效。 ");
     try {
       const project = await this.#projects.get((value as CreateHarnessRunRequest).projectId);
+      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness("codex");
       const harness = await this.#harness.create(project.cwd, project.projectId);
       await this.#projects.touch(project.projectId);
       return { harness };
@@ -375,24 +423,70 @@ export class LocalDaemon {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as StartHarnessConversationRequest).projectId !== "string" || (value as StartHarnessConversationRequest).projectId !== projectId || typeof (value as StartHarnessConversationRequest).text !== "string") throw new DaemonRequestError(400, "新会话首条消息请求无效。 ");
     try {
       const project = await this.#projects.get(projectId);
+      // 首发前验证 Runtime，避免先创建不可运行的 Harness manifest/Journaling。
+      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness("codex");
       const harness = await this.#harness.start(project.cwd, project.projectId, (value as StartHarnessConversationRequest).text);
       await this.#projects.touch(project.projectId);
       return { harness };
     } catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
   }
   private async listProjects(): Promise<HarnessProjectListResponse> { return { projects: await this.#projects.list() }; }
+  /** Control 命令只由当前 daemon 计算，绝不从用户 Runtime 或 PATH 获得。 */
+  private currentControlCommand(): string {
+    const compiled = import.meta.dir.startsWith("/$bunfs/");
+    return compiled ? shellQuote(join(dirname(process.execPath), "wave-flow")) : `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "../cli/main.ts"))}`;
+  }
+
   private async createProject(value: unknown): Promise<HarnessProjectResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessProjectRequest).cwd !== "string" || ((value as CreateHarnessProjectRequest).title !== undefined && typeof (value as CreateHarnessProjectRequest).title !== "string")) throw new DaemonRequestError(400, "创建项目请求无效。 ");
     try { return { project: await this.#projects.create((value as CreateHarnessProjectRequest).cwd, (value as CreateHarnessProjectRequest).title) }; }
     catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
   }
 
+  /** 返回设置页可展示的 Runtime；不暴露文件身份、PATH 或任何环境变量。 */
+  private async listCliRuntimes(): Promise<CliRuntimeListResponse> { return this.#cliRuntimes.list(); }
+
+  /** discovery 只能由用户按钮明确触发；请求体必须为空，禁止携带 shell 文本。 */
+  private async discoverCliRuntimes(value: unknown): Promise<DiscoverCliRuntimesResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "扫描本机 CLI 不接受请求字段。 ");
+    try { return { candidates: await new ShellPathDiscovery().discover() }; }
+    catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /** 验证固定 adapter 与用户明确给出的绝对 CLI 路径；成功也不自动选为默认。 */
+  private async validateCliRuntime(value: unknown): Promise<SelectCliRuntimeResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string") throw new DaemonRequestError(400, "CLI Runtime 验证请求无效。 ");
+    const request = value as ValidateCliRuntimeRequest;
+    const discoveredFrom = request.discoveredFrom ?? "manual";
+    if (!["shell-path", "gui-path", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new DaemonRequestError(400, "CLI Runtime 验证来源无效。 ");
+    try {
+      const verified = await validateCodexRuntime({ executablePath: request.executablePath, discoveredFrom, discoveredShell: request.discoveredShell ?? null, controlCommand: this.currentControlCommand() });
+      const stored = await this.#cliRuntimes.saveVerified(verified); const { executableIdentity: _identity, ...runtime } = stored;
+      return { runtime };
+    } catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /** 用户显式选择后才允许真实 Worker 使用该 CLI。 */
+  private async selectCliRuntime(runtimeId: string, value: unknown): Promise<SelectCliRuntimeResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "选择 CLI Runtime 不接受请求字段。 ");
+    try { return { runtime: await this.#cliRuntimes.select(runtimeId) }; }
+    catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  private async deleteCliRuntime(runtimeId: string): Promise<{ readonly deleted: true }> {
+    try { await this.#cliRuntimes.remove(runtimeId); return { deleted: true }; }
+    catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
   private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { return { harness: await this.#harness.snapshot(harnessRunId) }; }
   private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: await this.#harness.list() }; }
-  private async harnessConfig(): Promise<HarnessConfigResponse> { return this.#harness.configStatus(); }
-  private async updateHarnessConfig(value: unknown): Promise<HarnessConfigResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new DaemonRequestError(400, "Harness 模型配置请求无效。 ");
-    try { const status = await saveHarnessConfig(value as UpdateHarnessConfigRequest); this.#harness.invalidateModelSessions(); return status; } catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  /** 私有 MCP sidecar 只以 token 定位当前 Harness；token 不存在、过期或跨会话一律拒绝。 */
+  private async harnessMcp(token: string, value: unknown): Promise<unknown> {
+    const harnessRunId = this.#harnessMcpTokens.get(token);
+    if (!harnessRunId) throw new DaemonRequestError(404, "Harness MCP 会话不存在或已过期。 ");
+    if (!value || typeof value !== "object" || Array.isArray(value) || !["list", "call"].includes((value as { operation?: unknown }).operation as string) || !(value as { value?: unknown }).value || typeof (value as { value: unknown }).value !== "object" || Array.isArray((value as { value: unknown }).value)) throw new DaemonRequestError(400, "Harness MCP 请求无效。 ");
+    try { return await this.#harness.mcpTools(harnessRunId, value as { operation: "list" | "call"; value: Record<string, unknown> }); }
+    catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
   }
   private async harnessMessages(harnessRunId: string): Promise<HarnessMessagesResponse> { const harness = await this.#harness.snapshot(harnessRunId); return { harnessRunId, status: harness.status, messages: harness.messages }; }
   private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
@@ -411,6 +505,7 @@ export class LocalDaemon {
     if (!Number.isInteger(revision) || revision < 1) throw new DaemonRequestError(400, "创建 Execution 必须提供有效 revision 序号。 ");
     if (input !== undefined && !isJsonObject(input)) throw new DaemonRequestError(400, "Execution input 必须是 JSON-safe 对象。 ");
     try {
+      if (!this.deterministicForTest && !this.hasCustomRealExecutor) await this.#cliRuntimes.resolveSelected("codex");
       return await this.#executions.createExecution(harnessRunId, revision, input ?? {});
     } catch (error) { throw this.executionError(error); }
   }
@@ -616,10 +711,11 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(value.workflowPath, cwd);
     const sourcePath = await realpath(resolve(cwd, value.workflowPath));
     const source = await Bun.file(sourcePath).text();
+    if (!this.deterministicForTest && value.workerTransport !== "codex-app-server" && !this.hasCustomRealExecutor) await this.#cliRuntimes.resolveSelected("codex");
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
       : value.workerTransport !== "codex-app-server" && !this.hasCustomRealExecutor
-        ? new AcpWorkerExecutor(codexAcpLauncher())
+        ? new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand())
         : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: value.codexRpcInput !== false });
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
@@ -848,6 +944,7 @@ export class LocalDaemon {
     if (this.#runTasks.has(runId)) throw new DaemonRequestError(409, "该 Run 仍由当前 daemon 执行，不能重复 resume。 ");
     const opened = await RunJournal.open(runId, this.storeRoot);
     const resumesAcp = opened.events.some((event) => event.type === "agent.session" && event.delivery === "acp");
+    if (!this.deterministicForTest && resumesAcp) await this.#cliRuntimes.resolveSelected("codex");
     const manifest = opened.journal.manifest;
     if (manifest.runtimeVersion !== RUNTIME_VERSION) throw new DaemonRequestError(409, `resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${manifest.runtimeVersion} 只能读取。`);
     let source: string;
@@ -859,7 +956,7 @@ export class LocalDaemon {
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
       : resumesAcp
-        ? new AcpWorkerExecutor(codexAcpLauncher())
+        ? new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand())
         : this.createRealExecutor({ controlUrl: `http://127.0.0.1:${this.#server!.port}`, runsRoot: this.storeRoot, daemonInstanceId: this.instanceId, codexRpcInput: true });
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
@@ -1133,32 +1230,6 @@ function isCreateRunRequest(value: unknown): value is CreateRunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
   return typeof request.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(request.clientRequestId) && typeof request.workflowPath === "string" && typeof request.cwd === "string" && isJsonObject(request.input) && (request.codexRpcInput === undefined || typeof request.codexRpcInput === "boolean") && (request.workerTransport === undefined || request.workerTransport === "codex-app-server" || request.workerTransport === "codex-acp");
-}
-
-/** 固定使用 lockfile 安装的 Codex ACP adapter，不调用 npx，也不采用用户 PATH 的 adapter。 */
-export function codexAcpLauncher(): import("../adapters/acp-session").AcpLauncher {
-  const compiled = import.meta.dir.startsWith("/$bunfs/");
-  const bundledCodex = compiled ? join(dirname(process.execPath), basename(process.execPath).replace("wave-flow-daemon", "wave-flow-codex")) : undefined;
-  // Worker 的 complete/block/continue 必须回到启动它的这一套 Wave Flow，而不能依赖
-  // 用户 PATH 中可能过期或指向另一 checkout 的全局 CLI。开发态使用当前 Bun 与源码入口；
-  // 桌面编译版使用同目录已打包的 control sidecar。
-  const controlCommand = compiled
-    ? shellQuote(join(dirname(process.execPath), "wave-flow"))
-    : `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "../cli/main.ts"))}`;
-  return {
-    id: "codex-acp",
-    command: process.execPath,
-    args: compiled ? ["__codex-acp"] : [Bun.resolveSync("@agentclientprotocol/codex-acp", import.meta.dir)],
-    // Worker 受 Workflow Runtime 创建；不使用 Harness 的只读/审批策略。
-    env: {
-      INITIAL_AGENT_MODE: "agent-full-access",
-      WAVE_FLOW_CONTROL_COMMAND: controlCommand,
-      ...(bundledCodex ? {
-        CODEX_PATH: bundledCodex,
-        PATH: `${dirname(join(dirname(process.execPath), "wave-flow"))}:${process.env.PATH ?? ""}`,
-      } : {}),
-    },
-  };
 }
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }

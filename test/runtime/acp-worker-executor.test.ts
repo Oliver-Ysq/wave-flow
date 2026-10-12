@@ -48,6 +48,24 @@ test("ACP Worker 先耐久 binding，只有 Control complete 才返回结果", a
   expect(binding).toMatchObject({ delivery: "acp", acp: { launcherId: "codex-acp", sessionId: "native-acp" } });
 });
 
+test("已验证用户 runtime provenance 会随 ACP session 耐久，且不写入文件身份或环境", async () => {
+  const value = await fixture();
+  const session: AcpWorkerSession = {
+    binding: null,
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native-acp", capabilities: {} }; },
+    async prompt() { await value.control.completeReclaimed({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.agentSessionId, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, { runtimeId: "runtime-id", cli: "codex", executablePath: "/Users/test/bin/codex", version: "codex-cli 1", adapterId: "codex-acp", adapterVersion: "2.2.2", verifiedAt: "2026-10-12T00:00:00.000Z" });
+  executor.bindControl(value.control);
+  await executor.execute(value.node);
+  const opened = await RunJournal.open(value.manifest.runId, runsRoot(value.cwd));
+  const event = opened.events.find((item): item is Extract<JournalEvent, { type: "agent.session" }> => item.type === "agent.session");
+  expect(event?.acp?.runtime).toMatchObject({ runtimeId: "runtime-id", executablePath: "/Users/test/bin/codex", adapterVersion: "2.2.2" });
+  expect(JSON.stringify(event)).not.toContain("inode");
+});
+
 test("Control complete 不等待 ACP prompt 自然收尾", async () => {
   const value = await fixture();
   let releasePrompt!: (value: { readonly stopReason: string }) => void;

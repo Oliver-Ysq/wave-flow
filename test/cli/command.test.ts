@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { main, terminateVerifiedLegacyDaemon } from "../../src/cli/main";
 import { parseCommand } from "../../src/cli/parse-command";
 import { DaemonClient } from "../../src/cli/daemon-client";
-import { codexAcpLauncher } from "../../src/daemon/local-daemon";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -47,11 +46,6 @@ describe("CLI run / inspect", () => {
     expect(() => parseCommand(["capabilities", "--cwd", "/workspace"], "/workspace")).toThrow("仅支持 --json");
   });
 
-  test("默认 ACP Worker 的受管控制命令固定指向当前源码入口，不依赖用户 PATH", () => {
-    const launcher = codexAcpLauncher();
-    expect(launcher.env?.WAVE_FLOW_CONTROL_COMMAND).toContain("src/cli/main.ts");
-    expect(launcher.env?.WAVE_FLOW_CONTROL_COMMAND).not.toBe("wave-flow");
-  });
 
   test("capabilities --json 输出机器可读的三态快照", async () => {
     const lines: string[] = [];

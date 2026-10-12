@@ -98,7 +98,10 @@ export type HarnessDecision = { decisionId: string; question: string; answerSche
 export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; createdAt: string; messages: HarnessMessage[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
-export type HarnessConfigResponse = { configured: boolean; model: string | null; baseUrl: string | null };
+/** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
+export type CliRuntime = { runtimeId: string; cli: "codex"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp"; adapterVersion: string; acpProtocolVersion: number }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
+export type CliRuntimeListResponse = { selectedByCli: Partial<Record<"codex", string>>; runtimes: CliRuntime[] };
+export type DiscoveredCliCandidate = { executablePath: string; discoveredFrom: "shell-path" | "gui-path"; discoveredShell: string | null; aliases: string[] };
 /** 侧边栏耐久项目；项目提供 cwd，会话不再自行选择路径。 */
 export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
 export type HarnessProjectResponse = { project: HarnessProject };

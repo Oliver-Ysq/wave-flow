@@ -2,11 +2,12 @@ import type { JsonObject } from "../shared/json";
 import type { NormalizedAgentRequest, WorkflowMeta } from "../shared/workflow-types";
 import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { SessionIdentity } from "../sessions/types";
+import type { RuntimeProvenance } from "../runtimes/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 7;
+export const RUNTIME_VERSION = 8;
 /** 当前实现可安全读取的历史耐久格式；旧格式只读兼容，不允许追加新的 Replay attempt。 */
-export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, 5, 6, RUNTIME_VERSION] as const;
+export const COMPATIBLE_RUNTIME_VERSIONS = [3, 4, 5, 6, 7, RUNTIME_VERSION] as const;
 
 /** Harness 原生 Execution 的来源绑定；受信任作者入口创建的 Run 没有此字段。 */
 export type RunHarnessOrigin = {
@@ -125,7 +126,7 @@ export type JournalEvent = JournalBase & ({
   /** tmux/codex-rpc 的终端身份；ACP 投递不伪造此坐标。 */
   readonly session?: SessionIdentity;
   /** ACP 投递的 launcher、原生 session 与初始化能力快照。 */
-  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; };
+  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: RuntimeProvenance; };
   /** hybrid 投递的官方 thread/turn 坐标；普通 tmux 投递没有此字段。 */
   readonly appServer?: {
     readonly endpoint: string;
