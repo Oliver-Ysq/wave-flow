@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireDaemonLock, DAEMON_PROTOCOL_VERSION, daemonUserIdentity, descriptorPath, lockPath, publishDescriptor, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeOwnDescriptor } from "../../src/daemon/daemon-descriptor";
+import { acquireDaemonLock, DAEMON_PROTOCOL_VERSION, daemonUserIdentity, descriptorPath, lockPath, publishDescriptor, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeDeadDaemonArtifacts, removeOwnDescriptor } from "../../src/daemon/daemon-descriptor";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -11,6 +11,31 @@ async function root(): Promise<string> { const path = await mkdtemp(join(tmpdir(
 function descriptor(bootInstanceId = "boot"): Parameters<typeof publishDescriptor>[0] { return { protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId, port: 43123, pid: process.pid, processStartIdentity: "test-process", heartbeatAt: new Date().toISOString() }; }
 
 describe("全局 daemon descriptor", () => {
+  test("旧协议 daemon 仍可仅删除自己的 descriptor，供受控升级释放运行目录", async () => {
+    const directory = await root(); const boot = "old-daemon";
+    await (await import("node:fs/promises")).mkdir(directory, { recursive: true, mode: 0o700 });
+    await (await import("node:fs/promises")).writeFile(descriptorPath(directory), `${JSON.stringify({ protocolVersion: 2, userIdentity: daemonUserIdentity(), bootInstanceId: boot, port: 43123, pid: process.pid, processStartIdentity: "old", heartbeatAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+    await removeOwnDescriptor(boot, directory);
+    await expect((await import("node:fs/promises")).access(descriptorPath(directory))).rejects.toThrow();
+  });
+
+  test("仅在旧 descriptor 的 PID 已死亡时才清理其遗留记录", async () => {
+    const directory = await root(); await (await import("node:fs/promises")).mkdir(directory, { recursive: true, mode: 0o700 });
+    await (await import("node:fs/promises")).writeFile(descriptorPath(directory), `${JSON.stringify({ protocolVersion: 2, userIdentity: daemonUserIdentity(), bootInstanceId: "dead", port: 43123, pid: 999999, processStartIdentity: "dead", heartbeatAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+    await expect(removeDeadDaemonArtifacts(directory, async () => "replacement-process-start")).resolves.toBe(true);
+    await expect((await import("node:fs/promises")).access(descriptorPath(directory))).rejects.toThrow();
+  });
+
+  test("旧 daemon 启动身份不可读取时保持 descriptor 与 lock，拒绝猜测其已死亡", async () => {
+    const directory = await root();
+    await (await import("node:fs/promises")).mkdir(directory, { recursive: true, mode: 0o700 });
+    const value = { protocolVersion: 2, userIdentity: daemonUserIdentity(), bootInstanceId: "unknown", port: 43123, pid: process.pid, processStartIdentity: "old", heartbeatAt: new Date().toISOString() };
+    await (await import("node:fs/promises")).writeFile(descriptorPath(directory), `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    await writeFile(lockPath(directory), JSON.stringify({ pid: process.pid, processStartIdentity: "old", bootInstanceId: "unknown" }), { mode: 0o600 });
+    await expect(removeDeadDaemonArtifacts(directory, async () => { throw new Error("ps temporarily unavailable"); })).resolves.toBe(false);
+    await expect((await import("node:fs/promises")).access(descriptorPath(directory))).resolves.toBeNull();
+    await expect((await import("node:fs/promises")).access(lockPath(directory))).resolves.toBeNull();
+  });
   test("原子发布后仅在身份、版本和 heartbeat 均有效时可发现", async () => {
     const directory = await root();
     await publishDescriptor(descriptor(), directory);

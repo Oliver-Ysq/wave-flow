@@ -34,6 +34,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly executor: AgentNodeExecutor,
     initialJournalSequence = 0,
     private readonly replay = false,
+    /** interrupted Run 的 running 事实延迟到首个重跑节点经过调用指纹核验后。 */
+    private readonly resumeInterrupted = false,
   ) {
     this.#journalSequence = initialJournalSequence;
     if (!replay) this.#logicalSequence = initialJournalSequence;
@@ -251,6 +253,14 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** resume 的已完成前缀不产生事实；首个重跑节点才开启新尝试与第一轮阶段访问。 */
   private async ensureReplayAttempt(title: string): Promise<PhaseVisit> {
     if (this.#replayAttemptStarted && this.#currentPhaseVisit) return this.#currentPhaseVisit;
+    if (this.resumeInterrupted && this.state.snapshot().status === "interrupted") {
+      await this.durableApply(this.event({
+        type: "run.status",
+        nodeId: null,
+        diagnostic: "用户显式 resume，已通过首个节点调用校验并创建新的 executionAttempt。",
+        status: "running",
+      }));
+    }
     const executionAttemptId = this.state.snapshot().currentExecutionAttemptId + 1;
     await this.durableApply(this.event({ type: "execution-attempt.started", nodeId: null, executionAttemptId }));
     const visit: PhaseVisit = { executionAttemptId, phaseVisitId: 1, title: this.#replayPhaseTitle ?? title, occurrence: 1 };

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalDaemon } from "../../src/daemon/local-daemon";
@@ -11,6 +11,7 @@ import { RunRuntime } from "../../src/runtime/run-runtime";
 import { DeterministicExecutor } from "../../src/runtime/deterministic-executor";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
 import type { JsonObject } from "../../src/shared/json";
+import { agent, phase } from "../../src/workflow/author-api";
 
 const directories: string[] = [];
 const daemons: LocalDaemon[] = [];
@@ -36,6 +37,61 @@ async function testDaemon(options: ConstructorParameters<typeof LocalDaemon>[0] 
 // 本文件用模块级数组回收长生命周期 loopback server 与临时目录，故必须串行运行。
 // 生产 Runtime 不共享这些资源；这里只避免测试 cleanup 互相停止对方的 daemon。
 describe.serial("LocalDaemon", () => {
+  test("桌面确认重启后自动重新连接可验证终端，并在 daemon 摘要中报告", async () => {
+    const { cwd, workflowPath } = await fixture();
+    let options: import("../../src/sessions/types").CreateSessionOptions | null = null;
+    const backend: SessionBackend = {
+      async create(value) { options = value; return identity(value.runId, value.nodeId, value.agentSessionId!, value.reclaimTokenHash); },
+      async sendText() {}, async pasteText() {}, async sendSpecialKey() {}, async readRecent() { return ""; }, async liveness() { return "exists"; }, async detach() {}, async destroy(): Promise<DestroyResult> { return { status: "destroyed", diagnostic: null }; },
+    };
+    const store = await mkdtemp(join(tmpdir(), "wave-flow-auto-reconnect-store-")); directories.push(store);
+    const first = new LocalDaemon({ storeRoot: runsRoot(store), createRealExecutor: ({ controlUrl, runsRoot: root }) => new RealCodexExecutor(backend, controlUrl, root, async (_sessions, adapter, request) => {
+      const plan = await adapter.launch(request, new AbortController().signal);
+      return { identity: await backend.create({ runId: request.runId, nodeId: request.node.id, agentSessionId: request.node.agentSessionId!, cli: "codex", cwd: request.node.cwd, command: plan.command, env: plan.env, identityFile: request.identityFile, reclaimTokenHash: request.reclaimTokenHash }) };
+    }) });
+    daemons.push(first); const firstServer = first.start();
+    const created = await fetch(`${firstServer.baseUrl}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), workflowPath, cwd, input: { target: "src" } }) }).then(response => response.json() as Promise<{ runId: string }>);
+    await waitFor(() => options !== null); first.stop();
+    const observer = { async start() {}, async verify() {}, async initialScreen() { return { screen: "reconnected", sequence: 0, cols: 80, rows: 24 }; }, subscribe() { return () => {}; }, onClose() { return () => {}; }, replayAfter() { return []; }, async input() {}, async resize(cols: number, rows: number) { return { cols, rows }; }, async close() {} } as unknown as import("../../src/sessions/terminal-observer").TmuxTerminalObserver;
+    const second = new LocalDaemon({ storeRoot: runsRoot(store), verifyReclaimSession: async () => true, createTerminalObserver: () => observer }); daemons.push(second); const secondServer = second.start();
+    await second.reconnectExistingTerminalSessions();
+    const terminal = await fetch(`${secondServer.baseUrl}/runs/${created.runId}/nodes/scan-auth/terminal`);
+    expect(terminal.status).toBe(200);
+    await expect(fetch(`${secondServer.baseUrl}/daemon/status`).then(response => response.json())).resolves.toMatchObject({ activeRuns: 1, reconnectedTerminalSessions: 1, acpWorkersNeedingResume: 0 });
+  });
+
+  test("桌面重启将无法跨 daemon 认领的 ACP 会话耐久标记 interrupted，并允许用户显式 resume", async () => {
+    const { cwd, workflowPath } = await fixture();
+    const store = await mkdtemp(join(tmpdir(), "wave-flow-acp-restart-store-")); directories.push(store);
+    const source = await Bun.file(workflowPath).text();
+    const module: WorkflowModule<JsonObject, unknown> = {
+      meta: { name: "daemon-check", description: "Check daemon.", phases: [{ title: "scan" }] },
+      default: async () => { phase("scan"); return agent("Review", { id: "scan-auth", cli: "codex", input: { target: "src" } }); },
+    };
+    const runtime = await RunRuntime.create({ workflow: module, input: { target: "src" }, workflowSource: source, clientRequestId: crypto.randomUUID(), workflowProjectCwd: cwd, workflowPath, storeRoot: runsRoot(store), executor: new DeterministicExecutor() });
+    const runId = runtime.snapshot().id;
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd: await realpath(cwd), prompt: "Review", phase: "scan", input: { target: "src" } };
+    const at = new Date().toISOString();
+    for (const event of [
+      { type: "agent.created" as const, at, runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request },
+      { type: "agent.status" as const, at, runId, nodeId: "scan-auth", agentSessionId: "old-acp", diagnostic: null, status: "running" as const },
+      { type: "agent.session" as const, at, runId, nodeId: "scan-auth", agentSessionId: "old-acp", diagnostic: null, delivery: "acp" as const, acp: { launcherId: "codex-acp", sessionId: "native-old", capabilities: {} } },
+    ]) {
+      await runtime.journal.append(event); runtime.state.apply(event);
+    }
+    const daemon = new LocalDaemon({ deterministicForTest: true, storeRoot: runsRoot(store) }); daemons.push(daemon);
+    const server = daemon.start();
+    await daemon.reconnectExistingTerminalSessions();
+    await expect(fetch(`${server.baseUrl}/runs/${runId}`).then(response => response.json())).resolves.toMatchObject({ snapshot: { status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] } });
+    await expect(fetch(`${server.baseUrl}/daemon/status`).then(response => response.json())).resolves.toMatchObject({ activeRuns: 0, acpWorkersNeedingResume: 1 });
+    const resumed = await fetch(`${server.baseUrl}/runs/${runId}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ authorized: true }) });
+    expect(resumed.status, await resumed.text()).toBe(200);
+    await expect(waitForCompletedRun(server.baseUrl, runId)).resolves.toMatchObject({ snapshot: { status: "completed", phases: [{ agents: [{ status: "completed" }] }] } });
+    const opened = await (await import("../../src/journal/run-journal")).RunJournal.open(runId, runsRoot(store));
+    expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.status", status: "interrupted", diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。" }));
+    expect(opened.events.filter((event) => event.type === "agent.restarted")).toHaveLength(1);
+  });
+
   test("daemon 重启后只在用户显式请求时重新认领可验证的 Web Terminal", async () => {
     const { cwd, workflowPath } = await fixture();
     let options: import("../../src/sessions/types").CreateSessionOptions | null = null;

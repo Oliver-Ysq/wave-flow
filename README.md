@@ -12,16 +12,16 @@
 ## 当前可用能力
 
 - 使用 TypeScript 编排可复用的动态工作流；Agent 节点由 Workflow 在运行时的实际调用推进。
-- 为每个 Agent 节点托管真实、长期存活且可交互的 Codex CLI 会话。
+- 默认通过独立、长期存活的 Codex ACP Worker session 执行 Agent 节点。
 - 通过 `wave-flow run` 创建 Run，安全投递首条任务后返回 Run ID，并在当前终端订阅状态变化。
 - 通过 `wave-flow inspect <run-id>` 再次读取 Run 状态。
-- Agent 通过 `wave-flow complete` 上报经校验的结构化完成结果；可通过 `block / answer / continue` 请求并处理人工协助；终端文字不是完成依据。
-- daemon 重启后，仍存活且可验证的受管会话可继续处理 `answer / block / continue / complete`；不会自动重发任务或创建新 Agent。
-- `wave-flow resume <run-id>` 由用户授权后重放调用轨迹：严格复用连续匹配的 completed 前缀，从第一个不可验证节点开始创建新 attempt。
-- `wave-flow pause / recover / stop <run-id>` 管理当前受管 Run：暂停停止当前 turn 和该 thread 的受管背景终端，恢复在同一 thread 新开继续回合，停止使 Run 进入终态。
+- Agent 通过 `wave-flow complete` 上报经校验的结构化完成结果；可通过 `block / answer / continue` 请求并处理人工协助；ACP 流与自然结束不是完成依据。
+- daemon 重启将使当前 `running / blocked` ACP 节点耐久收敛为 `interrupted`；不会自动重发任务、交付旧 block 或认领旧 session。
+- `wave-flow resume <run-id>` 由用户授权后重放调用轨迹：严格复用连续匹配的 completed 前缀，从第一个 interrupted 或不匹配节点开始创建新 attempt。
+- `wave-flow pause / recover / stop <run-id>` 管理当前 daemon 内 ACP Run：暂停经 cancel 确认，恢复在同一 ACP session 新开检查现场后的继续回合，停止使 Run 进入终态。
 - daemon 同源提供 Local Web 总览，展示 Run、Phase、Agent、结果和待处理的人工协助。
 - 提供 Tauri 桌面端（当前 macOS Apple Silicon 构建），桌面端通过随包 bridge 安全发现或启动 loopback daemon；用户可直接查看和创建 Run。
-- 本地 daemon 持久化 Run、事件、会话坐标与结果，并管理私有 tmux socket 中的受管会话。
+- 本地 daemon 持久化 Run、事件、ACP 会话绑定与结果。
 
 ## 当前边界
 
@@ -32,7 +32,7 @@
 
 ## 快速开始
 
-CLI 开发要求：已安装 [Bun](https://bun.sh/)、Codex CLI 和 tmux。
+CLI 开发要求：已安装 [Bun](https://bun.sh/) 与 Codex CLI。
 
 桌面端使用者无需手动启动 daemon 或运行 `wave-flow start`。当前可在 macOS Apple Silicon 开发环境构建应用：
 
@@ -132,17 +132,15 @@ wave-flow continue --block-request-id <block-request-id> \
 
 开发 React 页面时可运行 `bun run web:dev`；Vite 只负责前端开发预览，生产页面始终由 daemon 同源提供构建产物。
 
-`pause` 不是操作系统级冻结：它先关闭 tmux viewer，再中断当前 App Server turn，并清理该 thread 可枚举的背景终端；只有背景终端清单为空才会进入 `paused`。`recover` 不重发原 Prompt，而是在同一 thread 创建“检查现场后继续”的新回合。Agent 主动用 `nohup`、远端服务等方式脱离 Codex 管理的进程，不在暂停确认的覆盖范围内。
+默认 ACP `pause` 不是操作系统级冻结：它请求当前 ACP Worker cancel，并在取消得到确认后才进入 `paused`。`recover` 不重发原 Prompt，而是在同一 ACP session 创建“检查现场后继续”的新回合。Agent 主动使用远端服务或其他方式脱离 Codex 管理的副作用，不在暂停确认的覆盖范围内。
 
 暂停依赖当前 daemon 保留的 Workflow 调用栈；如果 daemon 在 `pausing`、`paused` 或 `recovering` 时重启，Wave Flow 会将该 Run 如实标记为 `interrupted`，不会伪造 recover。之后可由用户使用 `resume` 创建新的受控 attempt。
 
-默认 ACP Worker 使用内置 `codex-acp` adapter 加用户明确选择、已验证的本机 Codex runtime；Worker 具有 Workflow 指派的完整读写权限。没有默认 runtime、CLI 文件身份变化或版本重新验证前，Wave Flow 会在创建真实 Worker 前 fail closed，不会回退到随包 Codex。传入 `--codex-app-server` 可显式使用旧 App Server + tmux 兼容路径，`--tmux-tui-input` 仅适用于该兼容路径。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`；daemon 重启后，用户 `resume` 创建新 ACP Worker attempt，不认领旧 ACP session。
+默认 ACP Worker 使用内置 `codex-acp` adapter 加用户明确选择、已验证的本机 Codex runtime；Worker 具有 Workflow 指派的完整读写权限。没有默认 runtime、CLI 文件身份变化或版本重新验证前，Wave Flow 会在创建真实 Worker 前 fail closed，不会回退到随包 Codex。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`。
 
-跨 daemon 的控制恢复只适用于旧 tmux 与 App Server thread 仍能验证的会话：答案可先保存，原 `block` 以相同请求 ID 重连后读取答案，只有 Agent 自己 `continue` 才恢复运行。它不自动发送 Codex 新回合、不重发 Prompt、不重跑节点，也不恢复 Workflow 调用栈。
+`resume` 是单独的用户授权操作。它严格核对 Workflow 源码 hash、输入、项目目录和每次 `agent()` 调用的节点 id、顺序、cwd、CLI、sandbox、model、schema、input 与 prompt。连续匹配的 completed 节点直接返回 Journal 结果；第一个 interrupted 或不匹配节点创建新 attempt，之后的节点不再复用旧结果。
 
-`resume` 是单独的用户授权操作。它严格核对 Workflow 源码 hash、输入、项目目录和每次 `agent()` 调用的节点 id、顺序、cwd、CLI、sandbox、model、schema、input 与 prompt。连续匹配的 completed 节点直接返回 Journal 结果；第一个不可验证或 interrupted 节点创建新 attempt，之后的节点不再复用旧结果。仍可验证的旧会话不会被 resume 重跑。
-
-`capabilities --json` 输出当前机器的三态能力快照：命令存在只表示可被探测；`unknown` 表示尚未形成环境结论；`unavailable` 表示已确认不能使用。Runtime 在启动与投递阶段继续验证 tmux、Codex 和会话状态，不会将二进制存在或终端文字误判为任务成功投递。
+`capabilities --json` 输出当前机器的三态能力快照：命令存在只表示可被探测；`unknown` 表示尚未形成环境结论；`unavailable` 表示已确认不能使用。默认 ACP 路径在启动与投递阶段继续验证 Codex ACP 与会话状态，不会将二进制存在或 ACP turn 结束误判为任务成功投递。
 
 ## 开发与验证
 

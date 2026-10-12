@@ -50,6 +50,22 @@ export type RunListItem = {
   readonly observationOnly?: boolean;
 };
 
+/** 菜单栏与桌面升级页读取的 daemon 权威摘要；只暴露计数，不泄露终端或 Journal 内容。 */
+export type DaemonStatusResponse = {
+  /** 当前 daemon 的发现协议版本。 */
+  readonly protocolVersion: number;
+  /** 未终结 Run 数量。 */
+  readonly activeRuns: number;
+  /** 等待人工协助的 Run 数量。 */
+  readonly blockedRuns: number;
+  /** 正在生成回复的 Harness 回合数。 */
+  readonly activeHarnesses: number;
+  /** 本次受控重启成功重新连接的旧终端会话数。 */
+  readonly reconnectedTerminalSessions: number;
+  /** ACP 不支持跨 daemon 认领、需要用户显式恢复的 Worker 数量。 */
+  readonly acpWorkersNeedingResume: number;
+};
+
 /** Run 当前执行尝试的轻量首页数据，不包含全部历史 Agent。 */
 export type CurrentAttemptResponse = {
   /** Run 稳定 id。 */
@@ -214,6 +230,15 @@ export type AnswerDecisionRequest = {
 export type CliRuntimeListResponse = { readonly selectedByCli: Readonly<Partial<Record<"codex", string>>>; readonly runtimes: readonly CliRuntimeView[] };
 /** 用户明确扫描 PATH 后返回的候选；候选尚未经过 ACP 验证。 */
 export type DiscoverCliRuntimesResponse = { readonly candidates: readonly DiscoveredCliCandidate[] };
+/** 一次启动扫描的汇总；成功候选已完成完整 ACP 验证并写入 Registry，但绝不改变默认项。 */
+export type ScanCliRuntimesResponse = {
+  /** 本次从受控 PATH 发现的去重候选数。 */
+  readonly discovered: number;
+  /** 本次完整验证并保存成功的候选数。 */
+  readonly verified: number;
+  /** 当前安全可展示的 Runtime 列表；不含 PATH、环境或文件身份。 */
+  readonly runtimes: CliRuntimeListResponse;
+};
 /** 验证发现候选或手动绝对路径；成功不会自动成为默认。 */
 export type ValidateCliRuntimeRequest = { readonly executablePath: string; readonly discoveredFrom?: "shell-path" | "gui-path" | "manual"; readonly discoveredShell?: string | null };
 /** 设置默认 Runtime 的响应。 */

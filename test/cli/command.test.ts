@@ -13,8 +13,8 @@ describe("CLI run / inspect", () => {
   test("旧 daemon close 兼容前再次发现身份变化时拒绝发送终止信号", async () => {
     let killed = false;
     await expect(terminateVerifiedLegacyDaemon(
-      { baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } },
-      async () => ({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 2, userIdentity: "uid:501", bootInstanceId: "replaced", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } }),
+      { baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 3, userIdentity: "uid:501", bootInstanceId: "original", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } },
+      async () => ({ baseUrl: "http://127.0.0.1:12345", descriptor: { protocolVersion: 3, userIdentity: "uid:501", bootInstanceId: "replaced", port: 12345, pid: 42, processStartIdentity: "original-start", heartbeatAt: new Date().toISOString() } }),
       (() => { killed = true; return true; }) as typeof process.kill,
     )).rejects.toThrow("身份在关闭前发生变化");
     expect(killed).toBe(false);

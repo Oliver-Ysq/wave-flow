@@ -90,9 +90,18 @@ export class RunRuntime {
     if (opened.journal.manifest.runtimeVersion !== RUNTIME_VERSION) throw new Error(`resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${opened.journal.manifest.runtimeVersion} 只能读取。`);
     const state = new RunStateMachine(opened.journal.manifest);
     for (const event of opened.events) state.apply(event);
-    if (state.snapshot().status !== "running") throw new Error("只有仍为 running 的 Run 可以 resume。");
+    const priorStatus = state.snapshot().status;
+    if (priorStatus !== "running" && priorStatus !== "interrupted") throw new Error("只有 running 或 interrupted 的 Run 可以 resume。");
     const historicalSequence = maximumJournalSequence(opened.events);
-    return new RunRuntime(opened.journal, state, new RunRuntimeHost(opened.journal, state, executor, historicalSequence, true), true);
+    const resumeInterrupted = priorStatus === "interrupted";
+    return new RunRuntime(opened.journal, state, new RunRuntimeHost(
+      opened.journal,
+      state,
+      executor,
+      historicalSequence,
+      true,
+      resumeInterrupted,
+    ), true);
   }
 
   /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。options.policy 用于受限脚本的资源护栏。 */

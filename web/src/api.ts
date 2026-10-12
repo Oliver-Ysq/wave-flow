@@ -1,4 +1,4 @@
-import type { CliRuntime, CliRuntimeListResponse, CreateRunRequest, CurrentAttemptResponse, DiscoveredCliCandidate, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
+import type { CliRuntime, CliRuntimeListResponse, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoveredCliCandidate, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, ScanCliRuntimesResponse, TerminalOpenResponse, ReclaimTerminalResponse } from "./types";
 
 async function json<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? undefined : {
@@ -15,11 +15,14 @@ async function json<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  daemonStatus: () => json<DaemonStatusResponse>("/daemon/status"),
+  closeDaemon: () => json<{ closing: true }>("/daemon/close", {}),
   createRun: (request: CreateRunRequest) => json<RunResponse>("/runs", request),
   listRuns: () => json<RunListItem[]>("/api/runs"),
   listHarnesses: () => json<HarnessRunListResponse>("/api/harness-runs"),
   cliRuntimes: () => json<CliRuntimeListResponse>("/cli-runtimes"),
   discoverCliRuntimes: () => json<{ candidates: DiscoveredCliCandidate[] }>("/cli-runtimes/discover", {}),
+  scanCliRuntimes: () => json<ScanCliRuntimesResponse>("/cli-runtimes/scan", {}),
   validateCliRuntime: (executablePath: string, discoveredFrom: "shell-path" | "gui-path" | "manual" = "manual", discoveredShell: string | null = null) => json<{ runtime: CliRuntime }>("/cli-runtimes/validate", { executablePath, discoveredFrom, discoveredShell }),
   selectCliRuntime: (runtimeId: string) => json<{ runtime: CliRuntime }>(`/cli-runtimes/${encodeURIComponent(runtimeId)}/select`, {}),
   deleteCliRuntime: async (runtimeId: string) => { const response = await fetch(`/cli-runtimes/${encodeURIComponent(runtimeId)}`, { method: "DELETE" }); if (!response.ok) { const value = await response.json() as { error?: string }; throw new Error(value.error ?? "删除 Runtime 失败"); } },

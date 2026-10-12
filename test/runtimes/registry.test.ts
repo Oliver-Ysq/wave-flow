@@ -41,4 +41,15 @@ describe("CliRuntimeRegistry", () => {
     const registry = new CliRuntimeRegistry(root);
     await expect(registry.resolveSelectedHarness("codex")).resolves.toMatchObject({ runtimeId: legacy.runtimeId, verifiedAdapter: { harnessTools: true } });
   });
+
+  test("已有默认主控时拒绝切换到另一 Runtime，但允许原选择幂等确认", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-no-switch-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root); const first = await registry.saveVerified(await record(root));
+    const secondPath = join(root, "second-codex"); await writeFile(secondPath, "#!/bin/sh\necho codex\n", { mode: 0o700 }); await chmod(secondPath, 0o700);
+    const executable = await verifyExecutable(secondPath);
+    const second = await registry.saveVerified({ ...(await record(root)), runtimeId: crypto.randomUUID(), executablePath: executable.executablePath, executableIdentity: executable.identity });
+    await registry.select(first.runtimeId);
+    await expect(registry.select(second.runtimeId)).rejects.toThrow("后续版本");
+    await expect(registry.select(first.runtimeId)).resolves.toMatchObject({ runtimeId: first.runtimeId });
+  });
 });

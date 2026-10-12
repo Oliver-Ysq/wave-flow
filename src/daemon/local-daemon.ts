@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, TerminalOpenResponse, ReclaimTerminalResponse, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, TerminalOpenResponse, ReclaimTerminalResponse, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { probeCapabilities } from "./capability-probe";
 import { handleCompleteHttp } from "../control/control-http";
@@ -31,6 +31,7 @@ import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
 import type { HarnessStreamEvent } from "../harness/types";
 import { CliRuntimeRegistry } from "../runtimes/registry";
+import type { CliRuntimeRecord, DiscoveredCliCandidate } from "../runtimes/types";
 import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
 import { validateCodexRuntime } from "../runtimes/codex-runtime-validator";
 import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
@@ -78,6 +79,10 @@ export type LocalDaemonOptions = {
   readonly scheduleClose?: () => void;
   /** 自动测试或显式兼容后端注入；生产省略时使用 selected ACP CLI Harness。 */
   readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks) => Promise<import("../harness/session").HarnessSession>;
+  /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
+  readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
+  /** 测试注入的完整 CLI 验证器；生产执行 realpath、版本与 ACP 握手。 */
+  readonly validateCliRuntime?: (candidate: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
 };
 
 /** 只监听 loopback 的最小 daemon；CLI 必须经它创建和查询 Run。 */
@@ -92,10 +97,16 @@ export class LocalDaemon {
   #executions: HarnessExecutionService;
   /** 所有 ACP Worker 必须使用用户确认且启动前复核的本机 CLI Runtime。 */
   #cliRuntimes: CliRuntimeRegistry;
+  /** 同一 daemon 内启动扫描单飞，避免并发页面加载重复握手和覆盖 Registry。 */
+  #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
   /** 每条 Harness ACP session 私有 MCP token；只在 daemon 内存存活。 */
   #harnessMcpTokens = new Map<string, string>();
   /** 用户显式验证并认领的旧会话；资格精确绑定 node/session，不能放宽到整个 Run。 */
   #observedSessions = new Set<string>();
+  /** 用户确认重启后，当前 daemon 实际认领成功的旧 tmux/App Server 会话数量。 */
+  #reconnectedTerminalSessions = 0;
+  /** ACP 缺少跨 daemon identity；仅提供诚实 UI 提示，绝不伪造 session 认领。 */
+  #acpWorkersNeedingResume = 0;
   /** 同一旧会话的并发认领单飞，防止两份 Runtime/Control 状态机互相覆盖。 */
   #terminalReclaims = new Map<string, Promise<ReclaimTerminalResponse>>();
   /** 同一 Run 的不同节点认领串行执行；不同 Run 仍可并行。 */
@@ -125,6 +136,8 @@ export class LocalDaemon {
   private readonly createTerminalObserver: NonNullable<LocalDaemonOptions["createTerminalObserver"]>;
   private readonly scheduleClose: () => void;
   private readonly hasCustomHarnessSession: boolean;
+  private readonly discoverCliRuntimeCandidates: () => Promise<readonly DiscoveredCliCandidate[]>;
+  private readonly validateCliRuntimeCandidate: NonNullable<LocalDaemonOptions["validateCliRuntime"]>;
 
   /**
    * @param options 自动测试可选择稳定或 fake 真实执行器；省略时启动真正 tmux/Codex。
@@ -139,6 +152,8 @@ export class LocalDaemon {
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
     this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
+    this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
+    this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((candidate) => validateCodexRuntime({ ...candidate, controlCommand: this.currentControlCommand() }));
     this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
     const harnessFactory = normalized.createHarnessSession ?? (this.deterministicForTest
       ? async () => new DeterministicHarnessSession()
@@ -217,6 +232,53 @@ export class LocalDaemon {
     }
   }
 
+  /**
+   * 仅由确认后的桌面重启调用：重连可验证的 tmux/App Server 会话。
+   * 不重发 Prompt、不恢复 Workflow 调用栈；ACP 一律保留为显式 resume。
+   */
+  async reconnectExistingTerminalSessions(): Promise<void> {
+    let runIds: string[];
+    try { runIds = await readdir(this.storeRoot); } catch { return; }
+    for (const runId of runIds) {
+      try {
+        const opened = await RunJournal.open(runId, this.storeRoot);
+        const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
+        let interruptedAcp = false;
+        for (const node of runtime.snapshot().phases.flatMap(phase => phase.agents)) {
+          if ((node.status !== "running" && node.status !== "blocked") || !node.agentSessionId) continue;
+          const session = sessionFor(opened.events, node.id, node.agentSessionId);
+          if (session?.delivery === "acp") {
+            // ACP 没有能与 tmux/App Server 一样跨 daemon 验证的会话身份。不能将
+            // session/load 误称为原 Worker 认领；只有用户显式 resume 能新建 attempt。
+            const event: import("../journal/types").JournalEvent = {
+              type: "agent.status", at: new Date().toISOString(), runId,
+              nodeId: node.id, agentSessionId: node.agentSessionId,
+              diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。",
+              status: "interrupted",
+            };
+            await runtime.journal.append(event);
+            runtime.state.apply(event);
+            this.#acpWorkersNeedingResume += 1;
+            interruptedAcp = true;
+            continue;
+          }
+          try { await this.reclaimTerminal(runId, node.id, {}); this.#reconnectedTerminalSessions += 1; }
+          catch { /* 不可验证会话保持原 Journal；用户可显式 resume。 */ }
+        }
+        if (interruptedAcp && runtime.snapshot().status === "running") {
+          const event: import("../journal/types").JournalEvent = {
+            type: "run.status", at: new Date().toISOString(), runId,
+            nodeId: null, agentSessionId: null,
+            diagnostic: "daemon 重启后存在无法跨进程验证的 ACP 会话；等待用户显式 resume。",
+            status: "interrupted",
+          };
+          await runtime.journal.append(event);
+          runtime.state.apply(event);
+        }
+      } catch { /* 单一 archive 损坏不能阻断其他旧会话。 */ }
+    }
+  }
+
   /** 注册一个真实 Run 的 ControlServer；必须与当前 daemon 中的同一 Run 绑定。 */
   registerControl(runId: string, control: ControlServer): void {
     const runtime = this.#runs.get(runId);
@@ -251,6 +313,7 @@ export class LocalDaemon {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
+      if (request.method === "GET" && url.pathname === "/daemon/status") return this.json(await this.daemonStatus());
       const harnessMcp = url.pathname.match(/^\/harness-mcp\/([^/]+)$/);
       if (request.method === "POST" && harnessMcp) return this.json(await this.harnessMcp(decodeURIComponent(harnessMcp[1]), await this.readJson(request)));
       if (request.method === "GET" && url.pathname === "/capabilities") return this.json(await probeCapabilities());
@@ -258,6 +321,7 @@ export class LocalDaemon {
       if (request.method === "GET" && url.pathname === "/api/runs") return this.json(await this.listRuns());
       if (request.method === "GET" && url.pathname === "/cli-runtimes") return this.json(await this.listCliRuntimes());
       if (request.method === "POST" && url.pathname === "/cli-runtimes/discover") return this.json(await this.discoverCliRuntimes(await this.readJson(request)));
+      if (request.method === "POST" && url.pathname === "/cli-runtimes/scan") return this.json(await this.scanCliRuntimes(await this.readJson(request)));
       if (request.method === "POST" && url.pathname === "/cli-runtimes/validate") return this.json(await this.validateCliRuntime(await this.readJson(request)));
       const cliRuntimeSelect = url.pathname.match(/^\/cli-runtimes\/([^/]+)\/select$/);
       if (request.method === "POST" && cliRuntimeSelect) return this.json(await this.selectCliRuntime(decodeURIComponent(cliRuntimeSelect[1]), await this.readJson(request)));
@@ -446,10 +510,29 @@ export class LocalDaemon {
   /** 返回设置页可展示的 Runtime；不暴露文件身份、PATH 或任何环境变量。 */
   private async listCliRuntimes(): Promise<CliRuntimeListResponse> { return this.#cliRuntimes.list(); }
 
-  /** discovery 只能由用户按钮明确触发；请求体必须为空，禁止携带 shell 文本。 */
+  /** 仅保留为诊断接口；启动扫描应使用 scan，由 daemon 负责验证和安全写入。 */
   private async discoverCliRuntimes(value: unknown): Promise<DiscoverCliRuntimesResponse> {
     if (!isEmptyObject(value)) throw new DaemonRequestError(400, "扫描本机 CLI 不接受请求字段。 ");
-    try { return { candidates: await new ShellPathDiscovery().discover() }; }
+    try { return { candidates: await this.discoverCliRuntimeCandidates() }; }
+    catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /**
+   * 自动扫描只发现、验证并保存候选，绝不写 selectedByCli。
+   * 页面每次启动触发一次；单飞只合并同一时刻请求，不把失败当成默认项变更。
+   */
+  private async scanCliRuntimes(value: unknown): Promise<ScanCliRuntimesResponse> {
+    if (!isEmptyObject(value)) throw new DaemonRequestError(400, "扫描本机 CLI 不接受请求字段。 ");
+    if (!this.#runtimeScan) this.#runtimeScan = (async () => {
+      const candidates = await this.discoverCliRuntimeCandidates();
+      let verified = 0;
+      for (const candidate of candidates) {
+        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate)); verified += 1; }
+        catch { /* 单个 PATH 条目损坏/未登录不阻塞其余候选；细节不回显到 Web。 */ }
+      }
+      return { discovered: candidates.length, verified, runtimes: await this.#cliRuntimes.list() };
+    })().finally(() => { this.#runtimeScan = null; });
+    try { return await this.#runtimeScan; }
     catch (error) { throw new DaemonRequestError(400, error instanceof Error ? error.message : String(error)); }
   }
 
@@ -621,6 +704,19 @@ export class LocalDaemon {
     if (!isEmptyObject(value)) throw new DaemonRequestError(400, "daemon close 不接受请求字段。 ");
     queueMicrotask(() => this.scheduleClose());
     return this.json({ closing: true } satisfies CloseDaemonResponse);
+  }
+
+  /** 菜单栏只能读取这个摘要，不得维护自己的 Run 状态机。 */
+  private async daemonStatus(): Promise<DaemonStatusResponse> {
+    const runs = await this.listRuns(); const harnesses = await this.listHarnesses();
+    return {
+      protocolVersion: DAEMON_PROTOCOL_VERSION,
+      activeRuns: runs.filter(run => isLiveRunStatus(run.status)).length,
+      blockedRuns: runs.filter(run => run.hasBlockedAgent).length,
+      activeHarnesses: harnesses.harnesses.filter(harness => harness.status === "running").length,
+      reconnectedTerminalSessions: this.#reconnectedTerminalSessions,
+      acpWorkersNeedingResume: this.#acpWorkersNeedingResume,
+    };
   }
 
   private async createRun(value: unknown): Promise<RunResponse> {

@@ -24,6 +24,7 @@ if (process.argv[2] === "__codex-acp") {
     daemon.setBootInstanceId(bootInstanceId);
     await daemon.reconcileRunControl();
     const server = daemon.start();
+    if (process.env.WF_RECONNECT_EXISTING === "1") await daemon.reconnectExistingTerminalSessions();
     const startedAt = await processStartIdentity(process.pid);
     const descriptor = () => ({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId, port: Number(new URL(server.baseUrl).port), pid: process.pid, processStartIdentity: startedAt, heartbeatAt: new Date().toISOString() } as const);
     await publishDescriptor(descriptor());

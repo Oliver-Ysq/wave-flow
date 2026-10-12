@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
-#[cfg(not(debug_assertions))]
-use tauri::Manager;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager, Theme, WindowEvent};
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri_plugin_shell::ShellExt;
 
 #[derive(Deserialize, Serialize)]
@@ -8,6 +11,9 @@ use tauri_plugin_shell::ShellExt;
 struct DaemonConnection {
   base_url: String,
 }
+
+/** 菜单栏只保留 daemon 已计算的摘要文本，不持有 Run、Journal 或会话状态。 */
+struct TrayState { summary: Mutex<MenuItem<tauri::Wry>> }
 
 /** 桌面壳可转交给 bridge 的唯一环境键；禁止以任意父进程环境替代此白名单。 */
 const SIDECAR_ENV_KEYS: &[&str] = &[
@@ -23,6 +29,47 @@ const SIDECAR_ENV_KEYS: &[&str] = &[
  */
 #[tauri::command]
 async fn ensure_daemon(app: tauri::AppHandle) -> Result<DaemonConnection, String> {
+  bridge_daemon(&app, false).await
+}
+
+/** 用户二次确认后才进入；bridge 会先验证旧 daemon 身份并请求优雅退出。 */
+#[tauri::command]
+async fn restart_daemon(app: tauri::AppHandle) -> Result<DaemonConnection, String> {
+  bridge_daemon(&app, true).await
+}
+
+/** 页面从 daemon/status 读取摘要后调用；Rust 仅展示这一权威投影。 */
+#[tauri::command]
+fn update_tray_summary(app: tauri::AppHandle, summary: String) -> Result<(), String> {
+  app.state::<TrayState>().summary.lock().map_err(|_| "菜单栏状态锁不可用。".to_string())?.set_text(summary).map_err(|error| error.to_string())
+}
+
+/** 仅在 Web 已收到 daemon 自己的关闭确认后调用，移除菜单栏伴侣。 */
+#[tauri::command]
+fn exit_menu_companion(app: tauri::AppHandle) {
+  app.exit(0);
+}
+
+/**
+ * 仅同步主窗口的原生明暗外观；Web 主题仍由 React 保存和渲染。
+ *
+ * 允许值限定为 `light`、`dark`，拒绝任何其他值，避免将窗口配置扩大成
+ * 任意桌面控制通道。窗口保留 macOS 系统可见标题栏，由系统稳定绘制
+ * 关闭、最小化与全屏交通灯；此命令只同步其原生明暗外观。
+ * 该命令不读取或改变 daemon、Run、Journal 与会话状态。
+ */
+#[tauri::command]
+fn set_window_theme(app: tauri::AppHandle, theme: String) -> Result<(), String> {
+  let native_theme = match theme.as_str() {
+    "light" => Theme::Light,
+    "dark" => Theme::Dark,
+    _ => return Err("桌面主题只允许 light 或 dark。".to_string()),
+  };
+  let window = app.get_webview_window("main").ok_or_else(|| "主窗口不可用。".to_string())?;
+  window.set_theme(Some(native_theme)).map_err(|error| error.to_string())
+}
+
+async fn bridge_daemon(app: &tauri::AppHandle, restart: bool) -> Result<DaemonConnection, String> {
   let web_dist = web_dist_path(&app)?;
   if !web_dist.join("index.html").is_file() {
     return Err(format!("桌面 Web 资源缺失：{}", web_dist.display()));
@@ -36,6 +83,7 @@ async fn ensure_daemon(app: tauri::AppHandle) -> Result<DaemonConnection, String
     // 并且只转交给本机 sidecar。它们不会进入 Web、bridge stdout、Journal 或
     // daemon API；这里不透传任意环境变量，避免桌面壳意外扩大配置边界。
     .envs(sidecar_env())
+    .args(if restart { vec!["--restart"] } else { vec![] })
     .output()
     .await
     .map_err(|error| format!("无法启动桌面 bridge：{error}"))?;
@@ -99,12 +147,93 @@ fn web_dist_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
   Ok(web_dist)
 }
 
+/**
+ * 专供 macOS 菜单栏的透明单色 V；不能复用带圆角背景的应用图标。
+ *
+ * menu bar 会将 template 图标按系统明暗色染色，所以这里仅提供黑色不透明像素和
+ * 透明背景。以 4x 采样生成抗锯齿边缘，避免小尺寸下的 V 变成两条细线。
+ */
+fn tray_v_icon() -> Image<'static> {
+  const SIZE: u32 = 44;
+  const SAMPLES: u32 = 4;
+  const STROKE: f32 = 5.4;
+  let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+
+  for y in 0..SIZE {
+    for x in 0..SIZE {
+      let mut covered = 0_u32;
+      for sample_y in 0..SAMPLES {
+        for sample_x in 0..SAMPLES {
+          let px = x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32;
+          let py = y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32;
+          let left = distance_to_segment(px, py, 9.0, 10.0, 22.0, 34.0);
+          let right = distance_to_segment(px, py, 35.0, 10.0, 22.0, 34.0);
+          if left <= STROKE / 2.0 || right <= STROKE / 2.0 {
+            covered += 1;
+          }
+        }
+      }
+      let alpha = (covered * 255 / (SAMPLES * SAMPLES)) as u8;
+      rgba.extend_from_slice(&[0, 0, 0, alpha]);
+    }
+  }
+  Image::new_owned(rgba, SIZE, SIZE)
+}
+
+/** 返回点到有限线段的距离，确保 V 的两个端点在小菜单栏尺寸下仍圆润可辨。 */
+fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+  let ab_x = bx - ax;
+  let ab_y = by - ay;
+  let projection = ((px - ax) * ab_x + (py - ay) * ab_y) / (ab_x * ab_x + ab_y * ab_y);
+  let t = projection.clamp(0.0, 1.0);
+  let dx = px - (ax + ab_x * t);
+  let dy = py - (ay + ab_y * t);
+  (dx * dx + dy * dy).sqrt()
+}
+
 fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
-    .invoke_handler(tauri::generate_handler![ensure_daemon])
+    .setup(|app| {
+      // 使用 macOS 可见标题栏，由系统稳定绘制完整的关闭、最小化与全屏交通灯。
+      // Web 工作台从标题栏下方开始，避免把业务控件和窗口控制区放在同一行。
+      let open = MenuItem::with_id(app, "open", "打开 Wave Flow", true, None::<&str>)?;
+      let summary = MenuItem::with_id(app, "summary", "正在连接后台服务…", false, None::<&str>)?;
+      let restart = MenuItem::with_id(app, "restart", "重启后台服务…", true, None::<&str>)?;
+      let shutdown = MenuItem::with_id(app, "shutdown", "退出后台服务…", true, None::<&str>)?;
+      let quit = MenuItem::with_id(app, "quit", "退出菜单栏伴侣", true, None::<&str>)?;
+      let separator = PredefinedMenuItem::separator(app)?;
+      let menu = Menu::with_items(app, &[&open, &summary, &separator, &restart, &shutdown, &quit])?;
+      app.manage(TrayState { summary: Mutex::new(summary) });
+      TrayIconBuilder::with_id("wave-flow-tray")
+        .menu(&menu)
+        .tooltip("Wave Flow 后台服务")
+        .icon(tray_v_icon())
+        .icon_as_template(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+          "open" => { let _ = show_main_window(app); }
+          "restart" => { let _ = app.emit("wave-flow://restart-requested", ()); let _ = show_main_window(app); }
+          "shutdown" => { let _ = app.emit("wave-flow://shutdown-requested", ()); let _ = show_main_window(app); }
+          "quit" => app.exit(0),
+          _ => {}
+        })
+        .build(app)?;
+      Ok(())
+    })
+    .on_window_event(|window, event| {
+      if let WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let _ = window.hide();
+      }
+    })
+    .invoke_handler(tauri::generate_handler![ensure_daemon, restart_daemon, update_tray_summary, exit_menu_companion, set_window_theme])
     .run(tauri::generate_context!())
     .expect("运行 Wave Flow Desktop 失败");
+}
+
+fn show_main_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
+  let window = app.get_webview_window("main").ok_or(tauri::Error::AssetNotFound("main".into()))?;
+  window.show()?; window.set_focus()?; Ok(())
 }
 
 #[cfg(test)]

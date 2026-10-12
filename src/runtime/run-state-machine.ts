@@ -391,6 +391,9 @@ function canRunTransition(from: RunStatus, to: RunStatus): boolean {
   if (from === "pausing") return to === "paused" || to === "cancelled" || to === "interrupted";
   if (from === "paused") return to === "recovering" || to === "cancelled" || to === "interrupted";
   if (from === "recovering") return to === "running" || to === "cancelled" || to === "interrupted";
+  // 只有用户显式 resume 才能令 interrupted 回到 running，并建立新的 attempt；
+  // daemon 重启或会话丢失绝不隐式重跑 Workflow。
+  if (from === "interrupted") return to === "running";
   return false;
 }
 

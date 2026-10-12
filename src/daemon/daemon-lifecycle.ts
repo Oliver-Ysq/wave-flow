@@ -1,4 +1,4 @@
-import { DAEMON_PROTOCOL_VERSION, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, type DaemonDescriptor } from "./daemon-descriptor";
+import { DAEMON_PROTOCOL_VERSION, processStartIdentity, readFreshDaemonCandidate, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeDeadDaemonArtifacts, type DaemonDescriptor } from "./daemon-descriptor";
 import { isAbsolute } from "node:path";
 import { runtimeRoot } from "../journal/paths";
 
@@ -37,6 +37,26 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
   throw new Error("Wave Flow 全局 daemon 未在时限内完成健康启动。");
 }
 
+/**
+ * 桌面端用户明确确认升级后才调用。旧 daemon 必须先以自身 loopback API 优雅退出；
+ * 身份、health 或关闭接口无法验证时 fail closed，绝不盲目杀进程。
+ */
+export async function restartGlobalDaemon(timeoutMs = 20_000, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>): Promise<ConnectedDaemon> {
+  const current = await discoverDaemon();
+  if (current) await requestVerifiedDaemonClose(current.descriptor, current.baseUrl);
+  else {
+    const legacy = await readFreshDaemonCandidate();
+    if (legacy) await requestVerifiedDaemonClose(legacy, `http://127.0.0.1:${legacy.port}`);
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await removeDeadDaemonArtifacts()) break;
+    await delay(50);
+  }
+  if (!await removeDeadDaemonArtifacts()) throw new Error("旧 daemon 未在确认时间内退出；为保护运行任务，拒绝启动第二个后台服务。 ");
+  return ensureGlobalDaemon(timeoutMs, undefined, daemonExecutable, { ...(daemonEnv ?? {}), WF_RECONNECT_EXISTING: "1" });
+}
+
 /** 读取候选 descriptor 后必须 health 握手；descriptor 本身不可信。 */
 export async function discoverDaemon(
   root = runtimeRoot(),
@@ -55,6 +75,14 @@ export async function discoverDaemon(
 }
 
 function delay(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+
+async function requestVerifiedDaemonClose(candidate: { readonly pid: number; readonly processStartIdentity: string; readonly bootInstanceId: string; readonly userIdentity: string }, baseUrl: string): Promise<void> {
+  if (await currentProcessStartIdentity(candidate.pid).catch(() => null) !== candidate.processStartIdentity) throw new Error("daemon 身份在重启前发生变化，拒绝关闭。 ");
+  const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1_000) }).then(response => response.ok ? response.json() as Promise<Partial<DaemonDescriptor>> : null).catch(() => null);
+  if (!health || health.bootInstanceId !== candidate.bootInstanceId || health.userIdentity !== candidate.userIdentity) throw new Error("daemon 健康身份无法确认，拒绝关闭。 ");
+  const response = await fetch(`${baseUrl}/daemon/close`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(1_000) });
+  if (!response.ok) throw new Error("现有 daemon 不支持受控重启；为保护任务，未终止后台服务。 ");
+}
 
 /** 连接前复核 descriptor 中 PID 的启动身份，防止 PID 被复用后误连无关进程。 */
 async function currentProcessStartIdentity(pid: number): Promise<string> {

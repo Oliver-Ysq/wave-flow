@@ -117,7 +117,7 @@ export default async function run(_args: {}) { phase("run"); return agent("Revie
 }
 
 async function publish(port: number, bootInstanceId: string, root: string): Promise<void> {
-  await publishDescriptor({ protocolVersion: 2, userIdentity: daemonUserIdentity(), bootInstanceId, port, pid: process.pid, processStartIdentity: TEST_PROCESS_IDENTITY, heartbeatAt: new Date().toISOString() }, root);
+  await publishDescriptor({ protocolVersion: 3, userIdentity: daemonUserIdentity(), bootInstanceId, port, pid: process.pid, processStartIdentity: TEST_PROCESS_IDENTITY, heartbeatAt: new Date().toISOString() }, root);
 }
 
 const TEST_PROCESS_IDENTITY = "test-process-start-identity";

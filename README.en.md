@@ -19,18 +19,18 @@
 - Use `wave-flow pause / recover / stop <run-id>` to control a managed Run: pause stops the active turn and managed background terminals, recover creates a continuation turn in the same thread, and stop is terminal.
 - The daemon serves a same-origin Local Web overview for Runs, phases, agents, results, and pending human help.
 - A Tauri desktop app is available for the current macOS Apple Silicon build. It safely discovers or starts the loopback daemon and lets users view and create Runs directly.
-- Persist Runs, events, session coordinates, and results in the local daemon, which manages sessions in a private tmux socket.
+- Persist Runs, events, ACP session bindings, and results in the local daemon.
 
 ## Current boundaries
 
 - Only `agent(..., { cli: "codex" })` is supported today.
 - Wave Flow is for one local user; its daemon runs locally.
-- TraeX, Retry, and Herdr / PTY backends are not implemented.
-- By default, initial-task delivery is confirmed by the Codex App Server `turn/start` ACK. tmux is a viewer for the interactive session; neither delivery nor completion is inferred from terminal text.
+- TraeX and Retry are not implemented.
+- By default, Agent nodes run in independent Codex ACP Worker sessions. ACP stream events and turn completion are not completion evidence.
 
 ## Quick start
 
-CLI development requires [Bun](https://bun.sh/), the Codex CLI, and tmux.
+CLI development requires [Bun](https://bun.sh/) and the Codex CLI.
 
 Desktop users do not need to start the daemon or run `wave-flow start` manually. Build the current macOS Apple Silicon desktop app in a development environment:
 
@@ -130,15 +130,15 @@ Run `wave-flow web` to print the Local Web URL, such as `http://127.0.0.1:<port>
 
 Use `bun run web:dev` while developing the React interface. Vite is only the frontend development server; production assets are always served from the daemon origin.
 
-`pause` is not an OS-level process freeze. It closes the tmux viewer, interrupts the current App Server turn, and cleans App Server-enumerated background terminals; only an empty terminal list reaches `paused`. `recover` does not resend the original prompt: it creates a same-thread turn that inspects the current workspace before continuing. Processes deliberately detached from Codex, such as through `nohup` or remote services, are outside this pause guarantee. If the daemon restarts while pausing, paused, or recovering, the Workflow call stack is gone, so Wave Flow records `interrupted` rather than fabricating a recover; use explicit `resume` instead.
+Default ACP `pause` is not an OS-level process freeze. It requests cancellation of the current ACP Worker turn and enters `paused` only after cancellation is confirmed. `recover` does not resend the original prompt: it opens a new turn in the same ACP session to inspect the workspace before continuing. Side effects deliberately detached from Codex management, such as remote services, are outside this pause guarantee. If the daemon restarts while pausing, paused, or recovering, Wave Flow records `interrupted` rather than fabricating a recover; use explicit `resume` instead.
 
-The default path sends the initial task through the local App Server using `initialize → thread/start → turn/start` ACKs. The Codex session in tmux is for human viewing and interaction. Pass `--tmux-tui-input` to explicitly use the ordinary tmux TUI paste/history compatibility path. In both paths, only `wave-flow complete` is completion evidence. If delivery cannot be confirmed, the Run becomes `interrupted`; it is never treated as delivered.
+The default path uses the built-in `codex-acp` adapter with a user-selected, verified local Codex runtime. Only `wave-flow complete` is completion evidence. If delivery cannot be confirmed, the Run becomes `interrupted`; it is never treated as delivered. Same-daemon recovery uses `pause → cancel → recover` in the same ACP session.
 
-Cross-daemon control recovery applies only when the original tmux and App Server thread remain verifiable: an answer may be saved first, and the original `block` reconnects with the same request ID to read it. Only the agent itself can call `continue`. Recovery never sends a new Codex turn, resends a prompt, reruns a node, or restores the Workflow call stack.
+After a daemon restart, active ACP nodes become `interrupted`. Wave Flow neither reclaims the old session nor resends its prompt or block answer. Explicit `resume` validates the Workflow source hash, input, cwd, and invocation fingerprint, then starts a new attempt from the first interrupted or mismatched node.
 
 `resume` is a separate user authorization. It strictly verifies the Workflow source hash, input, project directory, and every `agent()` call's id, order, cwd, CLI, sandbox, model, schema, input, and prompt. A continuous matching completed prefix returns Journal results directly; the first interrupted or unverifiable node creates a new attempt, and later nodes stop reusing old results. A still-verifiable old session is never rerun by resume.
 
-`capabilities --json` reports a three-state local capability snapshot. A discovered command merely means it can be probed; `unknown` means no environment conclusion exists yet, while `unavailable` means it has been confirmed unavailable. The runtime verifies tmux, Codex, and session state again during startup and delivery, and never treats binary presence or terminal text as successful delivery.
+`capabilities --json` reports a three-state local capability snapshot. A discovered command merely means it can be probed; `unknown` means no environment conclusion exists yet, while `unavailable` means it has been confirmed unavailable. The runtime verifies Codex ACP and session state again during startup and delivery, and never treats binary presence or ACP turn completion as successful delivery.
 
 ## Development and verification
 

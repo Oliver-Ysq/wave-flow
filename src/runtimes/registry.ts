@@ -24,12 +24,17 @@ export class CliRuntimeRegistry {
     return index >= 0 ? runtimes[index] : record;
   }
 
-  /** 只允许 verified runtime 成为默认执行底座。 */
+  /**
+   * 只允许首次明确选择的 verified runtime 成为默认执行底座。
+   * 已有默认项时只允许同一项幂等确认；运行中/空闲切换策略尚未实现，禁止 API 绕过 UI。
+   */
   async select(runtimeId: string): Promise<CliRuntimeView> {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
     if (!runtime) throw new Error("未知 CLI Runtime。 ");
     if (runtime.status !== "verified") throw new Error("只有已验证的 CLI Runtime 可以设为默认。 ");
+    const selected = state.selectedByCli[runtime.cli];
+    if (selected && selected !== runtime.runtimeId) throw new Error("当前主控 CLI 已设定；主控空闲时的切换将在后续版本开放。 ");
     await this.write({ ...state, selectedByCli: { ...state.selectedByCli, [runtime.cli]: runtime.runtimeId } });
     return view(runtime);
   }
