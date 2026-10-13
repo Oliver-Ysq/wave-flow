@@ -9,8 +9,9 @@ import type { HarnessActionCallbacks } from "./action-tools";
 import { executeReadOnlyProjectQuery, readProjectFile } from "./shell-policy";
 import { type HarnessPiSession } from "./pi-harness";
 import type { ResolvedHarnessModelConfig } from "./config";
+import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 
-/** daemon 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。 */
+/** daemon 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
   #sessions = new Map<string, { readonly journal: HarnessJournal; readonly projection: HarnessProjection; session: HarnessSession | null; readonly listeners: Set<(event: HarnessStreamEvent) => void>; turn: Promise<void> | null }>();
   /** 同一 Harness 的 Journal 状态变更必须串行；不同 Harness 仍可并行。 */
@@ -180,6 +181,9 @@ export class HarnessService {
 
   /** 同一 Journal 追加实现由用户 API 与受控主控工具共享，避免 revision 规则漂移。 */
   private async appendWorkflowRevision(harnessRunId: string, entry: Awaited<ReturnType<HarnessService["entry"]>>, source: string): Promise<HarnessSnapshot> {
+    // 草案必须通过完整受限编译门禁才允许冻结：语法、顶层形状与 meta 在提案时即校验，
+    // 用户绝不会在"创建执行"时才发现草案不可运行。编译只建 vm realm，不执行 run()。
+    compileRestrictedWorkflow(source);
     const revision: import("./types").WorkflowRevision = { revision: entry.projection.snapshot().workflowRevisions.length + 1, source, sourceHash: createHash("sha256").update(source).digest("hex"), createdAt: new Date().toISOString(), acceptedAt: null };
     const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision };
     await entry.journal.append(event); entry.projection.apply(event);

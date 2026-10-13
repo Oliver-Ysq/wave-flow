@@ -28,12 +28,10 @@ import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor
 import { AcpHarnessSession } from "../harness/acp-harness";
 import { resolveCodexAcpLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { DeterministicHarnessSession } from "../harness/deterministic-session";
+import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
-
-/** 用户本机 CLI 主控的固定系统约束；工具能力由 session-private MCP sidecar 提供。 */
-const HARNESS_SYSTEM_PROMPT = "你是 Wave Flow 主控。你必须基于 session 中提供的 wave-flow-harness MCP 工具处理项目事实、提出 workflow 草案、读取执行结果或请求用户决定。你只能使用该 MCP 的只读查询和四个窄工具；禁止写入业务工作区、直接创建 Worker、直接执行 Workflow、调用 wave-flow complete/block/continue，或仅凭自然语言声称任务已完成。propose_workflow_revision 只产生草案，用户接受后才可能创建 Execution。";
 
 /** LocalDaemon 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
 export type LocalDaemonOptions = {
@@ -118,7 +116,7 @@ export class LocalDaemon {
       const mcpServer = { name: "wave-flow-harness", command, args, env: [
         { name: "WF_HARNESS_MCP_BASE_URL", value: `http://127.0.0.1:${this.#server!.port}` }, { name: "WF_HARNESS_MCP_TOKEN", value: token },
       ] } as any;
-      const session = new AcpHarnessSession(resolveCodexAcpLauncher(runtime, this.currentControlCommand()), cwd, HARNESS_SYSTEM_PROMPT, prior, mcpServer);
+      const session = new AcpHarnessSession(resolveCodexAcpLauncher(runtime, this.currentControlCommand()), cwd, buildHarnessSystemPrompt(), prior, mcpServer);
       const close = session.close.bind(session); session.close = () => { this.#harnessMcpTokens.delete(token); close(); };
       return session;
     });

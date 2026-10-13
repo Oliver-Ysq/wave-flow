@@ -525,7 +525,6 @@ export function App() {
             <ProjectGroup
               key={project.projectId}
               project={project}
-              selected={selectedProjectId === project.projectId}
               harnesses={harnesses.filter(
                 (item) => item.projectId === project.projectId,
               )}
@@ -1272,7 +1271,6 @@ function HarnessListItem({
 }
 function ProjectGroup({
   project,
-  selected,
   harnesses,
   activeHarnessId,
   onSelectProject,
@@ -1280,7 +1278,6 @@ function ProjectGroup({
   onSelectHarness,
 }: {
   project: HarnessProject;
-  selected: boolean;
   harnesses: HarnessSnapshot[];
   activeHarnessId: string | null;
   onSelectProject: () => void;
@@ -1288,7 +1285,7 @@ function ProjectGroup({
   onSelectHarness: (harness: HarnessSnapshot) => void;
 }) {
   return (
-    <section className={`project-group ${selected ? "selected" : ""}`}>
+    <section className="project-group">
       <header>
         <button onClick={onSelectProject}>
           <span className="folder-glyph" aria-hidden="true">

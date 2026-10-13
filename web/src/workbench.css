@@ -102,7 +102,7 @@
 .agent-workbench .folder-glyph { display:grid; place-items:center; width:17px; height:17px; flex:0 0 auto; border:1.5px solid var(--wf-muted); border-radius:3px; color:transparent; position:relative; }
 .agent-workbench .folder-glyph::before { content:""; position:absolute; top:-4px; left:1px; width:7px; height:4px; border:1.5px solid var(--wf-muted); border-bottom:0; border-radius:3px 3px 0 0; }
 .agent-workbench .project-new-session { visibility:hidden; width:27px; height:27px; flex:0 0 27px; border:0; border-radius:7px; background:transparent; color:var(--wf-muted); font-size:20px; }
-.agent-workbench .project-group:hover .project-new-session, .agent-workbench .project-group.selected .project-new-session { visibility:visible; }
+.agent-workbench .project-group:hover .project-new-session { visibility:visible; }
 .agent-workbench .project-new-session:hover { background:var(--wf-accent-wash); color:var(--wf-ink); }
 .agent-workbench .project-conversations { display:grid; gap:2px; margin:0 0 8px 28px; }
 .agent-workbench .harness-list-item { display:grid; grid-template-columns:7px minmax(0,1fr); gap:9px; align-items:center; width:100%; margin:0; padding:8px 10px; border:0; border-radius:8px; background:transparent; color:var(--wf-ink); text-align:left; }
@@ -209,10 +209,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .task-rail .harness-list-item:hover { background:color-mix(in srgb, var(--wf-accent-wash) 74%, transparent)!important; }
 .agent-workbench .task-rail .project-group > header { gap:0; border:1px solid transparent; border-radius:10px; transition:background-color .14s ease; }
 .agent-workbench .task-rail .project-group > header:hover { background:color-mix(in srgb, var(--wf-accent-wash) 46%, transparent); }
-.agent-workbench .task-rail .project-group.selected > header { background:transparent; box-shadow:none; }
-.agent-workbench .task-rail .project-group > header > button:first-child,
-.agent-workbench .task-rail .project-group.selected > header > button:first-child { position:relative; border-radius:9px 0 0 9px!important; background:transparent!important; box-shadow:none!important; }
-.agent-workbench .task-rail .project-group.selected > header > button:first-child::before { content:""; position:absolute; left:5px; top:50%; width:3px; height:3px; border-radius:50%; background:var(--wf-accent); transform:translateY(-50%); }
+.agent-workbench .task-rail .project-group > header > button:first-child { position:relative; border-radius:9px 0 0 9px!important; background:transparent!important; box-shadow:none!important; }
 .agent-workbench .task-rail .project-new-session { width:34px!important; height:34px!important; flex-basis:34px!important; border-radius:0 9px 9px 0!important; background:transparent!important; }
 .agent-workbench .task-rail .project-new-session:hover { background:color-mix(in srgb, var(--wf-accent) 10%, transparent)!important; }
 
@@ -269,13 +266,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .task-rail .project-group:focus-within > header {
   background:color-mix(in srgb, var(--wf-accent-wash) 58%, transparent);
 }
-.agent-workbench .task-rail .project-group.selected > header {
-  border-color:color-mix(in srgb, var(--wf-accent) 13%, transparent);
-  background:color-mix(in srgb, var(--wf-panel-raised) 84%, var(--wf-accent-wash));
-  box-shadow:none;
-}
-.agent-workbench .task-rail .project-group > header > button:first-child,
-.agent-workbench .task-rail .project-group.selected > header > button:first-child {
+.agent-workbench .task-rail .project-group > header > button:first-child {
   height:38px;
   min-height:38px;
   padding:0 10px 0 13px;
@@ -283,11 +274,9 @@ body { min-height:100%; overscroll-behavior:none; }
   background:transparent!important;
   box-shadow:none!important;
 }
-.agent-workbench .task-rail .project-group > header > button:first-child:hover,
-.agent-workbench .task-rail .project-group.selected > header > button:first-child:hover {
+.agent-workbench .task-rail .project-group > header > button:first-child:hover {
   background:transparent!important;
 }
-.agent-workbench .task-rail .project-group.selected > header > button:first-child::before { display:none; }
 .agent-workbench .task-rail .project-new-session {
   display:grid;
   place-items:center;

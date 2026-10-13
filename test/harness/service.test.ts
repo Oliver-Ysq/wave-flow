@@ -138,7 +138,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-revision-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     const created = await service.create(cwd);
-    const source = 'export const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nexport default async function run() {}';
+    const source = 'const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nasync function run(args) { return args; }';
     const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
     expect(proposed.workflowRevisions).toHaveLength(1);
     expect(proposed.workflowRevisions[0]).toMatchObject({ revision: 1, source, acceptedAt: null, sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
@@ -171,8 +171,21 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-revision-lock-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     const created = await service.create(cwd);
-    await Promise.all([service.proposeWorkflowRevision(created.harnessRunId, "one"), service.proposeWorkflowRevision(created.harnessRunId, "two")]);
+    const draft = (name: string) => `const meta = { name: "${name}", description: "并发提案", phases: [{ title: "p" }] };\nasync function run(args) { return args; }`;
+    await Promise.all([service.proposeWorkflowRevision(created.harnessRunId, draft("draft-one")), service.proposeWorkflowRevision(created.harnessRunId, draft("draft-two"))]);
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1 }, { revision: 2 }] });
+  });
+
+  test("不可编译草案在提案时即被拒绝，不产生任何 revision 事实", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-revision-invalid-")); directories.push(cwd);
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
+    const created = await service.create(cwd);
+    // 主控最常见的生成错误：混入中文引号。拒绝必须发生在冻结之前，诊断必须可行动。
+    const invalid = 'const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nasync function run(args) { return agent(“审查代码”, { id: "a", cli: "codex" }); }';
+    await expect(service.proposeWorkflowRevision(created.harnessRunId, invalid)).rejects.toThrow(/语法无效.*第 2 行.*U\+201C/s);
+    await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [] });
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [] });
   });
 
   test("当前主控回合可经窄工具耐久草案，用户 API 仍不得在运行中抢写", async () => {

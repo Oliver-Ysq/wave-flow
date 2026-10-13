@@ -20,11 +20,31 @@ const BANNED_MEMBERS = new Set(["constructor", "prototype", "__proto__"]);
 export function validateRestrictedWorkflowSource(source: string, fileName = "workflow.generated.ts"): void {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
   const parseDiagnostics = (file as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
-  if (parseDiagnostics.length > 0) throw new Error(`受限 Workflow 脚本语法无效：${parseDiagnostics[0].messageText}`);
+  if (parseDiagnostics.length > 0) throw new Error(`受限 Workflow 脚本语法无效：${describeParseDiagnostic(source, parseDiagnostics[0])}`);
   // 先全树检查危险形态，再核对顶层形状，让 import/class 等给出准确诊断。
   const declared = collectDeclaredNames(file);
   validateTree(file, declared);
   validateTopLevelShape(file);
+}
+
+/**
+ * 把编译器诊断改写为可行动文本：携带行列位置；"Invalid character" 附冒犯字符与码位。
+ * 主控生成脚本时最常见的错误是混入中文引号或全角字符，诊断必须让它能精确自修。
+ */
+function describeParseDiagnostic(source: string, diagnostic: ts.Diagnostic): string {
+  const base = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+  if (typeof diagnostic.start !== "number") return base;
+  const before = source.slice(0, diagnostic.start);
+  const line = before.split("\n").length;
+  const column = diagnostic.start - (before.lastIndexOf("\n") + 1) + 1;
+  // 1127 = Invalid character；按诊断码而非文案判断，代理对按完整码位取字符。
+  if (diagnostic.code === 1127) {
+    const codePointValue = source.codePointAt(diagnostic.start);
+    const char = codePointValue === undefined ? "" : String.fromCodePoint(codePointValue);
+    const codePoint = codePointValue === undefined ? "未知" : `U+${codePointValue.toString(16).toUpperCase().padStart(4, "0")}`;
+    return `${base}（第 ${line} 行第 ${column} 列：字符 ${JSON.stringify(char)}，码位 ${codePoint}）。常见原因是在字符串或标识符中混入中文引号或全角字符；脚本只允许 ASCII 引号与标点。`;
+  }
+  return `${base}（第 ${line} 行第 ${column} 列）`;
 }
 
 /** 顶层形状：无 import/export；恰好一个纯字面量 meta 与一个 async run(args)。 */

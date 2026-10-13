@@ -55,7 +55,7 @@ describe.serial("Harness daemon API", () => {
     try {
       const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) }).then(value => value.json()) as { project: { projectId: string } };
       const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) }).then(value => value.json()) as { harness: { harnessRunId: string } };
-      const proposed = await fetch(`${server.baseUrl}/harness-runs/${created.harness.harnessRunId}/workflow-revisions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: "export default async function run() {}" }) });
+      const proposed = await fetch(`${server.baseUrl}/harness-runs/${created.harness.harnessRunId}/workflow-revisions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source: 'const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nasync function run(args) { return args; }' }) });
       expect(proposed.status).toBe(200);
       expect((await proposed.json() as { harness: { workflowRevisions: unknown[] } }).harness.workflowRevisions).toHaveLength(1);
       await expect(fetch(`${server.baseUrl}/api/runs`).then(value => value.json())).resolves.toEqual([]);

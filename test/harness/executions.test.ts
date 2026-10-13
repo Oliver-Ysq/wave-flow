@@ -56,11 +56,11 @@ describe("HarnessExecutionService", () => {
     expect(await executions.listExecutions(harnessRunId)).toEqual([]);
   });
 
-  test("脚本编译失败不产生任何 Execution 事实", async () => {
+  test("不可编译脚本在提案时即被拒绝，不存在可创建 Execution 的 revision", async () => {
     const { harness, executions, harnessRunId } = await fixture();
-    await harness.proposeWorkflowRevision(harnessRunId, `const meta = { name: "bad", description: "坏脚本", phases: [{ title: "工作" }] };\nasync function run(args) { return process.cwd(); }`);
-    await harness.acceptWorkflowRevision(harnessRunId, 1);
-    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("未注入的标识符：process");
+    await expect(harness.proposeWorkflowRevision(harnessRunId, `const meta = { name: "bad", description: "坏脚本", phases: [{ title: "工作" }] };\nasync function run(args) { return process.cwd(); }`)).rejects.toThrow("未注入的标识符：process");
+    expect((await harness.snapshot(harnessRunId)).workflowRevisions).toEqual([]);
+    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("revision 不存在");
     expect(await executions.listExecutions(harnessRunId)).toEqual([]);
   });
 
