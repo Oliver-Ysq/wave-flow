@@ -48,6 +48,7 @@ export const api = {
   harness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}`),
   sendHarnessMessage: (harnessRunId: string, text: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/messages`, { text }),
   abortHarness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/abort`, {}),
+  completeHarness: (harnessRunId: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/complete`, {}),
   proposeWorkflowRevision: (harnessRunId: string, source: string) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions`, { source }),
   acceptWorkflowRevision: (harnessRunId: string, revision: number) => json<HarnessRunResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/workflow-revisions/${revision}/accept`, {}),
   createExecution: (harnessRunId: string, revision: number, input: Record<string, unknown> = {}) => json<ExecutionResponse>(`/harness-runs/${encodeURIComponent(harnessRunId)}/executions`, { revision, input }),

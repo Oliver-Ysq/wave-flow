@@ -37,6 +37,20 @@ describe.serial("Harness daemon API", () => {
     expect(after).toEqual([]);
   });
 
+  test("完成 Harness 只封存会话，不创建 Workflow Run，后续消息被拒绝", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-complete-api-cwd-")); directories.push(cwd);
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-harness-complete-api-root-")); directories.push(root);
+    const daemon = new LocalDaemon({ storeRoot: runsRoot(root), harnessRoot: join(root, "harness-runs"), createHarnessSession: testHarness }); daemons.push(daemon); const server = daemon.start();
+    const project = await fetch(`${server.baseUrl}/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd }) }).then(value => value.json()) as { project: { projectId: string } };
+    const created = await fetch(`${server.baseUrl}/harness-runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.project.projectId }) }).then(value => value.json()) as { harness: { harnessRunId: string } };
+    const completed = await fetch(`${server.baseUrl}/harness-runs/${created.harness.harnessRunId}/complete`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toMatchObject({ harness: { status: "completed", completedAt: expect.any(String) } });
+    const sent = await fetch(`${server.baseUrl}/harness-runs/${created.harness.harnessRunId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "不应发送" }) });
+    expect(sent.status).toBe(400);
+    await expect(fetch(`${server.baseUrl}/api/runs`).then(value => value.json())).resolves.toEqual([]);
+  });
+
   test("没有默认 Harness Runtime 时，首发会话 fail closed 且不落盘", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-runtime-required-")); directories.push(cwd);
     const root = await mkdtemp(join(tmpdir(), "wave-flow-harness-runtime-root-")); directories.push(root);

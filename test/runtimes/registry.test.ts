@@ -31,6 +31,18 @@ describe("CliRuntimeRegistry", () => {
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
   });
 
+  test("node 依赖变化同样持久化 needs-revalidation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-node-drift-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await record(root));
+    const nodePath = join(root, "node"); await writeFile(nodePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(nodePath, 0o700);
+    const node = await verifyExecutable(nodePath);
+    await registry.saveVerified({ ...saved, nodeExecutable: { path: node.executablePath, identity: node.identity } });
+    await registry.select(saved.runtimeId);
+    await Bun.sleep(5); await writeFile(nodePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(nodePath, 0o700);
+    await expect(registry.resolveSelected("codex")).rejects.toThrow("node 依赖已变化");
+    await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
+  });
+
   test("旧 Codex runtime 记录在读取时补齐 harnessTools 能力", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-legacy-capability-")); roots.push(root);
     const legacy = await record(root); const { harnessTools: _removed, ...adapter } = legacy.verifiedAdapter;

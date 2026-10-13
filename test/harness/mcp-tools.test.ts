@@ -15,5 +15,20 @@ test("Harness MCP 只暴露只读工具与四个窄 action，越权工具明确�
   expect(listed.tools.map(item => item.name)).toEqual(["read_project_file", "query_project", "propose_workflow_revision", "inspect_execution", "read_run_capsule", "request_user_decision"]);
   expect(listed.tools.map(item => item.name)).not.toEqual(expect.arrayContaining(["complete", "create_worker", "write_file"]));
   await expect(service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "complete", arguments: {} } })).rejects.toThrow("未获授权");
+  const events: import("../../src/harness/types").HarnessStreamEvent[] = [];
+  await service.subscribe(created.harnessRunId, event => events.push(event));
   await expect(service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "read_project_file", arguments: { path: "package.json" } } })).resolves.toEqual({ text: "    1  {}\n    2  " });
+  expect(events).toEqual([
+    expect.objectContaining({ type: "tool_started", label: "读取项目文件" }),
+    expect.objectContaining({ type: "tool_finished", outcome: "completed" }),
+  ]);
+  expect((events[0] as { toolCallId: string }).toolCallId).toBe((events[1] as { toolCallId: string }).toolCallId);
+
+  events.length = 0;
+  await expect(service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "read_project_file", arguments: { path: "missing.txt" } } })).rejects.toThrow();
+  expect(events).toEqual([
+    expect.objectContaining({ type: "tool_started", label: "读取项目文件" }),
+    expect.objectContaining({ type: "tool_finished", outcome: "failed" }),
+  ]);
+  expect((events[0] as { toolCallId: string }).toolCallId).toBe((events[1] as { toolCallId: string }).toolCallId);
 });

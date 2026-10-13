@@ -4,6 +4,7 @@ import { runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import type { CliRuntimeRegistry } from "../runtimes/registry";
 import { AcpWorkerExecutor } from "./acp-worker-executor";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
+import type * as acp from "@agentclientprotocol/sdk";
 
 /**
  * 延迟解析用户 Runtime 的 ACP Executor。Run/Execution 可先建立 Journal 与 Control，
@@ -14,7 +15,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
   #workers = new Map<string, AcpWorkerExecutor>();
 
-  constructor(private readonly runtimes: CliRuntimeRegistry, private readonly controlCommand: () => string) {}
+  constructor(private readonly runtimes: CliRuntimeRegistry, private readonly controlCommand: () => string, private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer) {}
 
   bindControl(control: ControlServer): void {
     if (this.#control) throw new Error("Runtime ACP Worker 已绑定 ControlServer。 ");
@@ -25,7 +26,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     const control = this.#control;
     if (!control) throw new Error("Runtime ACP Worker 尚未绑定 ControlServer。 ");
     const runtime = await this.runtimes.resolveSelected("codex");
-    const worker = new AcpWorkerExecutor(resolveCodexAcpLauncher(runtime, this.controlCommand()), undefined, runtimeProvenance(runtime));
+    const worker = new AcpWorkerExecutor(resolveCodexAcpLauncher(runtime, this.controlCommand()), undefined, runtimeProvenance(runtime), this.createControlMcp);
     worker.bindControl(control);
     const key = keyOf(node);
     this.#workers.set(key, worker);

@@ -12,6 +12,8 @@ const HEARTBEAT_STALE_MS = 15_000;
 /** 仅用于发现候选 daemon 的私有 descriptor，不能作为任何 Control 授权。 */
 export type DaemonDescriptor = {
   readonly protocolVersion: 3;
+  /** daemon 服务的 Web 入口构建指纹；桌面壳不匹配时不得复用。 */
+  readonly webBuildId: string;
   readonly userIdentity: string;
   readonly bootInstanceId: string;
   readonly port: number;
@@ -25,7 +27,7 @@ export type DaemonDescriptor = {
  * 仅供受控升级读取的旧协议 daemon 坐标。它不是连接资格，更不是 Control 授权；
  * 必须再通过同一 PID 启动身份与 loopback `/health` 复核后才可请求优雅关闭。
  */
-export type FreshDaemonCandidate = Omit<DaemonDescriptor, "protocolVersion"> & { readonly protocolVersion: number };
+export type FreshDaemonCandidate = Omit<DaemonDescriptor, "protocolVersion" | "webBuildId"> & { readonly protocolVersion: number; readonly webBuildId?: string };
 
 /** 当前 OS 用户的稳定、非敏感身份文本。 */
 export function daemonUserIdentity(): string {
@@ -111,7 +113,7 @@ export async function readFreshDaemonCandidate(root = runtimeRoot(), now = Date.
     const info = await lstat(descriptorPath(root));
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (typeof process.getuid === "function" && info.uid !== process.getuid())) return null;
     const value = JSON.parse(await readFile(descriptorPath(root), "utf8")) as Record<string, unknown>;
-    if (!Number.isSafeInteger(value.protocolVersion) || value.userIdentity !== daemonUserIdentity() || typeof value.bootInstanceId !== "string" || !value.bootInstanceId || !Number.isSafeInteger(value.port) || (value.port as number) < 1 || (value.port as number) > 65_535 || !Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || typeof value.processStartIdentity !== "string" || !value.processStartIdentity || typeof value.heartbeatAt !== "string" || now - Date.parse(value.heartbeatAt) > HEARTBEAT_STALE_MS) return null;
+    if (!Number.isSafeInteger(value.protocolVersion) || value.userIdentity !== daemonUserIdentity() || typeof value.bootInstanceId !== "string" || !value.bootInstanceId || !Number.isSafeInteger(value.port) || (value.port as number) < 1 || (value.port as number) > 65_535 || !Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || typeof value.processStartIdentity !== "string" || !value.processStartIdentity || typeof value.heartbeatAt !== "string" || now - Date.parse(value.heartbeatAt) > HEARTBEAT_STALE_MS || (value.webBuildId !== undefined && (typeof value.webBuildId !== "string" || !/^[a-f0-9]{64}$/.test(value.webBuildId)))) return null;
     return value as FreshDaemonCandidate;
   } catch { return null; }
 }
@@ -270,5 +272,5 @@ async function processStatus(pid: number, expected: string): Promise<"live" | "d
 function isDescriptor(value: unknown): value is DaemonDescriptor {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return item.protocolVersion === DAEMON_PROTOCOL_VERSION && typeof item.userIdentity === "string" && item.userIdentity !== "" && typeof item.bootInstanceId === "string" && item.bootInstanceId !== "" && Number.isSafeInteger(item.port) && (item.port as number) > 0 && (item.port as number) <= 65_535 && Number.isSafeInteger(item.pid) && (item.pid as number) > 0 && typeof item.processStartIdentity === "string" && item.processStartIdentity !== "" && typeof item.heartbeatAt === "string" && !Number.isNaN(Date.parse(item.heartbeatAt));
+  return item.protocolVersion === DAEMON_PROTOCOL_VERSION && typeof item.webBuildId === "string" && /^[a-f0-9]{64}$/.test(item.webBuildId) && typeof item.userIdentity === "string" && item.userIdentity !== "" && typeof item.bootInstanceId === "string" && item.bootInstanceId !== "" && Number.isSafeInteger(item.port) && (item.port as number) > 0 && (item.port as number) <= 65_535 && Number.isSafeInteger(item.pid) && (item.pid as number) > 0 && typeof item.processStartIdentity === "string" && item.processStartIdentity !== "" && typeof item.heartbeatAt === "string" && !Number.isNaN(Date.parse(item.heartbeatAt));
 }

@@ -9,9 +9,9 @@ export type ConnectedDaemon = { readonly baseUrl: string; readonly descriptor: D
 export type DaemonEnsureProgress = (message: string) => void;
 
 /** 发现或启动当前用户唯一 daemon；客户端退出不停止后台进程。 */
-export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEnsureProgress, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>): Promise<ConnectedDaemon> {
+export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEnsureProgress, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>, expectedWebBuildId?: string): Promise<ConnectedDaemon> {
   progress?.("检查 daemon descriptor、heartbeat、PID 启动身份与 /health…");
-  const existing = await discoverDaemon();
+  const existing = await discoverDaemon(undefined, undefined, expectedWebBuildId);
   if (existing) {
     progress?.(`已验证并复用 daemon（PID ${existing.descriptor.pid}）。`);
     return existing;
@@ -20,6 +20,8 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
   // 改动这两条诊断文案时必须同步检查该契约，否则用户只会看到无操作的启动超时。
   const legacyProtocol = await readFreshDescriptorProtocol();
   if (legacyProtocol !== null && legacyProtocol !== DAEMON_PROTOCOL_VERSION) throw new Error(`现有 Wave Flow daemon 协议版本为 ${legacyProtocol}，当前版本需要 ${DAEMON_PROTOCOL_VERSION}；请在桌面端确认升级重启，或先停止旧 daemon 后重试。`);
+  const legacy = await readFreshDaemonCandidate();
+  if (legacy && expectedWebBuildId && legacy.webBuildId !== expectedWebBuildId) throw new Error("现有 Wave Flow daemon 的 Web 构建版本与桌面应用不一致；请在桌面端确认升级重启。");
   const incompatibleProtocol = await readIncompatibleFreshDescriptor();
   if (incompatibleProtocol !== null) throw new Error(`检测到协议版本为 ${incompatibleProtocol} 但 descriptor 格式过旧的 Wave Flow daemon；请先停止旧 daemon 后重试。`);
   if (daemonExecutable !== undefined && !isAbsolute(daemonExecutable)) throw new Error("桌面 daemon sidecar 必须使用绝对路径。");
@@ -29,7 +31,7 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
   child.unref();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const found = await discoverDaemon();
+    const found = await discoverDaemon(undefined, undefined, expectedWebBuildId);
     if (found) {
       progress?.(`已完成 heartbeat、PID 启动身份和 /health 验证（PID ${found.descriptor.pid}）。`);
       return found;
@@ -43,7 +45,7 @@ export async function ensureGlobalDaemon(timeoutMs = 10_000, progress?: DaemonEn
  * 桌面端用户明确确认升级后才调用。旧 daemon 必须先以自身 loopback API 优雅退出；
  * 身份、health 或关闭接口无法验证时 fail closed，绝不盲目杀进程。
  */
-export async function restartGlobalDaemon(timeoutMs = 20_000, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>): Promise<ConnectedDaemon> {
+export async function restartGlobalDaemon(timeoutMs = 20_000, daemonExecutable?: string, daemonEnv?: Readonly<Record<string, string>>, expectedWebBuildId?: string): Promise<ConnectedDaemon> {
   const current = await discoverDaemon();
   if (current) await requestVerifiedDaemonClose(current.descriptor, current.baseUrl);
   else {
@@ -58,13 +60,14 @@ export async function restartGlobalDaemon(timeoutMs = 20_000, daemonExecutable?:
     await delay(50);
   }
   if (!await removeDeadDaemonArtifacts()) throw new Error("旧 daemon 未在确认时间内退出；为保护运行任务，拒绝启动第二个后台服务。 ");
-  return ensureGlobalDaemon(timeoutMs, undefined, daemonExecutable, daemonEnv);
+  return ensureGlobalDaemon(timeoutMs, undefined, daemonExecutable, daemonEnv, expectedWebBuildId);
 }
 
 /** 读取候选 descriptor 后必须 health 握手；descriptor 本身不可信。 */
 export async function discoverDaemon(
   root = runtimeRoot(),
   readProcessStartIdentity: (pid: number) => Promise<string> = currentProcessStartIdentity,
+  expectedWebBuildId?: string,
 ): Promise<ConnectedDaemon | null> {
   const descriptor = await readFreshDescriptor(root);
   if (!descriptor) return null;
@@ -72,7 +75,7 @@ export async function discoverDaemon(
   try {
     const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1_000) });
     const health = await response.json() as Partial<DaemonDescriptor>;
-    if (!response.ok || health.protocolVersion !== descriptor.protocolVersion || health.userIdentity !== descriptor.userIdentity || health.bootInstanceId !== descriptor.bootInstanceId) return null;
+    if (!response.ok || health.protocolVersion !== descriptor.protocolVersion || health.webBuildId !== descriptor.webBuildId || health.userIdentity !== descriptor.userIdentity || health.bootInstanceId !== descriptor.bootInstanceId || (expectedWebBuildId !== undefined && descriptor.webBuildId !== expectedWebBuildId)) return null;
     if (await readProcessStartIdentity(descriptor.pid).catch(() => null) !== descriptor.processStartIdentity) return null;
     return { baseUrl, descriptor };
   } catch { return null; }

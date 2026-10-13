@@ -1,10 +1,14 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join, normalize } from "node:path";
+import { webBuildId } from "./web-build-id";
 
 /** Vite 构建产物目录；生产 daemon 仅同源读取这里的静态文件。 */
 const bundledWebDist = process.env.WF_WEB_DIST;
 if (bundledWebDist !== undefined && !isAbsolute(bundledWebDist)) throw new Error("WF_WEB_DIST 必须是绝对目录。 ");
 const webDist = bundledWebDist ?? new URL("./dist/", import.meta.url).pathname;
+
+/** 当前 daemon 所服务的 Web 构建指纹；桌面 bridge 以此拒绝旧页面。 */
+export const CURRENT_WEB_BUILD_ID = process.env.WF_WEB_BUILD_ID?.trim() || webBuildId(webDist);
 
 const mimeByExtension: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",

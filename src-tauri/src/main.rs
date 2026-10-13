@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, Theme, WindowEvent};
+use tauri::{Manager, Theme, WindowEvent};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -14,6 +14,9 @@ struct DaemonConnection {
 
 /** 菜单栏只保留 daemon 已计算的摘要文本，不持有 Run、Journal 或会话状态。 */
 struct TrayState { summary: Mutex<MenuItem<tauri::Wry>> }
+
+/** 菜单栏动作只保留一次性 UI 意图；不保存 daemon 或 Run 状态。 */
+struct PendingMenuAction { value: Mutex<Option<&'static str>> }
 
 /** 桌面壳可转交给 bridge 的唯一环境键；禁止以任意父进程环境替代此白名单。 */
 const SIDECAR_ENV_KEYS: &[&str] = &[
@@ -48,6 +51,12 @@ fn update_tray_summary(app: tauri::AppHandle, summary: String) -> Result<(), Str
 #[tauri::command]
 fn exit_menu_companion(app: tauri::AppHandle) {
   app.exit(0);
+}
+
+/** Web 通过窄轮询消费菜单栏意图，避免前端 event plugin ACL 异常打断整个工作台。 */
+#[tauri::command]
+fn take_menu_action(app: tauri::AppHandle) -> Result<Option<String>, String> {
+  Ok(app.state::<PendingMenuAction>().value.lock().map_err(|_| "菜单栏动作锁不可用。".to_string())?.take().map(str::to_string))
 }
 
 /**
@@ -205,6 +214,7 @@ fn main() {
       let separator = PredefinedMenuItem::separator(app)?;
       let menu = Menu::with_items(app, &[&open, &summary, &separator, &restart, &shutdown, &quit])?;
       app.manage(TrayState { summary: Mutex::new(summary) });
+      app.manage(PendingMenuAction { value: Mutex::new(None) });
       TrayIconBuilder::with_id("wave-flow-tray")
         .menu(&menu)
         .tooltip("Wave Flow 后台服务")
@@ -212,8 +222,8 @@ fn main() {
         .icon_as_template(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
           "open" => { let _ = show_main_window(app); }
-          "restart" => { let _ = app.emit("wave-flow://restart-requested", ()); let _ = show_main_window(app); }
-          "shutdown" => { let _ = app.emit("wave-flow://shutdown-requested", ()); let _ = show_main_window(app); }
+          "restart" => { if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("restart"); } let _ = show_main_window(app); }
+          "shutdown" => { if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("shutdown"); } let _ = show_main_window(app); }
           "quit" => app.exit(0),
           _ => {}
         })
@@ -226,7 +236,7 @@ fn main() {
         let _ = window.hide();
       }
     })
-    .invoke_handler(tauri::generate_handler![ensure_daemon, restart_daemon, update_tray_summary, exit_menu_companion, set_window_theme])
+    .invoke_handler(tauri::generate_handler![ensure_daemon, restart_daemon, update_tray_summary, exit_menu_companion, take_menu_action, set_window_theme])
     .run(tauri::generate_context!())
     .expect("运行 Wave Flow Desktop 失败");
 }

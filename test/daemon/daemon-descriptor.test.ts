@@ -2,13 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireDaemonLock, DAEMON_PROTOCOL_VERSION, daemonUserIdentity, descriptorPath, lockPath, publishDescriptor, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeDeadDaemonArtifacts, removeOwnDescriptor } from "../../src/daemon/daemon-descriptor";
+import { acquireDaemonLock, DAEMON_PROTOCOL_VERSION, daemonUserIdentity, descriptorPath, lockPath, publishDescriptor, readFreshDaemonCandidate, readFreshDescriptor, readFreshDescriptorProtocol, readIncompatibleFreshDescriptor, removeDeadDaemonArtifacts, removeOwnDescriptor } from "../../src/daemon/daemon-descriptor";
+import { discoverDaemon } from "../../src/daemon/daemon-lifecycle";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 async function root(): Promise<string> { const path = await mkdtemp(join(tmpdir(), "wave-flow-daemon-descriptor-")); directories.push(path); return path; }
-function descriptor(bootInstanceId = "boot"): Parameters<typeof publishDescriptor>[0] { return { protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId, port: 43123, pid: process.pid, processStartIdentity: "test-process", heartbeatAt: new Date().toISOString() }; }
+function descriptor(bootInstanceId = "boot"): Parameters<typeof publishDescriptor>[0] { return { protocolVersion: DAEMON_PROTOCOL_VERSION, webBuildId: "a".repeat(64), userIdentity: daemonUserIdentity(), bootInstanceId, port: 43123, pid: process.pid, processStartIdentity: "test-process", heartbeatAt: new Date().toISOString() }; }
 
 describe("全局 daemon descriptor", () => {
   test("旧协议 daemon 仍可仅删除自己的 descriptor，供受控升级释放运行目录", async () => {
@@ -95,6 +96,29 @@ describe("全局 daemon descriptor", () => {
     const { processStartIdentity: _omitted, ...incomplete } = descriptor();
     await writeFile(descriptorPath(directory), JSON.stringify(incomplete), { mode: 0o600 });
     await expect(readFreshDescriptor(directory)).resolves.toBeNull();
+  });
+
+  test("同协议但缺少 Web 构建指纹的旧 daemon 不可复用", async () => {
+    const directory = await root();
+    const { webBuildId: _removed, ...legacyWithoutBuild } = descriptor();
+    await writeFile(descriptorPath(directory), JSON.stringify(legacyWithoutBuild), { mode: 0o600 });
+    await expect(readFreshDescriptor(directory)).resolves.toBeNull();
+    const candidate = await readFreshDaemonCandidate(directory);
+    expect(candidate).toMatchObject({ protocolVersion: DAEMON_PROTOCOL_VERSION });
+    expect(candidate?.webBuildId).toBeUndefined();
+  });
+
+  test("同协议但 Web 构建不同的 daemon 不得被 desktop bridge 复用", async () => {
+    const directory = await root();
+    const buildId = "a".repeat(64);
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, webBuildId: buildId, userIdentity: daemonUserIdentity(), bootInstanceId: "web-build" }) });
+    try {
+      const port = server.port;
+      if (port === undefined) throw new Error("测试 daemon 未分配端口。 ");
+      await publishDescriptor({ ...descriptor("web-build"), webBuildId: buildId, port }, directory);
+      await expect(discoverDaemon(directory, async () => "test-process", buildId)).resolves.toMatchObject({ baseUrl: `http://127.0.0.1:${port}` });
+      await expect(discoverDaemon(directory, async () => "test-process", "b".repeat(64))).resolves.toBeNull();
+    } finally { server.stop(true); }
   });
 
   test("可读取新鲜旧协议版本以给出升级诊断，但不会把它当可复用 daemon", async () => {

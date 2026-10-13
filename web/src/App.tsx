@@ -1,18 +1,16 @@
 import {
+  Component,
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import {
-  AssistantRuntimeProvider,
-  ChainOfThoughtPrimitive,
-  useLocalRuntime,
-} from "@assistant-ui/react";
 import { api } from "./api";
 import type {
   AgentSnapshot,
@@ -40,6 +38,16 @@ const localeTime = (value: string | null) =>
       }).format(new Date(value))
     : "—";
 type ColorTheme = "dark" | "light";
+type HarnessTurnPart =
+  | { readonly id: string; readonly type: "text"; readonly text: string }
+  | { readonly id: string; readonly type: "reasoning"; readonly text: string }
+  | {
+      readonly id: string;
+      readonly type: "tool";
+      readonly toolCallId: string;
+      readonly label: string;
+      readonly outcome: "running" | "completed" | "failed";
+    };
 const themeStorageKey = "wave-flow:color-theme:v1";
 function readColorTheme(): ColorTheme {
   return localStorage.getItem(themeStorageKey) === "light" ? "light" : "dark";
@@ -70,8 +78,10 @@ export function App() {
   const [workflowPanelOpen, setWorkflowPanelOpen] = useState(false);
   const [projectCwd, setProjectCwd] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
-  const [reasoning, setReasoning] = useState("");
-  const [streamAnswer, setStreamAnswer] = useState("");
+  /** 当前回合按 SSE 到达顺序排列；工具调用会封口前一段正文。 */
+  const [turnParts, setTurnParts] = useState<HarnessTurnPart[]>([]);
+  /** 已完成但仍由本地过程时间线展示的 assistant 消息，防止 Journal 回读重复渲染。 */
+  const [timelineMessageId, setTimelineMessageId] = useState<string | null>(null);
   const [harnessStreamReady, setHarnessStreamReady] = useState(false);
   const [harnessText, setHarnessText] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -89,6 +99,7 @@ export function App() {
   const [theme, setTheme] = useState<ColorTheme>(readColorTheme);
   const [daemonRestartRequested, setDaemonRestartRequested] = useState(false);
   const [daemonShutdownRequested, setDaemonShutdownRequested] = useState(false);
+  const [harnessView, setHarnessView] = useState<"active" | "completed">("active");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -99,25 +110,18 @@ export function App() {
     );
   }, [theme]);
 
-  /** 菜单栏只请求展示确认；真正的状态与重启仍经过 daemon/bridge。 */
+  /** 菜单栏意图由窄 invoke 轮询消费；拒绝 event plugin 权限时也不能中断整个工作台。 */
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    let unlisten: (() => void) | undefined;
-    let unlistenShutdown: (() => void) | undefined;
-    void listen("wave-flow://restart-requested", () =>
-      setDaemonRestartRequested(true),
-    ).then((value) => {
-      unlisten = value;
-    });
-    void listen("wave-flow://shutdown-requested", () =>
-      setDaemonShutdownRequested(true),
-    ).then((value) => {
-      unlistenShutdown = value;
-    });
-    return () => {
-      unlisten?.();
-      unlistenShutdown?.();
+    let active = true;
+    let timer: number | null = null;
+    const poll = async () => {
+      try { const action = await invoke<string | null>("take_menu_action"); if (active) { if (action === "restart") setDaemonRestartRequested(true); if (action === "shutdown") setDaemonShutdownRequested(true); } }
+      catch { /* 菜单栏是辅助 UI；轮询失败绝不改变工作台或 daemon 状态。 */ }
+      finally { if (active) timer = window.setTimeout(() => void poll(), 500); }
     };
+    void poll();
+    return () => { active = false; if (timer !== null) window.clearTimeout(timer); };
   }, []);
 
   const refresh = useCallback(async () => {
@@ -211,6 +215,8 @@ export function App() {
   useEffect(() => {
     if (!harness?.harnessRunId) return;
     setHarnessStreamReady(false);
+    setTurnParts([]);
+    setTimelineMessageId(null);
     const stream = new EventSource(
       `/harness-runs/${encodeURIComponent(harness.harnessRunId)}/events`,
     );
@@ -218,13 +224,36 @@ export function App() {
       const value = JSON.parse((event as MessageEvent).data) as {
         delta: string;
       };
-      setReasoning((current) => current + value.delta);
+      setTurnParts((current) => appendTurnText(current, "reasoning", value.delta));
     });
     stream.addEventListener("assistant_delta", (event) => {
       const value = JSON.parse((event as MessageEvent).data) as {
         delta: string;
       };
-      setStreamAnswer((current) => current + value.delta);
+      setTurnParts((current) => appendTurnText(current, "text", value.delta));
+    });
+    stream.addEventListener("tool_started", (event) => {
+      const value = JSON.parse((event as MessageEvent).data) as {
+        toolCallId: string;
+        label: string;
+      };
+      setTurnParts((current) => [
+        ...current,
+        { id: `tool:${value.toolCallId}`, type: "tool", toolCallId: value.toolCallId, label: value.label, outcome: "running" },
+      ]);
+    });
+    stream.addEventListener("tool_finished", (event) => {
+      const value = JSON.parse((event as MessageEvent).data) as {
+        toolCallId: string;
+        outcome: "completed" | "failed";
+      };
+      setTurnParts((current) =>
+        current.map((item) =>
+          item.type === "tool" && item.toolCallId === value.toolCallId
+            ? { ...item, outcome: value.outcome }
+            : item,
+        ),
+      );
     });
     stream.addEventListener("snapshot", () => setHarnessStreamReady(true));
     const refreshHarness = () => {
@@ -232,15 +261,22 @@ export function App() {
         .harness(harness.harnessRunId)
         .then((response) => {
           setHarness(response.harness);
-          setStreamAnswer("");
         })
         .catch((cause) =>
           setError(cause instanceof Error ? cause.message : String(cause)),
         );
     };
-    stream.addEventListener("turn_finished", refreshHarness);
+    stream.addEventListener("turn_finished", (event) => {
+      const value = JSON.parse((event as MessageEvent).data) as { messageId: string; text: string };
+      setTimelineMessageId(value.messageId);
+      // assistant_delta 与工具事件拥有唯一可信的相对顺序。结束事件只校验/补足
+      // 文字流，绝不能把整个最终答案另插到工具之前或之后。
+      setTurnParts((current) => reconcileTurnText(current, value.text));
+      refreshHarness();
+    });
     stream.addEventListener("turn_interrupted", () => {
-      setStreamAnswer("");
+      setTurnParts([]);
+      setTimelineMessageId(null);
       refreshHarness();
     });
     stream.addEventListener("execution_changed", refreshHarness);
@@ -327,21 +363,22 @@ export function App() {
     }
   }
   function beginHarnessDraft(projectId = selectedProjectId) {
+    setHarnessView("active");
     if (!projectId) return;
     setSelectedProjectId(projectId);
     setDraftProjectId(projectId);
     setHarness(null);
     setHarnessText("");
-    setReasoning("");
-    setStreamAnswer("");
+    setTurnParts([]);
+    setTimelineMessageId(null);
     setWorkflowPanelOpen(false);
     setError(null);
   }
   async function sendHarness() {
     if (!harnessText.trim()) return;
     try {
-      setReasoning("");
-      setStreamAnswer("");
+      setTurnParts([]);
+      setTimelineMessageId(null);
       if (harness) {
         if (!harnessStreamReady) return;
         await api.sendHarnessMessage(harness.harnessRunId, harnessText);
@@ -376,7 +413,7 @@ export function App() {
         setExecutionDetail(detail);
         setWorkflowPanelOpen(true);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(executionLoadMessage(cause));
       }
     },
     [harness],
@@ -392,7 +429,7 @@ export function App() {
         })
         .catch((cause) => {
           if (active)
-            setError(cause instanceof Error ? cause.message : String(cause));
+            setError(executionLoadMessage(cause));
         });
     };
     reload();
@@ -401,11 +438,17 @@ export function App() {
     );
     stream.addEventListener("snapshot", reload);
     stream.onerror = () => stream.close();
+    // SSE 终态帧可能恰好与 WebView 休眠、重连或旧 daemon 切换重叠；轮询只在
+    // 当前详情仍是活跃态时兜底读取 daemon 权威快照，绝不由浏览器推断终态。
+    const fallback = window.setInterval(() => {
+      if (executionDetail?.snapshot.status === "running" || executionDetail?.snapshot.status === "pausing" || executionDetail?.snapshot.status === "recovering") reload();
+    }, 1_000);
     return () => {
       active = false;
       stream.close();
+      window.clearInterval(fallback);
     };
-  }, [harness?.harnessRunId, selectedExecutionId]);
+  }, [harness?.harnessRunId, selectedExecutionId, executionDetail?.snapshot.status]);
   async function createExecution(revision: number) {
     if (!harness) return;
     setBusy(`create-execution:${revision}`);
@@ -515,7 +558,10 @@ export function App() {
           ⊕ {selectedProjectId ? "新建会话" : "新建项目"}
         </button>
         <div className="task-section-title">
-          <span>项目</span>
+          <div className="harness-tabs" role="tablist" aria-label="会话状态">
+            <button className={harnessView === "active" ? "active" : ""} onClick={() => setHarnessView("active")} role="tab" aria-selected={harnessView === "active"}>进行中</button>
+            <button className={harnessView === "completed" ? "active" : ""} onClick={() => setHarnessView("completed")} role="tab" aria-selected={harnessView === "completed"}>已完成</button>
+          </div>
           <button onClick={() => void refresh()} aria-label="刷新项目与会话">
             ↻
           </button>
@@ -525,10 +571,9 @@ export function App() {
             <ProjectGroup
               key={project.projectId}
               project={project}
-              harnesses={harnesses.filter(
-                (item) => item.projectId === project.projectId,
-              )}
+              harnesses={harnesses.filter((item) => item.projectId === project.projectId && (harnessView === "completed" ? item.status === "completed" : item.status !== "completed"))}
               activeHarnessId={harness?.harnessRunId ?? null}
+              showNewSession={harnessView === "active"}
               onSelectProject={() => {
                 setSelectedProjectId(project.projectId);
                 setHarness(null);
@@ -539,31 +584,11 @@ export function App() {
                 setSelectedProjectId(project.projectId);
                 setHarness(item);
                 setDraftProjectId(null);
-                setReasoning("");
-                setStreamAnswer("");
+                setTurnParts([]);
+                setTimelineMessageId(null);
               }}
             />
           ))}
-          {harnesses.some((item) => item.projectId === null) && (
-            <div className="legacy-project">
-              <span>未归类历史会话</span>
-              {harnesses
-                .filter((item) => item.projectId === null)
-                .map((item) => (
-                  <HarnessListItem
-                    key={item.harnessRunId}
-                    item={item}
-                    active={harness?.harnessRunId === item.harnessRunId}
-                    onClick={() => {
-                      setHarness(item);
-                      setDraftProjectId(null);
-                      setReasoning("");
-                      setStreamAnswer("");
-                    }}
-                  />
-                ))}
-            </div>
-          )}
           {projects.length === 0 && <p>还没有项目，请从侧边栏创建。</p>}
         </nav>
         <footer>
@@ -589,13 +614,34 @@ export function App() {
         ) : (
           <HarnessConversation
             harness={harness}
-            reasoning={reasoning}
-            streamAnswer={streamAnswer}
+            turnParts={turnParts}
+            timelineMessageId={timelineMessageId}
             streamReady={harnessStreamReady}
             text={harnessText}
             onText={setHarnessText}
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
+            onComplete={() => {
+              setBusy("complete-harness");
+              void api.completeHarness(harness.harnessRunId)
+                .then((response) => {
+                  setHarnesses((current) => current.map((item) => item.harnessRunId === response.harness.harnessRunId ? response.harness : item));
+                  // 会话归档成功后，明确回到进行中视图的第一项目草稿页；不能依赖
+                  // beginHarnessDraft 的早退或当前已完成会话的渲染状态。
+                  const firstProjectId = projects[0]?.projectId ?? null;
+                  setHarnessView("active");
+                  setSelectedProjectId(firstProjectId);
+                  setDraftProjectId(firstProjectId);
+                  setHarness(null);
+                  setHarnessText("");
+                  setTurnParts([]);
+                  setTimelineMessageId(null);
+                  setWorkflowPanelOpen(false);
+                  setError(null);
+                })
+                .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+                .finally(() => setBusy(null));
+            }}
             onOpenWorkflow={() => setWorkflowPanelOpen(true)}
             hasWorkflow={harness.executions.length > 0}
             onDraft={() => setDraftingRevision(true)}
@@ -640,7 +686,10 @@ export function App() {
       <aside
         className={`workflow-pane ${workflowPanelOpen ? "open" : "closed"}`}
       >
-        <header>
+        <WorkflowPanelErrorBoundary
+          onClose={() => setWorkflowPanelOpen(false)}
+        >
+          <header>
           <div>
             <span>
               {executionDetail
@@ -659,8 +708,8 @@ export function App() {
           >
             ×
           </button>
-        </header>
-        {executionDetail && harness ? (
+          </header>
+          {executionDetail && harness ? (
           <div className="workflow-detail-scroll">
             <ExecutionDetail
               detail={executionDetail}
@@ -682,7 +731,7 @@ export function App() {
               }}
             />
           </div>
-        ) : !selected ? (
+          ) : !selected ? (
           <div className="workflow-empty">
             <div>◇</div>
             <strong>等待主控发起 Workflow</strong>
@@ -710,7 +759,7 @@ export function App() {
               </>
             )}
           </div>
-        ) : (
+          ) : (
           <div className="workflow-detail-scroll">
             <RunDetail
               run={selected}
@@ -727,10 +776,11 @@ export function App() {
               }}
             />
           </div>
-        )}
-        <button className="legacy-workflow" onClick={() => setCreating(true)}>
-          从本地 workflow 启动
-        </button>
+          )}
+          <button className="legacy-workflow" onClick={() => setCreating(true)}>
+            从本地 workflow 启动
+          </button>
+        </WorkflowPanelErrorBoundary>
       </aside>
       {!workflowPanelOpen && (
         <button
@@ -807,6 +857,15 @@ export function App() {
       )}
     </main>
   );
+}
+
+/** 将浏览器底层网络错误转换为可行动的本机 daemon 提示，避免误报 Workflow 失败。 */
+function executionLoadMessage(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/load failed|failed to fetch|networkerror|network request failed/i.test(message)) {
+    return "后台服务连接已中断；正在重新连接。若刚重启 Wave Flow，旧 Execution 会安全收敛为“已中断”，请在详情中显式恢复。";
+  }
+  return message;
 }
 
 /** 活跃任务也允许用户重启；此确认明确限定“收敛为已中断、不自动重跑”的语义。 */
@@ -1240,6 +1299,34 @@ function RuntimeConnectionPanel({
   );
 }
 
+/**
+ * Workflow 详情来自独立 Execution 快照；详情渲染异常只能降级右栏，不能卸载
+ * 仍可继续输入与查看会话的主工作台。关闭后由下一次显式打开重新尝试渲染。
+ */
+class WorkflowPanelErrorBoundary extends Component<
+  { children: ReactNode; onClose: () => void },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="workflow-render-error" role="alert">
+          <strong>无法显示 Workflow 详情</strong>
+          <p>详情数据暂时不可用；对话和运行不会因此停止。</p>
+          <button onClick={this.props.onClose}>关闭详情</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function HarnessListItem({
   item,
   active,
@@ -1262,8 +1349,10 @@ function HarnessListItem({
             ? "进行中"
             : item.status === "interrupted"
               ? "已中断"
+              : item.status === "completed"
+                ? "已完成"
               : "待命"}{" "}
-          · {localeTime(item.createdAt)}
+          · {localeTime(item.completedAt ?? item.createdAt)}
         </small>
       </div>
     </button>
@@ -1273,6 +1362,7 @@ function ProjectGroup({
   project,
   harnesses,
   activeHarnessId,
+  showNewSession,
   onSelectProject,
   onNewSession,
   onSelectHarness,
@@ -1280,6 +1370,7 @@ function ProjectGroup({
   project: HarnessProject;
   harnesses: HarnessSnapshot[];
   activeHarnessId: string | null;
+  showNewSession: boolean;
   onSelectProject: () => void;
   onNewSession: () => void;
   onSelectHarness: (harness: HarnessSnapshot) => void;
@@ -1293,15 +1384,17 @@ function ProjectGroup({
           </span>
           <strong>{project.title}</strong>
         </button>
-        <button
-          className="project-new-session"
-          onClick={onNewSession}
-          aria-label={`在 ${project.title} 新建会话`}
-        >
-          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <path d="M8 3.25v9.5M3.25 8h9.5" />
-          </svg>
-        </button>
+        {showNewSession && (
+          <button
+            className="project-new-session"
+            onClick={onNewSession}
+            aria-label={`在 ${project.title} 新建会话`}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M8 3.25v9.5M3.25 8h9.5" />
+            </svg>
+          </button>
+        )}
       </header>
       {harnesses.length > 0 ? (
         <div className="project-conversations">
@@ -1438,7 +1531,7 @@ function DraftConversation({
           onChange={(event) => onText(event.target.value)}
           placeholder={ready ? "给主控发送消息" : "请先选择项目"}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (shouldSubmitComposer(event)) {
               event.preventDefault();
               if (text.trim() && ready) onSend();
             }
@@ -1448,7 +1541,7 @@ function DraftConversation({
           <div className="composer-guidance">
             <span aria-hidden="true">＋</span>
             <small>
-              Enter 发送 · Shift + Enter 换行 · 未发送内容不会创建会话
+              ⌘/Ctrl + Enter 发送 · Enter 换行 · 未发送内容不会创建会话
             </small>
           </div>
           <button
@@ -1467,8 +1560,8 @@ function DraftConversation({
 
 function HarnessConversation({
   harness,
-  reasoning,
-  streamAnswer,
+  turnParts,
+  timelineMessageId,
   streamReady,
   text,
   onText,
@@ -1481,11 +1574,12 @@ function HarnessConversation({
   onCreateExecution,
   onSelectExecution,
   onAnswerDecision,
+  onComplete,
   busy,
 }: {
   harness: HarnessSnapshot;
-  reasoning: string;
-  streamAnswer: string;
+  turnParts: readonly HarnessTurnPart[];
+  timelineMessageId: string | null;
   streamReady: boolean;
   text: string;
   onText: (value: string) => void;
@@ -1501,6 +1595,7 @@ function HarnessConversation({
     decisionId: string,
     answer: Record<string, unknown>,
   ) => Promise<void>;
+  onComplete: () => void;
   busy: string | null;
 }) {
   const running = harness?.status === "running";
@@ -1515,7 +1610,20 @@ function HarnessConversation({
           </div>
         </div>
         <div className="conversation-actions">
-          <button onClick={onDraft}>提议 Workflow</button>
+          {harness.status !== "completed" && (
+            <>
+              <button
+                disabled={
+                  running ||
+                  harness.executions.some((item) => item.finishedAt === null)
+                }
+                onClick={onComplete}
+              >
+                完成会话
+              </button>
+              <button onClick={onDraft}>提议 Workflow</button>
+            </>
+          )}
           <button disabled={!hasWorkflow} onClick={onOpenWorkflow}>
             查看 Workflow
           </button>
@@ -1532,19 +1640,33 @@ function HarnessConversation({
             </p>
           </div>
         )}
-        {harness.messages.map((message) => (
-          <article className={`chat-message ${message.role}`} key={message.id}>
-            <div className="chat-avatar">
-              {message.role === "user" ? "你" : "W"}
-            </div>
-            <div>
-              <span>{message.role === "user" ? "你" : "主控 Agent"}</span>
-              <p>{message.text}</p>
-            </div>
-          </article>
+        {harness.messages
+          .filter((message) => message.id !== timelineMessageId)
+          .map((message) => (
+          <Fragment key={message.id}>
+            <article className={`chat-message ${message.role}`}>
+              <div className="chat-avatar">
+                {message.role === "user" ? "你" : "W"}
+              </div>
+              <div>
+                <span>{message.role === "user" ? "你" : "主控 Agent"}</span>
+                <p>{message.text}</p>
+              </div>
+            </article>
+            {message.role === "assistant" &&
+              (harness.toolActivitiesByMessageId[message.id] ?? []).map(
+                (activity, index) => (
+                  <HarnessToolActivity
+                    key={`${message.id}:tool:${index}`}
+                    activity={activity}
+                  />
+                ),
+              )}
+          </Fragment>
         ))}
+        <HarnessTurnTimeline parts={turnParts} />
         {harness.workflowRevisions.map((revision) => (
-          <article className="workflow-action" key={revision.revision}>
+          <article className="conversation-action workflow-revision" key={revision.revision}>
             <span>Workflow 草案 v{revision.revision}</span>
             <code>{revision.sourceHash.slice(0, 12)}</code>
             <p>
@@ -1552,7 +1674,7 @@ function HarnessConversation({
                 ? "已接受并冻结；可由用户显式创建 Execution。"
                 : "待确认；不会创建 Run 或 Worker。"}
             </p>
-            {!revision.acceptedAt ? (
+            {harness.status === "completed" ? null : !revision.acceptedAt ? (
               <button onClick={() => onAccept(revision.revision)}>
                 接受并冻结
               </button>
@@ -1596,21 +1718,11 @@ function HarnessConversation({
               }
             />
           ))}
-        {reasoning && <HarnessReasoning reasoning={reasoning} />}
-        {streamAnswer && (
-          <article className="chat-message assistant streaming">
-            <div className="chat-avatar">W</div>
-            <div>
-              <span>主控 Agent · 正在生成</span>
-              <p>{streamAnswer}</p>
-            </div>
-          </article>
-        )}
-        {running && !reasoning && !streamAnswer && (
+        {running && turnParts.length === 0 && (
           <div className="harness-thinking">主控正在响应…</div>
         )}
       </div>
-      <div className="conversation-composer">
+      {harness.status !== "completed" && <div className="conversation-composer">
         <textarea
           value={text}
           disabled={running || !streamReady}
@@ -1623,7 +1735,7 @@ function HarnessConversation({
                 : "给主控发送消息"
           }
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (shouldSubmitComposer(event)) {
               event.preventDefault();
               if (text.trim() && streamReady && !running) onSend();
             }
@@ -1632,7 +1744,7 @@ function HarnessConversation({
         <div className="composer-footer">
           <div className="composer-guidance">
             <span aria-hidden="true">＋</span>
-            <small>Enter 发送 · Shift + Enter 换行 · 思考过程不会保存</small>
+            <small>⌘/Ctrl + Enter 发送 · Enter 换行 · 思考过程不会保存</small>
           </div>
           {running ? (
             <button className="stop-turn" onClick={onAbort}>
@@ -1650,7 +1762,85 @@ function HarnessConversation({
           )}
         </div>
       </div>
+      }
     </div>
+  );
+}
+
+/**
+ * 裸 Enter 始终留给 textarea 与 IME：它可确认中文候选、切换输入状态或换行。
+ * 发送只接受显式的 ⌘/Ctrl + Enter，且 composition 期间一律不拦截事件。
+ */
+function shouldSubmitComposer(
+  event: ReactKeyboardEvent<HTMLTextAreaElement>,
+): boolean {
+  return (
+    event.key === "Enter" &&
+    (event.metaKey || event.ctrlKey) &&
+    !event.nativeEvent.isComposing &&
+    !event.shiftKey
+  );
+}
+
+/** 同类相邻文本合并；工具节点天然把前后 assistant 文本分成独立段落。 */
+function appendTurnText(
+  current: HarnessTurnPart[],
+  type: "text" | "reasoning",
+  delta: string,
+): HarnessTurnPart[] {
+  const last = current.at(-1);
+  if (last?.type === type) {
+    return [
+      ...current.slice(0, -1),
+      { ...last, text: last.text + delta },
+    ];
+  }
+  return [
+    ...current,
+    { id: `${type}:${crypto.randomUUID()}`, type, text: delta },
+  ];
+}
+
+/**
+ * 流式正文是唯一能保留“文字 → 工具 → 文字”顺序的来源。turn_finished 的完整
+ * 文本只用于补齐丢失的尾部，不得替换已分段的内容，否则会把所有段落拼回一坨。
+ */
+function reconcileTurnText(
+  current: HarnessTurnPart[],
+  durableText: string,
+): HarnessTurnPart[] {
+  const streamedText = current
+    .filter((part): part is Extract<HarnessTurnPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+  if (!durableText.startsWith(streamedText)) return current;
+  const missingTail = durableText.slice(streamedText.length);
+  return missingTail ? appendTurnText(current, "text", missingTail) : current;
+}
+
+/** 当前回合严格按 SSE 时间顺序呈现：正文、思考、工具、后续正文互不重排。 */
+function HarnessTurnTimeline({
+  parts,
+}: {
+  parts: readonly HarnessTurnPart[];
+}) {
+  return parts.map((part) => {
+    if (part.type === "text") return <HarnessTurnText key={part.id} text={part.text} />;
+    if (part.type === "reasoning") return <HarnessReasoning key={part.id} reasoning={part.text} />;
+    return <HarnessToolActivity key={part.id} activity={part} />;
+  });
+}
+
+/** 回合内正文片段：保留模型原始换行，且与工具过程共享同一阅读列。 */
+function HarnessTurnText({ text }: { text: string }) {
+  return (
+    <article className="chat-message assistant streaming">
+      <div className="chat-avatar">W</div>
+      <div>
+        <span>主控 Agent</span>
+        <p>{text}</p>
+      </div>
+    </article>
   );
 }
 
@@ -1662,7 +1852,7 @@ function ExecutionAction({
   onSelect: () => void;
 }) {
   return (
-    <article className="workflow-action execution-action">
+    <article className="conversation-action execution-action">
       <span>Execution · revision v{execution.revision}</span>
       <code>
         {execution.executionId.slice(0, 12)} · attempt 由详情 Journal 记录
@@ -1704,7 +1894,7 @@ function HarnessDecisionCard({
     }
   }
   return (
-    <article className="workflow-action harness-decision">
+    <article className="conversation-action harness-decision">
       <span>主控需要你的决定</span>
       <p>{decision.question}</p>
       {decision.answerSchema && (
@@ -1767,13 +1957,7 @@ function ExecutionDetail({
           />
         )}
         {detail.snapshot.status === "interrupted" && (
-          <Action
-            label="重新执行"
-            icon="↻"
-            tone="primary"
-            loading={busy === "execution:resume"}
-            onClick={() => void onControl("resume")}
-          />
+          <p className="diagnostic">该 Execution 已中断。请在对话中的已接受 revision 上“创建执行”以生成新的独立 Execution；只有 daemon 重启后可恢复的中断才支持 resume。</p>
         )}
         {["running", "pausing", "recovering", "paused"].includes(
           detail.snapshot.status,
@@ -1880,7 +2064,7 @@ function GateCard({
     }
   }
   return (
-    <article className="workflow-action execution-gate">
+    <article className="conversation-action execution-gate">
       <span>Execution 决策门 · {gate.gateId}</span>
       <p>{gate.question}</p>
       {gate.answerSchema && (
@@ -1946,18 +2130,45 @@ function WorkflowDraftModal({
   );
 }
 
-/** assistant-ui 只管理瞬时 thinking accordion；对话事实仍以 daemon Journal 为权威。 */
+/**
+ * 思考 delta 是独立 SSE 文本，不是 assistant-ui Thread 的 message part。
+ * 用原生 details 隔离展示，避免第三方 primitive 假定 runtime 带有
+ * chainOfThought scope 而让长回复的增量渲染中断整个工作台。
+ */
 function HarnessReasoning({ reasoning }: { reasoning: string }) {
-  const runtime = useLocalRuntime({ run: async () => ({ content: [] }) });
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ChainOfThoughtPrimitive.Root className="harness-reasoning">
-        <ChainOfThoughtPrimitive.AccordionTrigger>
-          主控正在思考 · 仅当前流可见
-        </ChainOfThoughtPrimitive.AccordionTrigger>
-        <pre>{reasoning}</pre>
-      </ChainOfThoughtPrimitive.Root>
-    </AssistantRuntimeProvider>
+    <details className="harness-reasoning">
+      <summary>
+        <span aria-hidden="true">◌</span>
+        思考过程
+        <em>当前回合</em>
+      </summary>
+      <pre>{reasoning}</pre>
+    </details>
+  );
+}
+
+/** MCP 工具是回复的低密度尾注；只展示、也只耐久最小安全摘要。 */
+function HarnessToolActivity({
+  activity,
+}: {
+  activity: { readonly label: string; readonly outcome: "running" | "completed" | "failed" };
+}) {
+  const stateText =
+    activity.outcome === "running"
+      ? "正在执行"
+      : activity.outcome === "completed"
+        ? "已完成"
+        : "未完成";
+  return (
+    <details className={`harness-tool ${activity.outcome}`}>
+      <summary>
+        <span aria-hidden="true">⌁</span>
+        {activity.label}
+        <em>{stateText}</em>
+      </summary>
+      <p>仅保留动作名称与结果；不保存参数、路径、命令或完整输出。</p>
+    </details>
   );
 }
 

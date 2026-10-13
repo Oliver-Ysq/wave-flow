@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { basename, dirname, join } from "node:path";
 import { ensureGlobalDaemon, restartGlobalDaemon } from "../daemon/daemon-lifecycle";
+import { webBuildId } from "../web/web-build-id";
 
 /**
  * Tauri 的唯一 Bun sidecar bridge：复用 daemon 的安全发现/启动协议，向桌面壳返回
@@ -13,11 +14,12 @@ async function main(): Promise<void> {
   const executable = join(dirname(process.execPath), daemonName);
   const webDist = process.env.WF_WEB_DIST;
   if (!webDist) throw new Error("桌面 bridge 缺少受控 Web 资源目录。");
+  const buildId = webBuildId(webDist);
   // 首次启动签名后的 macOS sidecar 可能超过 CLI 的常规冷启动窗口；bridge 在窗口
   // 打开前只做一次受控健康等待，不会重试或创建第二个 daemon。
   const daemon = process.argv[2] === "--restart"
-    ? await restartGlobalDaemon(20_000, executable, { WF_WEB_DIST: webDist })
-    : await ensureGlobalDaemon(20_000, undefined, executable, { WF_WEB_DIST: webDist });
+    ? await restartGlobalDaemon(20_000, executable, { WF_WEB_DIST: webDist, WF_WEB_BUILD_ID: buildId }, buildId)
+    : await ensureGlobalDaemon(20_000, undefined, executable, { WF_WEB_DIST: webDist, WF_WEB_BUILD_ID: buildId }, buildId);
   process.stdout.write(`${JSON.stringify({ baseUrl: daemon.baseUrl })}\n`);
 }
 

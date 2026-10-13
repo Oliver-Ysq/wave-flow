@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CloseDaemonResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DaemonStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessMessagesResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunProgressEvent, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { handleCompleteHttp } from "../control/control-http";
 import { handleAnswerHttp, handleBlockHttp, handleContinueHttp } from "../control/block-http";
@@ -16,6 +16,7 @@ import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION } from "../journal/types";
 import { AgentStartLimiter, LimitedAgentExecutor } from "./agent-start-limiter";
 import { serveWebAsset } from "../web/static-assets";
+import { CURRENT_WEB_BUILD_ID } from "../web/static-assets";
 import { HarnessService } from "../harness/service";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
@@ -207,6 +208,13 @@ export class LocalDaemon {
         }
       } catch { /* 单一 archive 损坏不能阻断其他旧会话。 */ }
     }
+    // HarnessExecution 的嵌套 Run 不在全局 Run Store，因此上面的扫描覆盖不到。
+    // 必须按 Harness 档案再次收敛，避免重启后 Web 把已失联的 Worker 显示为工作中。
+    const harnesses = await this.#harness.list();
+    for (const harness of harnesses) {
+      try { await this.#executions.convergeStaleExecutions(harness.harnessRunId); }
+      catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
+    }
   }
 
   /** 注册一个真实 Run 的 ControlServer；必须与当前 daemon 中的同一 Run 绑定。 */
@@ -220,7 +228,7 @@ export class LocalDaemon {
   /** Execution 的底座执行器；Harness 执行只走 Codex ACP Worker 或测试确定性执行器。 */
   private createExecutionExecutor(): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
-    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand(), (identity) => this.workerControlMcp(identity));
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -240,7 +248,7 @@ export class LocalDaemon {
   private async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
-      if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
+      if (request.method === "GET" && url.pathname === "/health") return this.json({ protocolVersion: DAEMON_PROTOCOL_VERSION, webBuildId: CURRENT_WEB_BUILD_ID, userIdentity: daemonUserIdentity(), bootInstanceId: this.bootInstanceId ?? this.instanceId });
       if (request.method === "GET" && url.pathname === "/daemon/status") return this.json(await this.daemonStatus());
       const harnessMcp = url.pathname.match(/^\/harness-mcp\/([^/]+)$/);
       if (request.method === "POST" && harnessMcp) return this.json(await this.harnessMcp(decodeURIComponent(harnessMcp[1]), await this.readJson(request)));
@@ -270,6 +278,8 @@ export class LocalDaemon {
       }
       const harnessAbortMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/abort$/);
       if (request.method === "POST" && harnessAbortMatch) return this.json(await this.abortHarness(decodeURIComponent(harnessAbortMatch[1]), await this.readJson(request)));
+      const harnessCompleteMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/complete$/);
+      if (request.method === "POST" && harnessCompleteMatch) return this.json(await this.completeHarness(decodeURIComponent(harnessCompleteMatch[1]), await this.readJson(request)));
       const workflowRevisionMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/workflow-revisions$/);
       if (request.method === "POST" && workflowRevisionMatch) return this.json(await this.proposeWorkflowRevision(decodeURIComponent(workflowRevisionMatch[1]), await this.readJson(request)));
       const workflowAcceptMatch = url.pathname.match(/^\/harness-runs\/([^/]+)\/workflow-revisions\/(\d+)\/accept$/);
@@ -391,6 +401,24 @@ export class LocalDaemon {
     return compiled ? shellQuote(join(dirname(process.execPath), "wave-flow")) : `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "../cli/main.ts"))}`;
   }
 
+  /** Worker 专属 MCP 只代理当前节点的 Control；token/capability 不会进入 Web 或 Journal。 */
+  private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }): import("@agentclientprotocol/sdk").McpServer {
+    if (!this.#server) throw new Error("Worker MCP 需要已启动的 loopback daemon。 ");
+    const compiled = import.meta.dir.startsWith("/$bunfs/");
+    const command = process.execPath;
+    const args = compiled ? ["__worker-mcp"] : [join(import.meta.dir, "daemon-main.ts"), "__worker-mcp"];
+    return {
+      name: "wave-flow-worker-control", command, args,
+      env: [
+        { name: "WF_WORKER_MCP_BASE_URL", value: `http://127.0.0.1:${this.#server.port}` },
+        { name: "WF_WORKER_MCP_CAPABILITY", value: identity.capability },
+        { name: "WF_WORKER_MCP_RUN_ID", value: identity.runId },
+        { name: "WF_WORKER_MCP_NODE_ID", value: identity.nodeId },
+        { name: "WF_WORKER_MCP_AGENT_SESSION_ID", value: identity.agentSessionId },
+      ],
+    } as any;
+  }
+
   private async createProject(value: unknown): Promise<HarnessProjectResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessProjectRequest).cwd !== "string" || ((value as CreateHarnessProjectRequest).title !== undefined && typeof (value as CreateHarnessProjectRequest).title !== "string")) throw new DaemonRequestError(400, "创建项目请求无效。 ");
     try { return { project: await this.#projects.create((value as CreateHarnessProjectRequest).cwd, (value as CreateHarnessProjectRequest).title) }; }
@@ -468,6 +496,7 @@ export class LocalDaemon {
     return { harness: await this.#harness.snapshot(harnessRunId) };
   }
   private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new DaemonRequestError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
+  private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value as CompleteHarnessRequest)) throw new DaemonRequestError(400, "Harness complete 不接受请求字段。 "); try { return { harness: await this.#harness.complete(harnessRunId) }; } catch (error) { throw this.executionError(error); } }
   private async proposeWorkflowRevision(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ProposeWorkflowRevisionRequest).source !== "string") throw new DaemonRequestError(400, "Workflow 草案请求无效。 "); return { harness: await this.#harness.proposeWorkflowRevision(harnessRunId, (value as ProposeWorkflowRevisionRequest).source) }; }
   private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new DaemonRequestError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
 
@@ -698,7 +727,7 @@ export class LocalDaemon {
     if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand(), (identity) => this.workerControlMcp(identity));
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
@@ -791,7 +820,7 @@ export class LocalDaemon {
     const workflow = await loadWorkflow(manifest.workflowPath, cwd);
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand());
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, () => this.currentControlCommand(), (identity) => this.workerControlMcp(identity));
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
     await this.reconcileResumeSessions(runtime);

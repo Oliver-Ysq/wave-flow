@@ -41,6 +41,8 @@ export type CliRuntimeRecord = {
   readonly executablePath: string;
   /** 写入时冻结的文件身份。 */
   readonly executableIdentity: ExecutableIdentity;
+  /** Codex JavaScript 入口使用的 node；旧记录可缺失，首次启动时受控补解析。 */
+  readonly nodeExecutable?: { readonly path: string; readonly identity: ExecutableIdentity };
   /** 固定 argv `--version` 返回的规范化版本摘要。 */
   readonly version: string;
   /** 候选进入验证流程的来源。 */
@@ -68,7 +70,7 @@ export type CliRuntimeRegistryFile = {
 };
 
 /** 通过启动前身份复核、可安全注入 Worker 的运行时。 */
-export type VerifiedCliRuntime = CliRuntimeRecord & { readonly status: "verified" };
+export type VerifiedCliRuntime = Omit<CliRuntimeRecord, "nodeExecutable" | "status"> & { readonly status: "verified"; readonly nodeExecutable: { readonly path: string; readonly identity: ExecutableIdentity } };
 
 /** 写入 Journal 的安全 runtime 来源；不含 device/inode、PATH 或环境变量。 */
 export type RuntimeProvenance = {
@@ -89,7 +91,7 @@ export type RuntimeProvenance = {
 };
 
 /** 仅在设置页展示的 runtime 字段；文件身份绝不返回浏览器。 */
-export type CliRuntimeView = Omit<CliRuntimeRecord, "executableIdentity">;
+export type CliRuntimeView = Omit<CliRuntimeRecord, "executableIdentity" | "nodeExecutable">;
 
 /** 发现到的未确认候选。 */
 export type DiscoveredCliCandidate = {

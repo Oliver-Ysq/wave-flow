@@ -127,6 +127,9 @@ export type CloseDaemonResponse = {
   readonly closing: true;
 };
 
+/** 完成 Harness 会话请求；空对象表示无额外参数。 */
+export type CompleteHarnessRequest = Record<string, never>;
+
 /** 创建只读 Harness 主控会话的 loopback 请求；不创建 Workflow Run 或 Worker。 */
 export type CreateHarnessRunRequest = {
   /** 已选择的耐久项目 id；daemon 从 Project Store 获取 cwd。 */

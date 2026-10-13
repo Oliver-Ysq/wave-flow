@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, realpath } from "node:fs/promises";
 import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, type HarnessManifest } from "./journal";
 import type { HarnessSession } from "./session";
-import type { HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
+import type { HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStreamEvent, HarnessToolActivity, WorkflowExecutionRecord } from "./types";
 import { harnessRunsRoot, validateRunId } from "../journal/paths";
 import type { JsonObject } from "../shared/json";
 import type { HarnessActionCallbacks } from "./action-tools";
@@ -13,7 +13,7 @@ import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-run
 
 /** daemon 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
-  #sessions = new Map<string, { readonly journal: HarnessJournal; readonly projection: HarnessProjection; session: HarnessSession | null; readonly listeners: Set<(event: HarnessStreamEvent) => void>; turn: Promise<void> | null }>();
+  #sessions = new Map<string, HarnessEntry>();
   /** 同一 Harness 的 Journal 状态变更必须串行；不同 Harness 仍可并行。 */
   #mutations = new Map<string, Promise<void>>();
   /** 回合内 request_user_decision 的等待者；键为 harnessRunId:decisionId。 */
@@ -45,7 +45,7 @@ export class HarnessService {
     const manifest: HarnessManifest = { harnessRunId: crypto.randomUUID(), projectId, version: HARNESS_JOURNAL_VERSION, cwd: resolvedCwd, modelFingerprint, ...(identity.runtime ? { runtime: identity.runtime } : {}), createdAt: new Date().toISOString() };
     const journal = await HarnessJournal.create(manifest, this.root);
     const opened = await HarnessJournal.open(manifest.harnessRunId, this.root);
-    const entry = { journal, projection: new HarnessProjection(manifest), session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null };
+    const entry: HarnessEntry = { journal, projection: new HarnessProjection(manifest), session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, toolActivities: [] };
     for (const event of opened.events) entry.projection.apply(event);
     this.#sessions.set(manifest.harnessRunId, entry);
     return entry.projection.snapshot();
@@ -87,7 +87,11 @@ export class HarnessService {
     if (!text.trim() || text.length > 20_000) throw new Error("Harness 消息必须为 1-20000 个字符。 ");
     const entry = await this.entry(harnessRunId);
     await this.mutate(harnessRunId, async () => {
+    if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档；请创建新会话继续。 ");
     if (entry.projection.snapshot().status === "running" || entry.turn) throw new Error("Harness 当前回合仍在运行。 ");
+    // 摘要只属于这一轮 prompt；发生中断时没有可安全绑定的完整 assistant 消息，
+    // 因而会在 finally 丢弃，绝不把过程遗留给下一轮。
+    entry.toolActivities = [];
     const actions = this.actionCallbacks(harnessRunId);
     const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, entry.projection.snapshot().messages, actions, entry.journal.manifest.runtime);
     entry.session = session;
@@ -104,9 +108,13 @@ export class HarnessService {
         if (!assistant.text.trim()) throw new Error("主控回答只包含非持久 reasoning。 ");
         const messageEvent = { type: "harness.assistant_message" as const, at: assistant.createdAt, harnessRunId, message: assistant };
         await entry.journal.append(messageEvent); entry.projection.apply(messageEvent);
+        if (entry.toolActivities.length > 0) {
+          const toolActivity = { type: "harness.tool_activity" as const, at: new Date().toISOString(), harnessRunId, messageId: assistant.id, activities: entry.toolActivities };
+          await entry.journal.append(toolActivity); entry.projection.apply(toolActivity);
+        }
         const finished = { type: "harness.turn_finished" as const, at: new Date().toISOString(), harnessRunId, messageId: assistant.id };
         await entry.journal.append(finished); entry.projection.apply(finished);
-        this.emit(entry, { type: "turn_finished", messageId: assistant.id });
+        this.emit(entry, { type: "turn_finished", messageId: assistant.id, text: assistant.text });
       } catch (error) {
         const diagnostic = error instanceof Error ? error.message : String(error);
         const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
@@ -121,6 +129,7 @@ export class HarnessService {
         // 而不释放它，后续 Harness 会永久卡在一个已无人消费的 Promise 上。
         this.rejectDecisionWaiters(harnessRunId, "Harness 主控回合已结束，无法再接收该决策答案。 ");
         unsubscribe();
+        entry.toolActivities = [];
         entry.turn = null;
       }
     })();
@@ -134,6 +143,21 @@ export class HarnessService {
     // 管理的 decision waiter，确保 prompt() 可回到 turn 的 interrupted 收敛路径。
     this.rejectDecisionWaiters(harnessRunId, "用户已停止 Harness 主控回合。 ");
     entry.session.abort();
+  }
+
+  /** 用户显式完成会话；保留审计内容，后续在已完成列表按项目展示。 */
+  async complete(harnessRunId: string): Promise<HarnessSnapshot> {
+    return this.mutate(harnessRunId, async () => {
+      const entry = await this.entry(harnessRunId);
+      const snapshot = entry.projection.snapshot();
+      if (snapshot.status === "running" || entry.turn) throw new Error("主控回合运行中不能完成会话。 ");
+      if (snapshot.status === "completed") throw new Error("该会话已完成。 ");
+      if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution，不能完成会话。 ");
+      const event = { type: "harness.completed" as const, at: new Date().toISOString(), harnessRunId };
+      await entry.journal.append(event); entry.projection.apply(event);
+      entry.session?.close?.(); entry.session = null;
+      return entry.projection.snapshot();
+    });
   }
   /** 私有 MCP sidecar 的唯一工具入口；所有 action 仍回到本服务做耐久校验。 */
   async mcpTools(harnessRunId: string, request: { readonly operation: "list" | "call"; readonly value: Record<string, unknown> }): Promise<unknown> {
@@ -149,12 +173,26 @@ export class HarnessService {
     const { name, arguments: args = {} } = request.value as { name?: unknown; arguments?: unknown };
     if (typeof name !== "string" || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("Harness MCP 工具请求无效。 ");
     const value = args as Record<string, unknown>; const actions = this.actionCallbacks(harnessRunId);
-    if (name === "read_project_file") return { text: await readProjectFile(entry.projection.snapshot().cwd, { path: String(value.path ?? ""), ...(typeof value.startLine === "number" ? { startLine: value.startLine } : {}), ...(typeof value.endLine === "number" ? { endLine: value.endLine } : {}) }) };
-    if (name === "query_project") return { text: await executeReadOnlyProjectQuery(entry.projection.snapshot().cwd, { command: value.command as "pwd" | "git" | "rg" | "ls", args: Array.isArray(value.args) ? value.args.map(String) : [] }) };
-    if (name === "propose_workflow_revision") return actions.proposeWorkflowRevision(String(value.source ?? ""));
-    if (name === "inspect_execution") return actions.inspectExecution(typeof value.executionId === "string" ? value.executionId : undefined);
-    if (name === "read_run_capsule") return actions.readRunCapsule();
-    if (name === "request_user_decision") return { answer: await actions.requestUserDecision(String(value.question ?? ""), value.answerSchema && typeof value.answerSchema === "object" && !Array.isArray(value.answerSchema) ? value.answerSchema as JsonObject : undefined) };
+    const runTool = async <T>(label: string, operation: () => Promise<T>): Promise<T> => {
+      const toolCallId = crypto.randomUUID();
+      this.emit(entry, { type: "tool_started", toolCallId, label });
+      try {
+        const result = await operation();
+        this.emit(entry, { type: "tool_finished", toolCallId, outcome: "completed" });
+        this.recordToolActivity(entry, label, "completed");
+        return result;
+      } catch (error) {
+        this.emit(entry, { type: "tool_finished", toolCallId, outcome: "failed" });
+        this.recordToolActivity(entry, label, "failed");
+        throw error;
+      }
+    };
+    if (name === "read_project_file") return runTool("读取项目文件", async () => ({ text: await readProjectFile(entry.projection.snapshot().cwd, { path: String(value.path ?? ""), ...(typeof value.startLine === "number" ? { startLine: value.startLine } : {}), ...(typeof value.endLine === "number" ? { endLine: value.endLine } : {}) }) }));
+    if (name === "query_project") return runTool("查询项目状态", async () => ({ text: await executeReadOnlyProjectQuery(entry.projection.snapshot().cwd, { command: value.command as "pwd" | "git" | "rg" | "ls", args: Array.isArray(value.args) ? value.args.map(String) : [] }) }));
+    if (name === "propose_workflow_revision") return runTool("提交 Workflow 草案", () => actions.proposeWorkflowRevision(String(value.source ?? "")));
+    if (name === "inspect_execution") return runTool("读取执行状态", () => actions.inspectExecution(typeof value.executionId === "string" ? value.executionId : undefined));
+    if (name === "read_run_capsule") return runTool("读取会话摘要", () => actions.readRunCapsule());
+    if (name === "request_user_decision") return runTool("等待用户决定", async () => ({ answer: await actions.requestUserDecision(String(value.question ?? ""), value.answerSchema && typeof value.answerSchema === "object" && !Array.isArray(value.answerSchema) ? value.answerSchema as JsonObject : undefined) }));
     throw new Error(`Harness MCP 工具未获授权：${name}`);
   }
   /** 创建新的不可变 workflow.ts 草案；它不是 Run，也不启动任何 Worker。 */
@@ -162,6 +200,7 @@ export class HarnessService {
     if (!source.trim() || source.length > 200_000) throw new Error("Workflow 草案必须为 1-200000 个字符。 ");
     return this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
+      if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能修改 Workflow 草案。 ");
       if (entry.projection.snapshot().status === "running") throw new Error("主控回合运行中不能修改 Workflow 草案。 ");
       return this.appendWorkflowRevision(harnessRunId, entry, source);
     });
@@ -193,6 +232,7 @@ export class HarnessService {
   async acceptWorkflowRevision(harnessRunId: string, revision: number): Promise<HarnessSnapshot> {
     return this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
+      if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能接受 Workflow 草案。 ");
       if (entry.projection.snapshot().status === "running") throw new Error("主控回合运行中不能接受 Workflow 草案。 ");
       const event = { type: "workflow.revision_accepted" as const, at: new Date().toISOString(), harnessRunId, revision };
       await entry.journal.append(event); entry.projection.apply(event);
@@ -204,6 +244,7 @@ export class HarnessService {
   async recordExecutionCreated(harnessRunId: string, execution: WorkflowExecutionRecord): Promise<HarnessSnapshot> {
     return this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
+      if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能创建 Execution。 ");
       const event = { type: "workflow.execution_created" as const, at: execution.createdAt, harnessRunId, execution };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, { type: "execution_changed", executionId: execution.executionId });
@@ -215,9 +256,22 @@ export class HarnessService {
   async recordExecutionFinished(harnessRunId: string, executionId: string, status: WorkflowExecutionRecord["status"], diagnostic: string | null, summary: JsonObject | null): Promise<void> {
     await this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
+      if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能修改 Execution。 ");
       const event = { type: "workflow.execution_finished" as const, at: new Date().toISOString(), harnessRunId, executionId, status, diagnostic, summary };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, { type: "execution_changed", executionId });
+    });
+  }
+
+  /** 用户明确恢复同一冻结 Execution；写入独立事实，不能静默改写旧中断终态。 */
+  async recordExecutionResumed(harnessRunId: string, executionId: string): Promise<HarnessSnapshot> {
+    return this.mutate(harnessRunId, async () => {
+      const entry = await this.entry(harnessRunId);
+      if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能恢复 Execution。 ");
+      const event = { type: "workflow.execution_resumed" as const, at: new Date().toISOString(), harnessRunId, executionId };
+      await entry.journal.append(event); entry.projection.apply(event);
+      this.emit(entry, { type: "execution_changed", executionId });
+      return entry.projection.snapshot();
     });
   }
 
@@ -233,6 +287,7 @@ export class HarnessService {
    */
   async requestUserDecision(harnessRunId: string, question: string, answerSchema?: JsonObject): Promise<JsonObject> {
     const entry = await this.entry(harnessRunId);
+    if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能请求用户决定。 ");
     if (typeof question !== "string" || !question.trim()) throw new Error("决策请求必须包含非空问题。 ");
     const decision: HarnessDecision = { decisionId: crypto.randomUUID(), question, answerSchema, createdAt: new Date().toISOString(), answer: null, answeredAt: null };
     const event = { type: "harness.decision_requested" as const, at: decision.createdAt, harnessRunId, decision };
@@ -246,6 +301,7 @@ export class HarnessService {
   /** 用户提交决策答案；durable-first 写入后只唤醒原工具调用，不推进任何其他状态。 */
   async answerUserDecision(harnessRunId: string, decisionId: string, answer: JsonObject): Promise<HarnessSnapshot> {
     const entry = await this.entry(harnessRunId);
+    if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能提交决定答案。 ");
     const decision = entry.projection.snapshot().decisions.find((item) => item.decisionId === decisionId);
     if (!decision) throw new Error("未知 Harness 决策请求。 ");
     if (decision.answer !== null) throw new Error("Harness 决策不能重复回答。 ");
@@ -296,10 +352,15 @@ export class HarnessService {
     const existing = this.#sessions.get(harnessRunId); if (existing) return existing;
     const opened = await HarnessJournal.open(harnessRunId, this.root);
     const projection = new HarnessProjection(opened.journal.manifest); for (const event of opened.events) projection.apply(event);
-    const entry = { journal: opened.journal, projection, session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null };
+    const entry: HarnessEntry = { journal: opened.journal, projection, session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, toolActivities: [] };
     this.#sessions.set(harnessRunId, entry); return entry;
   }
   private emit(entry: { readonly listeners: Set<(event: HarnessStreamEvent) => void> }, event: HarnessStreamEvent): void { for (const listener of entry.listeners) listener(event); }
+  /** 仅在真实主控回合中缓存安全字段，最终绑定到完整 assistant 消息后才落盘。 */
+  private recordToolActivity(entry: HarnessEntry, label: string, outcome: HarnessToolActivity["outcome"]): void {
+    if (entry.projection.snapshot().status !== "running") return;
+    entry.toolActivities.push({ label, finishedAt: new Date().toISOString(), outcome });
+  }
   private async mutate<T>(harnessRunId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.#mutations.get(harnessRunId) ?? Promise.resolve();
     const task = previous.catch(() => undefined).then(operation);
@@ -308,6 +369,16 @@ export class HarnessService {
     try { return await task; } finally { if (this.#mutations.get(harnessRunId) === settled) this.#mutations.delete(harnessRunId); }
   }
 }
+
+type HarnessEntry = {
+  readonly journal: HarnessJournal;
+  readonly projection: HarnessProjection;
+  session: HarnessSession | null;
+  readonly listeners: Set<(event: HarnessStreamEvent) => void>;
+  turn: Promise<void> | null;
+  /** 当前回合已结束工具的最小安全摘要；不会保存工具参数或输出。 */
+  toolActivities: HarnessToolActivity[];
+};
 
 /** 兼容模型把 <think> 内容作为 text 返回；只丢弃其显式 thinking 区段，不记录该内容。 */
 function stripReasoning(text: string): string { return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<\/?think>/gi, "").trim(); }

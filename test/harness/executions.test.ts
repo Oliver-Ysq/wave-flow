@@ -153,6 +153,93 @@ describe("HarnessExecutionService", () => {
     expect(detail.phases[0].agents.map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w2:completed"]);
   });
 
+  test("daemon 重启时遗留的 active Execution 必须收敛为 interrupted，不能伪装为工作中", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+
+    const restartedHarness = new HarnessService(root, async () => model, createPi);
+    const restarted = new HarnessExecutionService(restartedHarness, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    await restarted.convergeStaleExecutions(harnessRunId);
+    await expect(restarted.listExecutions(harnessRunId)).resolves.toMatchObject([
+      { executionId: execution.executionId, status: "interrupted", finishedAt: expect.any(String), diagnostic: expect.stringContaining("不可跨进程认领") },
+    ]);
+    await expect(restarted.snapshotExecution(harnessRunId, execution.executionId)).resolves.toMatchObject({ status: "interrupted" });
+    const detail = await restarted.snapshotExecution(harnessRunId, execution.executionId);
+    expect(detail.phases.flatMap((phase) => phase.agents)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "w1", status: "completed" }),
+    ]));
+    expect(detail.phases.flatMap((phase) => phase.agents).every((node) => node.status !== "running" && node.status !== "blocked")).toBe(true);
+  });
+
+  test("重启收敛为 interrupted 后，用户仍可显式 resume 创建新 attempt", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+
+    let resumedNodes = 0;
+    const restartedHarness = new HarnessService(root, async () => model, createPi);
+    const restarted = new HarnessExecutionService(restartedHarness, () => ({ executor: { execute: async () => ({ n: ++resumedNodes }) } }), {}, root);
+    await restarted.convergeStaleExecutions(harnessRunId);
+    // interrupted 的 running 事实由首个重放节点通过调用指纹校验后才写入；resume
+    // 返回时可以仍是 interrupted，但后台重放必须实际创建 attempt #2。
+    await expect(restarted.resume(harnessRunId, execution.executionId)).resolves.toMatchObject({ status: "interrupted", currentExecutionAttemptId: 1 });
+    await restarted.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(async () => (await restarted.listExecutions(harnessRunId))[0].status === "completed");
+    const detail = await restarted.snapshotExecution(harnessRunId, execution.executionId);
+    expect(detail.currentExecutionAttemptId).toBe(2);
+    expect(resumedNodes).toBe(1);
+  });
+
+  test("损坏的嵌套 Execution 不阻止后续 active Execution 在重启时收敛", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const first = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 2);
+    const second = await executions.createExecution(harnessRunId, 2);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, second.execution.executionId)).gates.length === 1);
+    await Bun.write(join(root, harnessRunId, "executions", first.execution.executionId, "manifest.json"), "{}\n");
+
+    const restartedHarness = new HarnessService(root, async () => model, createPi);
+    const restarted = new HarnessExecutionService(restartedHarness, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    await restarted.convergeStaleExecutions(harnessRunId);
+    await expect(restarted.listExecutions(harnessRunId)).resolves.toMatchObject([
+      { executionId: first.execution.executionId, status: "completed" },
+      { executionId: second.execution.executionId, status: "interrupted", finishedAt: expect.any(String) },
+    ]);
+  });
+
+  test("升级时为已中断 Execution 补齐遗留 active 节点，不改写其终态", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+
+    // 模拟旧版本只写顶层 run.status，却漏掉旧 ACP 节点收敛的历史档案。
+    const oldRuntime = await executions.snapshotExecution(harnessRunId, execution.executionId);
+    const journalPath = join(root, harnessRunId, "executions", execution.executionId, "journal.jsonl");
+    await Bun.write(journalPath, `${await Bun.file(journalPath).text()}${JSON.stringify({ type: "run.status", at: new Date().toISOString(), runId: execution.executionId, nodeId: null, agentSessionId: null, diagnostic: "旧版本中断", status: "interrupted" })}\n`);
+    expect(oldRuntime.status).toBe("running");
+
+    const restartedHarness = new HarnessService(root, async () => model, createPi);
+    const restarted = new HarnessExecutionService(restartedHarness, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    await restarted.convergeStaleExecutions(harnessRunId);
+    const detail = await restarted.snapshotExecution(harnessRunId, execution.executionId);
+    expect(detail.status).toBe("interrupted");
+    expect(detail.phases.flatMap((phase) => phase.agents)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "w1", status: "completed" }),
+    ]));
+    expect(detail.phases.flatMap((phase) => phase.agents).every((node) => node.status !== "running" && node.status !== "blocked")).toBe(true);
+  });
+
   test("Execution 档案嵌套在 Harness 档案内并携带 harness 来源绑定", async () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);

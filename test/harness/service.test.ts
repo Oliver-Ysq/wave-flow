@@ -89,6 +89,33 @@ describe("HarnessService", () => {
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "idle", messages: [{ role: "user", text: "hello" }, { role: "assistant", text: "durable answer" }] });
   });
 
+  test("主控回合的工具安全摘要绑定完整 assistant，重开会话仍可恢复", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-tool-summary-")); directories.push(cwd);
+    let service!: HarnessService;
+    const pi: HarnessPiSession = {
+      isRunning: false,
+      subscribe: () => () => {},
+      async prompt() {
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        return "已读取项目目录。";
+      },
+      abort() {},
+    };
+    service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "读取项目");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const completed = await service.snapshot(created.harnessRunId);
+    const assistant = completed.messages.at(-1)!;
+    expect(completed.toolActivitiesByMessageId[assistant.id]).toEqual([
+      expect.objectContaining({ label: "查询项目状态", outcome: "completed", finishedAt: expect.any(String) }),
+    ]);
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({
+      toolActivitiesByMessageId: { [assistant.id]: [{ label: "查询项目状态", outcome: "completed" }] },
+    });
+  });
+
   test("部分流或 provider 中断不耐久 assistant 消息", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-interrupted-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new InterruptedPi());
@@ -174,6 +201,35 @@ describe("HarnessService", () => {
     const draft = (name: string) => `const meta = { name: "${name}", description: "并发提案", phases: [{ title: "p" }] };\nasync function run(args) { return args; }`;
     await Promise.all([service.proposeWorkflowRevision(created.harnessRunId, draft("draft-one")), service.proposeWorkflowRevision(created.harnessRunId, draft("draft-two"))]);
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1 }, { revision: 2 }] });
+  });
+
+  test("用户完成会话后封存 Journal、释放 session，且拒绝后续写入", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-complete-")); directories.push(cwd);
+    const pi = new ClosablePi();
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "完成前的消息");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+
+    const completed = await service.complete(created.harnessRunId);
+    expect(completed).toMatchObject({ status: "completed", completedAt: expect.any(String) });
+    expect(pi.closed).toBe(true);
+    await expect(service.send(created.harnessRunId, "不应发送")).rejects.toThrow("完成归档");
+    await expect(service.proposeWorkflowRevision(created.harnessRunId, 'const meta = { name: "late", description: "late", phases: [{ title: "p" }] }; async function run(args) { return args; }')).rejects.toThrow("完成归档");
+
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "completed", completedAt: completed.completedAt });
+  });
+
+  test("运行中的主控回合不能完成会话", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-complete-running-")); directories.push(cwd);
+    const pi = new DeferredPi();
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "仍在运行");
+    await expect(service.complete(created.harnessRunId)).rejects.toThrow("运行中");
+    pi.finish();
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
   });
 
   test("不可编译草案在提案时即被拒绝，不产生任何 revision 事实", async () => {

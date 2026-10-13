@@ -65,9 +65,9 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 - `sandbox` 只允许 `read-only`（默认）或 `workspace-write`；没有更高权限模式。
 - 直接 `await agent()` 的失败会抛出并把节点标记为 interrupted；`parallel()` 内失败的
   任务结果为 `null`，使用前必须过滤或判空。
-- **不要**在 prompt 里指导 Worker 如何上报完成。`wave-flow complete / block / continue`
-  的控制指令由 Runtime 自动注入；作者只描述业务任务。Worker 需要人工输入时会自行
-  `block`，无需作者编排。
+- **不要**在 prompt 里指导 Worker 如何上报完成。Runtime 会为每个 Worker session
+  注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
+  Worker 需要人工输入时会自行 `block`，无需作者编排。
 
 ## 人工决策
 

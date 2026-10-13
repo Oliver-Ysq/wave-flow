@@ -121,6 +121,63 @@ export class HarnessExecutionService {
     return (await this.harness.snapshot(harnessRunId)).executions;
   }
 
+  /**
+   * 新 daemon 启动时收敛遗留 Execution：ACP session 与原 Workflow 调用栈都不
+   * 能跨进程认领，因此任何仍为 active 的嵌套 Run 都必须耐久标为 interrupted。
+   * 此方法只落盘已有事实的终态，不创建 Worker、不重放脚本；恢复仍只能由用户
+   * 显式调用 resume 发起。
+   */
+  async convergeStaleExecutions(harnessRunId: string): Promise<void> {
+    const snapshot = await this.harness.snapshot(harnessRunId);
+    for (const record of snapshot.executions) {
+      // 一份损坏的历史嵌套档案只能使自己不可读取；不能让同一 Harness 后续的
+      // active Execution 也逃过重启收敛，重新在 Web 中伪装为工作中。
+      let runtime: RunRuntime;
+      try {
+        runtime = await RunRuntime.open(record.executionId, new DeterministicExecutor(), this.executionsRoot(harnessRunId));
+      } catch {
+        continue;
+      }
+      const current = runtime.snapshot();
+      const activeNodes = current.phases.flatMap((phase) => phase.agents).filter((node) =>
+        node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
+      );
+      // 已被旧版本写成 Run 终态的档案也可能残留 active 节点。只补齐节点事实，
+      // 不改变 Run 终态或已完成节点，确保升级后的详情不会显示自相矛盾状态。
+      if (current.status === "completed" || current.status === "cancelled" || current.status === "interrupted") {
+        for (const node of activeNodes) {
+          const nodeEvent: import("../journal/types").JournalEvent = {
+            type: "agent.status", at: new Date().toISOString(), runId: record.executionId,
+            nodeId: node.id, agentSessionId: node.agentSessionId,
+            diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；按 Execution 终态收敛为 interrupted。", status: "interrupted",
+          };
+          await runtime.journal.append(nodeEvent);
+          runtime.state.apply(nodeEvent);
+        }
+        if (record.finishedAt === null) await this.harness.recordExecutionFinished(harnessRunId, record.executionId, current.status, current.status === "completed" ? null : current.diagnostic, null);
+        continue;
+      }
+      const diagnostic = `daemon 在 ${current.status} 中断；原 ACP 会话与 Workflow 调用栈不可跨进程认领，等待用户显式 resume。`;
+      // Run 终态不能掩盖仍显示 running/blocked 的旧节点。先逐节点追加中断事实，
+      // 再封存聚合状态，使详情、Phase 计数与 Harness 登记保持同一真相。
+      for (const node of activeNodes) {
+        const nodeEvent: import("../journal/types").JournalEvent = {
+          type: "agent.status", at: new Date().toISOString(), runId: record.executionId,
+          nodeId: node.id, agentSessionId: node.agentSessionId,
+          diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。", status: "interrupted",
+        };
+        await runtime.journal.append(nodeEvent);
+        runtime.state.apply(nodeEvent);
+      }
+      const event: import("../journal/types").JournalEvent = {
+        type: "run.status", at: new Date().toISOString(), runId: record.executionId, nodeId: null, agentSessionId: null, diagnostic, status: "interrupted",
+      };
+      await runtime.journal.append(event);
+      runtime.state.apply(event);
+      await this.harness.recordExecutionFinished(harnessRunId, record.executionId, "interrupted", diagnostic, null);
+    }
+  }
+
   /** Execution 的权威 Run 快照；活跃实例优先，否则从 Journal 只读重开。 */
   async snapshotExecution(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
     return (await this.runtimeFor(harnessRunId, executionId)).snapshot();
@@ -193,9 +250,13 @@ export class HarnessExecutionService {
       };
       await opened.journal.append(event);
       opened.state.apply(event);
-    } else if (previousStatus !== "running") {
-      throw new Error("只有 running 或 daemon 中断的暂停 Execution 可以 resume。 ");
+    } else if (previousStatus !== "running" && previousStatus !== "interrupted") {
+      throw new Error("只有 daemon 中断的 Execution 可以 resume。 ");
     }
+    // 外层登记与内嵌 Run 是两份独立 Journal。daemon 重启收敛时二者都会写成
+    // interrupted；用户授权 resume 后必须先耐久地重开外层登记，后续新 attempt
+    // 才能写入新的 execution_finished，而不是被旧终态拒绝。
+    if (record.status === "interrupted") await this.harness.recordExecutionResumed(harnessRunId, executionId);
     const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root);
     await this.hooks.wireControl?.(runtime, resumedExecutor.wiring);
     this.startExecution(harnessRunId, executionId, runtime, module, record.policy);

@@ -9,6 +9,9 @@ if (process.argv[2] === "__codex-acp") {
 } else if (process.argv[2] === "__harness-mcp") {
   const { runHarnessMcpServer } = await import("../harness/mcp-server");
   await runHarnessMcpServer();
+} else if (process.argv[2] === "__worker-mcp") {
+  const { runWorkerMcpServer } = await import("../runtime/worker-mcp-server");
+  await runWorkerMcpServer();
 } else if (process.argv[2] === "__wave-flow-cli" || basename(process.execPath) === "wave-flow") {
   const { main } = await import("../cli/main");
   // Bun compiled executable 的 argv[1] 是 /$bunfs 内部脚本路径，不是用户命令。
@@ -16,6 +19,7 @@ if (process.argv[2] === "__codex-acp") {
 } else {
   const { LocalDaemon } = await import("./local-daemon");
   const { acquireDaemonLock, DAEMON_PROTOCOL_VERSION, daemonUserIdentity, processStartIdentity, publishDescriptor, removeOwnDescriptor, removeOwnLock } = await import("./daemon-descriptor");
+  const { CURRENT_WEB_BUILD_ID } = await import("../web/static-assets");
   const bootInstanceId = crypto.randomUUID();
   if (!(await acquireDaemonLock(bootInstanceId))) process.exit(0);
   let closeDaemon: (() => void) | null = null;
@@ -28,7 +32,7 @@ if (process.argv[2] === "__codex-acp") {
     // interrupted；不能依赖桌面重启专用环境变量，否则 CLI 重启会留下假 running。
     await daemon.convergeStaleAcpWorkers();
     const startedAt = await processStartIdentity(process.pid);
-    const descriptor = () => ({ protocolVersion: DAEMON_PROTOCOL_VERSION, userIdentity: daemonUserIdentity(), bootInstanceId, port: Number(new URL(server.baseUrl).port), pid: process.pid, processStartIdentity: startedAt, heartbeatAt: new Date().toISOString() } as const);
+    const descriptor = () => ({ protocolVersion: DAEMON_PROTOCOL_VERSION, webBuildId: CURRENT_WEB_BUILD_ID, userIdentity: daemonUserIdentity(), bootInstanceId, port: Number(new URL(server.baseUrl).port), pid: process.pid, processStartIdentity: startedAt, heartbeatAt: new Date().toISOString() } as const);
     await publishDescriptor(descriptor());
     const heartbeat = setInterval(() => { void publishDescriptor(descriptor()).catch(() => {}); }, 5_000);
     let closing = false;

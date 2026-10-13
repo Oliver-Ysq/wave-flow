@@ -86,16 +86,18 @@ export type RunListItem = { runId: string; workflow: { name: string; description
 export type DaemonStatusResponse = { protocolVersion: number; activeRuns: number; blockedRuns: number; activeHarnesses: number; acpWorkersNeedingResume: number };
 
 /** 独立主控会话状态；不等同于 Workflow Run 状态。 */
-export type HarnessStatus = "idle" | "running" | "interrupted";
+export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 /** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
 export type HarnessMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
+/** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
+export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null };
 /** Harness 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
 export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null };
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** daemon 权威 Harness 会话快照。 */
-export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; createdAt: string; messages: HarnessMessage[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */

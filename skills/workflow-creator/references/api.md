@@ -107,9 +107,9 @@ type AgentOptions = {
 对象；需要 URL 时用 `{ type: "string" }` 并在 prompt 中要求绝对 HTTP(S) 地址，不要依赖
 `format` 关键字。
 
-Worker 的完成、阻塞与恢复由 Runtime 注入的控制协议处理：prompt 里只写业务任务，
-不写 `wave-flow complete` 之类的上报指令。Worker 中途需要人工输入时会自行 block，
-用户在 Web 界面回答后由原 Worker 决定是否继续。
+Worker 的完成、阻塞与恢复由 Runtime 注入的 session-private MCP 控制工具处理：prompt
+里只写业务任务，不写 shell `wave-flow complete` 之类的上报指令。Worker 中途需要人工
+输入时会自行调用 block，用户在 Web 界面回答后由原 Worker 决定是否继续。
 
 ## `phase()`
 

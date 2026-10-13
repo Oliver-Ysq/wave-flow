@@ -1,7 +1,7 @@
 import type { JsonObject } from "../shared/json";
 
 /** Harness 会话的耐久状态；它不等同于 Workflow Run 完成状态。 */
-export type HarnessStatus = "idle" | "running" | "interrupted";
+export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 
 /** 用户或完整主控消息；reasoning delta 永不进入此类型。 */
 export type HarnessMessage = {
@@ -13,6 +13,16 @@ export type HarnessMessage = {
   readonly text: string;
   /** 耐久写入时间。 */
   readonly createdAt: string;
+};
+
+/** 主控窄工具的可恢复安全摘要；不包含参数、路径、正文、命令或输出。 */
+export type HarnessToolActivity = {
+  /** 服务端固定的动作名称。 */
+  readonly label: string;
+  /** 结束时间，用于恢复后的稳定排序。 */
+  readonly finishedAt: string;
+  /** 成功或未完成；不暴露底层错误详情。 */
+  readonly outcome: "completed" | "failed";
 };
 
 /** 一个可恢复读取、但不认领原生 Pi session 的主控会话快照。 */
@@ -29,10 +39,14 @@ export type HarnessSnapshot = {
   readonly status: HarnessStatus;
   /** 最近一条 turn 的诊断；正常 idle 时为 null。 */
   readonly diagnostic: string | null;
+  /** 用户显式归档完成的时间；进行中会话为 null。 */
+  readonly completedAt: string | null;
   /** 创建时间。 */
   readonly createdAt: string;
   /** 当前已耐久的完整消息。 */
   readonly messages: readonly HarnessMessage[];
+  /** 按 assistant 消息归属的工具安全摘要；历史会话默认为空。 */
+  readonly toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>;
   /** 已耐久的 Workflow 草案；接受仅冻结 revision，不代表已创建或执行 Worker Run。 */
   readonly workflowRevisions: readonly WorkflowRevision[];
   /** 本 Harness 顺序拥有的 WorkflowExecution 登记；执行细节在 Execution 自己的 Run Journal。 */
@@ -99,7 +113,12 @@ export type HarnessDecision = {
 export type HarnessStreamEvent =
   | { readonly type: "reasoning_delta"; readonly delta: string }
   | { readonly type: "assistant_delta"; readonly delta: string }
-  | { readonly type: "turn_finished"; readonly messageId: string }
+  /** 当前回合中 MCP 窄工具开始执行；仅供瞬时过程展示，不写入 Harness Journal。 */
+  | { readonly type: "tool_started"; readonly toolCallId: string; readonly label: string }
+  /** 当前回合中 MCP 窄工具已经结束；成功与否不暴露参数或完整结果。 */
+  | { readonly type: "tool_finished"; readonly toolCallId: string; readonly outcome: "completed" | "failed" }
+  /** 当前回合已耐久的完整主控消息；只供同一 SSE 回合尾部渲染，不额外持久化。 */
+  | { readonly type: "turn_finished"; readonly messageId: string; readonly text: string }
   | { readonly type: "turn_interrupted"; readonly diagnostic: string }
   | { readonly type: "execution_changed"; readonly executionId: string };
 

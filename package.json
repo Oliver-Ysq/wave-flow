@@ -34,7 +34,6 @@
   "dependencies": {
     "@agentclientprotocol/codex-acp": "2.2.2",
     "@agentclientprotocol/sdk": "1.8.0",
-    "@assistant-ui/react": "0.15.27",
     "@mariozechner/pi-agent-core": "0.73.1",
     "@mariozechner/pi-ai": "0.73.1",
     "@modelcontextprotocol/sdk": "1.32.1",
