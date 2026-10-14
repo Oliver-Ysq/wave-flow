@@ -12,19 +12,19 @@ import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-run
 import type { HarnessService } from "./service";
 import type { WorkflowExecutionRecord } from "./types";
 
-/** daemon 注入的执行器工厂产物；wiring 是 daemon 私有接线上下文，本服务不透明传递。 */
+/** Engine 注入的执行器工厂产物；wiring 是 Engine 私有接线上下文，本服务不透明传递。 */
 export type HarnessExecutionExecutor = {
   /** 实际注入 RunRuntime 的执行器（可含名额护栏包装）。 */
   readonly executor: AgentNodeExecutor;
-  /** 需要绑定 ControlServer 的底座对象；仅 daemon 的 wireControl 钩子理解它。 */
+  /** 需要绑定 ControlServer 的底座对象；仅 Engine 的 wireControl 钩子理解它。 */
   readonly wiring?: unknown;
 };
 
-/** daemon 注入的真实执行器接线；测试可全部省略。 */
+/** Engine 注入的真实执行器接线；测试可全部省略。 */
 export type HarnessExecutionHooks = {
-  /** 真实执行器须在节点启动前绑定 ControlServer；由 daemon 注入，测试不注入。 */
+  /** 真实执行器须在节点启动前绑定 ControlServer；由 Engine 注入，测试不注入。 */
   readonly wireControl?: (runtime: RunRuntime, wiring: unknown) => void | Promise<void>;
-  /** 执行结束后的清理（如关闭终端观察器）；由 daemon 注入。 */
+  /** 执行结束后的清理（如关闭终端观察器）；由 Engine 注入。 */
   readonly onSettled?: (executionId: string) => void | Promise<void>;
 };
 
@@ -32,14 +32,14 @@ export type HarnessExecutionHooks = {
  * 一个 Harness 的 WorkflowExecution 序列。Execution 内部复用完整 RunRuntime
  * （attempt/阶段访问/批次/replay/pause/recover/Control），本服务只负责：
  * 冻结 revision 校验、受限编译、Execution 登记事实与生命周期入口。
- * daemon 重启后不做任何自动继续；只有显式 resume 才重新编译冻结源码。
+ * Engine 重启后不做任何自动继续；只有显式 resume 才重新编译冻结源码。
  */
 export class HarnessExecutionService {
-  /** 当前 daemon 生命周期内活跃的 Execution Runtime；离线档案只读重开。 */
+  /** 当前 Engine 生命周期内活跃的 Execution Runtime；离线档案只读重开。 */
   #runtimes = new Map<string, RunRuntime>();
   /** 活跃 Execution 的后台执行任务；控制操作要求任务在册。 */
   #tasks = new Map<string, Promise<void>>();
-  /** 同一 Execution 的控制操作单飞；与 daemon runControl 同一纪律。 */
+  /** 同一 Execution 的控制操作单飞；与 Engine runControl 同一纪律。 */
   #controlRequests = new Map<string, { readonly kind: string; readonly promise: Promise<unknown> }>();
   /** 同一 Execution 的 resume 单飞；必须在任一 await 前登记。 */
   #resumeRequests = new Map<string, Promise<RunSnapshot>>();
@@ -122,7 +122,7 @@ export class HarnessExecutionService {
   }
 
   /**
-   * 新 daemon 启动时收敛遗留 Execution：ACP session 与原 Workflow 调用栈都不
+   * 新 Engine 启动时收敛遗留 Execution：ACP session 与原 Workflow 调用栈都不
    * 能跨进程认领，因此任何仍为 active 的嵌套 Run 都必须耐久标为 interrupted。
    * 此方法只落盘已有事实的终态，不创建 Worker、不重放脚本；恢复仍只能由用户
    * 显式调用 resume 发起。
@@ -140,7 +140,7 @@ export class HarnessExecutionService {
       }
       const current = runtime.snapshot();
       const activeNodes = current.phases.flatMap((phase) => phase.agents).filter((node) =>
-        node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
+        node.status === "queued" || node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
       );
       // 已被旧版本写成 Run 终态的档案也可能残留 active 节点。只补齐节点事实，
       // 不改变 Run 终态或已完成节点，确保升级后的详情不会显示自相矛盾状态。
@@ -149,7 +149,7 @@ export class HarnessExecutionService {
           const nodeEvent: import("../journal/types").JournalEvent = {
             type: "agent.status", at: new Date().toISOString(), runId: record.executionId,
             nodeId: node.id, agentSessionId: node.agentSessionId,
-            diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；按 Execution 终态收敛为 interrupted。", status: "interrupted",
+            diagnostic: "Engine 重启后无法跨进程验证原 ACP 会话；按 Execution 终态收敛为 interrupted。", status: "interrupted",
           };
           await runtime.journal.append(nodeEvent);
           runtime.state.apply(nodeEvent);
@@ -157,14 +157,14 @@ export class HarnessExecutionService {
         if (record.finishedAt === null) await this.harness.recordExecutionFinished(harnessRunId, record.executionId, current.status, current.status === "completed" ? null : current.diagnostic, null);
         continue;
       }
-      const diagnostic = `daemon 在 ${current.status} 中断；原 ACP 会话与 Workflow 调用栈不可跨进程认领，等待用户显式 resume。`;
+      const diagnostic = `Engine 在 ${current.status} 中断；原 ACP 会话与 Workflow 调用栈不可跨进程认领，等待用户显式 resume。`;
       // Run 终态不能掩盖仍显示 running/blocked 的旧节点。先逐节点追加中断事实，
       // 再封存聚合状态，使详情、Phase 计数与 Harness 登记保持同一真相。
       for (const node of activeNodes) {
         const nodeEvent: import("../journal/types").JournalEvent = {
           type: "agent.status", at: new Date().toISOString(), runId: record.executionId,
           nodeId: node.id, agentSessionId: node.agentSessionId,
-          diagnostic: "daemon 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。", status: "interrupted",
+          diagnostic: "Engine 重启后无法跨进程验证原 ACP 会话；等待用户显式 resume。", status: "interrupted",
         };
         await runtime.journal.append(nodeEvent);
         runtime.state.apply(nodeEvent);
@@ -204,10 +204,24 @@ export class HarnessExecutionService {
     return this.control(harnessRunId, executionId, "stop", (runtime) => runtime.stop());
   }
 
-  /** 用户对脚本决策门提交答案；Execution 必须在当前 daemon 活跃，否则应先显式 resume。 */
+  /** Desktop 退出时同步写 cancelled，随后异步请求已启动 Worker 停止。 */
+  async cancelForDesktopExit(engineInstanceId: string): Promise<void> {
+    for (const [executionId, runtime] of [...this.#runtimes]) {
+      const snapshot = runtime.snapshot();
+      if (snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "interrupted") continue;
+      const harnessRunId = runtime.journal.manifest.harness?.harnessRunId;
+      await runtime.cancelForDesktopExit(engineInstanceId);
+      if (harnessRunId) await this.harness.recordExecutionFinished(harnessRunId, executionId, "cancelled", "退出 Wave Flow 时停止。 ", null);
+      // 终态 Execution 只保留 Journal/登记事实；不再保留可控 Runtime，否则
+      // 同一 Engine 内的显式 resume 会被误判为“仍在运行”。
+      this.#runtimes.delete(executionId);
+    }
+  }
+
+  /** 用户对脚本决策门提交答案；Execution 必须在当前 Engine 活跃，否则应先显式 resume。 */
   async answerGate(harnessRunId: string, executionId: string, gateId: string, answer: JsonObject): Promise<RunSnapshot> {
     const runtime = this.#runtimes.get(executionId);
-    if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 daemon 的可控制生命周期内；请先显式 resume。 ");
+    if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
     await runtime.answerGate(gateId, answer);
     await this.harness.notifyExecutionChanged(harnessRunId, executionId);
     return runtime.snapshot();
@@ -226,7 +240,7 @@ export class HarnessExecutionService {
   }
 
   private async resumeOnce(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
-    if (this.#runtimes.has(executionId)) throw new Error("该 Execution 已在当前 daemon 运行，不能重复 resume。 ");
+    if (this.#runtimes.has(executionId)) throw new Error("该 Execution 已在当前 Engine 运行，不能重复 resume。 ");
     const snapshot = await this.harness.snapshot(harnessRunId);
     const record = snapshot.executions.find((item) => item.executionId === executionId);
     if (!record) throw new Error("未知 WorkflowExecution。 ");
@@ -238,7 +252,7 @@ export class HarnessExecutionService {
     if (createHash("sha256").update(source).digest("hex") !== record.sourceHash) throw new Error("Execution 冻结源码快照与登记 hash 不一致，fail closed。 ");
     const module = compileRestrictedWorkflow(source);
     const resumedExecutor = this.createExecutor();
-    // daemon 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
+    // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
     // waiter 和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
     // 尝试收敛为 interrupted，再由标准 Replay 路径创建新 attempt。
     const opened = await RunRuntime.open(executionId, new DeterministicExecutor(), root);
@@ -246,17 +260,33 @@ export class HarnessExecutionService {
     if (previousStatus === "pausing" || previousStatus === "paused" || previousStatus === "recovering") {
       const event: import("../journal/types").JournalEvent = {
         type: "run.status", at: new Date().toISOString(), runId: executionId, nodeId: null, agentSessionId: null,
-        diagnostic: `daemon 在 ${previousStatus} 中断；用户明确 resume 后创建新的 executionAttempt。`, status: "interrupted",
+        diagnostic: `Engine 在 ${previousStatus} 中断；用户明确 resume 后创建新的 executionAttempt。`, status: "interrupted",
       };
       await opened.journal.append(event);
       opened.state.apply(event);
-    } else if (previousStatus !== "running" && previousStatus !== "interrupted") {
-      throw new Error("只有 daemon 中断的 Execution 可以 resume。 ");
+    } else if (previousStatus !== "running" && previousStatus !== "interrupted" && previousStatus !== "cancelled") {
+      throw new Error("只有中断或取消的 Execution 可以 resume。 ");
     }
-    // 外层登记与内嵌 Run 是两份独立 Journal。daemon 重启收敛时二者都会写成
-    // interrupted；用户授权 resume 后必须先耐久地重开外层登记，后续新 attempt
+    // 旧版本缺陷或执行器在 blocked 等待期间死亡，可能留下"终态 Run + 活跃节点"的档案；
+    // replay 遇到 running/blocked 节点会 fail closed 拒绝重放。与 Engine 重启收敛同样，
+    // 显式 resume 前先把这些不可认领的节点耐久收敛为 interrupted，replay 才能从首个
+    // 非 completed 节点创建新 attempt。
+    const staleNodes = opened.snapshot().phases.flatMap((phase) => phase.agents).filter((node) =>
+      node.status === "queued" || node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
+    );
+    for (const node of staleNodes) {
+      const nodeEvent: import("../journal/types").JournalEvent = {
+        type: "agent.status", at: new Date().toISOString(), runId: executionId,
+        nodeId: node.id, agentSessionId: node.agentSessionId,
+        diagnostic: "用户显式 resume；旧 attempt 遗留的活跃节点不可认领，收敛为 interrupted 后由新 attempt 重新调度。", status: "interrupted",
+      };
+      await opened.journal.append(nodeEvent);
+      opened.state.apply(nodeEvent);
+    }
+    // 外层登记与内嵌 Run 是两份独立 Journal。Engine 重启收敛时二者都会写成
+    // interrupted/cancelled；用户授权 resume 后必须先耐久地重开外层登记，后续新 attempt
     // 才能写入新的 execution_finished，而不是被旧终态拒绝。
-    if (record.status === "interrupted") await this.harness.recordExecutionResumed(harnessRunId, executionId);
+    if (record.status === "interrupted" || record.status === "cancelled") await this.harness.recordExecutionResumed(harnessRunId, executionId);
     const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root);
     await this.hooks.wireControl?.(runtime, resumedExecutor.wiring);
     this.startExecution(harnessRunId, executionId, runtime, module, record.policy);
@@ -280,7 +310,7 @@ export class HarnessExecutionService {
     }
     const task = (async () => {
       const runtime = this.#runtimes.get(executionId);
-      if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 daemon 的可控制生命周期内；请先显式 resume。 ");
+      if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
       return operation(runtime);
     })().finally(() => this.#controlRequests.delete(executionId));
     this.#controlRequests.set(executionId, { kind, promise: task });
@@ -294,8 +324,11 @@ export class HarnessExecutionService {
     this.#runtimes.set(executionId, runtime);
     // run() 的返回值需要进入 summary，经闭包传递；整个 Execution 只调用一次 run()。
     let runtimeResult: unknown = null;
+    // run() 的 rejection 是本 attempt 失败的直接原因，必须保留到 settle 登记；
+    // 否则 resume 重放被拒等场景下只能读到上一次 attempt 的旧诊断，真实错误永久丢失。
+    let runtimeError: Error | null = null;
     const task = runtime.run(module, { policy })
-      .then((result) => { runtimeResult = result; }, () => undefined)
+      .then((result) => { runtimeResult = result; }, (error: unknown) => { runtimeError = error instanceof Error ? error : new Error(String(error)); })
       .then(async () => {
         // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。
         // 等待快照收敛到终态再登记，避免把"停止中"误记为 interrupted。
@@ -309,11 +342,20 @@ export class HarnessExecutionService {
         const terminal = snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "interrupted" ? snapshot.status : "interrupted";
         // run() 返回值只在 completed 时有意义；非对象结果不进入摘要。
         const summary = terminal === "completed" && isJsonObject(runtimeResult) ? runtimeResult : null;
-        await this.harness.recordExecutionFinished(harnessRunId, executionId, terminal, terminal === "completed" ? null : snapshot.diagnostic, summary);
+        // interrupted 优先采用本次 run() 的真实 rejection；snapshot.diagnostic 可能是
+        // 旧 attempt 遗留的终态诊断（例如 resume 重放在首个节点前被拒，快照从未更新）。
+        // cancelled 的诊断以快照为准（"用户停止"/"退出 Wave Flow" 语义由控制路径耐久）。
+        const diagnostic = terminal === "completed" ? null
+          : terminal === "interrupted" && runtimeError ? runtimeError.message
+          : snapshot.diagnostic;
+        await this.harness.recordExecutionFinished(harnessRunId, executionId, terminal, diagnostic, summary);
       })
       .catch(() => undefined)
       .finally(async () => {
         this.#tasks.delete(executionId);
+        // 终态 Execution 只保留 Journal/登记事实；若继续保留 Runtime，用户在
+        // 同一 Engine 内显式 resume 会被误判为“仍在运行”。
+        this.#runtimes.delete(executionId);
         await this.hooks.onSettled?.(executionId);
       });
     this.#tasks.set(executionId, task);

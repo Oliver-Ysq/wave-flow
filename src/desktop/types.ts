@@ -1,0 +1,194 @@
+import type { JsonObject } from "../shared/json";
+import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord } from "../harness/types";
+import type { HarnessProject } from "../harness/projects";
+import type { CliRuntimeView, DiscoveredCliCandidate } from "../runtimes/types";
+import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
+
+/** 创建 Run 的 Desktop action 参数；Workflow 路径相对于 cwd 解析。 */
+export type CreateRunRequest = {
+  /** Desktop 为本次创建生成的 UUID；IPC 响应丢失后的重试必须复用它。 */
+  readonly clientRequestId: string;
+  /** 用户明确指定的本地 TypeScript Workflow 路径。 */
+  readonly workflowPath: string;
+  /** 项目 cwd；Engine 以此限制 Workflow 和状态目录边界。 */
+  readonly cwd: string;
+  /** 传给 Workflow default run(args) 的 JSON-safe 对象。 */
+  readonly input: JsonObject;
+};
+
+/** 创建或查询 Run 的 Engine 权威响应。 */
+export type RunResponse = {
+  /** Journaled Run 的稳定 id。 */
+  readonly runId: string;
+  /** Engine 权威的 Phase → Agent 查询快照。 */
+  readonly snapshot: RunSnapshot;
+};
+
+/** Run 列表的轻量条目；不包含阶段访问、批次、Agent 或结果。 */
+export type RunListItem = {
+  /** Run 稳定 id。 */
+  readonly runId: string;
+  /** Workflow 展示信息。 */
+  readonly workflow: { readonly name: string; readonly description: string };
+  /** 当前 Run 状态。 */
+  readonly status: RunSnapshot["status"];
+  /** Workflow 项目目录。 */
+  readonly cwd: string;
+  /** Run 创建时间。 */
+  readonly createdAt: string;
+  /** Run 终止时间；未终止为 null。 */
+  readonly endedAt: string | null;
+  /** Run 诊断信息。 */
+  readonly diagnostic: string | null;
+  /** 当前尝试内是否有需要协助的节点。 */
+  readonly hasBlockedAgent: boolean;
+};
+
+/** 菜单栏读取的 Desktop Engine 权威摘要；只暴露计数，不泄露会话或 Journal 内容。 */
+export type DesktopStatusResponse = {
+  /** 当前私有 Engine IPC 协议版本。 */
+  readonly protocolVersion: number;
+  /** 未终结 Run 数量。 */
+  readonly activeRuns: number;
+  /** 等待人工协助的 Run 数量。 */
+  readonly blockedRuns: number;
+  /** 正在生成回复的 Harness 回合数。 */
+  readonly activeHarnesses: number;
+  /** ACP 不支持跨 Engine 认领、需要用户显式恢复的 Worker 数量。 */
+  readonly acpWorkersNeedingResume: number;
+};
+
+/** Run 当前执行尝试的轻量首页数据，不包含全部历史 Agent。 */
+export type CurrentAttemptResponse = {
+  /** Run 稳定 id。 */
+  readonly runId: string;
+  /** Engine 权威 Run 状态。 */
+  readonly status: RunSnapshot["status"];
+  /** 当前尝试的阶段摘要。 */
+  readonly summary: CurrentAttemptSummary;
+};
+
+/** 可供审计界面选择的执行尝试列表。 */
+export type ExecutionAttemptsResponse = {
+  /** Run 稳定 id。 */
+  readonly runId: string;
+  /** 默认展示的当前尝试。 */
+  readonly currentExecutionAttemptId: number;
+  /** 已耐久的尝试号，按创建顺序排列。 */
+  readonly executionAttemptIds: readonly number[];
+};
+
+/** 单次阶段访问的完整阅读数据。 */
+export type PhaseVisitResponse = {
+  /** Run 稳定 id。 */
+  readonly runId: string;
+  /** 所属执行尝试。 */
+  readonly executionAttemptId: number;
+  /** 当前请求的阶段访问详情。 */
+  readonly visit: PhaseVisitSnapshot;
+};
+
+/** 分页执行记录响应；nextCursor 为 null 表示没有下一页。 */
+export type PhaseVisitPageResponse = {
+  /** Run 稳定 id。 */
+  readonly runId: string;
+  /** 被查询的执行尝试。 */
+  readonly executionAttemptId: number;
+  /** 当前页阶段访问。 */
+  readonly items: readonly PhaseVisitSnapshot[];
+  /** 下一页稳定 cursor。 */
+  readonly nextCursor: number | null;
+};
+
+/** 用户显式请求同一 Run 的调用级恢复；runId 仅来自 URL，避免客户端覆写 Manifest 身份。 */
+export type ResumeRunRequest = {
+  /** true 代表用户已确认允许从第一个 interrupted 节点创建新 attempt。 */
+  readonly authorized: true;
+};
+
+/** 完成 Harness 会话请求；空对象表示无额外参数。 */
+export type CompleteHarnessRequest = Record<string, never>;
+
+/** 创建只读 Harness 主控会话的 Desktop action 参数；不创建 Workflow Run 或 Worker。 */
+export type CreateHarnessRunRequest = {
+  /** 已选择的耐久项目 id；Engine 从 Project Store 获取 cwd。 */
+  readonly projectId: string;
+};
+/** 首次发送创建 Harness；草稿文本只在浏览器内存中，Engine 仅在此 action 抵达后创建档案。 */
+export type StartHarnessConversationRequest = {
+  /** 已选择的耐久项目 id；Engine 从 Project Store 获取 cwd。 */
+  readonly projectId: string;
+  /** 新会话的首条非空用户消息；成功后才产生 Harness manifest 与 Journal。 */
+  readonly text: string;
+};
+/** 创建侧边栏项目；cwd 会 realpath 校验，title 省略时取目录名。 */
+export type CreateHarnessProjectRequest = { readonly cwd: string; readonly title?: string };
+/** 创建或查询单个侧边栏项目。 */
+export type HarnessProjectResponse = { readonly project: HarnessProject };
+/** 当前用户全部耐久项目。 */
+export type HarnessProjectListResponse = { readonly projects: readonly HarnessProject[] };
+
+/** Harness 主控会话的 Engine 权威响应。 */
+export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
+/** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
+export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
+/** 发送一条用户消息；响应确认 Engine 已耐久接收，完整消息由后续快照读取。 */
+export type HarnessMessageRequest = { readonly text: string };
+/** 提交主控会话中的 workflow.ts 草案；仅耐久提案，不执行。 */
+export type ProposeWorkflowRevisionRequest = { readonly source: string };
+/** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
+export type AcceptWorkflowRevisionRequest = { readonly revision: number };
+
+/** 创建 WorkflowExecution 的 Desktop action 参数；只能绑定已接受冻结的 revision。 */
+export type CreateExecutionRequest = {
+  /** 已接受冻结的 revision 序号；草稿序号必须被拒绝。 */
+  readonly revision: number;
+  /** 传给受限脚本 run(args) 的 JSON-safe 输入；省略时为 {}。 */
+  readonly input?: JsonObject;
+};
+
+/** Execution 创建、控制或答题后的权威响应。 */
+export type ExecutionResponse = {
+  /** Execution 登记事实；终态与摘要由 harness.execution_finished 固定。 */
+  readonly execution: WorkflowExecutionRecord;
+  /** Execution 内嵌 Run 的 Engine 权威快照；gates 字段携带决策门状态。 */
+  readonly snapshot: RunSnapshot;
+};
+
+/** Harness 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */
+export type ExecutionListResponse = {
+  /** 所属 Harness Run id。 */
+  readonly harnessRunId: string;
+  /** 按创建顺序排列的 Execution 登记。 */
+  readonly executions: readonly WorkflowExecutionRecord[];
+};
+
+/** 用户显式恢复中断的 Execution；必须明确授权，Engine 重启绝不自动继续。 */
+export type ResumeExecutionRequest = {
+  /** true 代表用户确认允许同一冻结 revision 创建新的 executionAttempt。 */
+  readonly authorized: true;
+};
+
+/** 用户对脚本决策门或主控决策请求提交 JSON 答案；答案不自动推进任何节点状态。 */
+export type AnswerDecisionRequest = {
+  /** 已通过对应 answerSchema 校验前的原始 JSON 对象；Engine 负责校验。 */
+  readonly answer: JsonObject;
+};
+
+/** 当前用户的本机 CLI Runtime 与默认选择；不含 inode、PATH 或环境变量。 */
+export type CliRuntimeListResponse = { readonly selectedByCli: Readonly<Partial<Record<"codex", string>>>; readonly runtimes: readonly CliRuntimeView[] };
+/** 用户明确扫描 PATH 后返回的候选；候选尚未经过 ACP 验证。 */
+export type DiscoverCliRuntimesResponse = { readonly candidates: readonly DiscoveredCliCandidate[] };
+/** 一次启动扫描的汇总；成功候选已完成完整 ACP 验证并写入 Registry，但绝不改变默认项。 */
+export type ScanCliRuntimesResponse = {
+  /** 本次从受控 PATH 发现的去重候选数。 */
+  readonly discovered: number;
+  /** 本次完整验证并保存成功的候选数。 */
+  readonly verified: number;
+  /** 当前安全可展示的 Runtime 列表；不含 PATH、环境或文件身份。 */
+  readonly runtimes: CliRuntimeListResponse;
+};
+/** 验证发现候选或手动绝对路径；成功不会自动成为默认。 */
+export type ValidateCliRuntimeRequest = { readonly executablePath: string; readonly discoveredFrom?: "shell-path" | "gui-path" | "manual"; readonly discoveredShell?: string | null };
+/** 设置默认 Runtime 的响应。 */
+export type SelectCliRuntimeResponse = { readonly runtime: CliRuntimeView };

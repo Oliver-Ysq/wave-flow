@@ -178,6 +178,11 @@ export type JournalEvent = JournalBase & ({
   /** 已按 gate.created 的 answerSchema 校验的 JSON 答案。 */
   readonly answer: JsonObject;
 } | {
+  /** 用户明确退出 Desktop；必须先于本次退出写入的 cancelled 终态。 */
+  readonly type: "desktop.exit_requested";
+  /** 当前 Desktop Execution Engine 的随机实例标识，仅用于审计，不是授权凭据。 */
+  readonly engineInstanceId: string;
+} | {
   readonly type: "run.status";
   readonly status: RunStatus;
 });

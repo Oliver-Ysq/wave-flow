@@ -227,7 +227,7 @@ async function run(args) {
     await waitFor(() => runtime.snapshot().gates.length === 1);
     await runtime.answerGate("g1", { ok: true });
     await waitFor(() => runtime.snapshot().gates.length === 2);
-    // 模拟 daemon 重启：旧 host 的等待消失，只读重开后显式 resume。
+    // 模拟 Engine 重启：旧 host 的等待消失，只读重开后显式 resume。
     const resumed = await RunRuntime.resume(runId, { execute: async () => { executions += 1; return { n: executions }; } }, storeRoot);
     void task.catch(() => undefined);
     const replayTask = resumed.run(module);

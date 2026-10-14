@@ -224,6 +224,9 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "gate.answered":
       if (event.nodeId !== null || event.agentSessionId !== null || typeof event.gateId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(event.gateId) || !isJsonObject(event.answer)) throw new Error("gate.answered payload 无效。");
       break;
+    case "desktop.exit_requested":
+      if (event.nodeId !== null || event.agentSessionId !== null || typeof event.engineInstanceId !== "string" || !event.engineInstanceId.trim()) throw new Error("desktop.exit_requested payload 无效。 ");
+      break;
     case "run.status":
       if (event.nodeId !== null || !isRunStatus(event.status)) throw new Error("run.status payload 无效。");
       break;

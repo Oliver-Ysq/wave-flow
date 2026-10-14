@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { JsonObject } from "../shared/json";
 
 /**
- * 主控可用的行动类窄工具回调。所有回调都由 daemon 侧服务实现：
+ * 主控可用的行动类窄工具回调。所有回调都由 Desktop Engine 侧服务实现：
  * 校验并 Journal 化后才生效；工具本身不持有 Runtime、Control 或 Journal 对象。
  */
 export type HarnessActionCallbacks = {

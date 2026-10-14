@@ -11,7 +11,7 @@ import { type HarnessPiSession } from "./pi-harness";
 import type { ResolvedHarnessModelConfig } from "./config";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 
-/** daemon 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
+/** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
   #sessions = new Map<string, HarnessEntry>();
   /** 同一 Harness 的 Journal 状态变更必须串行；不同 Harness 仍可并行。 */
@@ -26,11 +26,13 @@ export class HarnessService {
     legacyCreate?: (config: ResolvedHarnessModelConfig, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks) => HarnessPiSession,
     private readonly resolveSessionIdentity: () => Promise<{ readonly fingerprint: string; readonly runtime?: import("../runtimes/types").RuntimeProvenance }> = async () => ({ fingerprint: "injected-harness-session" }),
   ) {
+    // 仅测试夹具仍可使用旧构造器形状；生产 Engine 只传 ACP factory，且仓库不再
+    // 提供任何 Base URL/API key 配置读写实现。
     if (legacyCreate) {
       const resolve = factoryOrResolve as () => Promise<ResolvedHarnessModelConfig | null>;
       this.createSession = async (_id, cwd, prior, actions) => {
         const config = await resolve();
-        if (!config) throw new Error("主控未配置模型。 ");
+        if (!config) throw new Error("测试 HarnessSession 未注入。 ");
         return legacyCreate(config, cwd, prior, actions);
       };
     } else this.createSession = factoryOrResolve as (harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>;
@@ -74,12 +76,33 @@ export class HarnessService {
   }
   async subscribe(harnessRunId: string, listener: (event: HarnessStreamEvent) => void): Promise<() => void> { const entry = await this.entry(harnessRunId); entry.listeners.add(listener); return () => entry.listeners.delete(listener); }
 
-  /** daemon 关闭时释放全部原生主控会话与未答决策；不改写任何 Journal 业务状态。 */
+  /** 释放全部原生主控会话与未答决策；仅供已完成耐久收敛后的资源清理。 */
   close(): void {
     for (const [harnessRunId, entry] of this.#sessions) {
-      this.rejectDecisionWaiters(harnessRunId, "daemon 已关闭，Harness 主控决策不再等待。 ");
+      this.rejectDecisionWaiters(harnessRunId, "Engine 已关闭，Harness 主控决策不再等待。 ");
       entry.session?.close?.();
       entry.session = null;
+    }
+  }
+
+  /**
+   * Desktop 明确退出时中断仍在生成的主控回合。
+   *
+   * Harness 没有业务 `cancelled` 状态：它不是 Workflow Run，不能伪装为节点取消。
+   * 这里耐久为 `interrupted`，同时关闭原生 session；Run/Execution 仍由各自的
+   * cancelled 路径处理。必须先写事实，再关闭资源，避免下次启动遗留 running。
+   */
+  async interruptForDesktopExit(): Promise<void> {
+    for (const [harnessRunId, entry] of this.#sessions) await this.interruptRunningTurn(harnessRunId, entry, "退出 Wave Flow，主控回合已中断。 ");
+  }
+
+  /** 新 Engine 启动时不认领旧主控 session；所有耐久 running 回合必须先收敛。 */
+  async convergeStaleTurns(): Promise<void> {
+    let ids: string[];
+    try { ids = await readdir(this.root); } catch { return; }
+    for (const harnessRunId of ids) {
+      try { const entry = await this.entry(harnessRunId); await this.interruptRunningTurn(harnessRunId, entry, "Desktop Engine 重启后无法跨进程验证原主控会话；回合已中断。 "); }
+      catch { /* 单个损坏档案不阻断其他 Harness 收敛。 */ }
     }
   }
 
@@ -104,6 +127,9 @@ export class HarnessService {
     entry.turn = (async () => {
       try {
         const answer = await session.prompt(text);
+        // 退出或异常收敛可能已在 prompt 等待期间写入 turn_interrupted。迟到的
+        // provider 回答不能再追加 assistant_message，否则 Journal 状态顺序损坏。
+        if (entry.projection.snapshot().status !== "running") return;
         const assistant: HarnessMessage = { id: crypto.randomUUID(), role: "assistant", text: stripReasoning(answer), createdAt: new Date().toISOString() };
         if (!assistant.text.trim()) throw new Error("主控回答只包含非持久 reasoning。 ");
         const messageEvent = { type: "harness.assistant_message" as const, at: assistant.createdAt, harnessRunId, message: assistant };
@@ -117,13 +143,17 @@ export class HarnessService {
         this.emit(entry, { type: "turn_finished", messageId: assistant.id, text: assistant.text });
       } catch (error) {
         const diagnostic = error instanceof Error ? error.message : String(error);
-        const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
-        await entry.journal.append(interrupted); entry.projection.apply(interrupted);
+        // 退出/重启路径可能已先耐久 interrupted；原 prompt 随后 rejection 时不能
+        // 再追加第二条 turn_interrupted，否则 Journal 重开会拒绝该 Harness。
+        if (entry.projection.snapshot().status === "running") {
+          const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
+          await entry.journal.append(interrupted); entry.projection.apply(interrupted);
+          this.emit(entry, { type: "turn_interrupted", diagnostic });
+        }
         // 不认领 provider 可能遗留的 partial assistant state。下一条消息只能从
         // 已耐久 capsule 重建独立 ACP session，避免未完成文本/工具调用进入新回合。
         entry.session?.close?.();
         entry.session = null;
-        this.emit(entry, { type: "turn_interrupted", diagnostic });
       } finally {
         // request_user_decision 的等待者只属于当前主控回合。若 adapter/用户中断
         // 而不释放它，后续 Harness 会永久卡在一个已无人消费的 Promise 上。
@@ -252,11 +282,22 @@ export class HarnessService {
     });
   }
 
-  /** 登记一次 WorkflowExecution 终态；summary 是脚本 run() 的 JSON 返回值摘要。 */
+  /**
+   * 登记一次 WorkflowExecution 终态；summary 是脚本 run() 的 JSON 返回值摘要。
+   *
+   * 幂等：退出路径（cancelForDesktopExit）与后台执行 settle 可能同时为同一
+   * Execution 登记终态。第二条 execution_finished 会让 Journal 重放永久失败，
+   * 因此必须在 append 之前按投影拒绝重复终态；只允许显式 resume 后的新终态。
+   */
   async recordExecutionFinished(harnessRunId: string, executionId: string, status: WorkflowExecutionRecord["status"], diagnostic: string | null, summary: JsonObject | null): Promise<void> {
     await this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
       if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能修改 Execution。 ");
+      const record = entry.projection.snapshot().executions.find((item) => item.executionId === executionId);
+      if (!record) throw new Error("workflow.execution_finished 指向未知 Execution。 ");
+      // 已有终态事实时静默返回：两条路径都完成了自己的登记意图，重复 append
+      // 才是真正的数据损坏。
+      if (record.finishedAt !== null) return;
       const event = { type: "workflow.execution_finished" as const, at: new Date().toISOString(), harnessRunId, executionId, status, diagnostic, summary };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, { type: "execution_changed", executionId });
@@ -354,6 +395,19 @@ export class HarnessService {
     const projection = new HarnessProjection(opened.journal.manifest); for (const event of opened.events) projection.apply(event);
     const entry: HarnessEntry = { journal: opened.journal, projection, session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, toolActivities: [] };
     this.#sessions.set(harnessRunId, entry); return entry;
+  }
+  private async interruptRunningTurn(harnessRunId: string, entry: HarnessEntry, diagnostic: string): Promise<void> {
+    if (entry.projection.snapshot().status !== "running") return;
+    // 不能经 mutate() 排队：当前 mutation 正在 await ACP prompt，而这个 prompt
+    // 正是退出要中止的对象。等待它会让关闭应用死锁。HarnessJournal 自己串行
+    // append；单线程 projection 在此处先进入 interrupted，原回合随后返回时会
+    // 发现已不是 running，从而不会重复写 turn_finished/interrupted。
+    const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
+    await entry.journal.append(interrupted); entry.projection.apply(interrupted);
+    this.rejectDecisionWaiters(harnessRunId, diagnostic);
+    entry.session?.abort(); entry.session?.close?.(); entry.session = null;
+    entry.toolActivities = [];
+    this.emit(entry, { type: "turn_interrupted", diagnostic });
   }
   private emit(entry: { readonly listeners: Set<(event: HarnessStreamEvent) => void> }, event: HarnessStreamEvent): void { for (const listener of entry.listeners) listener(event); }
   /** 仅在真实主控回合中缓存安全字段，最终绑定到完整 assistant 消息后才落盘。 */

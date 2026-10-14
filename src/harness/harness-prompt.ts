@@ -14,10 +14,10 @@ const HARNESS_SYSTEM_PROMPT = "你是 Wave Flow 主控。你必须基于 session
 /**
  * 组合主控系统 prompt：行为边界在前，workflow-creator skill 全文在后。
  *
- * skill 以 text import 内嵌，经 `bun build --compile` 后进入 daemon 二进制；主控 ACP
+ * skill 以 text import 内嵌，经 `bun build --compile` 后进入 Engine 二进制；主控 ACP
  * 会话的 cwd 是用户项目而非本仓库，无法运行时回读 skill 文件，因此这是主控获得作者
  * 契约的唯一通道。skill 正文中指向 references/ 的链接在此拍平为顺序拼接的两个附录。
- * 修改 `skills/workflow-creator/` 后必须重新构建 daemon 才对主控生效。
+ * 修改 `skills/workflow-creator/` 后必须重新构建 Engine 才对主控生效。
  */
 export function buildHarnessSystemPrompt(): string {
   return [

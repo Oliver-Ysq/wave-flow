@@ -6,17 +6,14 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "bin": {
-    "wave-flow": "./src/cli/main.ts"
-  },
   "scripts": {
     "test": "bun test",
     "check": "tsc --noEmit",
-    "web:dev": "vite --config web/vite.config.ts",
-    "web:build": "vite build --config web/vite.config.ts",
-    "web:preview": "vite preview --config web/vite.config.ts",
-    "desktop:prepare": "bun run web:build && bun build src/daemon/daemon-main.ts --compile --outfile src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin && cp src-tauri/binaries/wave-flow-daemon-aarch64-apple-darwin src-tauri/binaries/wave-flow-aarch64-apple-darwin && bun build src/desktop/bridge.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-bridge-aarch64-apple-darwin && chmod 755 src-tauri/binaries/wave-flow-aarch64-apple-darwin",
-    "desktop:dev": "tauri dev",
+    "web:dev": "vite --config src-tauri/web/vite.config.ts",
+    "web:build": "vite build --config src-tauri/web/vite.config.ts",
+    "web:preview": "vite preview --config src-tauri/web/vite.config.ts",
+    "desktop:prepare": "bun run web:build && bun build src/desktop/engine-main.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-engine-aarch64-apple-darwin",
+    "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "desktop:build": "tauri build"
   },
   "devDependencies": {

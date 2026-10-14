@@ -9,7 +9,7 @@ import { BlockBroker, type BlockAnswerSubmission, type BlockResolution, type Blo
 
 export type { BlockAnswerSubmission, BlockResolution, BlockSubmission, ContinueSubmission } from "./block-broker";
 
-/** 注册后仅在当前 daemon 生命周期有效的节点 capability。 */
+/** 注册后仅在当前 Engine 生命周期有效的节点 capability。 */
 export type RegisteredControlNode = {
   /** 所属 Run。 */
   readonly runId: string;
@@ -19,7 +19,7 @@ export type RegisteredControlNode = {
   readonly agentSessionId: string;
   /** 仅注入受管 Agent 会话环境的高熵 capability。 */
   readonly capability: string;
-  /** 节点完成后通知对应真实执行器返回结果；仅 daemon 内部使用，异常不得回滚已完成状态。 */
+  /** 节点完成后通知对应真实执行器返回结果；仅 Engine 内部使用，异常不得回滚已完成状态。 */
   readonly onCompleted?: (result: JsonObject) => void;
 };
 
@@ -187,7 +187,7 @@ export class ControlServer {
     }
   }
 
-  /** daemon 用于按全局 blockRequestId 路由用户侧 answer；不暴露 pending 内容。 */
+  /** Engine 用于按全局 blockRequestId 路由用户侧 answer；不暴露 pending 内容。 */
   hasBlock(blockRequestId: string): boolean { return this.#blocks.has(blockRequestId); }
 
   /** 只有原 Agent 在收到答案并自行判断可继续后，才推进 blocked → running。 */

@@ -26,7 +26,7 @@ export function runsRoot(root = waveFlowHome()): string { return join(root, "run
 /** 返回独立 Harness 对话档案根目录；不得与 Workflow Run Journal 混用。 */
 export function harnessRunsRoot(root = waveFlowHome()): string { return join(root, "harness-runs"); }
 
-/** 返回用户级 daemon 运行目录。root 仅供测试注入，生产调用不传。 */
+/** 返回用户级运行目录。root 仅供测试注入，生产调用不传。 */
 export function runtimeRoot(root = waveFlowHome()): string { return join(root, "runtime"); }
 
 /** 返回指定 Run 的耐久目录，且保证不逃出 runs 根目录。 */

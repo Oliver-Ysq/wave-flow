@@ -26,7 +26,7 @@ export type CreateRunOptions = {
   readonly workflowProjectCwd: string;
   /** realpath 后的 Workflow 文件。 */
   readonly workflowPath: string;
-  /** 用户级 Run Store 根目录；仅供 daemon / 测试注入。 */
+  /** 用户级 Run Store 根目录；仅供 Engine / 测试注入。 */
   readonly storeRoot?: string;
   /** 本章可控 Agent 执行器；不启动真实 CLI。 */
   readonly executor: AgentNodeExecutor;
@@ -52,7 +52,6 @@ export class RunRuntime {
     readonly journal: RunJournal,
     readonly state: RunStateMachine,
     private readonly host: RunRuntimeHost,
-    private readonly replay = false,
   ) {}
 
   /** 创建 Manifest、Journal、状态机与 Host，尚不执行 Workflow。 */
@@ -91,9 +90,9 @@ export class RunRuntime {
     const state = new RunStateMachine(opened.journal.manifest);
     for (const event of opened.events) state.apply(event);
     const priorStatus = state.snapshot().status;
-    if (priorStatus !== "running" && priorStatus !== "interrupted") throw new Error("只有 running 或 interrupted 的 Run 可以 resume。");
+    if (priorStatus !== "running" && priorStatus !== "interrupted" && priorStatus !== "cancelled") throw new Error("只有 running、interrupted 或 cancelled 的 Run 可以 resume。");
     const historicalSequence = maximumJournalSequence(opened.events);
-    const resumeInterrupted = priorStatus === "interrupted";
+    const resumeInterrupted = priorStatus === "interrupted" || priorStatus === "cancelled";
     return new RunRuntime(opened.journal, state, new RunRuntimeHost(
       opened.journal,
       state,
@@ -101,7 +100,7 @@ export class RunRuntime {
       historicalSequence,
       true,
       resumeInterrupted,
-    ), true);
+    ));
   }
 
   /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。options.policy 用于受限脚本的资源护栏。 */
@@ -116,7 +115,11 @@ export class RunRuntime {
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      if (!this.replay && !this.#stopping && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
+      // replay 在首个重跑节点前被拒绝时 Run 仍是旧终态（interrupted/cancelled 不能
+      // 再写 interrupted），由 status === "running" 守卫天然跳过；一旦新 attempt 已
+      // 开始（Run 已回 running），失败必须同样封存终态，否则残留"running Run +
+      // interrupted 节点"的损坏投影，下一次 resume 与启动收敛都会被误导。
+      if (!this.#stopping && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
       throw error;
     }
   }
@@ -127,7 +130,7 @@ export class RunRuntime {
   /**
    * 等待首个真实节点会话已耐久记录、因全局资源护栏实际等待，或 Run 已终结。
    *
-   * daemon 只能在这之后把 running Run 交还给 CLI，避免“任务尚未安全投递”就让用户
+   * Engine 只能在这之后把 running Run 交还给 CLI，避免“任务尚未安全投递”就让用户
    * 误以为可关闭启动过程。多个后续节点仍在后台按 Workflow 正常调度。
    */
   async waitForSafeLaunch(timeoutMs = 30_000): Promise<void> {
@@ -138,7 +141,7 @@ export class RunRuntime {
     }
   }
 
-  /** 供 daemon 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
+  /** 供 Engine 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return this.host.controlContext(); }
 
   /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后才唤醒等待中的脚本。 */
@@ -238,7 +241,39 @@ export class RunRuntime {
     }
   }
 
-  /** daemon 在排队 stop 前立刻抢占当前 ACP 控制调用。 */
+  /**
+   * Desktop 明确退出的快速收敛路径。
+   *
+   * 先 durable-first 写入 cancelled，随后才尽力停止已启动的 Worker；不等待 ACP
+   * cancel 或子进程退出确认。这样用户退出的授权事实不会被“CLI 是否及时响应”改写。
+   */
+  async cancelForDesktopExit(engineInstanceId: string): Promise<RunSnapshot> {
+    const status = this.state.snapshot().status;
+    if (status === "completed" || status === "cancelled" || status === "interrupted") return this.snapshot();
+    await this.journal.append({ type: "desktop.exit_requested", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "用户退出 Wave Flow。 ", engineInstanceId });
+    this.host.pauseScheduling(); this.#stopping = true;
+    this.host.rejectPendingGates("退出 Wave Flow，决策门不再等待答案。 ");
+    const activeControl = this.#controlAbort;
+    activeControl?.abort();
+    // pause/recover 可能正写入 agent/run 状态；先等它完成 finally 清理再写
+    // cancelled，避免 cancelled 之后又落一条非法 paused/recovering 事件——
+    // 那会让该 Run 的 Journal 重放永久失败。只等本地控制操作清理，不等 Worker。
+    if (activeControl && this.#controlSettled) await this.#controlSettled;
+    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) =>
+      node.status === "queued" || node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
+    );
+    for (const node of targets) {
+      await this.applyAgentStatus(node.id, "cancelled", node.agentSessionId, "退出 Wave Flow 时停止。 ");
+      if (node.status !== "queued" && this.host.stopNode) {
+        this.host.beginStop(node.id);
+        void this.host.stopNode(node).catch(() => undefined).finally(() => this.host.endStop(node.id));
+      }
+    }
+    await this.transitionRun("cancelled", "退出 Wave Flow 时停止。 ");
+    return this.snapshot();
+  }
+
+  /** Engine 在排队 stop 前立刻抢占当前 ACP 控制调用。 */
   requestStop(): void {
     this.#stopping = true;
     this.#controlAbort?.abort();

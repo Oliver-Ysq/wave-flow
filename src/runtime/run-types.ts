@@ -130,7 +130,7 @@ export type DecisionGateSnapshot = {
   readonly gateId: string;
   /** 面向用户的问题说明。 */
   readonly question: string;
-  /** 可选答案 JSON Schema；daemon answer API 按它校验。 */
+  /** 可选答案 JSON Schema；Engine 答题 action 按它校验。 */
   readonly answerSchema: JsonObject | undefined;
   /** 创建该 gate 的执行尝试与阶段访问；未进入阶段时为 null。 */
   readonly executionAttemptId: number;
@@ -163,7 +163,7 @@ export type ExecutionBatchSnapshot = {
   readonly agents: readonly AgentNodeSnapshot[];
 };
 
-/** Local Web 与后续 daemon 可消费的 Run 查询投影。 */
+/** Desktop 工作台消费的 Run 查询投影。 */
 export type RunSnapshot = {
   /** Run 稳定 UUID。 */
   readonly id: string;

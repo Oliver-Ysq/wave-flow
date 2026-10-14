@@ -1,6 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
 
-/** ACP Agent 的受控启动配置；argv 只能由 daemon 的已验证配置提供。 */
+/** ACP Agent 的受控启动配置；argv 只能由 Engine 的已验证配置提供。 */
 export type AcpLauncher = {
   /** 用于审计和能力策略匹配的稳定标识，例如 `codex-acp`。 */
   readonly id: string;
@@ -53,7 +53,7 @@ export class AcpAmbiguousPromptError extends Error {
 }
 
 /**
- * daemon 内的单 ACP Agent 连接。
+ * Engine 内的单 ACP Agent 连接。
  *
  * 本类只负责协议层的创建、session、事件与取消；它不创建 Worker 节点、不写 Journal，
  * 也绝不把 ACP stopReason 映射为 Wave Flow completed。
@@ -111,9 +111,15 @@ export class AcpSessionClient {
   }
 
   /** 创建新 ACP session；只有成功响应后才发布 binding。 */
-  async createSession(cwd: string, signal: AbortSignal, mcpServers: acp.McpServer[] = []): Promise<AcpSessionBinding> {
+  async createSession(cwd: string, signal: AbortSignal, mcpServers: acp.McpServer[] = [], mcpStartupAwaitMs?: number): Promise<AcpSessionBinding> {
     const connection = this.requireConnection();
-    const created = await connection.agent.request(acp.methods.agent.session.new, { cwd, mcpServers }, { cancellationSignal: signal });
+    const created = await connection.agent.request(acp.methods.agent.session.new, {
+      cwd,
+      mcpServers,
+      // Codex ACP 默认异步启动 stdio MCP。受管 Worker 的首轮 Prompt 不能在
+      // 私有完成工具尚未可调用时发出，否则模型会诚实地 end_turn 而无法上报。
+      ...(mcpServers.length > 0 && mcpStartupAwaitMs !== undefined ? { _meta: { mcpStartupAwaitTimeoutMs: mcpStartupAwaitMs } } : {}),
+    }, { cancellationSignal: signal });
     if (!created.sessionId.trim()) throw new Error("ACP session/new 返回空 sessionId。 ");
     const capabilities = await this.requireCapabilities(signal);
     const binding = { launcherId: this.launcher.id, sessionId: created.sessionId, capabilities } as const;
@@ -200,14 +206,17 @@ export class AcpSessionClient {
   }
 }
 
-/** Bun 生产 stdio transport；launcher argv 只能来自 daemon 的已验证配置。 */
+/** Bun 生产 stdio transport；launcher argv 只能来自 Engine 的已验证配置。 */
 export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => {
   if (signal.aborted) throw new Error("ACP 启动已取消。 ");
   const child = Bun.spawn([launcher.command, ...launcher.args], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    // launcher.env 必须由 WorkerLauncherResolver 白名单构造，禁止将 daemon 完整
+    // 每个 ACP adapter 是本次 Engine 可回收的独立进程组 leader。Codex 会从它
+    // 派生 MCP 子进程；退出时只 kill adapter PID 会留下孤儿 Worker MCP。
+    detached: true,
+    // launcher.env 必须由 WorkerLauncherResolver 白名单构造，禁止将 Engine 完整
     // 环境（例如 discovery shell、认证 token）透传给用户 CLI。
     env: launcher.env ?? {},
   });
@@ -216,7 +225,17 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
     if (code !== 0) throw new Error(`ACP Agent stderr：${(await stderr).slice(0, 2_000)}`);
     return code;
   });
-  const abort = () => child.kill();
+  const terminateGroup = () => {
+    // POSIX 向负 PID 发信号即定向到该独立进程组。若平台或进程已经退出而拒绝，
+    // 回退单进程 kill；两者都只是 best-effort，不影响 Journal 的 durable 终态。
+    try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
+  };
+  // Tauri/Engine 私有 stdin 意外断开时，JS finally 不一定有机会逐一关闭 session。
+  // 该钩子只清理本进程创建的独立进程组，不写任何 Journal 终态；下次 Engine 启动
+  // 仍会把没有 desktop.exit_requested 的活跃节点诚实收敛为 interrupted。
+  const onParentExit = () => terminateGroup();
+  process.once("exit", onParentExit);
+  const abort = () => terminateGroup();
   signal.addEventListener("abort", abort, { once: true });
   return {
     stream: acp.ndJsonStream(new WritableStream<Uint8Array>({
@@ -225,7 +244,7 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
       abort() { child.stdin.end(); },
     }), child.stdout),
     exited,
-    close: () => { signal.removeEventListener("abort", abort); child.kill(); },
+    close: () => { signal.removeEventListener("abort", abort); process.removeListener("exit", onParentExit); terminateGroup(); },
   };
 };
 

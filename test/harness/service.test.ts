@@ -7,10 +7,10 @@ import type { HarnessPiSession } from "../../src/harness/pi-harness";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { harnessRunsRoot } from "../../src/journal/paths";
 
-const testModel = { model: "test", baseUrl: "https://example.test/v1", apiKey: "test-key" };
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+const testModel = { model: "test", baseUrl: "https://example.test/v1", apiKey: "test-key" };
 
 class FakePi implements HarnessPiSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
@@ -61,7 +61,7 @@ describe("HarnessService", () => {
   test("关闭服务释放已复用的主控 session，不写入额外 Journal 事实", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-close-")); directories.push(cwd);
     const pi = new ClosablePi();
-    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => pi);
     const created = await service.create(cwd);
     await service.send(created.harnessRunId, "hello");
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
@@ -69,6 +69,42 @@ describe("HarnessService", () => {
     service.close();
     expect(pi.closed).toBe(true);
     await expect(service.snapshot(created.harnessRunId)).resolves.toEqual(before);
+  });
+  test("Desktop 退出先将运行中主控回合耐久为 interrupted，再关闭 session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-desktop-exit-")); directories.push(cwd);
+    const pi = new DeferredPi();
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "仍在生成");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "running");
+    await service.interruptForDesktopExit();
+    await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "interrupted", diagnostic: "退出 Wave Flow，主控回合已中断。 " });
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "interrupted" });
+  });
+  test("Desktop 退出后迟到的主控回答不会污染已中断 Journal", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-exit-late-answer-")); directories.push(cwd);
+    const pi = new DeferredPi();
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "会迟到的回答");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "running");
+    await service.interruptForDesktopExit();
+    pi.finish();
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "interrupted");
+    await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ messages: [{ role: "user", text: "会迟到的回答" }] });
+  });
+  test("新 Engine 将遗留 running Harness 回合收敛为 interrupted", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-stale-turn-")); directories.push(cwd);
+    const pi = new DeferredPi();
+    const original = new HarnessService(harnessRunsRoot(cwd), async () => pi);
+    const created = await original.create(cwd);
+    await original.send(created.harnessRunId, "模拟旧进程中断");
+    await waitFor(async () => (await original.snapshot(created.harnessRunId)).status === "running");
+    const restarted = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi());
+    await restarted.convergeStaleTurns();
+    await expect(restarted.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "interrupted", diagnostic: expect.stringContaining("Desktop Engine 重启") });
+    pi.abort();
   });
   test("创建 Harness 时冻结 session fingerprint，非法 fingerprint 不产生档案", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-fingerprint-")); directories.push(cwd);
@@ -79,7 +115,7 @@ describe("HarnessService", () => {
   });
   test("reasoning 只流式展示，完整 assistant 回答才耐久", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-service-")); directories.push(cwd);
-    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi());
     const created = await service.create(cwd);
     const events: HarnessStreamEvent[] = [];
     await service.subscribe(created.harnessRunId, (event) => events.push(event));

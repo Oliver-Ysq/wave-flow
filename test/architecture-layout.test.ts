@@ -12,10 +12,8 @@ const requiredDirectories = [
   "src/adapters",
   "src/control",
   "src/journal",
-  "src/daemon",
   "src/desktop",
-  "src/cli",
-  "src/web",
+  "src/desktop",
   "src-tauri",
   "src/shared",
 ] as const;
@@ -37,38 +35,74 @@ describe("新架构目录与历史实现边界", () => {
     await expect(access(join(projectRoot, "src/adapters/codex-cli"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/adapters/testing"))).rejects.toThrow();
     await expect(access(join(projectRoot, "src/runtime/runner.ts"))).rejects.toThrow();
-    await expect(access(join(projectRoot, "src/cli/run-lifecycle.ts"))).rejects.toThrow();
+    await expect(access(join(projectRoot, "src/cli"))).rejects.toThrow();
   });
 
-  test("桌面端只作为 daemon loopback 客户端，不承载新的业务状态目录", async () => {
+  test("桌面端通过私有 Engine 管道而非全局 Engine 控制任务", async () => {
     const cargo = await Bun.file(join(projectRoot, "src-tauri", "Cargo.toml")).text();
+    const tauriConfig = await Bun.file(join(projectRoot, "src-tauri", "tauri.conf.json")).text();
     const desktop = await Bun.file(join(projectRoot, "src-tauri", "src", "main.rs")).text();
-    const bridge = await Bun.file(join(projectRoot, "src", "desktop", "bridge.ts")).text();
+    const engine = await Bun.file(join(projectRoot, "src", "desktop", "engine-main.ts")).text();
     expect(cargo).toContain('name = "wave-flow-desktop"');
-    expect(desktop).toContain('sidecar("wave-flow-desktop-bridge")');
-    expect(desktop).toContain('resource_dir()');
-    expect(desktop).toContain('.join("web-dist")');
-    expect(desktop).toContain('WAVE_FLOW_HARNESS_API_KEY');
-    expect(desktop).toContain('.envs(sidecar_env())');
+    expect(JSON.parse(tauriConfig).bundle.externalBin).toEqual(["binaries/wave-flow-desktop-engine"]);
+    expect(desktop).toContain('sidecar("wave-flow-desktop-engine")');
+    expect(desktop).toContain("generation.fetch_add(1, Ordering::AcqRel)");
+    expect(desktop).toContain("generation.load(Ordering::Acquire) != generation");
+    expect(desktop).toContain('.set_process_group(true)');
+    expect(desktop).toContain('engine_request');
+    expect(desktop).toContain('exit_desktop');
+    expect(desktop).toContain('dispatch_with_timeout(&app, request, std::time::Duration::from_secs(3))');
+    expect(desktop).toContain('RunEvent::ExitRequested');
+    expect(desktop).toContain('api.prevent_exit()');
+    expect(desktop).toContain('app.set_menu');
+    expect(desktop).toContain('Submenu::with_items(app, "Wave Flow"');
+    expect(desktop).not.toContain('ensure_daemon');
+    expect(desktop).not.toContain('restart_daemon');
     expect(desktop).toContain('"WAVE_FLOW_HOME"');
-    expect(desktop).toContain('env!("CARGO_MANIFEST_DIR")');
-    expect(bridge).toContain("ensureGlobalDaemon");
-    expect(bridge).toContain("webBuildId(webDist)");
-    expect(bridge).toContain("WF_WEB_BUILD_ID");
-    const desktopEntry = await Bun.file(join(projectRoot, "web", "src", "main.tsx")).text();
-    expect(desktopEntry).toContain('invoke<{ baseUrl: string }>("ensure_daemon")');
-    expect(desktopEntry).toContain("connection.baseUrl");
-    expect(desktopEntry).toContain("Web 构建版本");
+    const desktopEntry = await Bun.file(join(projectRoot, "src-tauri", "web", "src", "main.tsx")).text();
+    expect(desktopEntry).toContain('invoke("ensure_engine")');
+    expect(desktopEntry).not.toContain("ensure_daemon");
+    expect(desktopEntry).not.toContain("restart_daemon");
     expect(desktopEntry).toContain("WorkbenchErrorBoundary");
     expect(desktopEntry).toContain("重新加载工作台");
+    expect(engine).toContain('method: "engine.status"');
+    expect(engine).toContain('"engine.shutdown"');
+    expect(engine).toContain('engine.action');
+    expect(engine).not.toContain(`engine.${"http"}`);
+    expect(engine).not.toContain("Bun.serve");
+    expect(engine).not.toContain("Request(`http");
+    expect(engine).not.toContain(`engine.${"http"}`);
+    const webApi = await Bun.file(join(projectRoot, "src-tauri", "web", "src", "api.ts")).text();
+    expect(webApi).toContain('action<T>');
+    expect(webApi).not.toContain("fetch(");
+    expect(webApi).not.toContain("httpMethod");
+    await expect(access(join(projectRoot, "src-tauri", "web", "mock-api.ts"))).rejects.toThrow();
+    const workbench = await Bun.file(join(projectRoot, "src-tauri", "web", "src", "App.tsx")).text();
+    expect(workbench).not.toContain("EventSource(");
+    expect(workbench).not.toContain("/harness-runs/");
+    const workerMcp = await Bun.file(join(projectRoot, "src", "runtime", "worker-mcp-server.ts")).text();
+    expect(workerMcp).not.toContain("WF_WORKER_MCP_BASE_URL");
+    expect(workerMcp).toContain("WF_WORKER_MCP_REQUEST_FIFO");
+    const workerPipe = await Bun.file(join(projectRoot, "src", "runtime", "worker-control-pipe.ts")).text();
+    expect(workerPipe).toContain('"/usr/bin/mkfifo"');
+    const harnessMcp = await Bun.file(join(projectRoot, "src", "harness", "mcp-server.ts")).text();
+    expect(harnessMcp).not.toContain("WF_HARNESS_MCP_BASE_URL");
+    expect(harnessMcp).toContain("WF_HARNESS_MCP_REQUEST_FIFO");
+    const acpSession = await Bun.file(join(projectRoot, "src", "adapters", "acp-session.ts")).text();
+    expect(acpSession).toContain("detached: true");
+    expect(acpSession).toContain("process.kill(-child.pid, \"SIGTERM\")");
+    expect(acpSession).toContain('process.once("exit", onParentExit)');
     expect(desktop).not.toContain("RunJournal");
-    expect(desktop).not.toContain("LocalDaemon");
     expect(desktop).not.toContain("shell:allow-execute");
     const capability = await Bun.file(join(projectRoot, "src-tauri", "capabilities", "default.json")).text();
     expect(capability).not.toContain('"core:event:default"');
     expect(desktop).toContain("take_menu_action");
-    const workbench = await Bun.file(join(projectRoot, "web", "src", "App.tsx")).text();
     expect(workbench).toContain('invoke<string | null>("take_menu_action")');
-    expect(desktopEntry).not.toContain('"@tauri-apps/api/event"');
+    expect(workbench).toContain('invoke("exit_desktop")');
+    await expect(access(join(projectRoot, "src/control/control-http.ts"))).rejects.toThrow();
+    await expect(access(join(projectRoot, "src/control/block-http.ts"))).rejects.toThrow();
+    // Web 工作台源码收敛在 src-tauri/web/，旧顶层 web/ 与 src/web/ 产物目录不得复活。
+    await expect(access(join(projectRoot, "web"))).rejects.toThrow();
+    await expect(access(join(projectRoot, "src/web"))).rejects.toThrow();
   });
 });

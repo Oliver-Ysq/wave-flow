@@ -1,4 +1,3 @@
-import { renderAgentIdentity } from "../cli/agent-identity";
 import { AcpSessionClient, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
 import type { ControlServer } from "../control/control-server";
 import type { JsonObject } from "../shared/json";
@@ -11,7 +10,7 @@ export interface AcpWorkerSession {
   /** 当前已验证的原生 ACP session binding；recover 不得切换到另一 session。 */
   readonly binding: AcpSessionBinding | null;
   initialize(signal: AbortSignal): Promise<unknown>;
-  createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[]): Promise<AcpSessionBinding>;
+  createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number): Promise<AcpSessionBinding>;
   prompt(text: string, signal: AbortSignal): Promise<{ readonly stopReason: string }>;
   cancel(signal: AbortSignal): Promise<void>;
   close(): void;
@@ -20,9 +19,9 @@ export interface AcpWorkerSession {
 /**
  * ACP Worker 执行器。
  *
- * 仅处理同一 daemon 生命周期内的 Codex ACP Worker。ACP 原生 session binding 在
+ * 仅处理同一 Engine 生命周期内的 Codex ACP Worker。ACP 原生 session binding 在
  * `agent.session` 耐久后才允许 Control complete；ACP turn 结束不等于节点完成。
- * 跨 daemon 不认领 ACP session；用户显式 resume 才会创建新 attempt。
+ * 跨 Engine 不认领 ACP session；用户显式 resume 才会创建新 attempt。
  */
 export class AcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
@@ -59,19 +58,18 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     });
     void completion.catch(() => undefined);
     control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, onCompleted: resolveCompletion });
-    // short-lived capability 只注入本节点 ACP 子进程；稳定三元组只用于定位，不能单独
-    // 授权 active daemon 的 complete/block/continue。
-    const launcher: AcpLauncher = { ...this.launcher, env: { ...this.launcher.env, WF_CONTROL_CAPABILITY: capability } };
-    const session = this.createSession(launcher);
+    // capability 只保留在 Engine 与私有 MCP server 的绑定中，绝不注入 ACP adapter
+    // 或 Coding Worker 的环境。稳定三元组只用于定位，不能单独授权上报。
+    const session = this.createSession(this.launcher);
+    let mcpServers: acp.McpServer[] = [];
     const key = nodeKey(node);
-    const identity = renderAgentIdentity({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId });
-    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, controlCommand: launcher.env?.WAVE_FLOW_CONTROL_COMMAND ?? "wave-flow", identity, completionReminderSent: false };
+    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
     this.#active.set(key, active);
     try {
       const signal = new AbortController();
       await session.initialize(signal.signal);
-      const mcpServers = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability })] : [];
-      const binding = await session.createSession(node.cwd, signal.signal, mcpServers);
+      mcpServers = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability })] : [];
+      const binding = await session.createSession(node.cwd, signal.signal, mcpServers, 10_000);
       await control.recordSession({
         runId: control.runId,
         nodeId: node.id,
@@ -79,7 +77,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         delivery: "acp",
         acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities, ...(this.runtime ? { runtime: this.runtime } : {}) },
       });
-      const turn = this.runTurn(active, managedPrompt(node, identity, launcher.env?.WAVE_FLOW_CONTROL_COMMAND ?? "wave-flow"), signal.signal);
+      const turn = this.runTurn(active, managedPrompt(node), signal.signal);
       // Control complete 是 Worker 的业务完成边界。某些 ACP Agent 在工具调用后会继续
       // 保持原 prompt turn；不能因此阻塞 Runtime 的 run.completed。turn 的拒绝仍被
       // race handler 消费，避免 complete 之后形成未处理 rejection。
@@ -90,10 +88,13 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     } finally {
       this.#active.delete(key);
       session.close();
+      // Worker 未 complete 就停止、取消或异常结束时也必须回收本 session 的私有
+      // Control 通道；它不能存活到整个 Engine 退出后才消失。
+      for (const server of mcpServers ?? []) (server as import("@agentclientprotocol/sdk").McpServer & { readonly close?: () => void }).close?.();
     }
   }
 
-  /** 同一 daemon 内暂停：cancel 必须真实以 cancelled 结束，不能把未知中断伪装为 paused。 */
+  /** 同一 Engine 内暂停：cancel 必须真实以 cancelled 结束，不能把未知中断伪装为 paused。 */
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> {
     const active = this.requireActive(node);
     if (active.paused || active.pauseRequested) throw new Error("ACP Worker 已在暂停控制中。 ");
@@ -153,7 +154,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       active.resolveCancelAck = null;
       await active.resume;
       if (active.isSettled() || active.stopped) return;
-      return this.runTurn(active, recoveryPrompt(active.controlCommand), signal, () => {
+      return this.runTurn(active, recoveryPrompt(), signal, () => {
         active.resolveRecoveryStarted?.();
         active.resolveRecoveryStarted = null;
       });
@@ -163,7 +164,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       // Agent 的 end_turn 不能推进状态；只在同一原生 session 内补发一次“仅上报”
       // 回合，绝不重发原业务任务或自行推断结果。若它仍不 complete，诚实 interrupted。
       active.completionReminderSent = true;
-      return this.runTurn(active, completionReminderPrompt(active.controlCommand, active.identity), signal);
+      return this.runTurn(active, completionReminderPrompt(), signal);
     }
     throw new Error(`ACP Worker turn 已结束（${turn.stopReason}），但未收到 wave-flow complete。`);
   }
@@ -189,24 +190,22 @@ type ActiveAcpWorker = {
   resolveRecoveryStarted: (() => void) | null;
   cancelAck: Promise<void> | null;
   resolveCancelAck: (() => void) | null;
-  controlCommand: string;
-  identity: string;
   completionReminderSent: boolean;
 };
 
 function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.agentSessionId ?? ""}`; }
 
-function managedPrompt(node: AgentNodeSnapshot, identity: string, controlCommand: string): string {
+function managedPrompt(node: AgentNodeSnapshot): string {
   const schema = node.request.schema ? `\n最终 JSON 必须符合此 resultSchema：${JSON.stringify(node.request.schema)}` : "";
-  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n本 session 注入了三个私有 MCP 工具：wave_flow_complete、wave_flow_block、wave_flow_continue。完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block；它返回 blockRequestId 与用户 JSON 答案，确认答案已解决问题后调用 wave_flow_continue。\n\n兼容 shell 命令仍可用：${controlCommand} complete ... ${identity}，但优先使用 MCP 工具。禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
+  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n本 session 注入了三个私有 MCP 工具：wave_flow_complete、wave_flow_block、wave_flow_continue。完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block；它返回 blockRequestId 与用户 JSON 答案，确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
 }
 
-function recoveryPrompt(controlCommand: string): string {
-  return `这是 Wave Flow 用户授权的恢复。上一回合已被取消，不能假设它未产生副作用。请先检查当前工作目录、Git 状态、已生成文件、测试和命令结果，再从已有现场继续；不要重发原始任务。完成仍须执行既有 ${controlCommand} complete；无法安全判断时使用 ${controlCommand} block。`;
+function recoveryPrompt(): string {
+  return "这是 Wave Flow 用户授权的恢复。上一回合已被取消，不能假设它未产生副作用。请先检查当前工作目录、Git 状态、已生成文件、测试和命令结果，再从已有现场继续；不要重发原始任务。完成仍须调用私有 MCP 的 wave_flow_complete；无法安全判断时调用 wave_flow_block。";
 }
 
-function completionReminderPrompt(controlCommand: string, identity: string): string {
-  return `上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，生成最终 JSON 对象，写入绝对路径结果文件，然后执行 ${controlCommand} complete --summary <简短完成说明> --result-file <结果文件绝对路径> ${identity}。若无法安全构造结果，改用 ${controlCommand} block --need-help <原因> ${identity}。完成上报后才可结束本回合。`;
+function completionReminderPrompt(): string {
+  return "上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，调用私有 MCP 工具 wave_flow_complete 并提供最终 JSON 对象与简短摘要。若无法安全构造结果，改用 wave_flow_block。完成上报后才可结束本回合。";
 }
 
 async function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

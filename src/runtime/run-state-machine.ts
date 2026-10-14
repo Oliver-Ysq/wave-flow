@@ -77,6 +77,8 @@ export class RunStateMachine {
       case "gate.answered":
         this.#applyGateAnswered(event);
         return;
+      case "desktop.exit_requested":
+        return;
       case "run.status":
         this.#applyRunStatus(event.status, event.at, event.diagnostic);
         return;
@@ -115,7 +117,7 @@ export class RunStateMachine {
     return gate ? { ...gate } : null;
   }
 
-  /** 尚未回答的决策门；daemon API 与 Web 据此渲染待答问题。 */
+  /** 尚未回答的决策门；Engine action 与 Web 据此渲染待答问题。 */
   pendingGates(): readonly DecisionGateSnapshot[] {
     return [...this.#gates.values()].filter((gate) => gate.answer === null).map((gate) => ({ ...gate }));
   }
@@ -364,8 +366,8 @@ function canRunTransition(from: RunStatus, to: RunStatus): boolean {
   if (from === "paused") return to === "recovering" || to === "cancelled" || to === "interrupted";
   if (from === "recovering") return to === "running" || to === "cancelled" || to === "interrupted";
   // 只有用户显式 resume 才能令 interrupted 回到 running，并建立新的 attempt；
-  // daemon 重启或会话丢失绝不隐式重跑 Workflow。
-  if (from === "interrupted") return to === "running";
+  // Engine 重启或会话丢失绝不隐式重跑 Workflow。
+  if (from === "interrupted" || from === "cancelled") return to === "running";
   return false;
 }
 

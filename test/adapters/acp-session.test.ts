@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAmbiguousPromptError, AcpSessionClient, type AcpTransportFactory } from "../../src/adapters/acp-session";
 
-function fakeTransport(events: acp.SessionUpdate[], hooks: { cancelled: number; loaded: string[] }): AcpTransportFactory {
+function fakeTransport(events: acp.SessionUpdate[], hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown> }): AcpTransportFactory {
   return async () => {
     const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
     const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
     const app = acp.agent({ name: "fake-acp" })
       .onRequest(acp.methods.agent.initialize, () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } }))
-      .onRequest(acp.methods.agent.session.new, () => ({ sessionId: "acp-session" }))
+      .onRequest(acp.methods.agent.session.new, (context) => { hooks.newSessionMeta = context.params._meta as Record<string, unknown> | undefined; return { sessionId: "acp-session" }; })
       .onRequest(acp.methods.agent.session.load, (context) => { hooks.loaded.push(context.params.sessionId); return {}; })
       .onRequest(acp.methods.agent.session.prompt, async (context) => {
         await context.client.notify(acp.methods.client.session.update, { sessionId: context.params.sessionId, update: events[0]! });
@@ -40,6 +40,15 @@ test("ACP session client records a binding, forwards stream events, cancels and 
   expect(hooks.cancelled).toBe(1);
   await client.loadSession("saved-session", "/workspace", new AbortController().signal);
   expect(hooks.loaded).toEqual(["saved-session"]);
+  client.close();
+});
+
+test("携带私有 MCP 的 session/new 会等待 MCP startup 后才返回", async () => {
+  const hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown> } = { cancelled: 0, loaded: [] };
+  const client = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, fakeTransport([], hooks));
+  await client.initialize(new AbortController().signal);
+  await client.createSession("/workspace", new AbortController().signal, [{ name: "private", command: "/mcp", args: [], env: [] }], 10_000);
+  expect(hooks.newSessionMeta).toEqual({ mcpStartupAwaitTimeoutMs: 10_000 });
   client.close();
 });
 

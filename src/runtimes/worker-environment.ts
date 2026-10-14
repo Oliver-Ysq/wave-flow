@@ -2,13 +2,12 @@ import type { VerifiedCliRuntime } from "./types";
 import { nodeRuntimeDirectory } from "./node-runtime";
 
 /** 为 ACP Worker 构造最小环境；只允许有限的运行时与用户显式配置需求。 */
-export function createWorkerEnvironment(runtime: VerifiedCliRuntime, controlCommand: string, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+export function createWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
   const result: Record<string, string> = {};
   for (const key of ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"] as const) if (inherited[key]) result[key] = inherited[key]!;
   for (const [key, value] of Object.entries(inherited)) if ((key.startsWith("LC_") || proxyOrCertificateKey(key)) && value) result[key] = value;
   result.PATH = normalizedPath(inherited.PATH, nodeRuntimeDirectory({ executablePath: runtime.nodeExecutable.path, executableIdentity: runtime.nodeExecutable.identity }));
   result.CODEX_PATH = runtime.executablePath;
-  result.WAVE_FLOW_CONTROL_COMMAND = controlCommand;
   result.INITIAL_AGENT_MODE = "agent-full-access";
   result.NO_BROWSER = "1";
   return result;

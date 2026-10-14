@@ -27,7 +27,7 @@ export type DecisionGateRequest = {
   readonly id: string;
   /** 面向用户的完整问题说明：为什么必须有人类决定才能安全继续。 */
   readonly question: string;
-  /** 可选答案 JSON Schema；daemon answer API 与 Journal 重开都会按它校验。 */
+  /** 可选答案 JSON Schema；Engine 答题 action 与 Journal 重开都会按它校验。 */
   readonly answerSchema?: JsonObject;
 };
 

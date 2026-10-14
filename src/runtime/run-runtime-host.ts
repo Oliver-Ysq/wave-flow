@@ -70,7 +70,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   beginStop(nodeId: string): void { this.#stopping.add(nodeId); }
   endStop(nodeId: string): void { this.#stopping.delete(nodeId); }
 
-  /** 是否已有节点确实因 daemon 全局资源名额等待。 */
+  /** 是否已有节点确实因 Engine 全局资源名额等待。 */
   hasWaitingStart(): boolean { return this.executor.hasWaitingStart?.() === true; }
 
   /** Run pause 后阻断尚未进入启动阶段的新节点；已启动节点由 Executor 单独停止。 */
@@ -111,7 +111,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: request.phase ?? null, executionAttemptId: activeVisit.executionAttemptId, phaseVisitId: activeVisit.phaseVisitId, executionBatch, request });
       await this.durableApply(created);
     }
-    // 全局 daemon 的名额必须在节点进入 running 前取得。这样超限节点可被权威
+    // 全局 Engine 的名额必须在节点进入 running 前取得。这样超限节点可被权威
     // 快照如实显示为 queued，而不会先伪装成已启动的 ACP Worker。
     await this.executor.waitForStart?.(this.state.agent(nodeId));
     const restartedSession = existing && this.replay ? this.state.agent(nodeId).agentSessionId : null;
@@ -143,7 +143,10 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      if (this.state.agent(nodeId).status === "running" && !this.#stopping.has(nodeId)) {
+      // 执行器失败意味着节点不可能再继续（包括 Worker 在 blocked 等待答案时死亡）；
+      // 任意非终态节点都必须诚实收敛为 interrupted，不得留下终态 Run 与非终态节点并存的投影。
+      const status = this.state.agent(nodeId).status;
+      if (status !== "completed" && status !== "cancelled" && status !== "interrupted" && !this.#stopping.has(nodeId)) {
         await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
       }
       throw error;
@@ -187,7 +190,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     return this.waitForGateAnswer(request.id);
   }
 
-  /** daemon 答题入口：先于 Journal 写入校验 Schema；答案只唤醒等待同一 gate 的脚本调用。 */
+  /** Engine 答题入口：先于 Journal 写入校验 Schema；答案只唤醒等待同一 gate 的脚本调用。 */
   async answerGate(gateId: string, answer: JsonObject): Promise<void> {
     const gate = this.state.gate(gateId);
     if (!gate) throw new WorkflowContractError(`未知决策门：${gateId}`);
@@ -238,7 +241,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** resume 的已完成前缀不产生事实；首个重跑节点才开启新尝试与第一轮阶段访问。 */
   private async ensureReplayAttempt(title: string): Promise<PhaseVisit> {
     if (this.#replayAttemptStarted && this.#currentPhaseVisit) return this.#currentPhaseVisit;
-    if (this.resumeInterrupted && this.state.snapshot().status === "interrupted") {
+    if (this.resumeInterrupted && (this.state.snapshot().status === "interrupted" || this.state.snapshot().status === "cancelled")) {
       await this.durableApply(this.event({
         type: "run.status",
         nodeId: null,

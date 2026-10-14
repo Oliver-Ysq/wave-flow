@@ -15,8 +15,6 @@ export type { CreateRunOptions } from "./runtime/run-runtime";
 export { AcpWorkerExecutor } from "./runtime/acp-worker-executor";
 export type { AcpWorkerSession } from "./runtime/acp-worker-executor";
 export { ControlServer } from "./control/control-server";
-export { handleCompleteHttp } from "./control/control-http";
-export { handleBlockHttp, handleAnswerHttp, handleContinueHttp } from "./control/block-http";
 export { BlockBroker } from "./control/block-broker";
 export type { CompletionSubmission, RegisteredControlNode } from "./control/control-server";
 export type { BlockAnswerSubmission, BlockResolution, BlockSubmission, ContinueSubmission } from "./control/control-server";

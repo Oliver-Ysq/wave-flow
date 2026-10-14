@@ -151,7 +151,7 @@ export class HarnessProjection {
       const index = this.#executions.findIndex((item) => item.executionId === event.executionId);
       if (index < 0) throw new Error("workflow.execution_resumed 指向未知 Execution。 ");
       const execution = this.#executions[index];
-      if (execution.status !== "interrupted" || execution.finishedAt === null) throw new Error("只有已中断的 WorkflowExecution 可以显式 resume。 ");
+      if ((execution.status !== "interrupted" && execution.status !== "cancelled") || execution.finishedAt === null) throw new Error("只有已中断或已取消的 WorkflowExecution 可以显式 resume。 ");
       this.#executions[index] = { ...execution, status: "running", finishedAt: null, diagnostic: null, summary: null };
       return;
     }

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 
 test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅色表单", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
-  const css = await Bun.file("web/src/workbench.css").text();
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain('runtime-settings--gate');
   expect(source).toContain('api.scanCliRuntimes()');
   expect(source).toContain('选择主控 CLI');
@@ -22,19 +22,19 @@ test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅
   expect(css).toContain(".manual-runtime-error");
 });
 
-test("思考流使用与会话 runtime 无关的原生折叠控件，长回复不能读取 chainOfThought scope", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
+test("桌面端不渲染未耐久思考流，也不依赖第三方会话 runtime", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   const manifest = await Bun.file("package.json").text();
-  expect(source).toContain('<details className="harness-reasoning">');
-  expect(source).toContain("<pre>{reasoning}</pre>");
+  expect(source).not.toContain("harness-reasoning");
+  expect(source).not.toContain("reasoning_delta");
   expect(source).not.toContain("ChainOfThoughtPrimitive");
   expect(source).not.toContain("useLocalRuntime");
   expect(manifest).not.toContain("@assistant-ui/react");
 });
 
 test("主控输入框让裸 Enter 留给 IME/换行，仅以 ⌘/Ctrl + Enter 发送且显式绘制光标", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
-  const css = await Bun.file("web/src/workbench.css").text();
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain("function shouldSubmitComposer");
   expect(source).toContain("event.nativeEvent.isComposing");
   expect(source).toContain("event.metaKey || event.ctrlKey");
@@ -44,7 +44,7 @@ test("主控输入框让裸 Enter 留给 IME/换行，仅以 ⌘/Ctrl + Enter �
 });
 
 test("完成会话后回到进行中第一个项目的新建会话页", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   const draftStart = source.indexOf("function beginHarnessDraft");
   const draftEnd = source.indexOf("async function sendHarness", draftStart);
   const draftSource = source.slice(draftStart, draftEnd);
@@ -63,19 +63,13 @@ test("完成会话后回到进行中第一个项目的新建会话页", async ()
   expect(completeSource).not.toContain('setHarnessView("completed")');
 });
 
-test("当前回合按 SSE 顺序分段，最终正文只能补尾不能重排工具前后的文字", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
-  const css = await Bun.file("web/src/workbench.css").text();
-  expect(source).toContain("type HarnessTurnPart =");
-  expect(source).toContain('appendTurnText(current, "text", value.delta)');
-  expect(source).toContain('type: "tool", toolCallId: value.toolCallId');
-  expect(source).toContain("function HarnessTurnTimeline");
-  expect(source).toContain("function reconcileTurnText");
-  expect(source).toContain("if (!durableText.startsWith(streamedText)) return current");
-  expect(source).toContain('appendTurnText(current, "text", missingTail)');
-  expect(source).toContain("function HarnessTurnText");
-  expect(source).toContain("message.id !== timelineMessageId");
-  expect(source).not.toContain("timelineAssistantText");
+test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主控消息", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
+  expect(source).not.toContain("EventSource(");
+  expect(source).not.toContain("assistant_delta");
+  expect(source).not.toContain("reasoning_delta");
+  expect(source).toContain("harness.messages");
   expect(source).toContain("class WorkflowPanelErrorBoundary");
   expect(source).toContain("无法显示 Workflow 详情");
   expect(source).toContain("<WorkflowPanelErrorBoundary");
@@ -88,8 +82,8 @@ test("当前回合按 SSE 顺序分段，最终正文只能补尾不能重排工
 });
 
 test("工具过程作为 assistant 正文下方的安全尾注恢复，不显示敏感调用细节", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
-  const types = await Bun.file("web/src/types.ts").text();
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const types = await Bun.file("src-tauri/web/src/types.ts").text();
   expect(types).toContain("toolActivitiesByMessageId");
   expect(source).toContain("harness.toolActivitiesByMessageId[message.id]");
   expect(source).toContain("key={`${message.id}:tool:${index}`}");
@@ -98,8 +92,8 @@ test("工具过程作为 assistant 正文下方的安全尾注恢复，不显示
 });
 
 test("Workflow 草案是受对话列宽约束的内联行动点，不能挤占或溢出主视图", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
-  const css = await Bun.file("web/src/workbench.css").text();
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain('className="conversation-action workflow-revision"');
   expect(source).not.toContain('className="workflow-action"');
   expect(css).toContain(".agent-workbench .conversation-action {");
@@ -109,9 +103,33 @@ test("Workflow 草案是受对话列宽约束的内联行动点，不能挤占�
   expect(css).toContain(".agent-workbench .workflow-pane { position:fixed");
 });
 
-test("Execution 详情读取失败时说明后台服务重连，而不是误报 Workflow 失败", async () => {
-  const source = await Bun.file("web/src/App.tsx").text();
+test("Execution 详情读取失败时说明 Desktop Engine 重连，而不是误报 Workflow 失败", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain("function executionLoadMessage");
-  expect(source).toContain("后台服务连接已中断；正在重新连接");
+  expect(source).toContain("Desktop Engine 连接已中断；正在重新连接");
   expect(source).toContain("旧 Execution 会安全收敛为“已中断”");
+  // 触发条件必须挂在 invoke 的稳定错误文案上，而不是永不出现的 fetch 网络错误。
+  expect(source).toContain("Desktop Engine (已退出|请求超时|管道错误|未运行)");
+});
+
+test("退出取消的 Run 与中断 Run 都提供显式恢复入口", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(source).toContain('run.status === "interrupted" || run.status === "cancelled"');
+  expect(source).toContain('label={run.status === "cancelled" ? "恢复已停止 Run" : "重新执行"}');
+  expect(source).toContain('onClick={() => void onControl("resume")}');
+});
+
+test("取消或中断的 Execution 都提供同一冻结 revision 的显式恢复入口", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(source).toContain('detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled"');
+  expect(source).toContain('label={detail.snapshot.status === "cancelled" ? "恢复已停止 Execution" : "恢复中断 Execution"}');
+  expect(source).toContain('onClick={() => void onControl("resume")}');
+});
+
+test("活动 Run 仅通过 Engine action 轮询当前尝试，不回退 SSE", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(source).toContain("Desktop 不再有 Run SSE");
+  expect(source).toContain("window.setInterval(reload, 1_000)");
+  expect(source).toContain("api.currentAttempt(run.runId)");
+  expect(source).not.toContain("EventSource(");
 });

@@ -39,7 +39,7 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
     async prompt(text) { managed = text; await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
     async cancel() {}, close() {},
   };
-  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, (launcher) => { capability = launcher.env?.WF_CONTROL_CAPABILITY ?? ""; return session; });
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
   executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
   expect(managed).toContain("高优先级、不可省略");
@@ -66,7 +66,7 @@ test("ACP Worker cancel 确认后仅在同一 session recover", async () => {
     },
     async cancel() { releaseFirst({ stopReason: "cancelled" }); }, close() {},
   };
-  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, (launcher) => { capability = launcher.env?.WF_CONTROL_CAPABILITY ?? ""; return session; });
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
   executor.bindControl(value.control);
   const running = executor.execute(value.node);
   while (prompts.length === 0) await Bun.sleep(1);
@@ -83,7 +83,7 @@ test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", 
     binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
     async prompt(text) { prompts.push(text); if (prompts.length === 1) return { stopReason: "end_turn" }; await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "recovered-report", result: { ok: true } }); return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
   };
-  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, launcher => { capability = launcher.env?.WF_CONTROL_CAPABILITY ?? ""; return session; }); executor.bindControl(value.control);
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; }); executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
   expect(prompts).toHaveLength(2); expect(prompts[1]).toContain("不要重做业务任务");
 });
@@ -96,11 +96,28 @@ test("真实 Worker session 仅注入节点私有的 Control MCP", async () => {
   };
   const executor = new AcpWorkerExecutor(
     { id: "codex-acp", command: "fake", args: [] },
-    launcher => { capability = launcher.env?.WF_CONTROL_CAPABILITY ?? ""; return session; },
+    () => session,
     undefined,
-    identity => ({ name: "wave-flow-worker-control", command: "/wave-flow-daemon", args: ["__worker-mcp"], env: [{ name: "WF_WORKER_MCP_CAPABILITY", value: identity.capability }] }),
+    identity => { capability = identity.capability; return { name: "wave-flow-worker-control", command: "/wave-flow-desktop-engine", args: ["__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: "/private/request" }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: "/private/response" }] }; },
   );
   executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
-  expect(servers).toEqual([expect.objectContaining({ name: "wave-flow-worker-control", args: ["__worker-mcp"] })]);
+  expect(servers).toEqual([expect.objectContaining({ name: "wave-flow-worker-control", command: "/wave-flow-desktop-engine", args: ["__worker-mcp"] })]);
+});
+
+test("真实 Worker 创建带私有 MCP 的 session 时等待其启动完成", async () => {
+  const value = await fixture(); let capability = ""; let startupWait: number | undefined;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession(_cwd, _signal, _servers = [], wait) { startupWait = wait; return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
+    async prompt() { await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "mcp-ready", result: { ok: true } }); return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor(
+    { id: "codex-acp", command: "fake", args: [] },
+    () => session,
+    undefined,
+    identity => { capability = identity.capability; return { name: "wave-flow-worker-control", command: "/wave-flow-desktop-engine", args: ["__worker-mcp"], env: [] }; },
+  );
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+  expect(startupWait).toBe(10_000);
 });

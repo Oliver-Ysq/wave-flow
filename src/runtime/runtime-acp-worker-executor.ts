@@ -15,7 +15,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
   #workers = new Map<string, AcpWorkerExecutor>();
 
-  constructor(private readonly runtimes: CliRuntimeRegistry, private readonly controlCommand: () => string, private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer) {}
+  constructor(private readonly runtimes: CliRuntimeRegistry, private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer) {}
 
   bindControl(control: ControlServer): void {
     if (this.#control) throw new Error("Runtime ACP Worker 已绑定 ControlServer。 ");
@@ -26,7 +26,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     const control = this.#control;
     if (!control) throw new Error("Runtime ACP Worker 尚未绑定 ControlServer。 ");
     const runtime = await this.runtimes.resolveSelected("codex");
-    const worker = new AcpWorkerExecutor(resolveCodexAcpLauncher(runtime, this.controlCommand()), undefined, runtimeProvenance(runtime), this.createControlMcp);
+    const worker = new AcpWorkerExecutor(resolveCodexAcpLauncher(runtime), undefined, runtimeProvenance(runtime), this.createControlMcp);
     worker.bindControl(control);
     const key = keyOf(node);
     this.#workers.set(key, worker);

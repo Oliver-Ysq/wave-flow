@@ -5,9 +5,9 @@ import { createWorkerEnvironment } from "./worker-environment";
 import type { RuntimeProvenance, VerifiedCliRuntime } from "./types";
 
 /** 将已复核的用户 CLI 与固定 adapter 组合为唯一可启动 ACP Launcher。 */
-export function resolveCodexAcpLauncher(runtime: VerifiedCliRuntime, controlCommand: string): AcpLauncher {
+export function resolveCodexAcpLauncher(runtime: VerifiedCliRuntime): AcpLauncher {
   const entry = codexAcpAdapterEntry();
-  return { id: CODEX_ACP_ADAPTER.id, command: entry.command, args: entry.args, env: createWorkerEnvironment(runtime, controlCommand) };
+  return { id: CODEX_ACP_ADAPTER.id, command: entry.command, args: entry.args, env: createWorkerEnvironment(runtime) };
 }
 
 /** 写入 Journal 的安全来源信息；不含文件身份、PATH 或任何环境变量。 */

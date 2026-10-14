@@ -3,6 +3,8 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessExecutionService } from "../../src/harness/executions";
+import { HarnessJournal } from "../../src/harness/journal";
+import { RunJournal } from "../../src/journal/run-journal";
 import { HarnessService } from "../../src/harness/service";
 import type { ResolvedHarnessModelConfig } from "../../src/harness/config";
 import type { HarnessPiSession } from "../../src/harness/pi-harness";
@@ -124,14 +126,77 @@ describe("HarnessExecutionService", () => {
     await expect(executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true })).rejects.toThrow("可控制生命周期");
   });
 
-  test("daemon 重启后只读还原登记事实，显式 resume 以新 attempt 继续未答 gate", async () => {
+  test("退出与 settle 并发登记终态只写一条 execution_finished，Journal 可重开", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+    // 退出路径与后台 settle 会同时尝试登记终态；第二条 execution_finished
+    // 会让 Journal 重放永久失败，因此必须幂等。
+    await executions.cancelForDesktopExit("exit-engine");
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const reopened = await HarnessJournal.open(harnessRunId, root);
+    const finished = reopened.events.filter((event) => event.type === "workflow.execution_finished" && event.executionId === execution.executionId);
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ status: "cancelled", diagnostic: "退出 Wave Flow 时停止。 " });
+    expect(reopened.snapshot.executions[0]).toMatchObject({ status: "cancelled" });
+  });
+
+  test("recordExecutionFinished 对已终态 Execution 幂等，不产生重复事实", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+    await harness.recordExecutionFinished(harnessRunId, execution.executionId, "cancelled", "迟到的重复登记。 ", null);
+    const reopened = await HarnessJournal.open(harnessRunId, root);
+    const finished = reopened.events.filter((event) => event.type === "workflow.execution_finished");
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ status: "completed" });
+    expect(reopened.snapshot.executions[0]).toMatchObject({ status: "completed" });
+  });
+
+  test("blocked Worker 的 Execution 在退出时收敛为 cancelled 且可显式 resume", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+    await executions.cancelForDesktopExit("exit-engine");
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+    expect((await executions.listExecutions(harnessRunId))[0].status).toBe("cancelled");
+    await executions.resume(harnessRunId, execution.executionId);
+    await executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
+    expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
+    const reopened = await HarnessJournal.open(harnessRunId, root);
+    expect(reopened.snapshot.executions[0]).toMatchObject({ status: "completed" });
+  });
+
+  test("用户取消的 Execution 可显式 resume 为新 attempt", async () => {
+    const { harness, executions, harnessRunId } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+    await executions.stop(harnessRunId, execution.executionId);
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "cancelled");
+    await expect(executions.resume(harnessRunId, execution.executionId)).resolves.toMatchObject({ status: "cancelled" });
+    await executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
+    expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
+  });
+
+  test("Engine 重启后只读还原登记事实，显式 resume 以新 attempt 继续未答 gate", async () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
     const { execution } = await executions.createExecution(harnessRunId, 1);
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
-    // 模拟 daemon 重启：全新服务实例，没有任何内存 Runtime。
+    // 模拟 Engine 重启：全新服务实例，没有任何内存 Runtime。
     let executions2Count = 0;
     const harness2 = new HarnessService(root, async () => model, createPi);
     const executions2 = new HarnessExecutionService(harness2, () => ({ executor: { execute: async () => { executions2Count += 1; return { n: executions2Count }; } } }), {}, root);
@@ -153,7 +218,7 @@ describe("HarnessExecutionService", () => {
     expect(detail.phases[0].agents.map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w2:completed"]);
   });
 
-  test("daemon 重启时遗留的 active Execution 必须收敛为 interrupted，不能伪装为工作中", async () => {
+  test("Engine 重启时遗留的 active Execution 必须收敛为 interrupted，不能伪装为工作中", async () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
@@ -250,5 +315,59 @@ describe("HarnessExecutionService", () => {
     expect(manifest.harness).toMatchObject({ harnessRunId, revision: 1, sourceHash: execution.sourceHash });
     const source = await Bun.file(join(root, harnessRunId, "executions", execution.executionId, "source.ts")).text();
     expect(source).toBe(SIMPLE_SOURCE);
+  });
+
+  test("旧档案遗留 blocked 节点 + 终态 Run：显式 resume 先收敛节点再创建新 attempt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-execution-"));
+    directories.push(root);
+    const harness = new HarnessService(root, async () => model, createPi);
+    const created = await harness.create(root);
+    const harnessRunId = created.harnessRunId;
+    // 第一份 Engine：Worker 请求人工确认进入 blocked 后永不返回（真实故障中它以
+    // end_turn 结束回合且不上报 complete/continue）。
+    let control: import("../../src/control/control-server").ControlServer | null = null;
+    let runtimeRef: import("../../src/runtime/run-runtime").RunRuntime | null = null;
+    const executions = new HarnessExecutionService(harness, () => ({
+      executor: {
+        execute: async (node) => {
+          const runId = runtimeRef!.snapshot().id;
+          control!.register({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: "cap-1" });
+          await control!.recordSession({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
+          void control!.block({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, () => null);
+          return new Promise<never>(() => {});
+        },
+      },
+    }), { wireControl: (runtime) => { runtimeRef = runtime; control = runtime.createControlServer(); } }, root);
+    await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).phases[0]?.agents[0]?.status === "blocked");
+
+    // 模拟旧版本缺陷留下的损坏档案：只写 Run 终态，漏掉 blocked 节点的收敛。
+    const journalPath = join(root, harnessRunId, "executions", execution.executionId, "journal.jsonl");
+    await Bun.write(journalPath, `${await Bun.file(journalPath).text()}${JSON.stringify({ type: "run.status", at: new Date().toISOString(), runId: execution.executionId, nodeId: null, agentSessionId: null, diagnostic: "Error: ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。", status: "interrupted" })}\n`);
+    await harness.recordExecutionFinished(harnessRunId, execution.executionId, "interrupted", "Error: ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。", null);
+
+    // 全新 Engine（不做启动收敛），直接显式 resume：必须先收敛僵尸 blocked 节点，
+    // 再由 replay 创建新 attempt 重跑，而不是 2ms 内以旧诊断再次 finished。
+    let executed = 0;
+    const harness2 = new HarnessService(root, async () => model, createPi);
+    const executions2 = new HarnessExecutionService(harness2, () => ({ executor: { execute: async () => ({ n: ++executed }) } }), {}, root);
+    await executions2.resume(harnessRunId, execution.executionId);
+    await waitFor(async () => (await executions2.listExecutions(harnessRunId))[0].status === "completed");
+    const detail = await executions2.snapshotExecution(harnessRunId, execution.executionId);
+    expect(detail).toMatchObject({ status: "completed", currentExecutionAttemptId: 2 });
+    expect(detail.phases[0].agents).toEqual([expect.objectContaining({ id: "w1", status: "completed", result: { n: 1 } })]);
+    expect(executed).toBe(1);
+    const reopened = await RunJournal.open(execution.executionId, join(root, harnessRunId, "executions"));
+    const staleConverged = reopened.events.findIndex((event) => event.type === "agent.status" && event.status === "interrupted" && event.diagnostic?.includes("不可认领"));
+    const restarted = reopened.events.findIndex((event) => event.type === "agent.restarted");
+    expect(staleConverged).toBeGreaterThanOrEqual(0);
+    expect(restarted).toBeGreaterThan(staleConverged);
+    expect(reopened.events.some((event) => event.type === "execution-attempt.started" && event.executionAttemptId === 2)).toBe(true);
+    const outer = await HarnessJournal.open(harnessRunId, root);
+    expect(outer.events.some((event) => event.type === "workflow.execution_resumed" && event.executionId === execution.executionId)).toBe(true);
+    const finished = outer.events.filter((event) => event.type === "workflow.execution_finished" && event.executionId === execution.executionId);
+    expect(finished.map((event) => (event as { readonly status: string }).status)).toEqual(["interrupted", "completed"]);
   });
 });

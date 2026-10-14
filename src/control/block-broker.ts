@@ -50,7 +50,7 @@ export type BlockResolution = {
   readonly answer: JsonObject;
 };
 
-/** 同一 daemon 生命周期内的 pending block 与原 Agent 等待者。 */
+/** 同一 Engine 生命周期内的 pending block 与原 Agent 等待者。 */
 export class BlockBroker {
   #pending = new Map<string, PendingBlock>();
 
@@ -66,8 +66,8 @@ export class BlockBroker {
 
   /**
    * 从 Journal 重建一个已经 durable 的 block；不得再次写 block.created。
-   * 仅 daemon 重启后的 Control 恢复路径使用，恢复后仍必须由原会话携带
-   * daemon 仍会在恢复前核验真实会话，重连者才能取得答案或调用 continue。
+   * 仅 Engine 重启后的 Control 恢复路径使用，恢复后仍必须由原会话携带
+   * Engine 仍会在恢复前核验真实会话，重连者才能取得答案或调用 continue。
    */
   restore(submission: BlockSubmission, answer: JsonObject | null): void {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
@@ -136,7 +136,7 @@ export class BlockBroker {
   discard(blockRequestId: string): void { this.#pending.delete(blockRequestId); }
   private require(blockRequestId: string): PendingBlock {
     const pending = this.#pending.get(blockRequestId);
-    if (!pending) throw new Error("指定 block 不存在或不属于当前 daemon 生命周期。");
+    if (!pending) throw new Error("指定 block 不存在或不属于当前 Engine 生命周期。");
     return pending;
   }
 }

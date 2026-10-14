@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wave Flow Dev",
+  "identifier": "com.wave-flow.desktop.dev"
+}
