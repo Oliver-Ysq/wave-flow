@@ -35,6 +35,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly replay = false,
     /** interrupted Run 的 running 事实延迟到首个重跑节点经过调用指纹核验后。 */
     private readonly resumeInterrupted = false,
+    /** 受限 Execution 冻结的分配快照；受信任 Run 为 null，脚本 cli/model 直接生效。 */
+    private readonly executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null,
   ) {
     this.#journalSequence = initialJournalSequence;
     if (!replay) this.#logicalSequence = initialJournalSequence;
@@ -92,23 +94,29 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** 创建、启动并执行节点；只有结果与 Journal 均耐久后才返回对象。 */
   async agent(request: NormalizedAgentRequest, executionBatch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
     while (this.#schedulingPaused) await this.#schedulingGate;
-    if (request.phase === undefined) throw new WorkflowContractError("agent() 前必须调用 phase() 选择已声明阶段。");
-    const nodeId = request.id;
+    // 分配快照改写必须先于指纹比较与 agent.created 落盘：Journal 记录的永远是生效请求
+    // （分配的 cli、cli-default 语义下的 model 省略、assignedRuntimeId），而不是脚本字面量。
+    const effectiveRequest = this.rewriteRequest(request);
+    if (effectiveRequest.phase === undefined) throw new WorkflowContractError("agent() 前必须调用 phase() 选择已声明阶段。");
+    const nodeId = effectiveRequest.id;
     const logicalSequence = ++this.#logicalSequence;
     let existing: import("./run-types").AgentNodeSnapshot | null = null;
     try { existing = this.state.agent(nodeId); } catch {}
     if (existing) {
-      if (!this.replay || this.state.logicalSequence(nodeId) !== logicalSequence || existing.phase !== (request.phase ?? null) || fingerprint(existing.request) !== fingerprint(request)) throw new WorkflowContractError(`resume 的第 ${logicalSequence} 个 agent() 调用与 Journal 节点不匹配：${nodeId}；旧=${fingerprint(existing.request)}；新=${fingerprint(request)}`);
-      if (existing.status === "completed" && this.#replayPrefix) return existing.result;
+      if (!this.replay || this.state.logicalSequence(nodeId) !== logicalSequence || existing.phase !== (effectiveRequest.phase ?? null) || fingerprint(existing.request) !== fingerprint(effectiveRequest)) throw new WorkflowContractError(`resume 的第 ${logicalSequence} 个 agent() 调用与 Journal 节点不匹配：${nodeId}；旧=${fingerprint(existing.request)}；新=${fingerprint(effectiveRequest)}`);
+      // replay 复用除请求指纹外还要复核 provenance：旧 attempt 实际落过的 Runtime
+      // （含启动前回退）与当前分配快照不一致时，旧结果不可复用，从该节点开始新 attempt。
+      const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
+      if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) return existing.result;
       if ((existing.status === "running" || existing.status === "blocked") && this.#replayPrefix) throw new WorkflowContractError(`resume 遇到仍存活或未确认丢失的节点：${nodeId}；先恢复其 Control 或将其明确标记为 interrupted。`);
-      const replayVisit = await this.ensureReplayAttempt(phaseVisit.title || request.phase!);
-      const invalidatedByPriorRestart = !this.#replayPrefix;
-      const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, executionAttemptId: replayVisit.executionAttemptId, phaseVisitId: replayVisit.phaseVisitId, request });
+      const replayVisit = await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!);
+      const invalidatedByPriorRestart = !this.#replayPrefix || (existing.status === "completed" && !provenanceMatches);
+      const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, executionAttemptId: replayVisit.executionAttemptId, phaseVisitId: replayVisit.phaseVisitId, request: effectiveRequest });
       await this.durableApply(restarted);
       this.#replayPrefix = false;
     } else {
-      const activeVisit = this.replay ? await this.ensureReplayAttempt(phaseVisit.title || request.phase!) : phaseVisit;
-      const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: request.phase ?? null, executionAttemptId: activeVisit.executionAttemptId, phaseVisitId: activeVisit.phaseVisitId, executionBatch, request });
+      const activeVisit = this.replay ? await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!) : phaseVisit;
+      const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: effectiveRequest.phase ?? null, executionAttemptId: activeVisit.executionAttemptId, phaseVisitId: activeVisit.phaseVisitId, executionBatch, request: effectiveRequest });
       await this.durableApply(created);
     }
     // 全局 Engine 的名额必须在节点进入 running 前取得。这样超限节点可被权威
@@ -223,8 +231,30 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     if (this.#backgroundFailure) throw this.#backgroundFailure;
   }
 
-  private event(event: Record<string, unknown>): JournalEvent {
-    return {
+  /**
+   * 受限 Execution 的分配消费点：把脚本请求改写为生效请求。命中 assignments 按条目
+   * 分配，否则落 defaultAssignment（动态 id Worker 的唯一分配通道）；脚本字面量
+   * cli/model 在受限 Execution 中不直接生效，model 恒省略为 cli-default 语义。
+   */
+  private rewriteRequest(request: NormalizedAgentRequest): NormalizedAgentRequest {
+    const config = this.executionConfig;
+    if (!config) return request;
+    const assignment = config.assignments.find((item) => item.agentId === request.id) ?? config.defaultAssignment;
+    const rewritten: NormalizedAgentRequest = { ...request, cli: assignment.cli, model: undefined, assignedRuntimeId: assignment.runtimeId };
+    return rewritten;
+  }
+
+  /** 当前节点的分配与已耐久 session provenance 是否一致；缺任一证据时不否决复用。 */
+  private assignmentProvenanceMatches(nodeId: string): boolean {
+    const config = this.executionConfig;
+    if (!config) return true;
+    const recorded = this.state.nodeSessionRuntime(nodeId);
+    if (!recorded) return true;
+    const assignment = config.assignments.find((item) => item.agentId === nodeId) ?? config.defaultAssignment;
+    return recorded.runtimeId === assignment.runtimeId && recorded.adapterId === assignment.adapterId && recorded.adapterVersion === assignment.adapterVersion;
+  }
+
+  private event(event: Record<string, unknown>): JournalEvent {    return {
       ...event,
       at: new Date().toISOString(),
       runId: this.state.manifest.runId,

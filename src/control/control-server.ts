@@ -113,6 +113,18 @@ export class ControlServer {
     this.#recordedSessions.add(key);
   }
 
+  /** 节点当前 attempt 的 agent.session 是否已耐久；执行器仅在 false 时允许启动前回退。 */
+  hasRecordedNodeSession(nodeId: string, agentSessionId: string): boolean {
+    return this.state.hasNodeSession(nodeId, agentSessionId);
+  }
+
+  /** 执行器启动前回退等诊断的耐久写入；只追加 log.written 事实，不改变任何节点状态。 */
+  async recordExecutorDiagnostic(message: string): Promise<void> {
+    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message };
+    await this.journal.append(event);
+    this.state.apply(event);
+  }
+
   /** 校验 capability、Schema 与 durable 写入后，唯一地完成 running 节点。 */
   async complete(request: CompletionSubmission): Promise<void> {
     const key = controlKey(request.runId, request.nodeId);

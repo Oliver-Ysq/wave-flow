@@ -10,7 +10,7 @@
 ## Available today
 
 - Author reusable dynamic workflows in TypeScript; agent nodes advance from actual workflow calls at runtime.
-- Host one real, long-lived, interactive Codex CLI session for each agent node.
+- Host one real, long-lived, interactive local CLI (Codex or Kimi) ACP session for each agent node.
 - Create a Run with `wave-flow run`; receive its Run ID after safe initial-task delivery, then watch live state changes in the current terminal.
 - Read a Run again with `wave-flow inspect <run-id>`.
 - Let agents report validated structured completion results through `wave-flow complete`, and request human help through `block / answer / continue`; terminal text is never completion evidence.
@@ -23,14 +23,14 @@
 
 ## Current boundaries
 
-- Only `agent(..., { cli: "codex" })` is supported today.
+- `agent()` accepts `cli: "codex"` or `cli: "kimi"`; the CLI must be verified in the desktop execution-base settings (any verified runtime is a Worker candidate).
 - Wave Flow is for one local user; its daemon runs locally.
 - TraeX and Retry are not implemented.
 - By default, Agent nodes run in independent Codex ACP Worker sessions. ACP stream events and turn completion are not completion evidence.
 
 ## Quick start
 
-CLI development requires [Bun](https://bun.sh/) and the Codex CLI.
+CLI development requires [Bun](https://bun.sh/) and the Codex CLI or Kimi CLI (at least one).
 
 Desktop users do not need to start the daemon or run `wave-flow start` manually. Build the current macOS Apple Silicon desktop app in a development environment:
 

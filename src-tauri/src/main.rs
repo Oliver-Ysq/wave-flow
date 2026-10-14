@@ -184,7 +184,18 @@ fn main() {
     // macOS 主菜单的退出也只能进入应用内确认，不使用系统默认 Quit 直接终止
     // 进程，确保用户明确退出时总会先完成 Engine 的 durable-first cancelled。
     let app_menu = Submenu::with_items(app, "Wave Flow", true, &[&open, &separator, &shutdown])?;
-    app.set_menu(Menu::with_items(app, &[&app_menu])?)?;
+    // macOS WKWebView 的 ⌘X/⌘C/⌘V/⌘A 依赖原生“编辑”菜单项存在才会派发到输入框；
+    // 缺少该菜单时 WebView 内所有编辑快捷键静默失效。
+    let edit_menu = Submenu::with_items(app, "编辑", true, &[
+      &PredefinedMenuItem::undo(app, Some("撤销"))?,
+      &PredefinedMenuItem::redo(app, Some("重做"))?,
+      &PredefinedMenuItem::separator(app)?,
+      &PredefinedMenuItem::cut(app, Some("剪切"))?,
+      &PredefinedMenuItem::copy(app, Some("拷贝"))?,
+      &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+      &PredefinedMenuItem::select_all(app, Some("全选"))?,
+    ])?;
+    app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu])?)?;
     app.manage(EngineState { child: Mutex::new(None), generation: AtomicU64::new(0), ready: Mutex::new(false), pending: Mutex::new(HashSet::new()), responses: Mutex::new(HashMap::new()), startup_error: Mutex::new(None), stdout_buffer: Mutex::new(Vec::new()) }); app.manage(TrayState { summary: Mutex::new(summary) }); app.manage(PendingMenuAction { value: Mutex::new(None) }); app.manage(ExitState { approved: AtomicBool::new(false) });
     let tray_icon = app.default_window_icon().cloned();
     TrayIconBuilder::with_id("wave-flow-tray").menu(&menu).tooltip("Wave Flow").icon(tray_icon.unwrap_or_else(|| tauri::image::Image::new_owned(vec![0; 4], 1, 1))).on_menu_event(|app, event| match event.id().as_ref() { "open" => { let _ = show_main_window(app); }, "shutdown" => { if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("shutdown"); } let _ = show_main_window(app); }, _ => {} }).build(app)?; Ok(())

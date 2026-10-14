@@ -209,10 +209,28 @@ function isPolicy(value: unknown): boolean { return plain(value) && Number.isInt
 function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
   if (!plain(value) || typeof value.executionId !== "string") return false;
   try { validateRunId(value.executionId); } catch { return false; }
-  return Number.isInteger(value.revision) && (value.revision as number) > 0 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && Number.isInteger(value.runtimeVersion) && isPolicy(value.policy) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && isExecutionStatus(value.status) && (value.finishedAt === null || typeof value.finishedAt === "string") && (value.diagnostic === null || typeof value.diagnostic === "string") && (value.summary === null || isJsonObject(value.summary));
+  return Number.isInteger(value.revision) && (value.revision as number) > 0 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && Number.isInteger(value.runtimeVersion) && isPolicy(value.policy) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && isExecutionStatus(value.status) && (value.finishedAt === null || typeof value.finishedAt === "string") && (value.diagnostic === null || typeof value.diagnostic === "string") && (value.summary === null || isJsonObject(value.summary)) && (value.config === undefined || isExecutionConfigSnapshot(value.config));
+}
+/** Worker 指派的耐久形状校验；严格失败即拒绝重开，绝不容忍被篡改的分配快照。 */
+function isWorkerAssignment(value: unknown): value is import("./types").WorkerAssignment {
+  if (!plain(value)) return false;
+  return typeof value.agentId === "string" && value.agentId.trim() !== "" && (value.cli === "codex" || value.cli === "kimi") && value.model === "cli-default" && (value.source === "harness-cli" || value.source === "random" || value.source === "rule" || value.source === "literal-cli") && typeof value.runtimeId === "string" && value.runtimeId.trim() !== "" && (value.adapterId === "codex-acp" || value.adapterId === "kimi-acp") && typeof value.adapterVersion === "string" && value.adapterVersion.trim() !== "";
+}
+/** 执行配置快照的耐久形状校验；只验证结构，语义（runtime 已验证、id 已枚举）由创建路径保证。 */
+function isExecutionConfigSnapshot(value: unknown): value is import("./types").ExecutionConfigSnapshot {
+  if (!plain(value)) return false;
+  if (value.version !== 1 || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)) || typeof value.fallbackRuntimeId !== "string" || !value.fallbackRuntimeId.trim() || (value.ruleText !== null && typeof value.ruleText !== "string") || typeof value.ruleDegraded !== "boolean" || !Array.isArray(value.assignments)) return false;
+  if (!isWorkerAssignment(value.defaultAssignment)) return false;
+  const ids = new Set<string>();
+  for (const assignment of value.assignments) {
+    if (!isWorkerAssignment(assignment)) return false;
+    if (ids.has(assignment.agentId)) return false;
+    ids.add(assignment.agentId);
+  }
+  return true;
 }
 function isDecision(value: unknown): value is HarnessDecision { return plain(value) && typeof value.decisionId === "string" && value.decisionId.trim() !== "" && typeof value.question === "string" && value.question.trim() !== "" && (value.answerSchema === undefined || isJsonObject(value.answerSchema)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.answer === null && value.answeredAt === null; }
-function isRuntimeProvenance(value: unknown): value is RuntimeProvenance { return plain(value) && typeof value.runtimeId === "string" && !!value.runtimeId && value.cli === "codex" && typeof value.executablePath === "string" && value.executablePath.startsWith("/") && typeof value.version === "string" && !!value.version && value.adapterId === "codex-acp" && typeof value.adapterVersion === "string" && !!value.adapterVersion && typeof value.verifiedAt === "string" && !Number.isNaN(Date.parse(value.verifiedAt)); }
+function isRuntimeProvenance(value: unknown): value is RuntimeProvenance { return plain(value) && typeof value.runtimeId === "string" && !!value.runtimeId && (value.cli === "codex" || value.cli === "kimi") && typeof value.executablePath === "string" && value.executablePath.startsWith("/") && typeof value.version === "string" && !!value.version && (value.adapterId === "codex-acp" || value.adapterId === "kimi-acp") && typeof value.adapterVersion === "string" && !!value.adapterVersion && typeof value.verifiedAt === "string" && !Number.isNaN(Date.parse(value.verifiedAt)); }
 /** 主控决策答案的 Schema 校验；与 Run 决策门共用同一套 Ajv 纪律。 */
 function validateDecisionAnswer(schema: JsonObject | undefined, answer: JsonObject): void {
   if (!schema) return;

@@ -114,6 +114,9 @@ if (process.argv[2] === "__codex-acp") {
 } else if (process.argv[2] === "__harness-mcp") {
   const { runHarnessMcpServer } = await import("../harness/mcp-server");
   await runHarnessMcpServer();
+} else if (process.argv[2] === "__mcp-probe") {
+  const { runMcpProbeServer } = await import("../runtimes/mcp-probe");
+  await runMcpProbeServer();
 } else {
   main().catch((error) => { process.stderr.write(`Wave Flow Desktop Engine: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 }

@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
@@ -16,16 +16,19 @@ import { HarnessService } from "../harness/service";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
 import { CliRuntimeRegistry } from "../runtimes/registry";
-import type { CliRuntimeRecord, DiscoveredCliCandidate } from "../runtimes/types";
+import type { CliRuntimeRecord, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
-import { validateCodexRuntime } from "../runtimes/codex-runtime-validator";
+import { validateCliRuntime } from "../runtimes/cli-runtime-validator";
 import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
 import { AcpHarnessSession } from "../harness/acp-harness";
-import { resolveCodexAcpLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
+import { resolveHarnessLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { DeterministicHarnessSession } from "../harness/deterministic-session";
 import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
 import { WorkerControlPipe } from "../runtime/worker-control-pipe";
 import { HarnessControlPipe } from "../harness/harness-control-pipe";
+import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
+import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
+import { buildRandomAssignments, buildRulePrompt, parseRuleReply, validateExecutionConfig } from "./execution-assignment";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
@@ -46,8 +49,8 @@ export type DesktopExecutionEngineOptions = {
   readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks) => Promise<import("../harness/session").HarnessSession>;
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
-  /** 测试注入的完整 CLI 验证器；生产执行 realpath、版本与 ACP 握手。 */
-  readonly validateCliRuntime?: (candidate: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
+  /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
+  readonly validateCliRuntime?: (cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
 };
 
 /**
@@ -103,12 +106,12 @@ export class DesktopExecutionEngine {
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
     this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
-    this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((candidate) => validateCodexRuntime(candidate));
+    this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((cli, input) => validateCliRuntime(cli, input));
     this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
     const harnessFactory = normalized.createHarnessSession ?? (this.deterministicForTest
       ? async () => new DeterministicHarnessSession()
       : async (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], _actions: import("../harness/action-tools").HarnessActionCallbacks, frozenRuntime?: import("../runtimes/types").RuntimeProvenance) => {
-      const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness("codex");
+      const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
       const compiled = import.meta.dir.startsWith("/$bunfs/");
       const command = process.execPath;
       const pipe = new HarnessControlPipe(request => this.#harness.mcpTools(harnessRunId, request));
@@ -117,16 +120,16 @@ export class DesktopExecutionEngine {
       const mcpServer = { name: "wave-flow-harness", command, args, env: [
         { name: "WF_HARNESS_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_HARNESS_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
       ] } as any;
-      const session = new AcpHarnessSession(resolveCodexAcpLauncher(runtime), cwd, buildHarnessSystemPrompt(), prior, mcpServer);
+      const session = new AcpHarnessSession(resolveHarnessLauncher(runtime), cwd, buildHarnessSystemPrompt(), prior, mcpServer);
       const close = session.close.bind(session); session.close = () => { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); close(); };
       return session;
     });
     this.#harness = new HarnessService(harnessRoot, harnessFactory, undefined, async () => {
       if (this.hasCustomHarnessSession) return { fingerprint: "injected-harness-session" };
-      const runtime = await this.#cliRuntimes.resolveSelectedHarness("codex");
+      const runtime = await this.#cliRuntimes.resolveSelectedHarness();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
     });
-    this.#executions = new HarnessExecutionService(this.#harness, () => this.createExecutionExecutor(), {
+    this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
       // Execution 已写入终态后不再允许 Control 接口接收其旧 Worker 上报；释放
       // Engine 生命周期内映射，避免长时间使用后保留不可达的 ControlServer。
@@ -220,10 +223,10 @@ export class DesktopExecutionEngine {
     this.#controls.set(runId, control);
   }
 
-  /** Execution 的底座执行器；Harness 执行只走 Codex ACP Worker 或测试确定性执行器。 */
-  private createExecutionExecutor(): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
+  /** Execution 的底座执行器；Harness 执行只走用户已验证的本机 ACP Worker 或测试确定性执行器。 */
+  private createExecutionExecutor(config: import("../harness/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
-    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity));
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity), undefined, config?.fallbackRuntimeId ?? null);
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -247,7 +250,7 @@ export class DesktopExecutionEngine {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessRunRequest).projectId !== "string") throw new EngineActionError(400, "创建 Harness 请求无效。 ");
     try {
       const project = await this.#projects.get((value as CreateHarnessRunRequest).projectId);
-      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness("codex");
+      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness();
       const harness = await this.#harness.create(project.cwd, project.projectId);
       await this.#projects.touch(project.projectId);
       return { harness };
@@ -259,7 +262,7 @@ export class DesktopExecutionEngine {
     try {
       const project = await this.#projects.get(projectId);
       // 首发前验证 Runtime，避免先创建不可运行的 Harness manifest/Journaling。
-      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness("codex");
+      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness();
       const harness = await this.#harness.start(project.cwd, project.projectId, (value as StartHarnessConversationRequest).text);
       await this.#projects.touch(project.projectId);
       return { harness };
@@ -313,7 +316,7 @@ export class DesktopExecutionEngine {
       const candidates = await this.discoverCliRuntimeCandidates();
       let verified = 0;
       for (const candidate of candidates) {
-        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate)); verified += 1; }
+        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate.cli, candidate)); verified += 1; }
         catch { /* 单个 PATH 条目损坏/未登录不阻塞其余候选；细节不回显到 Web。 */ }
       }
       return { discovered: candidates.length, verified, runtimes: await this.#cliRuntimes.list() };
@@ -324,22 +327,30 @@ export class DesktopExecutionEngine {
 
   /** 验证固定 adapter 与用户明确给出的绝对 CLI 路径；成功也不自动选为默认。 */
   private async validateCliRuntime(value: unknown): Promise<SelectCliRuntimeResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string") throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string" || ((value as ValidateCliRuntimeRequest).cli !== "codex" && (value as ValidateCliRuntimeRequest).cli !== "kimi")) throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
     const request = value as ValidateCliRuntimeRequest;
     const discoveredFrom = request.discoveredFrom ?? "manual";
     if (!["shell-path", "gui-path", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new EngineActionError(400, "CLI Runtime 验证来源无效。 ");
     try {
-      const verified = await validateCodexRuntime({ executablePath: request.executablePath, discoveredFrom, discoveredShell: request.discoveredShell ?? null });
+      const verified = await this.validateCliRuntimeCandidate(request.cli, { executablePath: request.executablePath, discoveredFrom, discoveredShell: request.discoveredShell ?? null });
       const stored = await this.#cliRuntimes.saveVerified(verified); const { executableIdentity: _identity, ...runtime } = stored;
       return { runtime };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
-  /** 用户显式选择后才允许真实 Worker 使用该 CLI。 */
+  /** 创建 Execution/Run 前的存在性预检：任一 cli 有已验证的 Worker 候选即可；逐节点仍按 cli fail closed。 */
+  private async requireWorkerCandidate(): Promise<void> {
+    if (!await this.#cliRuntimes.hasWorkerCandidate()) throw new EngineActionError(400, "没有已验证的 Worker 执行底座。请在设置页扫描并验证一个本机 CLI。 ");
+  }
+
+  /** 用户显式选择主控 runtime；有主控回合进行中时拒绝切换，只影响空闲后的新会话。 */
   private async selectCliRuntime(runtimeId: string, value: unknown): Promise<SelectCliRuntimeResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "选择 CLI Runtime 不接受请求字段。 ");
-    try { return { runtime: await this.#cliRuntimes.select(runtimeId) }; }
-    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    try {
+      if ((await this.#harness.list()).some(harness => harness.status === "running")) throw new EngineActionError(409, "有主控回合进行中，主控空闲后才能切换。 ");
+      return { runtime: await this.#cliRuntimes.select(runtimeId) };
+    }
+    catch (error) { throw error instanceof EngineActionError ? error : new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
   private async deleteCliRuntime(runtimeId: string): Promise<{ readonly deleted: true }> {
@@ -366,9 +377,84 @@ export class DesktopExecutionEngine {
     if (!Number.isInteger(revision) || revision < 1) throw new EngineActionError(400, "创建 Execution 必须提供有效 revision 序号。 ");
     if (input !== undefined && !isJsonObject(input)) throw new EngineActionError(400, "Execution input 必须是 JSON-safe 对象。 ");
     try {
-      if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
-      return await this.#executions.createExecution(harnessRunId, revision, input ?? {});
+      if (!this.deterministicForTest) await this.requireWorkerCandidate();
+      const config = await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
+      return await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
     } catch (error) { throw this.executionError(error); }
+  }
+
+  /**
+   * 分配卡快照的创建前复核：受限 Execution 的节点落点只由快照决定，因此创建时
+   * 必须重新核对 runtimeId 已验证、cli/adapter 与 Registry 一致、id 已枚举、
+   * model 仅 cli-default，且回退目标就是当前主控 Runtime。伪造或陈旧快照一律拒绝。
+   */
+  private async validateExecutionConfigValue(harnessRunId: string, revisionNumber: number, raw: unknown): Promise<import("../harness/types").ExecutionConfigSnapshot> {
+    if (!raw) throw new EngineActionError(400, "创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
+    const snapshot = await this.#harness.snapshot(harnessRunId);
+    const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
+    if (!revision || revision.acceptedAt === null) throw new EngineActionError(400, "创建 Execution 必须绑定已接受冻结的 revision。 ");
+    const extracted = extractAgentWorkers(revision.source);
+    const list = await this.#cliRuntimes.list();
+    const verified = list.runtimes.filter((runtime) => runtime.status === "verified");
+    let config: import("../harness/types").ExecutionConfigSnapshot;
+    try { config = validateExecutionConfig(raw, extracted.workers, verified); }
+    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    const harnessRuntimeId = snapshot.runtime?.runtimeId ?? list.harnessRuntimeId;
+    if (!harnessRuntimeId || config.fallbackRuntimeId !== harnessRuntimeId) throw new EngineActionError(400, "执行配置快照的回退目标必须是当前主控 Runtime。 ");
+    return config;
+  }
+
+  /** executions.plan：编译预检冻结源码并枚举 Worker、已验证池与主控 Runtime，供分配卡渲染。 */
+  private async planExecution(harnessRunId: string, value: unknown): Promise<ExecutionPlanResponse> {
+    const revisionNumber = requiredInteger(value, "revision");
+    try {
+      const snapshot = await this.#harness.snapshot(harnessRunId);
+      const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
+      if (!revision || revision.acceptedAt === null) throw new Error("只能为已接受冻结的 revision 规划执行分配。 ");
+      // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
+      compileRestrictedWorkflow(revision.source);
+      const extracted = extractAgentWorkers(revision.source);
+      const list = await this.#cliRuntimes.list();
+      const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
+      return { harnessRunId, revision: revisionNumber, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: list.harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === list.harnessRuntimeId) ?? null : null };
+    } catch (error) { throw this.executionError(error); }
+  }
+
+  /** executions.randomize：Engine 侧相邻轮换随机分配；仅首次进入分配卡或显式重新随机时调用。 */
+  private async randomizeExecutionAssignment(harnessRunId: string, value: unknown): Promise<ExecutionRandomizeResponse> {
+    try {
+      const plan = await this.planExecution(harnessRunId, value);
+      if (!plan.harnessRuntime) throw new EngineActionError(400, "未设置已验证的主控 CLI，无法生成随机分配。 ");
+      return buildRandomAssignments(plan.workers, plan.pool, plan.selectedByCli, plan.harnessRuntime);
+    } catch (error) { throw this.executionError(error); }
+  }
+
+  /**
+   * executions.parseRule：把自然语言规则作为主控普通回合解析（不新增工具）。
+   * 解析失败、超时或回复不合规一律返回 degraded，UI 据此显式展示已退化为随机分配。
+   */
+  private async parseExecutionRule(harnessRunId: string, value: unknown): Promise<ExecutionParseRuleResponse> {
+    const ruleText = requiredString(value, "ruleText");
+    try {
+      const plan = await this.planExecution(harnessRunId, value);
+      if ((await this.#harness.snapshot(harnessRunId)).status === "running") throw new EngineActionError(409, "主控回合运行中不能解析分配规则。 ");
+      const parsed = await this.runRuleParseTurn(harnessRunId, ruleText, plan);
+      return { degraded: false, diagnostic: null, assignments: parsed };
+    } catch (error) {
+      if (error instanceof EngineActionError) throw error;
+      return { degraded: true, diagnostic: (error instanceof Error ? error.message : String(error)).slice(0, 300), assignments: null };
+    }
+  }
+
+  /** 规则解析回合本体；任何失败都向上抛，由 parseExecutionRule 统一收敛为 degraded。 */
+  private async runRuleParseTurn(harnessRunId: string, ruleText: string, plan: ExecutionPlanResponse): Promise<readonly import("../harness/types").WorkerAssignment[]> {
+    // 超时只放弃等待并退化；回合本身已耐久，仍会在后台正常收尾，不产生状态歧义。
+    const timeout = new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("主控规则解析回合超时。 ")), 120_000); timer.unref?.(); });
+    const snapshot = await Promise.race([this.#harness.sendAndAwait(harnessRunId, buildRulePrompt(ruleText, plan.workers, plan.pool)), timeout]);
+    if (snapshot.status !== "idle") throw new Error("主控规则解析回合未完成。 ");
+    const reply = [...snapshot.messages].reverse().find((message) => message.role === "assistant");
+    if (!reply) throw new Error("主控规则解析回合没有 assistant 回复。 ");
+    return parseRuleReply(reply.text, plan.workers, plan.pool, plan.selectedByCli);
   }
 
   private async listExecutions(harnessRunId: string): Promise<ExecutionListResponse> {
@@ -490,6 +576,9 @@ export class DesktopExecutionEngine {
       case "harnesses.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
       case "harnesses.answerDecision": return this.answerHarnessDecision(requiredString(value, "harnessRunId"), requiredString(value, "decisionId"), value);
       case "executions.create": return this.createExecution(requiredString(value, "harnessRunId"), value);
+      case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
+      case "executions.parseRule": return this.parseExecutionRule(requiredString(value, "harnessRunId"), value);
+      case "executions.randomize": return this.randomizeExecutionAssignment(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
       case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
@@ -595,7 +684,7 @@ export class DesktopExecutionEngine {
     const workflow = await loadWorkflow(value.workflowPath, cwd);
     const sourcePath = await realpath(resolve(cwd, value.workflowPath));
     const source = await Bun.file(sourcePath).text();
-    if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
+    if (!this.deterministicForTest) await this.requireWorkerCandidate();
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
       : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity));
@@ -685,7 +774,7 @@ export class DesktopExecutionEngine {
   private async resumeOnce(runId: string): Promise<RunResponse> {
     if (this.#runTasks.has(runId)) throw new EngineActionError(409, "该 Run 仍由当前 Engine 执行，不能重复 resume。 ");
     const opened = await RunJournal.open(runId, this.storeRoot);
-    if (!this.deterministicForTest) await this.#cliRuntimes.resolveSelected("codex");
+    if (!this.deterministicForTest) await this.requireWorkerCandidate();
     const manifest = opened.journal.manifest;
     if (manifest.runtimeVersion !== RUNTIME_VERSION) throw new EngineActionError(409, `resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${manifest.runtimeVersion} 只能读取。`);
     let source: string;

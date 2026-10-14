@@ -1,10 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
+import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engine";
+import { CliRuntimeRegistry } from "../../src/runtimes/registry";
+import { verifyExecutable } from "../../src/runtimes/identity";
+import type { CliRuntimeRecord } from "../../src/runtimes/types";
+import type { HarnessSession } from "../../src/harness/session";
 
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
@@ -142,6 +147,32 @@ test("Desktop Engine 启动时收敛 paused 节点，再将 Run 标为 interrupt
   child.kill(); await child.exited;
 });
 
+/** Runtime action 契约：已移除的 setWorkerEnabled 一律拒绝，validate 必须显式携带 cli。 */
+test("Engine runtime action 校验 validate 请求并拒绝已移除的 setWorkerEnabled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-runtimes-")); roots.push(root);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WAVE_FLOW_HOME: root, WF_ENGINE_DETERMINISTIC: "1" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<{ ok?: boolean; error?: string; type?: string; protocolVersion?: number }> => {
+    while (true) {
+      const index = buffered.indexOf("\n");
+      if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); }
+      const value = await reader.read(); if (value.done) throw new Error("Engine 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true });
+    }
+  };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  expect(await next()).toEqual({ type: "ready", protocolVersion: 1 });
+  // Worker 启用池已移除：旧 action 不再注册，一律按未知 action 拒绝
+  send({ requestId: "toggle-removed", method: "engine.action", action: "runtimes.setWorkerEnabled", args: { runtimeId: crypto.randomUUID(), enabled: true } });
+  expect((await next()).error).toContain("未知 Desktop action");
+  send({ requestId: "validate-no-cli", method: "engine.action", action: "runtimes.validate", args: { executablePath: "/bin/sh" } });
+  expect((await next()).error).toContain("验证请求无效");
+  send({ requestId: "validate-bad-cli", method: "engine.action", action: "runtimes.validate", args: { executablePath: "/bin/sh", cli: "traex" } });
+  expect((await next()).error).toContain("验证请求无效");
+  send({ requestId: "close", method: "engine.shutdown" });
+  await next(); expect(await child.exited).toBe(0);
+});
+
 /** 崩溃可发生在首个 Agent session 建立前；没有节点也不能把丢失调用栈伪装成 running。 */
 test("Desktop Engine 启动时将无 Agent 的 live Run 收敛为 interrupted", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-empty-live-")); roots.push(root);
@@ -157,4 +188,66 @@ test("Desktop Engine 启动时将无 Agent 的 live Run 收敛为 interrupted", 
   const reopened = await RunJournal.open(runId, runsRoot(root));
   expect(reopened.events.filter((event): event is Extract<JournalEvent, { type: "run.status" }> => event.type === "run.status").at(-1)?.status).toBe("interrupted");
   child.kill(); await child.exited;
+});
+
+/** 主控切换的空闲语义在 Engine 层：运行中回合拒绝（409），空闲后允许并耐久 harnessRuntimeId。 */
+test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-harness-switch-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-switch-project-")); roots.push(cwd);
+  const registry = new CliRuntimeRegistry(root);
+  const runtimeRecord = async (name: string, cli: "codex" | "kimi", harnessTools: boolean): Promise<CliRuntimeRecord> => {
+    const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho cli\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+    const executable = await verifyExecutable(executablePath);
+    return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${cli} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "kimi" ? "kimi-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  };
+  const first = await registry.saveVerified(await runtimeRecord("codex-a", "codex", true));
+  const second = await registry.saveVerified(await runtimeRecord("kimi-b", "kimi", true));
+  const workerOnly = await registry.saveVerified(await runtimeRecord("kimi-c", "kimi", false));
+  let release: (() => void) | null = null;
+  const session: HarnessSession = {
+    isRunning: true,
+    subscribe: () => () => {},
+    abort: () => {},
+    prompt: () => new Promise<string>((resolve) => { release = () => resolve("回合完成"); }),
+  };
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), createHarnessSession: async () => session });
+  try {
+    await engine.handleDesktopAction("runtimes.select", { runtimeId: first.runtimeId });
+    // 无 harnessTools 的 runtime 即使空闲也不能设为主控。
+    await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: workerOnly.runtimeId })).rejects.toMatchObject({ status: 400 });
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, text: "进行中的回合" });
+    await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: second.runtimeId })).rejects.toMatchObject({ status: 409 });
+    release!();
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const listed = await engine.handleDesktopAction("harnesses.list", {}) as { harnesses: { status: string }[] };
+      if (listed.harnesses.every((harness) => harness.status !== "running")) break;
+      await Bun.sleep(10);
+    }
+    await engine.handleDesktopAction("runtimes.select", { runtimeId: second.runtimeId });
+    const listed = await engine.handleDesktopAction("runtimes.list", {}) as { harnessRuntimeId: string | null };
+    expect(listed.harnessRuntimeId).toBe(second.runtimeId);
+  } finally { engine.shutdown(); }
+});
+
+/** validate action 统一走 Catalog 驱动的单验证器，测试缝签名为 (cli, input)。 */
+test("Engine runtimes.validate 走统一验证器入口", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-validate-")); roots.push(root);
+  const seen: { cli: string; executablePath: string }[] = [];
+  const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executable = await verifyExecutable(executablePath);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async (cli, input) => {
+      seen.push({ cli, executablePath: input.executablePath });
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    },
+  });
+  try {
+    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "kimi" }) as { runtime: { cli: string } };
+    expect(response.runtime.cli).toBe("kimi");
+    expect(seen).toEqual([{ cli: "kimi", executablePath }]);
+    const listed = await engine.handleDesktopAction("runtimes.list", {}) as { runtimes: { cli: string }[] };
+    expect(listed.runtimes).toHaveLength(1);
+  } finally { engine.shutdown(); }
 });

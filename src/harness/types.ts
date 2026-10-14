@@ -69,6 +69,48 @@ export type WorkflowRevision = {
   readonly acceptedAt: string | null;
 };
 
+/**
+ * 分配卡冻结的一个 Worker 指派。它覆盖脚本字面量 cli：受限 Execution 中脚本写死的
+ * cli/model 不直接生效，只有快照指派决定节点落到哪个已验证 Runtime。
+ */
+export type WorkerAssignment = {
+  /** 目标 Worker 节点 id；必须命中静态枚举的字面量 id，defaultAssignment 的兜底条目除外。 */
+  readonly agentId: string;
+  /** 分配的 CLI；必须与 runtimeId 对应已验证 Runtime 的 cli 一致。 */
+  readonly cli: import("../runtimes/types").RuntimeCli;
+  /** 模型分配；本期恒为 "cli-default"（跟随 CLI 默认），模型覆盖尚未验证，不伪造模型目录。 */
+  readonly model: "cli-default";
+  /** 分配来源：harness-cli=全部用主控 CLI，random=Engine 随机轮换，rule=自然语言规则解析，literal-cli=保留脚本字面量。 */
+  readonly source: "harness-cli" | "random" | "rule" | "literal-cli";
+  /** 分配目标；必须是 Registry 中已验证的 Runtime。 */
+  readonly runtimeId: string;
+  /** 分配目标已验证 adapter 标识；创建时与 Registry 核对一致。 */
+  readonly adapterId: "codex-acp" | "kimi-acp";
+  /** 分配目标已验证 adapter 版本；replay provenance 复核按它比对。 */
+  readonly adapterVersion: string;
+};
+
+/**
+ * 创建 Execution 时由分配卡冻结的不可变执行配置。随 WorkflowExecutionRecord 耐久，
+ * resume 从登记事实重新加载；分配变化会让 replay 指纹不匹配，从而诚实拒绝复用旧结果。
+ */
+export type ExecutionConfigSnapshot = {
+  /** 快照格式版本；当前固定为 1。 */
+  readonly version: 1;
+  /** 快照创建时间。 */
+  readonly createdAt: string;
+  /** 启动前失败的唯一回退目标：主控 CLI 的 runtimeId；主控不可用则 fail closed。 */
+  readonly fallbackRuntimeId: string;
+  /** 用户输入的自然语言分配规则原文；未使用规则时为 null。 */
+  readonly ruleText: string | null;
+  /** 规则解析失败/超时后是否已显式退化为随机分配；UI 必须如实展示。 */
+  readonly ruleDegraded: boolean;
+  /** 未命中 assignments 的节点（含动态 id Worker）使用的兜底分配。 */
+  readonly defaultAssignment: WorkerAssignment;
+  /** 逐 Worker 指派；agentId 不得重复。 */
+  readonly assignments: readonly WorkerAssignment[];
+};
+
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */
 export type WorkflowExecutionRecord = {
   /** Execution 的 UUID，同时是其内嵌 Run Journal 的 runId。 */
@@ -91,6 +133,8 @@ export type WorkflowExecutionRecord = {
   readonly diagnostic: string | null;
   /** 脚本 run() 的 JSON 返回值摘要，供主控汇总；非对象结果或未结束时为 null。 */
   readonly summary: JsonObject | null;
+  /** 分配卡冻结的执行配置；本期起创建的 Harness Execution 必填，历史档案可缺失。 */
+  readonly config?: ExecutionConfigSnapshot;
 };
 
 /** 主控经 request_user_decision 发起的用户决策请求；答案只唤醒原工具调用。 */

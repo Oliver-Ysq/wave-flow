@@ -166,6 +166,19 @@ export class HarnessService {
     });
   }
 
+  /**
+   * 发送一条消息并等待该回合完全收敛（finished 或 interrupted）后返回最新快照。
+   * 仅供 Engine 内部结构化通道（如分配规则解析）使用；UI 仍走 send + 快照轮询。
+   * 回合中断不抛错——调用方必须自己从快照判断是否存在可用 assistant 回复。
+   */
+  async sendAndAwait(harnessRunId: string, text: string): Promise<HarnessSnapshot> {
+    await this.send(harnessRunId, text);
+    const entry = await this.entry(harnessRunId);
+    // turn 内部已捕获全部异常；这里只等待收尾，回合结果从耐久快照读取。
+    await entry.turn;
+    return entry.projection.snapshot();
+  }
+
   async abort(harnessRunId: string): Promise<void> {
     const entry = await this.entry(harnessRunId);
     if (!entry.turn || !entry.session?.isRunning) throw new Error("Harness 当前没有可取消回合。 ");
@@ -194,7 +207,7 @@ export class HarnessService {
     const entry = await this.entry(harnessRunId);
     if (request.operation === "list") return { tools: [
       { name: "read_project_file", description: "读取当前项目内常规文件片段", inputSchema: { type: "object", required: ["path"], properties: { path: { type: "string" }, startLine: { type: "integer" }, endLine: { type: "integer" } } } },
-      { name: "query_project", description: "执行受限只读项目查询", inputSchema: { type: "object", required: ["command", "args"], properties: { command: { enum: ["pwd", "git", "rg", "ls"] }, args: { type: "array", items: { type: "string" } } } } },
+      { name: "query_project", description: "执行受限只读项目查询", inputSchema: { type: "object", required: ["command", "args"], properties: { command: { type: "string", enum: ["pwd", "git", "rg", "ls"] }, args: { type: "array", items: { type: "string" } } } } },
       { name: "propose_workflow_revision", description: "提交 workflow 草案，不执行", inputSchema: { type: "object", required: ["source"], properties: { source: { type: "string" } } } },
       { name: "inspect_execution", description: "读取 Execution 登记", inputSchema: { type: "object", properties: { executionId: { type: "string" } } } },
       { name: "read_run_capsule", description: "读取耐久 Harness capsule", inputSchema: { type: "object" } },

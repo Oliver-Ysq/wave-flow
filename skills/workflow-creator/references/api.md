@@ -87,13 +87,13 @@ function agent<T extends JsonObject = JsonObject>(
 ): Promise<T | null>;
 ```
 
-执行一次完整的 Codex ACP Worker 会话。直接 `await` 时失败会抛出并把节点标记为
+执行一次完整的本机 CLI ACP Worker 会话（Codex 或 Kimi）。直接 `await` 时失败会抛出并把节点标记为
 interrupted；在 `parallel()` / `pipeline()` 内失败时该任务结果为 `null`。
 
 ```ts
 type AgentOptions = {
   id: string;          // 必填；Run 内唯一稳定，1–120 位 [A-Za-z0-9._:/-]
-  cli: "codex";        // 必填；当前唯一已实现的 CLI
+  cli: "codex" | "kimi"; // 必填；当前已验证的 CLI；该 Runtime 必须在设置页验证通过
   label?: string;      // 可选展示名；缺省用 id
   cwd?: string;        // 可选；相对路径必须位于 Workflow 项目目录内
   model?: string;      // 可选；由 Adapter 决定是否支持

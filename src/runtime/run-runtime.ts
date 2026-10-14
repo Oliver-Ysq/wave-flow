@@ -34,6 +34,8 @@ export type CreateRunOptions = {
   readonly harness?: import("../journal/types").RunHarnessOrigin;
   /** 固定 Run id；仅 Harness Execution 用来让登记 id 与内嵌 Journal runId 一致，省略时生成随机 UUID。 */
   readonly runId?: string;
+  /** 分配卡冻结的执行配置；仅受限 Execution 提供，受信任 Run 省略（脚本 cli/model 直接生效）。 */
+  readonly executionConfig?: import("../harness/types").ExecutionConfigSnapshot;
 };
 
 /** RunRuntime.run 的可选执行约束。 */
@@ -68,7 +70,7 @@ export class RunRuntime {
     const attempt = { type: "execution-attempt.started" as const, at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, executionAttemptId: 1 };
     await journal.append(attempt);
     state.apply(attempt);
-    return new RunRuntime(journal, state, new RunRuntimeHost(journal, state, options.executor));
+    return new RunRuntime(journal, state, new RunRuntimeHost(journal, state, options.executor, 0, false, false, options.executionConfig ?? null));
   }
 
   /** 打开已有 Run 并从已验证 Journal 事实重建 Phase → Agent 查询视图。 */
@@ -84,7 +86,7 @@ export class RunRuntime {
    * 用户显式 resume 后，从 Workflow 起点重放调用轨迹。Host 以 sequence=0 开始逐项
    * 比对 Journal；只复用连续匹配的 completed 节点。
    */
-  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot()): Promise<RunRuntime> {
+  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot(), executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null): Promise<RunRuntime> {
     const opened = await RunJournal.open(runId, storeRoot);
     if (opened.journal.manifest.runtimeVersion !== RUNTIME_VERSION) throw new Error(`resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${opened.journal.manifest.runtimeVersion} 只能读取。`);
     const state = new RunStateMachine(opened.journal.manifest);
@@ -100,6 +102,7 @@ export class RunRuntime {
       historicalSequence,
       true,
       resumeInterrupted,
+      executionConfig,
     ));
   }
 

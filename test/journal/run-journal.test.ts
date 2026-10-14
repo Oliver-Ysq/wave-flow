@@ -156,6 +156,17 @@ describe("RunJournal", () => {
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("必须是有效 ACP binding");
   });
 
+  test("接受 kimi runtime provenance 的 agent.session 事实并可重开", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "kimi" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, status: "running" });
+    await journal.append({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: "session", diagnostic: null, delivery: "acp", acp: { launcherId: "kimi-acp", sessionId: "kimi-native", capabilities: {}, runtime: { runtimeId: "33333333-3333-4333-8333-333333333333", cli: "kimi", executablePath: "/Users/test/.kimi-code/bin/kimi", version: "kimi 2.1.1", adapterId: "kimi-acp", adapterVersion: "2.1.1", verifiedAt: "2026-10-13T00:00:00.000Z" } } });
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", acp: expect.objectContaining({ launcherId: "kimi-acp", runtime: expect.objectContaining({ cli: "kimi", adapterId: "kimi-acp" }) }) }));
+  });
+
   test("重开时拒绝缺少 ACP 坐标的 agent.recovered 事实", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));

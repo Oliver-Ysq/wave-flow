@@ -1,5 +1,5 @@
-/** 当前一期支持的用户本机 Coding CLI。 */
-export type RuntimeCli = "codex";
+/** 当前支持的用户本机 Coding CLI；新 CLI 只在其 ACP Adapter、测试与能力验证完成后加入。 */
+export type RuntimeCli = "codex" | "kimi";
 
 /** 发现候选时的来源；仅用于用户展示与审计，不保存 PATH 或 shell 环境。 */
 export type RuntimeDiscoverySource = "shell-path" | "gui-path" | "manual";
@@ -21,8 +21,8 @@ export type ExecutableIdentity = {
 
 /** 内置 ACP adapter 的验证来源。 */
 export type VerifiedAdapter = {
-  /** 固定 adapter 标识；一期只允许 codex-acp。 */
-  readonly adapterId: "codex-acp";
+  /** 固定 adapter 标识；只允许 Adapter Catalog 中已声明的内置 adapter。 */
+  readonly adapterId: "codex-acp" | "kimi-acp";
   /** lockfile 中 adapter 版本。 */
   readonly adapterVersion: string;
   /** 握手确认的 ACP 协议版本。 */
@@ -41,7 +41,7 @@ export type CliRuntimeRecord = {
   readonly executablePath: string;
   /** 写入时冻结的文件身份。 */
   readonly executableIdentity: ExecutableIdentity;
-  /** Codex JavaScript 入口使用的 node；旧记录可缺失，首次启动时受控补解析。 */
+  /** Codex JavaScript 入口使用的 node；仅 requiresNodeRuntime 的 adapter 必须存在；旧记录可缺失，首次启动时受控补解析。 */
   readonly nodeExecutable?: { readonly path: string; readonly identity: ExecutableIdentity };
   /** 固定 argv `--version` 返回的规范化版本摘要。 */
   readonly version: string;
@@ -63,14 +63,23 @@ export type CliRuntimeRecord = {
 export type CliRuntimeRegistryFile = {
   /** 当前文件格式版本。 */
   readonly version: 1;
-  /** 每个 CLI 当前用户明确选择的 runtime id。 */
+  /** 每个 CLI 当前用户明确选择的 runtime id；作为各 CLI 的 Worker 偏好，主控解析不读它。 */
   readonly selectedByCli: Partial<Record<RuntimeCli, string>>;
+  /**
+   * 新建主控会话使用的 runtime id；与 Worker 池正交。
+   * 旧文件缺省时读取回填为 `selectedByCli["codex"]`（语义不变的用户原默认）；必须引用存在的记录。
+   */
+  readonly harnessRuntimeId?: string;
   /** 所有经验证或待重验的 runtime 记录。 */
   readonly runtimes: readonly CliRuntimeRecord[];
 };
 
 /** 通过启动前身份复核、可安全注入 Worker 的运行时。 */
-export type VerifiedCliRuntime = Omit<CliRuntimeRecord, "nodeExecutable" | "status"> & { readonly status: "verified"; readonly nodeExecutable: { readonly path: string; readonly identity: ExecutableIdentity } };
+export type VerifiedCliRuntime = Omit<CliRuntimeRecord, "nodeExecutable" | "status"> & {
+  readonly status: "verified";
+  /** 仅 requiresNodeRuntime 的 adapter（当前为 codex-acp）保证存在；kimi 等自包含 CLI 不写该字段。 */
+  readonly nodeExecutable?: { readonly path: string; readonly identity: ExecutableIdentity };
+};
 
 /** 写入 Journal 的安全 runtime 来源；不含 device/inode、PATH 或环境变量。 */
 export type RuntimeProvenance = {
@@ -83,7 +92,7 @@ export type RuntimeProvenance = {
   /** 经验证的版本摘要。 */
   readonly version: string;
   /** adapter id。 */
-  readonly adapterId: "codex-acp";
+  readonly adapterId: "codex-acp" | "kimi-acp";
   /** adapter 锁定版本。 */
   readonly adapterVersion: string;
   /** 最后完整验证时间。 */
@@ -95,6 +104,8 @@ export type CliRuntimeView = Omit<CliRuntimeRecord, "executableIdentity" | "node
 
 /** 发现到的未确认候选。 */
 export type DiscoveredCliCandidate = {
+  /** 按可执行文件名判定的 CLI 种类；realpath 后保持不变。 */
+  readonly cli: RuntimeCli;
   /** canonical realpath；重复 PATH 入口已经合并。 */
   readonly executablePath: string;
   /** 候选来源。 */

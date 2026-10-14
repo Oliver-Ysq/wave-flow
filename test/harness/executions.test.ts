@@ -25,6 +25,12 @@ async function fixture(): Promise<{ harness: HarnessService; executions: Harness
   return { harness, executions, harnessRunId: created.harnessRunId, root };
 }
 
+/** 测试冻结配置；服务层不核对 runtimeId 真实性（那是 Engine action 的职责）。 */
+function testConfig(): import("../../src/harness/types").ExecutionConfigSnapshot {
+  const assignment = (agentId: string): import("../../src/harness/types").WorkerAssignment => ({ agentId, cli: "codex", model: "cli-default", source: "harness-cli", runtimeId: "test-runtime", adapterId: "codex-acp", adapterVersion: "0.0.0-test" });
+  return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: "test-runtime", ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("w1"), assignment("w2")] };
+}
+
 const SIMPLE_SOURCE = `const meta = { name: "exec-simple", description: "简单执行", phases: [{ title: "工作" }] };
 async function run(args) {
   phase("工作");
@@ -53,7 +59,7 @@ describe("HarnessExecutionService", () => {
   test("草稿与未接受 revision 永远不能创建 Execution", async () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
-    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("草稿永远不能执行");
+    await expect(executions.createExecution(harnessRunId, 1, {}, testConfig())).rejects.toThrow("草稿永远不能执行");
     await expect(executions.createExecution(harnessRunId, 99)).rejects.toThrow("revision 不存在");
     expect(await executions.listExecutions(harnessRunId)).toEqual([]);
   });
@@ -62,15 +68,36 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId } = await fixture();
     await expect(harness.proposeWorkflowRevision(harnessRunId, `const meta = { name: "bad", description: "坏脚本", phases: [{ title: "工作" }] };\nasync function run(args) { return process.cwd(); }`)).rejects.toThrow("未注入的标识符：process");
     expect((await harness.snapshot(harnessRunId)).workflowRevisions).toEqual([]);
-    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("revision 不存在");
+    await expect(executions.createExecution(harnessRunId, 1, {}, testConfig())).rejects.toThrow("revision 不存在");
     expect(await executions.listExecutions(harnessRunId)).toEqual([]);
+  });
+
+  test("无配置快照的 Harness Execution 拒绝创建", async () => {
+    const { harness, executions, harnessRunId } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("执行配置快照");
+    expect(await executions.listExecutions(harnessRunId)).toEqual([]);
+  });
+
+  test("配置快照随登记耐久并在生效请求中改写 cli 与 assignedRuntimeId", async () => {
+    const { harness, executions, harnessRunId, root } = await fixture();
+    await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+    await harness.acceptWorkflowRevision(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
+    await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+    const reopened = await HarnessJournal.open(harnessRunId, root);
+    expect(reopened.snapshot.executions[0].config).toMatchObject({ version: 1, fallbackRuntimeId: "test-runtime", ruleDegraded: false });
+    // Journal 记录的是生效请求：脚本字面量 cli 被快照指派覆盖，assignedRuntimeId 进入指纹。
+    const detail = await executions.snapshotExecution(harnessRunId, execution.executionId);
+    expect(detail.phases[0].agents[0].request).toMatchObject({ id: "w1", cli: "codex", assignedRuntimeId: "test-runtime" });
   });
 
   test("接受冻结后创建 Execution，完成后登记终态与摘要", async () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution, snapshot } = await executions.createExecution(harnessRunId, 1, { note: "来自用户" });
+    const { execution, snapshot } = await executions.createExecution(harnessRunId, 1, { note: "来自用户" }, testConfig());
     expect(execution).toMatchObject({ revision: 1, status: "running", finishedAt: null });
     expect(snapshot.workflow.name).toBe("exec-simple");
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
@@ -85,16 +112,16 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     // 第一个 Execution 停在决策门上，未达终态。
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
-    await expect(executions.createExecution(harnessRunId, 1)).rejects.toThrow("未结束");
+    await expect(executions.createExecution(harnessRunId, 1, {}, testConfig())).rejects.toThrow("未结束");
     await executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
     // 终态后新 revision 可以创建下一个 Execution。
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 2);
-    const second = await executions.createExecution(harnessRunId, 2);
+    const second = await executions.createExecution(harnessRunId, 2, {}, testConfig());
     expect(second.execution.revision).toBe(2);
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[1]?.status === "completed");
     expect((await executions.listExecutions(harnessRunId)).map((item) => item.status)).toEqual(["completed", "completed"]);
@@ -105,8 +132,8 @@ describe("HarnessExecutionService", () => {
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
     const results = await Promise.allSettled([
-      executions.createExecution(harnessRunId, 1),
-      executions.createExecution(harnessRunId, 1),
+      executions.createExecution(harnessRunId, 1, {}, testConfig()),
+      executions.createExecution(harnessRunId, 1, {}, testConfig()),
     ]);
     expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((item) => item.status === "rejected")).toHaveLength(1);
@@ -118,7 +145,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
     const stopped = await executions.stop(harnessRunId, execution.executionId);
     expect(stopped.status).toBe("cancelled");
@@ -130,7 +157,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
     // 退出路径与后台 settle 会同时尝试登记终态；第二条 execution_finished
     // 会让 Journal 重放永久失败，因此必须幂等。
@@ -148,7 +175,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
     await harness.recordExecutionFinished(harnessRunId, execution.executionId, "cancelled", "迟到的重复登记。 ", null);
     const reopened = await HarnessJournal.open(harnessRunId, root);
@@ -162,7 +189,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
     await executions.cancelForDesktopExit("exit-engine");
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
@@ -179,7 +206,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
     await executions.stop(harnessRunId, execution.executionId);
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "cancelled");
@@ -193,7 +220,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
     // 模拟 Engine 重启：全新服务实例，没有任何内存 Runtime。
@@ -222,7 +249,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
     const restartedHarness = new HarnessService(root, async () => model, createPi);
@@ -243,7 +270,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
     let resumedNodes = 0;
@@ -264,11 +291,11 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const first = await executions.createExecution(harnessRunId, 1);
+    const first = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 2);
-    const second = await executions.createExecution(harnessRunId, 2);
+    const second = await executions.createExecution(harnessRunId, 2, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, second.execution.executionId)).gates.length === 1);
     await Bun.write(join(root, harnessRunId, "executions", first.execution.executionId, "manifest.json"), "{}\n");
 
@@ -285,7 +312,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
     // 模拟旧版本只写顶层 run.status，却漏掉旧 ACP 节点收敛的历史档案。
@@ -309,7 +336,7 @@ describe("HarnessExecutionService", () => {
     const { harness, executions, harnessRunId, root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
     const manifest = JSON.parse(await Bun.file(join(root, harnessRunId, "executions", execution.executionId, "manifest.json")).text()) as { harness?: { harnessRunId: string; revision: number; sourceHash: string } };
     expect(manifest.harness).toMatchObject({ harnessRunId, revision: 1, sourceHash: execution.sourceHash });
@@ -340,7 +367,7 @@ describe("HarnessExecutionService", () => {
     }), { wireControl: (runtime) => { runtimeRef = runtime; control = runtime.createControlServer(); } }, root);
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1);
+    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).phases[0]?.agents[0]?.status === "blocked");
 
     // 模拟旧版本缺陷留下的损坏档案：只写 Run 终态，漏掉 blocked 节点的收敛。

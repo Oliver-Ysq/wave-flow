@@ -1,6 +1,6 @@
 import { delimiter } from "node:path";
 import { verifyExecutable } from "./identity";
-import type { DiscoveredCliCandidate } from "./types";
+import type { DiscoveredCliCandidate, RuntimeCli } from "./types";
 
 /** 受控 shell discovery 的可替换执行器；测试无需启动真实 login shell。 */
 export type ShellPathCommand = (shell: string, signal: AbortSignal) => Promise<{ readonly stdout: string; readonly stderr: string; readonly exitCode: number }>;
@@ -11,7 +11,7 @@ export class ShellPathDiscovery {
 
   async discover(): Promise<readonly DiscoveredCliCandidate[]> {
     if (process.platform === "win32") throw new Error("当前版本仅支持 macOS/Linux 的本机 CLI 扫描。 ");
-    const discovered: Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null }> = [];
+    const discovered: Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }> = [];
     const shells = await candidateShells();
     for (const shell of shells) {
       try {
@@ -67,19 +67,22 @@ export function extractPath(output: string): string | null {
   return null;
 }
 
-function candidatePaths(pathValue: string, source: "shell-path" | "gui-path", shell: string | null): Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null }> {
-  return pathValue.split(delimiter).filter(Boolean).map(directory => `${directory.replace(/\/$/, "")}/codex`).filter(path => path.startsWith("/" )).map(path => ({ path, source, shell }));
+function candidatePaths(pathValue: string, source: "shell-path" | "gui-path", shell: string | null): Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }> {
+  return pathValue.split(delimiter).filter(Boolean).flatMap(directory => (["codex", "kimi"] as const).map(cli => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source, shell, cli }))).filter(item => item.path.startsWith("/"));
 }
 
-async function mergeCandidates(items: readonly { path: string; source: "shell-path" | "gui-path"; shell: string | null }[]): Promise<readonly DiscoveredCliCandidate[]> {
+async function mergeCandidates(items: readonly { path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }[]): Promise<readonly DiscoveredCliCandidate[]> {
   const result = new Map<string, DiscoveredCliCandidate>();
   for (const item of items) {
     try {
       const verified = await verifyExecutable(item.path); const canonical = verified.executablePath;
-      const existing = result.get(canonical);
+      // realpath 目标可能不再以 codex/kimi 结尾；以 canonical basename 优先判定种类。
+      const name = canonical.slice(canonical.lastIndexOf("/") + 1);
+      const cli: RuntimeCli = name === "codex" || name === "kimi" ? name : item.cli;
+      const key = `${cli}\0${canonical}`;
+      const existing = result.get(key);
       const aliases = [...new Set([...(existing?.aliases ?? []), item.path])];
-      result.set(canonical, existing ?? { executablePath: canonical, discoveredFrom: item.source, discoveredShell: item.shell, aliases });
-      if (existing) result.set(canonical, { ...existing, aliases });
+      result.set(key, existing ? { ...existing, aliases } : { cli, executablePath: canonical, discoveredFrom: item.source, discoveredShell: item.shell, aliases });
     } catch { /* PATH entries are only candidates; absence/non-executable is normal. */ }
   }
   return [...result.values()];

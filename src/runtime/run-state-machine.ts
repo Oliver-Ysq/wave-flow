@@ -16,6 +16,8 @@ export class RunStateMachine {
   #logicalSequences = new Map<string, number>();
   #recordedSessions = new Set<string>();
   #acpBindings = new Map<string, { readonly launcherId: string; readonly sessionId: string; }>();
+  /** 节点当前 attempt 已耐久的会话 provenance；replay 复用前据此与分配快照复核。 */
+  #sessionRuntimes = new Map<string, import("../runtimes/types").RuntimeProvenance | null>();
   #blockSchemas = new Map<string, JsonSchema | undefined>();
   #currentExecutionAttemptId = 0;
   #phaseVisits = new Map<string, PhaseVisitSnapshot>();
@@ -182,6 +184,18 @@ export class RunStateMachine {
     return value;
   }
 
+  /** 节点当前 attempt 已耐久的 agent.session runtime provenance；无记录或旧档案缺省时为 null。 */
+  nodeSessionRuntime(nodeId: string): import("../runtimes/types").RuntimeProvenance | null {
+    return this.#sessionRuntimes.get(nodeId) ?? null;
+  }
+
+  /** 节点当前 attempt 是否已耐久 agent.session；执行器只在 false 时允许启动前回退。 */
+  hasNodeSession(nodeId: string, agentSessionId: string | null): boolean {
+    if (!this.#recordedSessions.has(nodeId)) return false;
+    const agent = this.#agents.get(nodeId);
+    return !!agent && agent.agentSessionId !== null && agent.agentSessionId === agentSessionId;
+  }
+
   /**
    * 是否有当前仍在运行或等待人工协助的节点完成真实会话事实耐久记录。
    * 已 completed 节点的旧 session 不能让 resume 在新 attempt 尚未投递时提前返回。
@@ -252,6 +266,7 @@ export class RunStateMachine {
     // 新会话自己的 session 事实，不能因旧记录提前返回。
     this.#recordedSessions.delete(event.nodeId);
     this.#acpBindings.delete(event.nodeId);
+    this.#sessionRuntimes.delete(event.nodeId);
     const executionAttemptId = event.executionAttemptId ?? agent.executionAttemptId;
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
@@ -266,6 +281,7 @@ export class RunStateMachine {
     if (this.#recordedSessions.has(event.nodeId)) throw new Error("同一 Agent 节点只能记录一次 agent.session。");
     this.#recordedSessions.add(event.nodeId);
     this.#acpBindings.set(event.nodeId, { launcherId: event.acp.launcherId, sessionId: event.acp.sessionId });
+    this.#sessionRuntimes.set(event.nodeId, event.acp.runtime ?? null);
   }
 
   #applyAgentRecovered(event: Extract<JournalEvent, { type: "agent.recovered" }>): void {

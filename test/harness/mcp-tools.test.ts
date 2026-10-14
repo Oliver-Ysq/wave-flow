@@ -11,7 +11,15 @@ test("Harness MCP 只暴露只读工具与四个窄 action，越权工具明确�
   const root = await mkdtemp(join(tmpdir(), "wave-flow-harness-mcp-")); roots.push(root); await writeFile(join(root, "package.json"), "{}\n");
   const service = new HarnessService(join(root, "harness"), async () => new DeterministicHarnessSession());
   const created = await service.create(root);
-  const listed = await service.mcpTools(created.harnessRunId, { operation: "list", value: {} }) as { tools: Array<{ name: string }> };
+  const listed = await service.mcpTools(created.harnessRunId, { operation: "list", value: {} }) as { tools: Array<{ name: string; inputSchema: Record<string, any> }> };
+  // Kimi/Moonshot 在模型请求前校验每个属性，enum 不能替代显式 type。
+  const checkTypes = (schema: Record<string, any>): void => {
+    expect(typeof schema.type).toBe("string");
+    for (const property of Object.values(schema.properties ?? {})) checkTypes(property as Record<string, any>);
+    if (schema.items) checkTypes(schema.items);
+  };
+  for (const tool of listed.tools) checkTypes(tool.inputSchema);
+  expect(listed.tools.find(item => item.name === "query_project")?.inputSchema.properties.command).toEqual({ type: "string", enum: ["pwd", "git", "rg", "ls"] });
   expect(listed.tools.map(item => item.name)).toEqual(["read_project_file", "query_project", "propose_workflow_revision", "inspect_execution", "read_run_capsule", "request_user_decision"]);
   expect(listed.tools.map(item => item.name)).not.toEqual(expect.arrayContaining(["complete", "create_worker", "write_file"]));
   await expect(service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "complete", arguments: {} } })).rejects.toThrow("未获授权");

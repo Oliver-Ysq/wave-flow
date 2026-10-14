@@ -1,7 +1,7 @@
 import type { JsonObject } from "../shared/json";
 import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord } from "../harness/types";
 import type { HarnessProject } from "../harness/projects";
-import type { CliRuntimeView, DiscoveredCliCandidate } from "../runtimes/types";
+import type { CliRuntimeView, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
 
 /** 创建 Run 的 Desktop action 参数；Workflow 路径相对于 cwd 解析。 */
@@ -145,6 +145,44 @@ export type CreateExecutionRequest = {
   readonly revision: number;
   /** 传给受限脚本 run(args) 的 JSON-safe 输入；省略时为 {}。 */
   readonly input?: JsonObject;
+  /** 分配卡冻结的执行配置快照；Harness Execution 必填，缺失即拒绝创建。 */
+  readonly config?: import("../harness/types").ExecutionConfigSnapshot;
+};
+
+/** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
+export type ExecutionPlanResponse = {
+  /** 所属 Harness Run id。 */
+  readonly harnessRunId: string;
+  /** 已接受冻结的 revision 序号。 */
+  readonly revision: number;
+  /** 静态枚举出的字面量 Worker；分配卡逐 Worker 展示。 */
+  readonly workers: readonly import("../workflow/restricted/extract-agents").ExtractedAgentWorker[];
+  /** 非字面量 id 的 agent() 调用数；它们运行时落 default 分配。 */
+  readonly dynamicCount: number;
+  /** 已验证即候选的 Worker Runtime 池；不含文件身份。 */
+  readonly pool: readonly import("../runtimes/types").CliRuntimeView[];
+  /** 每个 CLI 的用户偏好 runtime id；Engine 解析 cli → Runtime 时优先使用。 */
+  readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>;
+  /** 主控 Runtime（回退目标）；未设置时为 null，UI 必须阻止创建。 */
+  readonly harnessRuntime: import("../runtimes/types").CliRuntimeView | null;
+};
+
+/** executions.randomize 的响应；每次调用重新生成，仅首次进入或显式重新随机时调用。 */
+export type ExecutionRandomizeResponse = {
+  /** 随机轮换生成的逐 Worker 指派与兜底分配。 */
+  readonly assignments: readonly import("../harness/types").WorkerAssignment[];
+  /** 兜底分配（动态 id Worker 使用）。 */
+  readonly defaultAssignment: import("../harness/types").WorkerAssignment;
+};
+
+/** executions.parseRule 的响应；degraded 为 true 时 UI 必须显式展示已退化为随机分配。 */
+export type ExecutionParseRuleResponse = {
+  /** 规则是否解析失败并退化；true 时 assignments 为 null。 */
+  readonly degraded: boolean;
+  /** 退化原因的安全摘要；未退化为 null。 */
+  readonly diagnostic: string | null;
+  /** 解析成功的逐 Worker 指派（仅规则覆盖的条目）；degraded 时为 null。 */
+  readonly assignments: readonly import("../harness/types").WorkerAssignment[] | null;
 };
 
 /** Execution 创建、控制或答题后的权威响应。 */
@@ -176,7 +214,14 @@ export type AnswerDecisionRequest = {
 };
 
 /** 当前用户的本机 CLI Runtime 与默认选择；不含 inode、PATH 或环境变量。 */
-export type CliRuntimeListResponse = { readonly selectedByCli: Readonly<Partial<Record<"codex", string>>>; readonly runtimes: readonly CliRuntimeView[] };
+export type CliRuntimeListResponse = {
+  /** 每个 CLI 的 Worker 偏好 runtime id。 */
+  readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>;
+  /** 新建主控会话使用的 runtime id；未设置时为 null。 */
+  readonly harnessRuntimeId: string | null;
+  /** 设置页可展示的 runtime 列表。 */
+  readonly runtimes: readonly CliRuntimeView[];
+};
 /** 用户明确扫描 PATH 后返回的候选；候选尚未经过 ACP 验证。 */
 export type DiscoverCliRuntimesResponse = { readonly candidates: readonly DiscoveredCliCandidate[] };
 /** 一次启动扫描的汇总；成功候选已完成完整 ACP 验证并写入 Registry，但绝不改变默认项。 */
@@ -188,7 +233,14 @@ export type ScanCliRuntimesResponse = {
   /** 当前安全可展示的 Runtime 列表；不含 PATH、环境或文件身份。 */
   readonly runtimes: CliRuntimeListResponse;
 };
-/** 验证发现候选或手动绝对路径；成功不会自动成为默认。 */
-export type ValidateCliRuntimeRequest = { readonly executablePath: string; readonly discoveredFrom?: "shell-path" | "gui-path" | "manual"; readonly discoveredShell?: string | null };
+/** 验证发现候选或手动绝对路径；成功不会自动成为默认项。 */
+export type ValidateCliRuntimeRequest = {
+  /** 用户明确给出的 CLI 绝对路径；Engine 会 realpath 并复核身份。 */
+  readonly executablePath: string;
+  /** 该路径声称的 CLI 种类；决定使用哪个内置 validator，不允许猜测。 */
+  readonly cli: RuntimeCli;
+  readonly discoveredFrom?: "shell-path" | "gui-path" | "manual";
+  readonly discoveredShell?: string | null;
+};
 /** 设置默认 Runtime 的响应。 */
 export type SelectCliRuntimeResponse = { readonly runtime: CliRuntimeView };

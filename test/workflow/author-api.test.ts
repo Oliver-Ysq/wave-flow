@@ -58,6 +58,14 @@ describe("Workflow 作者 API", () => {
     }]);
   });
 
+  test("接受 cli: kimi，拒绝未知 cli", async () => {
+    const host = new MemoryHost();
+    const result = await executeWorkflow(workflow(async () => agent("Review", { id: "kimi-node", cli: "kimi" })), undefined, host);
+    expect(result).toEqual({ id: "kimi-node" });
+    expect(host.agents).toEqual([expect.objectContaining({ id: "kimi-node", cli: "kimi" })]);
+    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unknown-cli", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex 或 kimi");
+  });
+
   test("拒绝非法 Agent 选项、重复 id 与未声明阶段", async () => {
     const host = new MemoryHost();
     await expect(executeWorkflow(workflow(async () => agent("", { id: "bad", cli: "codex" })), undefined, host)).rejects.toThrow("非空字符串");
@@ -70,6 +78,47 @@ describe("Workflow 作者 API", () => {
     await expect(executeWorkflow(workflow(async () => agent("schema", {
       id: "invalid-schema", cli: "codex", schema: { invalid: undefined } as unknown as Record<string, never>,
     })), undefined, host)).rejects.toThrow("schema 必须是 JSON-safe 对象");
+  });
+
+  test("agent() 在委派宿主前静态拒绝自相矛盾的 schema，合法 schema 不受影响", async () => {
+    // 每类矛盾都必须在任何 Journal 事实或 Worker 会话（这里以宿主调用为代表）之前抛出。
+    const cases: Array<{ readonly schema: JsonObject; readonly message: string }> = [
+      { schema: { type: "text" }, message: ".type 必须是" },
+      { schema: { type: ["string", "null"] as unknown as string }, message: ".type 必须是" },
+      { schema: { enum: [] }, message: ".enum 必须是非空数组" },
+      { schema: { enum: "a" as unknown as [] }, message: ".enum 必须是非空数组" },
+      { schema: { properties: [] as unknown as JsonObject }, message: ".properties 必须是 schema 对象的字典" },
+      { schema: { properties: { name: "string" as unknown as JsonObject } }, message: ".properties.name 必须是 schema 对象" },
+      { schema: { type: "object", properties: { name: { type: "string" } }, additionalProperties: false, required: ["name", "missing"] as never }, message: "未在 properties 声明的键：missing" },
+      { schema: { items: "string" as unknown as JsonObject }, message: ".items 必须是 schema 对象" },
+      // 嵌套子 schema 的矛盾同样拒绝
+      { schema: { type: "object", properties: { nested: { type: "object", properties: { leaf: { type: "text" } } } } }, message: ".type 必须是" },
+      { schema: { type: "array", items: { type: "object", additionalProperties: false, required: ["ghost"] as never } }, message: "未在 properties 声明的键：ghost" },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const host = new MemoryHost();
+      await expect(executeWorkflow(workflow(async () => agent("work", { id: `bad-schema-${index}`, cli: "codex", schema: item.schema })), undefined, host)).rejects.toThrow(item.message);
+      expect(host.agents).toEqual([]);
+    }
+    const host = new MemoryHost();
+    const legal: JsonObject = {
+      type: "object",
+      properties: {
+        name: { type: "string", enum: ["a", "b"] },
+        count: { type: "integer" },
+        tags: { type: "array", items: { type: "string" } },
+        maybe: { type: "null" },
+      },
+      additionalProperties: false,
+      required: ["name"] as never,
+    };
+    await executeWorkflow(workflow(async () => agent("work", { id: "legal-schema", cli: "codex", schema: legal })), undefined, host);
+    expect(host.agents).toEqual([expect.objectContaining({ id: "legal-schema", schema: legal })]);
+    // 预检是纯函数：同一 schema 重复执行（等价于 Replay 重新求值）结果一致。
+    const replay = new MemoryHost();
+    await executeWorkflow(workflow(async () => agent("work", { id: "legal-schema", cli: "codex", schema: legal })), undefined, replay);
+    expect(replay.agents).toEqual([expect.objectContaining({ id: "legal-schema", schema: legal })]);
+    await expect(executeWorkflow(workflow(async () => agent("work", { id: "legal-schema", cli: "codex", schema: cases[6]!.schema })), undefined, new MemoryHost())).rejects.toThrow(cases[6]!.message);
   });
 
   test("隔离并发 Workflow Run 的当前阶段与宿主", async () => {

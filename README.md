@@ -12,7 +12,7 @@
 ## 当前可用能力
 
 - 使用 TypeScript 编排可复用的动态工作流；Agent 节点由 Workflow 在运行时的实际调用推进。
-- 默认通过独立、长期存活的 Codex ACP Worker session 执行 Agent 节点。
+- 默认通过独立、长期存活的本机 CLI ACP Worker session（Codex 或 Kimi）执行 Agent 节点。
 - 通过 `wave-flow run` 创建 Run，安全投递首条任务后返回 Run ID，并在当前终端订阅状态变化。
 - 通过 `wave-flow inspect <run-id>` 再次读取 Run 状态。
 - Agent 通过 `wave-flow complete` 上报经校验的结构化完成结果；可通过 `block / answer / continue` 请求并处理人工协助；ACP 流与自然结束不是完成依据。
@@ -25,14 +25,14 @@
 
 ## 当前边界
 
-- 当前仅支持 `agent(..., { cli: "codex" })`。
+- `agent()` 的 `cli` 支持 `"codex"` 与 `"kimi"`；对应 CLI 必须已在桌面“执行底座”中完成验证（已验证即 Worker 候选）。
 - 当前面向本机单用户；daemon 仅在本机运行。
 - TraeX 与 Retry 尚未实现。
-- 默认 ACP Worker 使用用户在桌面“执行底座”中明确验证并设为默认的本机 Codex CLI；不随包或静默 fallback 到固定 Codex。ACP 流、turn 结束和终端文字均不作为完成依据，仍只信任 `wave-flow complete` 的 Schema 与 Journal 证据。
+- 默认 ACP Worker 使用用户在桌面“执行底座”中明确验证的本机 CLI（Codex 或 Kimi）；不随包或静默 fallback 到固定 CLI。ACP 流、turn 结束和终端文字均不作为完成依据，仍只信任 `wave-flow complete` 的 Schema 与 Journal 证据。
 
 ## 快速开始
 
-CLI 开发要求：已安装 [Bun](https://bun.sh/) 与 Codex CLI。
+CLI 开发要求：已安装 [Bun](https://bun.sh/)，以及 Codex CLI 或 Kimi CLI（至少其一）。
 
 桌面端使用者无需手动启动 daemon 或运行 `wave-flow start`。当前可在 macOS Apple Silicon 开发环境构建应用：
 
@@ -136,7 +136,7 @@ wave-flow continue --block-request-id <block-request-id> \
 
 暂停依赖当前 daemon 保留的 Workflow 调用栈；如果 daemon 在 `pausing`、`paused` 或 `recovering` 时重启，Wave Flow 会将该 Run 如实标记为 `interrupted`，不会伪造 recover。之后可由用户使用 `resume` 创建新的受控 attempt。
 
-默认 ACP Worker 使用内置 `codex-acp` adapter 加用户明确选择、已验证的本机 Codex runtime；Worker 具有 Workflow 指派的完整读写权限。没有默认 runtime、CLI 文件身份变化或版本重新验证前，Wave Flow 会在创建真实 Worker 前 fail closed，不会回退到随包 Codex。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`。
+默认 ACP Worker 使用内置 adapter（`codex-acp` 或 `kimi-acp`）加用户明确验证的本机 runtime（已验证即 Worker 候选）；Worker 具有 Workflow 指派的完整读写权限。没有已验证 runtime、CLI 文件身份变化或版本重新验证前，Wave Flow 会在创建真实 Worker 前 fail closed，不会回退到随包 CLI。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`。
 
 `resume` 是单独的用户授权操作。它严格核对 Workflow 源码 hash、输入、项目目录和每次 `agent()` 调用的节点 id、顺序、cwd、CLI、sandbox、model、schema、input 与 prompt。连续匹配的 completed 节点直接返回 Journal 结果；第一个 interrupted 或不匹配节点创建新 attempt，之后的节点不再复用旧结果。
 

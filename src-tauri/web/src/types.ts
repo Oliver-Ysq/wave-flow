@@ -6,8 +6,8 @@ export type AgentSnapshot = {
   id: string;
   /** 面向界面展示的节点名称。 */
   label: string;
-  /** 实际承载该节点的 Agent CLI。 */
-  cli: "codex";
+  /** 实际承载该节点的 Agent CLI（生效值；受限 Execution 由分配快照决定）。 */
+  cli: "codex" | "kimi";
   /** 节点当前权威状态。 */
   status: AgentStatus;
   /** Agent 实际工作目录。 */
@@ -18,6 +18,8 @@ export type AgentSnapshot = {
   diagnostic: string | null;
   /** 当前人工协助请求；非 blocked 节点为 null。 */
   block: { blockRequestId: string; needHelp: string; answered: boolean } | null;
+  /** 生效请求摘要；assignedRuntimeId 仅在受限 Execution 中由分配快照注入。 */
+  request?: { assignedRuntimeId?: string; model?: string };
 };
 
 export type RunSnapshot = {
@@ -93,7 +95,18 @@ export type HarnessMessage = { id: string; role: "user" | "assistant"; text: str
 export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null };
 /** Harness 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
-export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null };
+export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
+
+/** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
+export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
+/** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
+export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[] };
+/** executions.plan 的分配卡数据。 */
+export type ExecutionPlanResponse = { harnessRunId: string; revision: number; workers: Array<{ id: string; cli: "codex" | "kimi" | null; label: string | null }>; dynamicCount: number; pool: CliRuntime[]; selectedByCli: Partial<Record<"codex" | "kimi", string>>; harnessRuntime: CliRuntime | null };
+/** executions.randomize 的随机指派结果。 */
+export type ExecutionRandomizeResponse = { assignments: WorkerAssignment[]; defaultAssignment: WorkerAssignment };
+/** executions.parseRule 的规则解析结果；degraded 时必须显式展示已退化。 */
+export type ExecutionParseRuleResponse = { degraded: boolean; diagnostic: string | null; assignments: WorkerAssignment[] | null };
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
@@ -101,11 +114,11 @@ export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; 
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
-export type CliRuntime = { runtimeId: string; cli: "codex"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp"; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
-export type CliRuntimeListResponse = { selectedByCli: Partial<Record<"codex", string>>; runtimes: CliRuntime[] };
+export type CliRuntime = { runtimeId: string; cli: "codex" | "kimi"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
+export type CliRuntimeListResponse = { selectedByCli: Partial<Record<"codex" | "kimi", string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
 /** 启动自动扫描的无敏感信息摘要；成功项已保存但尚未被设为默认。 */
 export type ScanCliRuntimesResponse = { discovered: number; verified: number; runtimes: CliRuntimeListResponse };
-export type DiscoveredCliCandidate = { executablePath: string; discoveredFrom: "shell-path" | "gui-path"; discoveredShell: string | null; aliases: string[] };
+export type DiscoveredCliCandidate = { cli: "codex" | "kimi"; executablePath: string; discoveredFrom: "shell-path" | "gui-path"; discoveredShell: string | null; aliases: string[] };
 /** 侧边栏耐久项目；项目提供 cwd，会话不再自行选择路径。 */
 export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
 export type HarnessProjectResponse = { project: HarnessProject };

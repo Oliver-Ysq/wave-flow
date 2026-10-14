@@ -12,6 +12,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
+import { ExecutionAssignmentFlow } from "./assignment-flow";
 import type {
   AgentSnapshot,
   CliRuntime,
@@ -80,6 +81,10 @@ export function App() {
   );
   const [executionDetail, setExecutionDetail] =
     useState<ExecutionResponse | null>(null);
+  /** 分配卡当前服务的已接受 revision；非 null 时展示两卡横滑流程。 */
+  const [assignmentRevision, setAssignmentRevision] = useState<number | null>(
+    null,
+  );
   const [theme, setTheme] = useState<ColorTheme>(readColorTheme);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
   const [harnessView, setHarnessView] = useState<"active" | "completed">("active");
@@ -282,6 +287,7 @@ export function App() {
     setHarness(null);
     setHarnessText("");
     setWorkflowPanelOpen(false);
+    setAssignmentRevision(null);
     setError(null);
   }
   async function sendHarness() {
@@ -350,19 +356,17 @@ export function App() {
   }, [harness?.harnessRunId, selectedExecutionId]);
   async function createExecution(revision: number) {
     if (!harness) return;
-    setBusy(`create-execution:${revision}`);
-    try {
-      const detail = await api.createExecution(harness.harnessRunId, revision);
-      setExecutionDetail(detail);
-      setSelectedExecutionId(detail.execution.executionId);
-      setWorkflowPanelOpen(true);
-      setHarness((await api.harness(harness.harnessRunId)).harness);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
+    // 创建 Execution 必须经过分配卡：脚本字面量 cli/model 在受限 Execution 中不直接生效。
+    setAssignmentRevision(revision);
+  }
+  async function finishAssignment(detail: ExecutionResponse) {
+    if (!harness) return;
+    setAssignmentRevision(null);
+    setExecutionDetail(detail);
+    setSelectedExecutionId(detail.execution.executionId);
+    setWorkflowPanelOpen(true);
+    setHarness((await api.harness(harness.harnessRunId)).harness);
+    setError(null);
   }
   async function controlExecution(
     action: "pause" | "recover" | "stop" | "resume",
@@ -483,6 +487,7 @@ export function App() {
                 setSelectedProjectId(project.projectId);
                 setHarness(item);
                 setDraftProjectId(null);
+                setAssignmentRevision(null);
               }}
             />
           ))}
@@ -551,6 +556,9 @@ export function App() {
               }
             }}
             onCreateExecution={(revision) => void createExecution(revision)}
+            assignmentRevision={assignmentRevision}
+            onAssignmentCancel={() => setAssignmentRevision(null)}
+            onAssignmentCreated={(detail) => void finishAssignment(detail)}
             onSelectExecution={(executionId) =>
               void selectExecution(executionId)
             }
@@ -713,7 +721,7 @@ export function App() {
           onCreate={() => void createProject()}
         />
       )}
-      {settingsOpen && runtimeState?.selectedByCli.codex && (
+      {settingsOpen && runtimeState?.harnessRuntimeId && (
         <RuntimeConnectionPanel
           runtimeState={runtimeState}
           scanning={runtimeScanning}
@@ -722,7 +730,7 @@ export function App() {
           onError={setError}
         />
       )}
-      {runtimeState && !runtimeState.selectedByCli.codex && (
+      {runtimeState && !runtimeState.harnessRuntimeId && (
         <RuntimeConnectionPanel
           gateMode
           runtimeState={runtimeState}
@@ -848,13 +856,17 @@ function RuntimeConnectionPanel({
   onError: (value: string) => void;
 }) {
   const [manualPath, setManualPath] = useState("");
+  const [manualCli, setManualCli] = useState<"codex" | "kimi">("codex");
   const [manualOpen, setManualOpen] = useState(false);
   /** 手动验证失败必须在二级弹窗内可见；全局 toast 只是补充，不作为唯一反馈。 */
   const [manualError, setManualError] = useState<string | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+  /** WKWebView 不支持 window.confirm；切换主控用两段式按钮确认，timer 只负责超时复位。 */
+  const [confirmSwitchId, setConfirmSwitchId] = useState<string | null>(null);
+  const confirmSwitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selected =
     runtimeState.runtimes.find(
-      (runtime) => runtimeState.selectedByCli.codex === runtime.runtimeId,
+      (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
     ) ?? null;
   const reloadRuntimes = useCallback(async () => {
     onRuntimeState(await api.cliRuntimes());
@@ -874,7 +886,7 @@ function RuntimeConnectionPanel({
     setRuntimeBusy(true);
     setManualError(null);
     try {
-      await api.validateCliRuntime(manualPath.trim());
+      await api.validateCliRuntime(manualPath.trim(), manualCli);
       await reloadRuntimes();
       setManualPath("");
       setManualOpen(false);
@@ -887,6 +899,14 @@ function RuntimeConnectionPanel({
     }
   }
   async function selectRuntime(runtime: CliRuntime) {
+    if (selected && selected.runtimeId !== runtime.runtimeId && confirmSwitchId !== runtime.runtimeId) {
+      // 第一次点击只进入待确认态；4 秒内再次点击才执行切换。
+      setConfirmSwitchId(runtime.runtimeId);
+      if (confirmSwitchTimer.current) clearTimeout(confirmSwitchTimer.current);
+      confirmSwitchTimer.current = setTimeout(() => setConfirmSwitchId(null), 4_000);
+      return;
+    }
+    setConfirmSwitchId(null);
     setRuntimeBusy(true);
     try {
       await api.selectCliRuntime(runtime.runtimeId);
@@ -897,7 +917,6 @@ function RuntimeConnectionPanel({
       setRuntimeBusy(false);
     }
   }
-  const canChoose = !selected;
   return (
     <div
       className={`settings-backdrop connection-backdrop ${gateMode ? "connection-backdrop--gate" : ""}`}
@@ -937,7 +956,9 @@ function RuntimeConnectionPanel({
               <div className="status-mark verified">✓</div>
               <div>
                 <span>当前主控 CLI</span>
-                <strong>Codex CLI</strong>
+                <strong>
+                  {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+                </strong>
                 <code title={selected.executablePath}>
                   {selected.executablePath}
                 </code>
@@ -975,7 +996,7 @@ function RuntimeConnectionPanel({
               <strong>{selected ? "可用 CLI" : "已验证候选"}</strong>
               <span>
                 {selected
-                  ? "主控切换会在后续支持“主控空闲”检查后开放；当前默认保持不变。"
+                  ? "切换主控只影响新会话；进行中的主控回合会阻止切换。"
                   : "从 PATH 自动发现，或手动添加一个绝对路径。"}
               </span>
             </div>
@@ -1012,35 +1033,40 @@ function RuntimeConnectionPanel({
             <article
               key={runtime.runtimeId}
               className={
-                runtimeState.selectedByCli.codex === runtime.runtimeId
+                runtimeState.harnessRuntimeId === runtime.runtimeId
                   ? "selected"
                   : ""
               }
             >
               <div>
                 <strong>
-                  {runtime.cli === "codex" ? "Codex CLI" : runtime.cli}
+                  {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+                  <span className="runtime-cli-badge">{runtime.cli}</span>
                 </strong>
                 <code title={runtime.executablePath}>
                   {runtime.executablePath}
                 </code>
                 <small>
-                  {runtime.version} ·{" "}
+                  {runtime.version} · adapter {runtime.verifiedAdapter.adapterId} ·{" "}
+                  {runtime.verifiedAdapter.harnessTools ? "主控 + Worker" : "Worker"} ·{" "}
                   {runtime.discoveredFrom === "manual"
                     ? "手动添加"
                     : "从终端 PATH 发现"}
                 </small>
                 {runtime.diagnostic && <p>{runtime.diagnostic}</p>}
               </div>
-              {runtimeState.selectedByCli.codex === runtime.runtimeId ? (
+              {runtimeState.harnessRuntimeId === runtime.runtimeId ? (
                 <span className="runtime-selected">当前主控</span>
-              ) : canChoose && runtime.status === "verified" ? (
+              ) : runtime.status === "verified" &&
+                runtime.verifiedAdapter.harnessTools ? (
                 <button
                   className="button-primary"
                   disabled={runtimeBusy}
                   onClick={() => void selectRuntime(runtime)}
                 >
-                  设为主控
+                  {confirmSwitchId === runtime.runtimeId
+                    ? "确认切换主控？"
+                    : "设为主控"}
                 </button>
               ) : (
                 <span className="runtime-passive">可用候选</span>
@@ -1080,12 +1106,28 @@ function RuntimeConnectionPanel({
               </header>
               <section className="connection-form">
                 <label className="connection-field">
+                  <span>CLI 种类</span>
+                  <select
+                    value={manualCli}
+                    onChange={(event) =>
+                      setManualCli(event.target.value as "codex" | "kimi")
+                    }
+                  >
+                    <option value="codex">Codex CLI</option>
+                    <option value="kimi">Kimi CLI</option>
+                  </select>
+                </label>
+                <label className="connection-field">
                   <span>CLI 绝对路径</span>
                   <input
                     autoFocus
                     value={manualPath}
                     onChange={(event) => setManualPath(event.target.value)}
-                    placeholder="/Users/you/.local/bin/codex"
+                    placeholder={
+                      manualCli === "kimi"
+                        ? "/Users/you/.kimi-code/bin/kimi"
+                        : "/Users/you/.local/bin/codex"
+                    }
                     spellCheck={false}
                   />
                 </label>
@@ -1389,6 +1431,9 @@ function HarnessConversation({
   onDraft,
   onAccept,
   onCreateExecution,
+  assignmentRevision,
+  onAssignmentCancel,
+  onAssignmentCreated,
   onSelectExecution,
   onAnswerDecision,
   onComplete,
@@ -1404,6 +1449,10 @@ function HarnessConversation({
   onDraft: () => void;
   onAccept: (revision: number) => void;
   onCreateExecution: (revision: number) => void;
+  /** 分配卡当前展开的 revision；非 null 时内嵌在对应草案卡片下方。 */
+  assignmentRevision: number | null;
+  onAssignmentCancel: () => void;
+  onAssignmentCreated: (detail: ExecutionResponse) => void;
   onSelectExecution: (executionId: string) => void;
   onAnswerDecision: (
     decisionId: string,
@@ -1476,6 +1525,13 @@ function HarnessConversation({
               )}
           </Fragment>
         ))}
+        {harness.status === "interrupted" && (
+          <article className="conversation-interruption" role="alert">
+            <strong>主控回合已中断</strong>
+            <p>{harness.diagnostic || "本回合未能产生完整回答。"}</p>
+            <small>可直接发送下一条消息重试；不会自动重发或执行 Workflow。</small>
+          </article>
+        )}
         {harness.workflowRevisions.map((revision) => (
           <article className="conversation-action workflow-revision" key={revision.revision}>
             <span>Workflow 草案 v{revision.revision}</span>
@@ -1489,20 +1545,25 @@ function HarnessConversation({
               <button onClick={() => onAccept(revision.revision)}>
                 接受并冻结
               </button>
-            ) : (
+            ) : assignmentRevision === revision.revision ? null : (
               <button
                 disabled={
-                  busy === `create-execution:${revision.revision}` ||
                   harness.executions.some((item) => item.finishedAt === null)
                 }
                 onClick={() => onCreateExecution(revision.revision)}
               >
-                {busy === `create-execution:${revision.revision}`
-                  ? "正在创建执行…"
-                  : harness.executions.some((item) => item.finishedAt === null)
-                    ? "等待当前执行结束"
-                    : "创建执行"}
+                {harness.executions.some((item) => item.finishedAt === null)
+                  ? "等待当前执行结束"
+                  : "创建执行"}
               </button>
+            )}
+            {assignmentRevision === revision.revision && (
+              <ExecutionAssignmentFlow
+                harnessRunId={harness.harnessRunId}
+                revision={revision.revision}
+                onCancel={onAssignmentCancel}
+                onCreated={onAssignmentCreated}
+              />
             )}
             <details>
               <summary>查看 workflow.ts</summary>
@@ -1685,6 +1746,16 @@ function ExecutionDetail({
           Runtime v{detail.execution.runtimeVersion} · 当前 attempt #
           {detail.snapshot.currentExecutionAttemptId}
         </small>
+        {detail.execution.config && (
+          <small>
+            分配：{detail.execution.config.assignments.length} 名 Worker
+            {detail.execution.config.ruleText
+              ? ` · 规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
+              : ""}
+            {" · 回退到主控 Runtime "}
+            {detail.execution.config.fallbackRuntimeId.slice(0, 8)}
+          </small>
+        )}
       </div>
       <div className="actions">
         {detail.snapshot.status === "running" && (
@@ -1852,17 +1923,21 @@ function WorkflowDraftModal({
     'const meta = { name: "draft-workflow", description: "待确认的 Workflow 草案", phases: [{ title: "计划" }] };\n\nasync function run(args) {\n  phase("计划");\n  return agent("请完成已确认的任务", { id: "plan", cli: "codex" });\n}',
   );
   return (
-    <div className="settings-backdrop" onMouseDown={onClose}>
+    <div className="connection-backdrop" onMouseDown={onClose}>
       <section
-        className="workflow-draft"
+        className="connection-panel workflow-draft"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workflow-draft-title"
         onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}
       >
         <header>
           <div>
             <span>Workflow 提案</span>
-            <strong>冻结前的草案</strong>
+            <strong id="workflow-draft-title">冻结前的草案</strong>
           </div>
-          <button onClick={onClose}>×</button>
+          <button aria-label="关闭 Workflow 草案" onClick={onClose}>×</button>
         </header>
         <p>
           保存后只产生不可变 hash 草案；接受动作也不会创建 Worker
@@ -1870,6 +1945,8 @@ function WorkflowDraftModal({
           async function run(args)，不得 export/import 或访问 Bun/Node。
         </p>
         <textarea
+          aria-label="Workflow 草案源码"
+          autoFocus
           value={source}
           onChange={(event) => setSource(event.target.value)}
           spellCheck={false}
@@ -2624,9 +2701,12 @@ function AgentCard({
           <h3>{agent.label}</h3>
           <span
             className="cli-badge"
-            title={`所用 Agent CLI：${cliLabel(agent.cli)}`}
+            title={`所用 Agent CLI：${cliLabel(agent.cli)}${agent.request?.assignedRuntimeId ? ` · 分配 Runtime ${agent.request.assignedRuntimeId.slice(0, 8)}` : ""}`}
           >
             {cliLabel(agent.cli)}
+            {agent.request?.assignedRuntimeId && (
+              <small> · {agent.request.assignedRuntimeId.slice(0, 8)}</small>
+            )}
           </span>
         </div>
         <Status status={agent.status} />
@@ -2808,5 +2888,5 @@ function agentPersona(agent: AgentSnapshot): {
 }
 
 function cliLabel(cli: AgentSnapshot["cli"]): string {
-  return ({ codex: "Codex CLI" } as const)[cli];
+  return ({ codex: "Codex CLI", kimi: "Kimi CLI" } as const)[cli];
 }

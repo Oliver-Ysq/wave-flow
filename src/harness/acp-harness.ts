@@ -46,7 +46,10 @@ export class AcpHarnessSession implements HarnessSession {
         this.#initialized = true;
       }
       const prompt = this.#primed ? text : this.primePrompt(text);
-      await this.#client.prompt(prompt, controller.signal);
+      const turn = await this.#client.prompt(prompt, controller.signal);
+      // 某些 ACP CLI 的 cancel 会正常 resolve（stopReason: "cancelled"）而不是 reject；
+      // 被取消回合累积的 partial 文本绝不能作为完整回答耐久化。
+      if (turn.stopReason === "cancelled") throw new Error("ACP 主控回合已被取消。 ");
       this.#primed = true;
       const answer = this.#assistantText.trim();
       if (!answer) throw new Error("ACP 主控未产生可耐久的完整回答。 ");

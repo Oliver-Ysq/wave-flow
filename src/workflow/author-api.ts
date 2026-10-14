@@ -75,13 +75,50 @@ export function log(message: string): void {
 function validateAgentOptions(options: AgentOptions): void {
   if (!options || typeof options !== "object") throw new WorkflowContractError("agent() 必须提供 options。");
   if (!agentId.test(options.id)) throw new WorkflowContractError("agent() 的 id 必须为 1-120 位允许字符。");
-  if (options.cli !== "codex") throw new WorkflowContractError("agent() 的 cli 当前仅支持 codex。");
+  if (options.cli !== "codex" && options.cli !== "kimi") throw new WorkflowContractError("agent() 的 cli 当前仅支持 codex 或 kimi。");
   if (options.label !== undefined && (typeof options.label !== "string" || options.label.trim() === "")) throw new WorkflowContractError("agent() 的 label 必须为非空字符串。");
   if (options.cwd !== undefined && (typeof options.cwd !== "string" || options.cwd.trim() === "")) throw new WorkflowContractError("agent() 的 cwd 必须为非空字符串。");
   if (options.model !== undefined && (typeof options.model !== "string" || options.model.trim() === "")) throw new WorkflowContractError("agent() 的 model 必须为非空字符串。");
-  if (options.schema !== undefined && !isJsonObject(options.schema)) throw new WorkflowContractError("agent() 的 schema 必须是 JSON-safe 对象。");
+  if (options.schema !== undefined) {
+    if (!isJsonObject(options.schema)) throw new WorkflowContractError("agent() 的 schema 必须是 JSON-safe 对象。");
+    // 在任何 Journal 事实或 Worker 会话之前静态拒绝可证明自相矛盾的 schema。
+    assertSchemaSelfConsistent(options.schema, "schema");
+  }
   if (options.sandbox !== undefined && options.sandbox !== "read-only" && options.sandbox !== "workspace-write") throw new WorkflowContractError("agent() 的 sandbox 必须为 read-only 或 workspace-write。");
   if (options.input !== undefined && !isJsonObject(options.input)) throw new WorkflowContractError("agent() 的 input 必须是 JSON-safe 对象。");
+}
+
+/** `type` 关键字允许的单值集合；一期不支持数组形式的联合类型。 */
+const schemaTypes = new Set(["string", "number", "integer", "boolean", "object", "array", "null"]);
+
+/**
+ * 递归自一致性预检：只拒绝可证明自相矛盾的 schema，不是完整 JSON Schema 校验器。
+ * 覆盖 type 白名单、enum 非空、properties/items 结构形状，以及
+ * additionalProperties: false 与未声明 required 键的硬矛盾；逐层递归子 schema。
+ */
+function assertSchemaSelfConsistent(schema: JsonObject, path: string): void {
+  if (schema.type !== undefined && (typeof schema.type !== "string" || !schemaTypes.has(schema.type))) {
+    throw new WorkflowContractError(`agent() 的 ${path}.type 必须是 ${[...schemaTypes].join("/")} 之一。`);
+  }
+  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || schema.enum.length === 0)) {
+    throw new WorkflowContractError(`agent() 的 ${path}.enum 必须是非空数组。`);
+  }
+  if (schema.properties !== undefined && !isJsonObject(schema.properties)) {
+    throw new WorkflowContractError(`agent() 的 ${path}.properties 必须是 schema 对象的字典。`);
+  }
+  const properties = (schema.properties ?? {}) as JsonObject;
+  for (const [key, value] of Object.entries(properties)) {
+    if (!isJsonObject(value)) throw new WorkflowContractError(`agent() 的 ${path}.properties.${key} 必须是 schema 对象。`);
+    assertSchemaSelfConsistent(value, `${path}.properties.${key}`);
+  }
+  if (schema.additionalProperties === false && Array.isArray(schema.required)) {
+    const undeclared = schema.required.filter(key => typeof key === "string" && !(key in properties));
+    if (undeclared.length > 0) throw new WorkflowContractError(`agent() 的 ${path} 在 additionalProperties: false 下要求了未在 properties 声明的键：${undeclared.join(", ")}。`);
+  }
+  if (schema.items !== undefined) {
+    if (!isJsonObject(schema.items)) throw new WorkflowContractError(`agent() 的 ${path}.items 必须是 schema 对象。`);
+    assertSchemaSelfConsistent(schema.items, `${path}.items`);
+  }
 }
 
 async function inConcurrentScope<T>(batch: import("../runtime/workflow-host").ExecutionBatch, callback: () => Promise<T>): Promise<T> {

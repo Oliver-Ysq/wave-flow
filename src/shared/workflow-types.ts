@@ -1,7 +1,7 @@
 import type { JsonObject, JsonValue } from "./json";
 
-/** Workflow 当前可使用的正常交互式 CLI；TraeX 在其 Adapter、测试与能力探测完成后再加入。 */
-export type AgentCli = "codex";
+/** Workflow 当前可使用的正常交互式 CLI；新 CLI 只在其 Adapter、测试与能力探测完成后加入。 */
+export type AgentCli = "codex" | "kimi";
 
 /** Agent CLI 的可写范围；默认 read-only，当前 Codex ACP Worker 尚不以该声明可靠限制真实权限。 */
 export type AgentSandbox = "read-only" | "workspace-write";
@@ -31,7 +31,7 @@ export type WorkflowMeta = {
 export type AgentOptions = {
   /** Run 内唯一且稳定的节点身份；最长 120 字符，参与后续会话和 replay 绑定。 */
   readonly id: string;
-  /** 要启动的正常交互式 CLI Adapter；当前仅允许已实现并可验证的 codex。 */
+  /** 要启动的正常交互式 CLI Adapter；只允许已实现并可验证的 codex 或 kimi。 */
   readonly cli: AgentCli;
   /** 可选展示名称；省略时运行时使用 id，不影响节点稳定身份。 */
   readonly label?: string;
@@ -57,6 +57,11 @@ export type NormalizedAgentRequest = Omit<AgentOptions, "cwd" | "sandbox"> & {
   readonly prompt: string;
   /** 调用 agent() 时生效的已声明阶段标题。 */
   readonly phase: string | undefined;
+  /**
+   * 受限 Execution 由分配快照注入的指派 Runtime id；受信任作者入口不写该字段。
+   * 它参与 replay 指纹：分配变化后同一脚本不再复用旧节点结果。
+   */
+  readonly assignedRuntimeId?: string;
 };
 
 /** 一个接受前一阶段值并返回下一阶段值的 pipeline 函数。 */

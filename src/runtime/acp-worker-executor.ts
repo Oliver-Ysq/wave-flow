@@ -1,5 +1,6 @@
 import { AcpSessionClient, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
 import type { ControlServer } from "../control/control-server";
+import { workerAdapterForCli } from "../runtimes/adapter-catalog";
 import type { JsonObject } from "../shared/json";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { RuntimeProvenance } from "../runtimes/types";
@@ -19,7 +20,7 @@ export interface AcpWorkerSession {
 /**
  * ACP Worker 执行器。
  *
- * 仅处理同一 Engine 生命周期内的 Codex ACP Worker。ACP 原生 session binding 在
+ * 仅处理同一 Engine 生命周期内、Adapter Catalog 已声明 CLI 的 ACP Worker。ACP 原生 session binding 在
  * `agent.session` 耐久后才允许 Control complete；ACP turn 结束不等于节点完成。
  * 跨 Engine 不认领 ACP session；用户显式 resume 才会创建新 attempt。
  */
@@ -35,6 +36,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly runtime?: RuntimeProvenance,
     /** 每个 Worker session 私有的 Control MCP；省略仅供旧测试夹具。 */
     private readonly createControlMcp?: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer,
+    /** 判定节点 cli 是否有已验证的 Worker adapter；默认查询内置 Adapter Catalog。 */
+    private readonly isSupportedWorkerCli: (cli: string) => boolean = (cli) => workerAdapterForCli(cli) !== null,
   ) {}
 
   /** Runtime 创建当前 Run 的 Control 后调用；缺失时绝不启动真实 Agent。 */
@@ -47,7 +50,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     const control = this.#control;
     if (!control) throw new Error("ACP Worker 执行器尚未绑定 ControlServer。 ");
     if (!node.agentSessionId) throw new Error("ACP Worker 节点缺少 agentSessionId。 ");
-    if (node.cli !== "codex") throw new Error(`一期 ACP Worker 只支持 cli: codex，收到 ${node.cli}。`);
+    if (!this.isSupportedWorkerCli(node.cli)) throw new Error(`ACP Worker 不支持 cli: ${node.cli}，没有已验证的 Adapter。 `);
     const capability = crypto.randomUUID();
     let settled = false;
     let resolveCompletion!: (result: JsonObject) => void;

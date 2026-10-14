@@ -22,3 +22,17 @@ test("ACP Harness 创建独立 session、注入私有 MCP 并只耐久 assistant
   await session.prompt("第二轮");
   expect(prompt).toBe("第二轮");
 });
+
+test("cancel 正常 resolve 的 ACP CLI 不得把 partial 文本当完整回答", async () => {
+  let listener: ((event: { update: acp.SessionUpdate }) => void) | null = null;
+  const client = {
+    subscribe(value: typeof listener) { listener = value; return () => {}; },
+    async initialize() {},
+    async createSession() { return { launcherId: "kimi-acp", sessionId: "harness-session", capabilities: {} }; },
+    // Kimi 等 CLI 的 cancel 以 stopReason "cancelled" 正常结束 prompt，而非 reject。
+    async prompt() { listener?.({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "未写完的" } } }); return { stopReason: "cancelled" }; },
+    async cancel() {}, close() {},
+  } as unknown as AcpSessionClient;
+  const session = new AcpHarnessSession({ id: "kimi-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "wave-flow-harness", command: "/wave-flow-desktop-engine", args: ["__harness-mcp"], env: [] }, client);
+  await expect(session.prompt("写一篇长文")).rejects.toThrow("取消");
+});
