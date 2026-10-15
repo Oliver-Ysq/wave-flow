@@ -62,8 +62,10 @@ test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async (
   const waitIdle = async () => {
     for (let attempt = 0; attempt < 200; attempt += 1) {
       send({ requestId: `idle-${attempt}`, method: "engine.action", action: "harnesses.get", args: { harnessRunId } });
-      const current = await next() as { result: { harness: { status: string } } };
-      if (current.result.harness.status !== "running") return;
+      // 事件帧与响应共用通道：等待响应时必须跳过无 requestId 的事件帧。
+      let current = await next() as { type?: string; result?: { harness: { status: string } } };
+      while (current.type === "event") current = await next() as typeof current;
+      if (current.result!.harness.status !== "running") return;
       await Bun.sleep(10);
     }
     throw new Error("Harness 回合未在时限内结束。 ");
@@ -147,8 +149,56 @@ test("Desktop Engine 启动时收敛 paused 节点，再将 Run 标为 interrupt
   child.kill(); await child.exited;
 });
 
-/** Runtime action 契约：已移除的 setWorkerEnabled 一律拒绝，validate 必须显式携带 cli。 */
-test("Engine runtime action 校验 validate 请求并拒绝已移除的 setWorkerEnabled", async () => {
+/** 事件帧与请求响应共用同一 JSONL 通道：事件帧带协议版本/会话 ID/单调序号，响应关联不受影响。 */
+test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响应同通道分流", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-events-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-events-project-")); roots.push(cwd);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WAVE_FLOW_HOME: root, WF_ENGINE_DETERMINISTIC: "1" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => {
+    while (true) {
+      const index = buffered.indexOf("\n");
+      if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line) as Record<string, unknown>; }
+      const value = await reader.read(); if (value.done) throw new Error("Engine 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true });
+    }
+  };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  expect(await next()).toEqual({ type: "ready", protocolVersion: 1 });
+  send({ requestId: "project", method: "engine.action", action: "projects.create", args: { cwd } });
+  const project = await next() as { result: { project: { projectId: string } } };
+  const frames: { seq: number; event: { type: string }; harnessRunId: string }[] = [];
+  let harnessRunId = "";
+  // 等待响应的同时收集事件帧：中文正文跨 pipe 读取块时帧也必须完整可解析。
+  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId: project.result.project.projectId, text: "观察事件帧".repeat(2_000) } });
+  let sawTurnFinished = false;
+  for (let attempt = 0; attempt < 400 && !sawTurnFinished; attempt += 1) {
+    const frame = await next();
+    if (frame.type === "event") {
+      expect(frame.protocolVersion).toBe(1);
+      expect(frame.stream).toBe("harness");
+      const eventFrame = frame as unknown as { harnessRunId: string; seq: number; event: { type: string } };
+      if (harnessRunId) expect(eventFrame.harnessRunId).toBe(harnessRunId);
+      harnessRunId = eventFrame.harnessRunId;
+      frames.push(eventFrame);
+      if (eventFrame.event.type === "turn_finished") sawTurnFinished = true;
+    }
+  }
+  expect(sawTurnFinished).toBe(true);
+  // 序号从 1 开始严格递增；帧内只允许耐久派生事件，瞬时 delta 不上帧。
+  expect(frames.map((frame) => frame.seq)).toEqual(frames.map((_, index) => index + 1));
+  expect(frames.some((frame) => frame.event.type === "entry_started")).toBe(true);
+  expect(frames.some((frame) => frame.event.type === "entry_finished")).toBe(true);
+  expect(frames.every((frame) => !["reasoning_delta", "assistant_delta", "acp_tool_call", "acp_tool_update"].includes(frame.event.type))).toBe(true);
+  // 事件流之后请求响应通道仍然正常工作。
+  send({ requestId: "after", method: "engine.action", action: "harnesses.list", args: {} });
+  const listed = await next() as { requestId: string; ok: boolean };
+  expect(listed).toMatchObject({ requestId: "after", ok: true });
+  send({ requestId: "close", method: "engine.shutdown" });
+  await next(); expect(await child.exited).toBe(0);
+});
+
+/** Runtime action 契约：已移除的 setWorkerEnabled 一律拒绝，validate 必须显式携带 cli。 */test("Engine runtime action 校验 validate 请求并拒绝已移除的 setWorkerEnabled", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-runtimes-")); roots.push(root);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
   const child = Bun.spawn([process.execPath, entry], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WAVE_FLOW_HOME: root, WF_ENGINE_DETERMINISTIC: "1" } }); children.push(child);

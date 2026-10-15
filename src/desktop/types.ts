@@ -100,6 +100,18 @@ export type PhaseVisitPageResponse = {
   readonly nextCursor: number | null;
 };
 
+/** Execution 的 Phase 访问分页响应；attempt 缺省时跨全部 attempt 聚合（cursor 为组合键）。 */
+export type ExecutionPhaseVisitPageResponse = {
+  /** 所属 Execution 稳定 id。 */
+  readonly executionId: string;
+  /** 单 attempt 查询时回显该尝试号；跨 attempt 聚合查询为 null。 */
+  readonly executionAttemptId: number | null;
+  /** 当前页阶段访问；聚合查询按（尝试号, phaseVisitId）稳定排序。 */
+  readonly items: readonly PhaseVisitSnapshot[];
+  /** 下一页稳定 cursor。 */
+  readonly nextCursor: number | null;
+};
+
 /** 用户显式请求同一 Run 的调用级恢复；runId 仅来自 URL，避免客户端覆写 Manifest 身份。 */
 export type ResumeRunRequest = {
   /** true 代表用户已确认允许从第一个 interrupted 节点创建新 attempt。 */
@@ -151,6 +163,10 @@ export type CreateExecutionRequest = {
 
 /** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
 export type ExecutionPlanResponse = {
+  /** 已校验 meta.phases 的声明顺序标题；只作预览词表，不表达执行顺序或依赖。 */
+  readonly phaseTitles: readonly string[];
+  /** 每个源码 agent() 调用一个展示示意（含动态 id）；不用于分配校验或运行节点定位。 */
+  readonly previewAgents: readonly import("../workflow/restricted/extract-agents").PreviewAgent[];
   /** 所属 Harness Run id。 */
   readonly harnessRunId: string;
   /** 已接受冻结的 revision 序号。 */
@@ -191,6 +207,12 @@ export type ExecutionResponse = {
   readonly execution: WorkflowExecutionRecord;
   /** Execution 内嵌 Run 的 Engine 权威快照；gates 字段携带决策门状态。 */
   readonly snapshot: RunSnapshot;
+  /**
+   * 该 Execution 是否在当前 Engine 的可控制生命周期内（Engine 进程持有活跃实例）。
+   * false 时 pause/recover/stop/answerGate 都会被拒绝，唯一前进路径是显式 resume；
+   * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
+   */
+  readonly controllable: boolean;
 };
 
 /** Harness 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */

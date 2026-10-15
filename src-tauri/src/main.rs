@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
-use tauri::{Manager, RunEvent, Theme, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, Theme, WindowEvent};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_shell::{ShellExt, process::{CommandChild, CommandEvent}};
@@ -143,6 +143,15 @@ fn process_stdout(app: &tauri::AppHandle, bytes: &[u8]) {
 }
 fn process_line(app: &tauri::AppHandle, line: &str) {
   if let Ok(ready) = serde_json::from_str::<EngineReady>(line) { if ready.r#type == "ready" && ready.protocol_version == 1 { if let Ok(mut value) = app.state::<EngineState>().ready.lock() { *value = true; } } return; }
+  // 事件帧与请求响应分流：事件帧没有 requestId，type 恒为 "event"。Tauri 附加当前
+  // Engine generation 后转发给 Web；旧 Engine 的迟到帧已在 stdout 消费层被丢弃。
+  if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) {
+    if frame.get("type").and_then(|value| value.as_str()) == Some("event") && frame.get("protocolVersion").and_then(|value| value.as_u64()) == Some(1) {
+      let generation = app.state::<EngineState>().generation.load(Ordering::Acquire);
+      let _ = app.emit("engine-event", serde_json::json!({ "generation": generation, "frame": frame }));
+      return;
+    }
+  }
   if let Ok(response) = serde_json::from_str::<EngineResponse>(line) {
     let state = app.state::<EngineState>();
     let accepted = state.pending.lock().map(|mut pending| pending.remove(&response.request_id)).unwrap_or(false);
@@ -179,11 +188,13 @@ fn shutdown_engine(app: &tauri::AppHandle) { if let Some(mut child) = app.state:
 fn show_main_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> { let window = app.get_webview_window("main").ok_or(tauri::Error::AssetNotFound("main".into()))?; window.show()?; window.set_focus()?; Ok(()) }
 
 fn main() {
-  tauri::Builder::default().plugin(tauri_plugin_shell::init()).setup(|app| {
+  tauri::Builder::default().plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init()).setup(|app| {
     let open = MenuItem::with_id(app, "open", "打开 Wave Flow", true, None::<&str>)?; let summary = MenuItem::with_id(app, "summary", "桌面执行环境启动中…", false, None::<&str>)?; let shutdown = MenuItem::with_id(app, "shutdown", "退出 Wave Flow", true, Some("CmdOrMeta+Q"))?; let separator = PredefinedMenuItem::separator(app)?; let menu = Menu::with_items(app, &[&open, &summary, &separator, &shutdown])?;
     // macOS 主菜单的退出也只能进入应用内确认，不使用系统默认 Quit 直接终止
     // 进程，确保用户明确退出时总会先完成 Engine 的 durable-first cancelled。
-    let app_menu = Submenu::with_items(app, "Wave Flow", true, &[&open, &separator, &shutdown])?;
+    // “设置… ⌘,”与左栏按钮共用同一个 PendingMenuAction 通道，隐藏窗口也会被唤起。
+    let settings = MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrMeta+,"))?;
+    let app_menu = Submenu::with_items(app, "Wave Flow", true, &[&open, &settings, &separator, &shutdown])?;
     // macOS WKWebView 的 ⌘X/⌘C/⌘V/⌘A 依赖原生“编辑”菜单项存在才会派发到输入框；
     // 缺少该菜单时 WebView 内所有编辑快捷键静默失效。
     let edit_menu = Submenu::with_items(app, "编辑", true, &[
@@ -196,6 +207,13 @@ fn main() {
       &PredefinedMenuItem::select_all(app, Some("全选"))?,
     ])?;
     app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu])?)?;
+    // 应用菜单事件统一走 PendingMenuAction 通道；Web 经 take_menu_action 轮询消费。
+    app.on_menu_event(|app, event| {
+      if event.id().as_ref() == "settings" {
+        if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("settings"); }
+        let _ = show_main_window(app);
+      }
+    });
     app.manage(EngineState { child: Mutex::new(None), generation: AtomicU64::new(0), ready: Mutex::new(false), pending: Mutex::new(HashSet::new()), responses: Mutex::new(HashMap::new()), startup_error: Mutex::new(None), stdout_buffer: Mutex::new(Vec::new()) }); app.manage(TrayState { summary: Mutex::new(summary) }); app.manage(PendingMenuAction { value: Mutex::new(None) }); app.manage(ExitState { approved: AtomicBool::new(false) });
     let tray_icon = app.default_window_icon().cloned();
     TrayIconBuilder::with_id("wave-flow-tray").menu(&menu).tooltip("Wave Flow").icon(tray_icon.unwrap_or_else(|| tauri::image::Image::new_owned(vec![0; 4], 1, 1))).on_menu_event(|app, event| match event.id().as_ref() { "open" => { let _ = show_main_window(app); }, "shutdown" => { if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("shutdown"); } let _ = show_main_window(app); }, _ => {} }).build(app)?; Ok(())

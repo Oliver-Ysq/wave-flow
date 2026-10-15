@@ -4,13 +4,14 @@ import { dirname, join, resolve } from "node:path";
 import Ajv from "ajv";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } from "../journal/paths";
 import { isJsonObject, type JsonObject } from "../shared/json";
-import type { HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStatus, HarnessToolActivity, WorkflowExecutionRecord, WorkflowRevision } from "./types";
+import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStatus, HarnessToolActivity, HarnessToolEntry, WorkflowExecutionRecord, WorkflowRevision } from "./types";
 import type { RuntimeProvenance } from "../runtimes/types";
+import { isRevisionPreview, previewMatchesSource, type RevisionPreview } from "./revision-preview";
 
-/** 独立 Harness 档案格式；v2 增加 WorkflowExecution 登记与主控决策事实，v1 只读兼容。 */
-export const HARNESS_JOURNAL_VERSION = 4;
+/** 独立 Harness 档案格式；v5 增加耐久对话条目，v6 增加 revision 展示预览；v1-v5 兼容读取。 */
+export const HARNESS_JOURNAL_VERSION = 6;
 /** 可读取的历史 Harness 档案版本。 */
-export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, 3, HARNESS_JOURNAL_VERSION] as const;
+export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, 3, 4, 5, HARNESS_JOURNAL_VERSION] as const;
 
 export type HarnessManifest = {
   readonly harnessRunId: string;
@@ -24,17 +25,27 @@ export type HarnessManifest = {
   readonly createdAt: string;
 };
 
-type HarnessEvent =
-  | { readonly type: "harness.created"; readonly at: string; readonly harnessRunId: string }
-  | { readonly type: "harness.user_message"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage }
+/** Harness 档案的全部耐久事件类型；导出供记录器等内部写路径复用同一形状。 */
+export type HarnessEvent =
+  | { readonly type: "harness.created"; readonly at: string; readonly harnessRunId: string }  | { readonly type: "harness.user_message"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage }
   | { readonly type: "harness.turn_started"; readonly at: string; readonly harnessRunId: string; readonly userMessageId: string }
   | { readonly type: "harness.assistant_message"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage }
   | { readonly type: "harness.tool_activity"; readonly at: string; readonly harnessRunId: string; readonly messageId: string; readonly activities: readonly HarnessToolActivity[] }
+  /** v5：耐久对话条目建立；entry 身份字段（entryId/turnId/seq/kind）此后不可变。 */
+  | { readonly type: "harness.entry_started"; readonly at: string; readonly harnessRunId: string; readonly entry: HarnessConversationEntry }
+  /** v5：条目正文/输出增量追加；text 为本次追加片段，truncated 表示已达保存上限。 */
+  | { readonly type: "harness.entry_appended"; readonly at: string; readonly harnessRunId: string; readonly entryId: string; readonly text: string; readonly truncated: boolean }
+  /** v5：条目终结；携带完整最终条目，状态必须是 completed/failed/interrupted。 */
+  | { readonly type: "harness.entry_finished"; readonly at: string; readonly harnessRunId: string; readonly entry: HarnessConversationEntry }
   | { readonly type: "harness.turn_finished"; readonly at: string; readonly harnessRunId: string; readonly messageId: string }
   | { readonly type: "harness.turn_interrupted"; readonly at: string; readonly harnessRunId: string; readonly diagnostic: string }
   | { readonly type: "harness.completed"; readonly at: string; readonly harnessRunId: string }
   | { readonly type: "workflow.revision_proposed"; readonly at: string; readonly harnessRunId: string; readonly revision: WorkflowRevision }
+  /** v6：旧草案展示预览补齐或规则升级；只变更展示投影，不变更源码/审批。 */
+  | { readonly type: "workflow.revision_preview_saved"; readonly at: string; readonly harnessRunId: string; readonly revision: number; readonly preview: RevisionPreview }
   | { readonly type: "workflow.revision_accepted"; readonly at: string; readonly harnessRunId: string; readonly revision: number }
+  /** 用户显式拒绝最新未接受草案；拒绝是不可逆耐久事实，已拒绝草案不能再接受或执行。 */
+  | { readonly type: "workflow.revision_rejected"; readonly at: string; readonly harnessRunId: string; readonly revision: number }
   | { readonly type: "workflow.execution_created"; readonly at: string; readonly harnessRunId: string; readonly execution: WorkflowExecutionRecord }
   | { readonly type: "workflow.execution_finished"; readonly at: string; readonly harnessRunId: string; readonly executionId: string; readonly status: WorkflowExecutionRecord["status"]; readonly diagnostic: string | null; readonly summary: JsonObject | null }
   /** 用户显式恢复同一冻结 revision；新 attempt 的终态仍由 execution_finished 写入。 */
@@ -109,6 +120,12 @@ export class HarnessProjection {
   #workflowRevisions: WorkflowRevision[] = [];
   #executions: WorkflowExecutionRecord[] = [];
   #decisions: HarnessDecision[] = [];
+  /** 耐久对话条目（含 legacy 重建）；顺序即事件顺序。 */
+  #entries: HarnessConversationEntry[] = [];
+  /** 未终结条目的下标；终结后从表中移除以便拒绝重复终态。 */
+  #openEntries = new Map<string, number>();
+  /** 当前回合已用的最大条目序号；条目 seq 必须严格递增。 */
+  #turnEntrySeq = 0;
   constructor(private readonly manifest: HarnessManifest) {}
   apply(event: HarnessEvent): void {
     if (event.harnessRunId !== this.manifest.harnessRunId) throw new Error("Harness 事件不属于当前会话。 ");
@@ -118,18 +135,61 @@ export class HarnessProjection {
     if (this.#completedAt !== null && event.type !== "harness.completed") throw new Error("已完成的 Harness 不能追加新事实。 ");
     if (event.type === "harness.created") { if (this.#created) throw new Error("Harness created 重复。 "); this.#created = true; return; }
     if (event.type === "harness.user_message") { if (this.#status === "running" || this.#status === "completed") throw new Error("已完成或运行中的 Harness 不能追加用户消息。 "); this.#messages.push(event.message); this.#status = "idle"; this.#diagnostic = null; return; }
-    if (event.type === "harness.turn_started") { if (this.#status === "running" || this.#messages.at(-1)?.id !== event.userMessageId) throw new Error("Harness turn_started 不匹配最新用户消息。 "); this.#status = "running"; this.#turnUserMessageId = event.userMessageId; return; }
+    if (event.type === "harness.turn_started") { if (this.#status === "running" || this.#messages.at(-1)?.id !== event.userMessageId) throw new Error("Harness turn_started 不匹配最新用户消息。 "); this.#status = "running"; this.#turnUserMessageId = event.userMessageId; this.#turnEntrySeq = 0; return; }
     if (event.type === "harness.assistant_message") { if (this.#status !== "running" || event.message.role !== "assistant" || this.#assistantMessageId) throw new Error("Harness assistant_message 不合法。 "); this.#messages.push(event.message); this.#assistantMessageId = event.message.id; return; }
-    if (event.type === "harness.tool_activity") { if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness tool_activity 必须绑定当前 assistant 消息。 "); this.#toolActivitiesByMessageId[event.messageId] = event.activities.map((item) => ({ ...item })); return; }
-    if (event.type === "harness.turn_finished") { if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness turn_finished 缺少完整 assistant 消息。 "); this.#status = "idle"; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
-    if (event.type === "harness.turn_interrupted") { if (this.#status !== "running") throw new Error("Harness turn_interrupted 必须来自运行中回合。 "); this.#status = "interrupted"; this.#diagnostic = event.diagnostic; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
+    if (event.type === "harness.tool_activity") {
+      if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness tool_activity 必须绑定当前 assistant 消息。 ");
+      this.#toolActivitiesByMessageId[event.messageId] = event.activities.map((item) => ({ ...item }));
+      // v1-v4 历史摘要重建为 legacy 工具条目：只保留动作名/结果/时间，缺失详情
+      // 不得补造；界面按 hasDetail=false 显示“历史记录未保存”。
+      for (const [index, item] of event.activities.entries()) {
+        this.#turnEntrySeq += 1;
+        const entry: HarnessToolEntry = { kind: "tool", entryId: `legacy-${event.messageId}-${index + 1}`, turnId: this.#turnUserMessageId ?? event.messageId, seq: this.#turnEntrySeq, legacy: true, callId: `legacy-${event.messageId}-${index + 1}`, source: "engine-mcp", name: item.label, toolKind: "unknown", target: null, paramsSummary: null, startedAt: item.finishedAt, finishedAt: item.finishedAt, status: item.outcome === "completed" ? "completed" : "failed", output: null, outputTruncated: false, exitCode: null, hasDetail: false };
+        this.#entries.push(entry);
+      }
+      return;
+    }
+    if (event.type === "harness.entry_started") {
+      this.assertEntryTurn(event.entry.turnId);
+      if (this.#openEntries.has(event.entry.entryId) || this.#entries.some((item) => item.entryId === event.entry.entryId)) throw new Error("Harness 对话条目 ID 重复。 ");
+      if (event.entry.seq !== this.#turnEntrySeq + 1) throw new Error("Harness 对话条目序号必须严格递增。 ");
+      this.#turnEntrySeq = event.entry.seq;
+      this.#openEntries.set(event.entry.entryId, this.#entries.length);
+      this.#entries.push(event.entry);
+      return;
+    }
+    if (event.type === "harness.entry_appended") {
+      const index = this.openEntryIndex(event.entryId);
+      const entry = this.#entries[index];
+      if (entry.kind === "tool") this.#entries[index] = { ...entry, output: `${entry.output ?? ""}${event.text}`, outputTruncated: entry.outputTruncated || event.truncated };
+      else this.#entries[index] = { ...entry, text: entry.text + event.text, truncated: entry.truncated || event.truncated };
+      return;
+    }
+    if (event.type === "harness.entry_finished") {
+      const index = this.openEntryIndex(event.entry.entryId);
+      const current = this.#entries[index];
+      if (current.turnId !== event.entry.turnId || current.seq !== event.entry.seq || current.kind !== event.entry.kind) throw new Error("Harness 对话条目终结事件身份不一致。 ");
+      if (event.entry.kind === "body" ? event.entry.finishedAt === null : event.entry.status === "running") throw new Error("Harness 对话条目终态必须是 completed/failed/interrupted。 ");
+      this.#entries[index] = event.entry;
+      this.#openEntries.delete(event.entry.entryId);
+      return;
+    }
+    if (event.type === "harness.turn_finished") { if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness turn_finished 缺少完整 assistant 消息。 "); this.assertNoOpenEntries("turn_finished"); this.#status = "idle"; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
+    if (event.type === "harness.turn_interrupted") { if (this.#status !== "running") throw new Error("Harness turn_interrupted 必须来自运行中回合。 "); this.assertNoOpenEntries("turn_interrupted"); this.#status = "interrupted"; this.#diagnostic = event.diagnostic; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
     if (event.type === "harness.completed") { if (this.#status === "running" || this.#completedAt !== null) throw new Error("Harness 只能在空闲或中断后完成一次。 "); if (this.#executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution 时不能完成 Harness。 "); this.#status = "completed"; this.#completedAt = event.at; this.#diagnostic = null; return; }
-    if (event.type === "workflow.revision_proposed") { if (this.#workflowRevisions.length + 1 !== event.revision.revision || event.revision.acceptedAt !== null) throw new Error("Workflow revision 序号或状态无效。 "); this.#workflowRevisions.push(event.revision); return; }
-    if (event.type === "workflow.revision_accepted") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.revision !== event.revision || revision.acceptedAt !== null) throw new Error("Workflow revision 只能按最新未接受草案冻结。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, acceptedAt: event.at }; return; }
-    if (event.type === "workflow.execution_created") {
+    if (event.type === "workflow.revision_preview_saved") {
+      const index = this.#workflowRevisions.findIndex(item => item.revision === event.revision);
+      const revision = this.#workflowRevisions[index];
+      if (!revision || !previewMatchesSource(event.preview, revision.source, revision.sourceHash) || (revision.preview && revision.preview.previewVersion >= event.preview.previewVersion)) throw new Error("Workflow 预览身份或版本无效。");
+      this.#workflowRevisions[index] = { ...revision, preview: event.preview }; return;
+    }
+    if (event.type === "workflow.revision_proposed") { if (this.#workflowRevisions.length + 1 !== event.revision.revision || event.revision.acceptedAt !== null || (event.revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 序号或状态无效。 "); this.#workflowRevisions.push(event.revision); return; }
+    if (event.type === "workflow.revision_accepted") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.revision !== event.revision || revision.acceptedAt !== null || (revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能按最新未接受且未拒绝草案冻结。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, acceptedAt: event.at }; return; }
+    if (event.type === "workflow.revision_rejected") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.revision !== event.revision || revision.acceptedAt !== null || (revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能拒绝最新未接受且未拒绝草案。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, rejectedAt: event.at }; return; }
+  if (event.type === "workflow.execution_created") {
       const revision = this.#workflowRevisions.find((item) => item.revision === event.execution.revision);
-      // Execution 只能绑定已接受冻结的 revision；草稿或序号不存在的草案永远不能执行。
-      if (!revision || revision.acceptedAt === null || revision.sourceHash !== event.execution.sourceHash) throw new Error("WorkflowExecution 必须绑定已接受冻结的 revision。 ");
+      // Execution 只能绑定已接受冻结的 revision；草稿、已拒绝或序号不存在的草案永远不能执行。
+      if (!revision || revision.acceptedAt === null || (revision.rejectedAt ?? null) !== null || revision.sourceHash !== event.execution.sourceHash) throw new Error("WorkflowExecution 必须绑定已接受冻结的 revision。 ");
       if (this.#executions.some((item) => item.executionId === event.execution.executionId)) throw new Error("WorkflowExecution id 重复。 ");
       // 一个 Harness 顺序拥有多个 Execution：前一个未到终态时不得创建新执行。
       if (this.#executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束的 WorkflowExecution，不能创建新执行。 ");
@@ -166,7 +226,24 @@ export class HarnessProjection {
       return;
     }
   }
-  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
+  snapshot(): HarnessSnapshot { return { harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
+  /** 条目事件只能属于当前运行中回合；重放乱序即 fail closed。 */
+  private assertEntryTurn(turnId: string): void {
+    if (this.#status !== "running" || this.#turnUserMessageId !== turnId) throw new Error("Harness 对话条目必须属于当前运行中回合。 ");
+  }
+  private openEntryIndex(entryId: string): number {
+    this.assertEntryTurnOpen();
+    const index = this.#openEntries.get(entryId);
+    if (index === undefined) throw new Error("Harness 对话条目不存在或已终结。 ");
+    return index;
+  }
+  private assertEntryTurnOpen(): void {
+    if (this.#status !== "running") throw new Error("Harness 对话条目只能在运行中回合更新。 ");
+  }
+  /** 回合终结前所有条目必须已终结；崩溃恢复路径必须先补写 interrupted 终态。 */
+  private assertNoOpenEntries(ending: string): void {
+    if (this.#openEntries.size > 0) throw new Error(`Harness ${ending} 前仍存在未终结对话条目。 `);
+  }
 }
 
 function validateManifest(value: unknown): HarnessManifest {
@@ -185,11 +262,16 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.user_message" || item.type === "harness.assistant_message") { if (!isMessage(item.message, item.type === "harness.user_message" ? "user" : "assistant")) throw new Error("Harness 消息无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.turn_started") { if (typeof item.userMessageId !== "string" || !item.userMessageId.trim()) throw new Error("Harness turn_started 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.tool_activity") { if (typeof item.messageId !== "string" || !item.messageId.trim() || !Array.isArray(item.activities) || item.activities.length === 0 || item.activities.some((activity) => !isToolActivity(activity))) throw new Error("Harness tool_activity 无效。 "); return item as unknown as HarnessEvent; }
+  if (item.type === "harness.entry_started") { if (!isConversationEntry(item.entry, "open")) throw new Error("Harness entry_started 无效。 "); return item as unknown as HarnessEvent; }
+  if (item.type === "harness.entry_appended") { if (typeof item.entryId !== "string" || !item.entryId.trim() || typeof item.text !== "string" || !item.text || item.text.length > 300_000 || typeof item.truncated !== "boolean") throw new Error("Harness entry_appended 无效。 "); return item as unknown as HarnessEvent; }
+  if (item.type === "harness.entry_finished") { if (!isConversationEntry(item.entry, "terminal")) throw new Error("Harness entry_finished 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.turn_finished") { if (typeof item.messageId !== "string" || !item.messageId.trim()) throw new Error("Harness turn_finished 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.turn_interrupted" && typeof item.diagnostic === "string" && item.diagnostic.trim()) return item as unknown as HarnessEvent;
   if (item.type === "harness.completed") return item as unknown as HarnessEvent;
   if (item.type === "workflow.revision_proposed" && isWorkflowRevision(item.revision)) return item as unknown as HarnessEvent;
+  if (item.type === "workflow.revision_preview_saved" && Number.isInteger(item.revision) && (item.revision as number) > 0 && isRevisionPreview(item.preview)) return item as unknown as HarnessEvent;
   if (item.type === "workflow.revision_accepted" && Number.isInteger(item.revision) && (item.revision as number) > 0) return item as unknown as HarnessEvent;
+  if (item.type === "workflow.revision_rejected" && Number.isInteger(item.revision) && (item.revision as number) > 0) return item as unknown as HarnessEvent;
   if (item.type === "workflow.execution_created" && isExecutionRecord(item.execution)) return item as unknown as HarnessEvent;
   if (item.type === "workflow.execution_finished") {
     if (typeof item.executionId !== "string" || !isExecutionStatus(item.status) || (item.diagnostic !== null && typeof item.diagnostic !== "string") || (item.summary !== null && !isJsonObject(item.summary))) throw new Error("Harness 事件类型或字段无效。 ");
@@ -202,8 +284,24 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
 }
 
 function isMessage(value: unknown, role: HarnessMessage["role"]): value is HarnessMessage { return plain(value) && value.role === role && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)); }
+/** 对话条目形状校验；open 要求进行中形态，terminal 要求终态且身份字段齐全。 */
+function isConversationEntry(value: unknown, phase: "open" | "terminal"): value is HarnessConversationEntry {
+  if (!plain(value) || typeof value.entryId !== "string" || !value.entryId.trim() || typeof value.turnId !== "string" || !value.turnId.trim() || !Number.isInteger(value.seq) || (value.seq as number) < 1 || typeof value.legacy !== "boolean" || typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt)) || (value.finishedAt !== null && (typeof value.finishedAt !== "string" || Number.isNaN(Date.parse(value.finishedAt)))) || (phase === "open" && value.finishedAt !== null) || (phase === "terminal" && typeof value.finishedAt !== "string")) return false;
+  if (value.kind === "body") return typeof value.text === "string" && value.text.length <= 300_000 && typeof value.completed === "boolean" && typeof value.truncated === "boolean" && (phase === "open" ? value.completed === false && value.finishedAt === null : true);
+  if (value.kind === "thought") return typeof value.text === "string" && value.text.length <= 300_000 && typeof value.truncated === "boolean" && isOpenOrTerminalStatus(value.status, phase, ["running", "completed", "interrupted"]);
+  if (value.kind === "tool") return typeof value.callId === "string" && !!value.callId.trim() && (value.source === "engine-mcp" || value.source === "acp") && typeof value.name === "string" && !!value.name.trim() && value.name.length <= 200 && isToolKind(value.toolKind) && (value.target === null || typeof value.target === "string" && value.target.length <= 1_200) && (value.paramsSummary === null || typeof value.paramsSummary === "string" && value.paramsSummary.length <= 3_000) && isOpenOrTerminalStatus(value.status, phase, ["running", "completed", "failed", "interrupted"]) && (value.output === null || typeof value.output === "string" && value.output.length <= 40_000) && typeof value.outputTruncated === "boolean" && (value.exitCode === null || Number.isInteger(value.exitCode)) && typeof value.hasDetail === "boolean";
+  return false;
+}
+function isOpenOrTerminalStatus(value: unknown, phase: "open" | "terminal", allowed: readonly string[]): boolean { if (typeof value !== "string" || !allowed.includes(value)) return false; return phase === "open" ? value === "running" : value !== "running"; }
+function isToolKind(value: unknown): boolean { return value === "file-read" || value === "file-write" || value === "search" || value === "command" || value === "mcp" || value === "unknown"; }
+/** 崩溃恢复/中断路径把未终结条目收敛为 interrupted；body 标为未完成，绝不冒充完整回答。 */
+export function interruptConversationEntry(entry: HarnessConversationEntry, at: string): HarnessConversationEntry {
+  if (entry.kind === "body") return { ...entry, completed: false, finishedAt: at };
+  if (entry.kind === "thought") return { ...entry, status: "interrupted", finishedAt: at };
+  return { ...entry, status: "interrupted", finishedAt: at };
+}
 function isToolActivity(value: unknown): value is HarnessToolActivity { return plain(value) && typeof value.label === "string" && value.label.trim() !== "" && typeof value.finishedAt === "string" && !Number.isNaN(Date.parse(value.finishedAt)) && (value.outcome === "completed" || value.outcome === "failed") && Object.keys(value).every((key) => key === "label" || key === "finishedAt" || key === "outcome"); }
-function isWorkflowRevision(value: unknown): value is WorkflowRevision { return plain(value) && Number.isInteger(value.revision) && (value.revision as number) > 0 && typeof value.source === "string" && value.source.length > 0 && value.source.length <= 200_000 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.acceptedAt === null; }
+function isWorkflowRevision(value: unknown): value is WorkflowRevision { return plain(value) && Number.isInteger(value.revision) && (value.revision as number) > 0 && typeof value.source === "string" && value.source.length > 0 && value.source.length <= 200_000 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.acceptedAt === null && (value.rejectedAt === undefined || value.rejectedAt === null) && (value.preview === undefined || (isRevisionPreview(value.preview) && previewMatchesSource(value.preview, value.source, String(value.sourceHash)))); }
 function isExecutionStatus(value: unknown): value is WorkflowExecutionRecord["status"] { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isPolicy(value: unknown): boolean { return plain(value) && Number.isInteger(value.maxNodes) && (value.maxNodes as number) >= 1 && Number.isInteger(value.maxPhaseVisits) && (value.maxPhaseVisits as number) >= 1 && Number.isInteger(value.maxGates) && (value.maxGates as number) >= 1; }
 function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
@@ -241,6 +339,24 @@ function validateDecisionAnswer(schema: JsonObject | undefined, answer: JsonObje
 function plain(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function isTruncatedTail(line: string): boolean { return line.trim().startsWith("{"); }
 async function ensureHome(root: string, create = true): Promise<void> { if (resolve(root) !== resolve(harnessRunsRoot())) return; if (create) await ensurePrivateDirectory(waveFlowHome()); else await assertPrivateDirectory(waveFlowHome()); }
+
+/**
+ * Engine 启动收敛前的权限修复：旧版本曾以 0755 创建状态目录，直接读取会被
+ * assertPrivateDirectory 拒绝，导致启动收敛把全部档案静默视为不存在。这里只收紧
+ * 当前用户拥有的真实目录（home 与 harness 根）；symlink、他人目录与单个路径的失败
+ * 都跳过，后续读取校验会如实报错，绝不放宽校验本身。
+ */
+export async function repairHarnessHomePermissions(root = harnessRunsRoot()): Promise<void> {
+  const targets = resolve(root) === resolve(harnessRunsRoot()) ? [waveFlowHome(), root] : [root];
+  for (const path of targets) {
+    try {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) continue;
+      if (typeof process.getuid === "function" && info.uid !== process.getuid()) continue;
+      if ((info.mode & 0o077) !== 0) await chmod(path, 0o700);
+    } catch { /* 单个路径修复失败不阻断启动收敛。 */ }
+  }
+}
 async function ensurePrivateDirectory(path: string): Promise<void> { const created = await mkdir(path, { recursive: true, mode: 0o700 }); await assertPrivateDirectory(path); if (created !== undefined) await chmod(path, 0o700); }
 async function assertPrivateDirectory(path: string): Promise<void> { const info = await lstat(path); if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Harness 状态目录必须是真实目录。 "); if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("Harness 状态目录不属于当前用户。 "); if ((info.mode & 0o077) !== 0) throw new Error("Harness 状态目录权限过宽。 "); }
 async function assertPrivateFile(path: string): Promise<void> { const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink()) throw new Error("Harness 状态文件必须是常规文件。 "); if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("Harness 状态文件不属于当前用户。 "); if ((info.mode & 0o077) !== 0) throw new Error("Harness 状态文件权限过宽。 "); }

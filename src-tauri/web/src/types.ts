@@ -48,6 +48,8 @@ export type RunSnapshot = {
   }>;
   /** 当前 Execution 的耐久执行尝试序号。 */
   currentExecutionAttemptId: number;
+  /** 当前尝试的阶段访问（含 occurrence 回访轮次与耐久批次）；两类 Run 统一以此呈现 Phase 轨迹。 */
+  phaseVisits: PhaseVisit[];
   /** 脚本声明的决策门；未回答时可由 Execution 专用端点交付 JSON 答案。 */
   gates: Array<{ gateId: string; question: string; answerSchema: Record<string, unknown> | undefined; executionAttemptId: number; phaseVisitId: number; createdAt: string; answeredAt: string | null; answer: Record<string, unknown> | null }>;
 };
@@ -79,6 +81,8 @@ export type PhaseVisit = {
 
 export type PhaseVisitResponse = { runId: string; executionAttemptId: number; visit: PhaseVisit };
 export type PhaseVisitPageResponse = { runId: string; executionAttemptId: number; items: PhaseVisit[]; nextCursor: number | null };
+/** Execution 的 Phase 访问分页；attempt 缺省时跨全部 attempt 聚合（executionAttemptId 为 null，cursor 为组合键）。 */
+export type ExecutionPhaseVisitPageResponse = { executionId: string; executionAttemptId: number | null; items: PhaseVisit[]; nextCursor: number | null };
 
 export type RunResponse = { runId: string; snapshot: RunSnapshot };
 /** 桌面端创建 Run 的最小 action 参数；路径仍由 Engine 做最终 realpath 与信任校验。 */
@@ -93,7 +97,54 @@ export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 export type HarnessMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
 /** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
 export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
-export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null };
+/** 工具动作分类；与来源分开，经 MCP 执行的文件读取仍保留 MCP 徽标。 */
+export type HarnessToolKind = "file-read" | "file-write" | "search" | "command" | "mcp" | "unknown";
+/** 工具调用来源；engine-mcp 展示 MCP 徽标，acp 为 CLI 原生上报。 */
+export type HarnessToolSource = "engine-mcp" | "acp";
+/** 对话条目状态；interrupted 表示回合中断时仍未完成。 */
+export type HarnessConversationEntryStatus = "running" | "completed" | "failed" | "interrupted";
+/** 对话条目公共身份字段。 */
+export type HarnessConversationEntryBase = {
+  /** 稳定条目 ID；界面 key 与事件关联均使用它。 */
+  entryId: string;
+  /** 所属回合标识（回合用户消息 ID）。 */
+  turnId: string;
+  /** 回合内单调顺序号。 */
+  seq: number;
+  /** true 表示历史档案重建条目；缺失详情显示“历史记录未保存”。 */
+  legacy: boolean;
+};
+/** assistant 正文条目；completed=false 为中断残留，不是完整回答。 */
+export type HarnessBodyEntry = HarnessConversationEntryBase & { kind: "body"; text: string; completed: boolean; truncated: boolean; startedAt: string; finishedAt: string | null };
+/** 思考条目；耗时只由起止时间计算。 */
+export type HarnessThoughtEntry = HarnessConversationEntryBase & { kind: "thought"; text: string; startedAt: string; finishedAt: string | null; status: "running" | "completed" | "interrupted"; truncated: boolean };
+/** 工具调用条目；含目标、起止、状态、参数摘要与限长输出。 */
+export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; callId: string; source: HarnessToolSource; name: string; toolKind: HarnessToolKind; target: string | null; paramsSummary: string | null; startedAt: string; finishedAt: string | null; status: HarnessConversationEntryStatus; output: string | null; outputTruncated: boolean; exitCode: number | null; hasDetail: boolean };
+/** 耐久对话条目；实时展示与重开回放同源。 */
+export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
+/** Engine 事件帧中的会话事件（耐久派生子集）。 */
+export type HarnessStreamEvent =
+  | { type: "entry_started"; entry: HarnessConversationEntry }
+  | { type: "entry_appended"; entryId: string; text: string; truncated: boolean }
+  | { type: "entry_finished"; entry: HarnessConversationEntry }
+  | { type: "turn_finished"; messageId: string; text: string }
+  | { type: "turn_interrupted"; diagnostic: string }
+  | { type: "execution_changed"; executionId: string };
+/** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
+export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
+export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null; rejectedAt?: string | null;
+  /** 随 revision 耐久的展示预览；旧档案补齐失败时缺省，不代表执行失败。 */
+  preview?: {
+    /** 正整数解析规则版本。 */
+    previewVersion: number;
+    /** 预览绑定的冻结源码 hash。 */
+    sourceHash: string;
+    /** 已校验阶段词表，不表达运行依赖。 */
+    phaseTitles: string[];
+    /** 源码调用示意，不是实际执行节点名单。 */
+    previewAgents: ExecutionPlanResponse["previewAgents"];
+  };
+};
 /** Harness 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
 export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
@@ -102,7 +153,33 @@ export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: 
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[] };
 /** executions.plan 的分配卡数据。 */
-export type ExecutionPlanResponse = { harnessRunId: string; revision: number; workers: Array<{ id: string; cli: "codex" | "kimi" | null; label: string | null }>; dynamicCount: number; pool: CliRuntime[]; selectedByCli: Partial<Record<"codex" | "kimi", string>>; harnessRuntime: CliRuntime | null };
+export type ExecutionPlanResponse = {
+  harnessRunId: string;
+  revision: number;
+  /** 已校验的阶段词表，按 meta 声明排序；不代表实际执行顺序。 */
+  phaseTitles: string[];
+  /** 每个源码 agent() 调用一个示意；含动态 id，不用作执行分配或定位。 */
+  previewAgents: Array<{
+    /** 循环／常见批量回调中的调用提示；false 为未识别，不能推断必定只运行一次。 */
+    loop: boolean;
+    /** 调用位置生成的列表 key，不是运行节点 id。 */
+    key: string;
+    /** 非空字面量 label → 固定 id → Agent；不求值动态表达式。 */
+    name: string;
+    /** 字面量 CLI 提示；null 表示由分配决定。 */
+    cli: "codex" | "kimi" | null;
+    /** 最近的字面量 phase 标题；null 表示无法静态确定，不是运行事实。 */
+    phaseTitle: string | null;
+  }>;
+  workers: Array<{ id: string; cli: "codex" | "kimi" | null; label: string | null;
+    /** 源码中最近的字面量 phase 标题；null 表示无法静态确定，不是运行事实。 */
+    phaseTitle: string | null;
+  }>;
+  dynamicCount: number;
+  pool: CliRuntime[];
+  selectedByCli: Partial<Record<"codex" | "kimi", string>>;
+  harnessRuntime: CliRuntime | null;
+};
 /** executions.randomize 的随机指派结果。 */
 export type ExecutionRandomizeResponse = { assignments: WorkerAssignment[]; defaultAssignment: WorkerAssignment };
 /** executions.parseRule 的规则解析结果；degraded 时必须显式展示已退化。 */
@@ -110,7 +187,7 @@ export type ExecutionParseRuleResponse = { degraded: boolean; diagnostic: string
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
-export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
@@ -123,5 +200,6 @@ export type DiscoveredCliCandidate = { cli: "codex" | "kimi"; executablePath: st
 export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
 export type HarnessProjectResponse = { project: HarnessProject };
 export type HarnessProjectListResponse = { projects: HarnessProject[] };
-export type ExecutionResponse = { execution: WorkflowExecution; snapshot: RunSnapshot };
+/** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
+export type ExecutionResponse = { execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };
 export type ExecutionListResponse = { harnessRunId: string; executions: WorkflowExecution[] };

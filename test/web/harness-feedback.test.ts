@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 
 test("中断诊断在对话内可见并提供显式重试提示", async () => {
-  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
-  const conversation = source.slice(source.indexOf('className="conversation"'), source.indexOf("function WorkflowDraftModal("));
+  const conversation = await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
   expect(conversation).toContain('harness.status === "interrupted"');
   expect(conversation).toContain('className="conversation-interruption" role="alert"');
   expect(conversation).toContain("harness.diagnostic");

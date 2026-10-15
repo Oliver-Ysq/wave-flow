@@ -33,7 +33,7 @@ test("桌面端不渲染未耐久思考流，也不依赖第三方会话 runtime
 });
 
 test("主控输入框让裸 Enter 留给 IME/换行，仅以 ⌘/Ctrl + Enter 发送且显式绘制光标", async () => {
-  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const source = await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain("function shouldSubmitComposer");
   expect(source).toContain("event.nativeEvent.isComposing");
@@ -75,26 +75,28 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(source).toContain("<WorkflowPanelErrorBoundary");
   expect(css).toContain("white-space:pre-wrap");
   expect(css).toContain(".workflow-render-error");
-  expect(css).toContain(".workflow-open { grid-template-columns:274px minmax(0,1fr) 0");
+  expect(css).toContain(".workflow-open { grid-template-columns:240px minmax(0,1fr) 0");
   expect(css).toContain(".workflow-pane { position:fixed");
   expect(css).toContain("visibility:hidden; pointer-events:none");
   expect(css).toContain(".workflow-pane.open { opacity:1; visibility:visible; pointer-events:auto");
 });
 
 test("工具过程作为 assistant 正文下方的安全尾注恢复，不显示敏感调用细节", async () => {
-  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const source = await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
   const types = await Bun.file("src-tauri/web/src/types.ts").text();
   expect(types).toContain("toolActivitiesByMessageId");
-  expect(source).toContain("harness.toolActivitiesByMessageId[message.id]");
-  expect(source).toContain("key={`${message.id}:tool:${index}`}");
+  expect(source).toContain("harness.toolActivitiesByMessageId[turn.assistant.id]");
+  expect(source).toContain("key={`${turn.assistant!.id}:tool:${index}`}");
   expect(source).toContain("不保存参数、路径、命令或完整输出");
   expect(source).not.toContain("完整结果不会显示或保存");
 });
 
 test("Workflow 草案是受对话列宽约束的内联行动点，不能挤占或溢出主视图", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const card = await Bun.file("src-tauri/web/src/conversation/revision-card.tsx").text();
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
-  expect(source).toContain('className="conversation-action workflow-revision"');
+  expect(source).toContain("WorkflowRevisionCard");
+  expect(card).toContain('className={`conversation-action workflow-revision');
   expect(source).not.toContain('className="workflow-action"');
   expect(css).toContain(".agent-workbench .conversation-action {");
   expect(css).toContain("width:min(720px, 100%)");

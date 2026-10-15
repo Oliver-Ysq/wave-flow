@@ -1,6 +1,5 @@
 import {
   Component,
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -11,13 +10,23 @@ import {
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import { ExecutionAssignmentFlow } from "./assignment-flow";
+import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
+import { WorkflowRevisionCard } from "./conversation/revision-card";
+import { TeamPanel } from "./execution/team-panel";
+import { ExecutionProgressCard } from "./execution/progress-card";
+import { SchemaForm } from "./forms/schema-form";
+import {
+  acceptEnvelope,
+  applyHarnessEventToSnapshot,
+  createStreamTracker,
+} from "./conversation/harness-event-merge";
 import type {
-  AgentSnapshot,
   CliRuntime,
   CliRuntimeListResponse,
   CurrentAttemptResponse,
+  DesktopStatusResponse,
   ExecutionResponse,
   HarnessDecision,
   HarnessProject,
@@ -49,6 +58,16 @@ function syncNativeWindowTheme(theme: ColorTheme) {
   void invoke("set_window_theme", { theme }).catch(() => {});
 }
 
+/** 原生文件选择器：只接受本地 .ts Workflow；用户取消返回 null。 */
+async function pickWorkflowFile(): Promise<string | null> {
+  const picked = await openFileDialog({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Workflow", extensions: ["ts"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
 export function App() {
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
@@ -61,6 +80,11 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  /** "执行已有的 Workflow"的原生选择器预填：路径只读，cwd 默认当前项目目录。 */
+  const [createRunPrefill, setCreateRunPrefill] = useState<{
+    workflowPath: string;
+    cwd: string;
+  } | null>(null);
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
@@ -69,6 +93,23 @@ export function App() {
   const [projectCwd, setProjectCwd] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
   const [harnessText, setHarnessText] = useState("");
+  /** 最近一次 Harness 条目事件到达时间；切换会话或重读快照时重置。 */
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  /** 输入框草稿按会话/项目缓存；每次击键即写入，切换时按键恢复。 */
+  const draftCacheRef = useRef(new Map<string, string>());
+  const draftKey =
+    harness?.harnessRunId ??
+    `draft:${draftProjectId ?? selectedProjectId ?? "none"}`;
+  const updateHarnessText = useCallback(
+    (value: string) => {
+      draftCacheRef.current.set(draftKey, value);
+      setHarnessText(value);
+    },
+    [draftKey],
+  );
+  useEffect(() => {
+    setHarnessText(draftCacheRef.current.get(draftKey) ?? "");
+  }, [draftKey]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** Runtime 列表只来自 Engine；页面不能把发现结果当作已验证或默认选择。 */
   const [runtimeState, setRuntimeState] =
@@ -81,6 +122,23 @@ export function App() {
   );
   const [executionDetail, setExecutionDetail] =
     useState<ExecutionResponse | null>(null);
+  /** 当前详情 revision 的动态节点数；plan 不可用或为 0 时按 0 处理。 */
+  const [executionDynamicCount, setExecutionDynamicCount] = useState(0);
+  useEffect(() => {
+    if (!harness || !executionDetail) return;
+    let active = true;
+    api
+      .planExecution(harness.harnessRunId, executionDetail.execution.revision)
+      .then((plan) => {
+        if (active) setExecutionDynamicCount(plan.dynamicCount);
+      })
+      .catch(() => {
+        if (active) setExecutionDynamicCount(0);
+      });
+    return () => {
+      active = false;
+    };
+  }, [harness?.harnessRunId, executionDetail?.execution.revision]);
   /** 分配卡当前服务的已接受 revision；非 null 时展示两卡横滑流程。 */
   const [assignmentRevision, setAssignmentRevision] = useState<number | null>(
     null,
@@ -104,7 +162,7 @@ export function App() {
     let active = true;
     let timer: number | null = null;
     const poll = async () => {
-      try { const action = await invoke<string | null>("take_menu_action"); if (active) { if (action === "shutdown") setExitConfirmOpen(true); } }
+      try { const action = await invoke<string | null>("take_menu_action"); if (active) { if (action === "shutdown") setExitConfirmOpen(true); else if (action === "settings") setSettingsOpen(true); } }
       catch { /* 菜单栏是辅助 UI；轮询失败绝不改变工作台或 Engine 状态。 */ }
       finally { if (active) timer = window.setTimeout(() => void poll(), 500); }
     };
@@ -213,8 +271,60 @@ export function App() {
         );
     };
     refreshHarness();
-    const timer = window.setInterval(refreshHarness, 1_000);
+    // 事件流为主通道；4 秒轮询只是断帧兜底。
+    const timer = window.setInterval(refreshHarness, 4_000);
     return () => { active = false; window.clearInterval(timer); };
+  }, [harness?.harnessRunId]);
+
+  /** Engine 事件驱动会话增量更新；条目先耐久后发布，事件与快照同源。 */
+  useEffect(() => {
+    const harnessRunId = harness?.harnessRunId;
+    if (!harnessRunId) return;
+    const tracker = createStreamTracker();
+    let disposed = false;
+    setLastEventAt(null);
+    const resync = () => {
+      void api
+        .harness(harnessRunId)
+        .then((response) => {
+          if (disposed) return;
+          setHarness(response.harness);
+          setLastEventAt(Date.now());
+        })
+        .catch(() => {});
+    };
+    const unlisten = api.listenEngineEvents((envelope) => {
+      if (disposed) return;
+      if (envelope.frame.stream !== "harness") return;
+      if (envelope.frame.harnessRunId !== harnessRunId) return;
+      const decision = acceptEnvelope(tracker, envelope);
+      if (decision === "skip") return;
+      if (decision === "resync") {
+        // generation 变化或漏帧：重读权威快照对齐（快照耐久包含该帧效果）。
+        resync();
+        return;
+      }
+      const event = envelope.frame.event;
+      if (
+        event.type === "turn_finished" ||
+        event.type === "turn_interrupted" ||
+        event.type === "execution_changed"
+      ) {
+        // 这些事件不携带条目增量；重读一次获取 assistant 消息与最新状态。
+        resync();
+        return;
+      }
+      setHarness((current) =>
+        current && current.harnessRunId === harnessRunId
+          ? applyHarnessEventToSnapshot(current, event)
+          : current,
+      );
+      setLastEventAt(Date.now());
+    });
+    return () => {
+      disposed = true;
+      void unlisten.then((release) => release());
+    };
   }, [harness?.harnessRunId]);
 
   async function control(action: "pause" | "recover" | "stop" | "resume") {
@@ -253,6 +363,7 @@ export function App() {
       ]);
       setSelectedId(response.runId);
       setCreating(false);
+      setCreateRunPrefill(null);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -261,8 +372,23 @@ export function App() {
     }
   }
 
-  async function createProject() {
+  /** 草稿窗口"执行已有的 Workflow"：原生选择器选中后预填并打开创建弹窗；取消无副作用。 */
+  async function runExistingWorkflow() {
     try {
+      const path = await pickWorkflowFile();
+      if (!path) return;
+      const project = projects.find(
+        (item) => item.projectId === (draftProjectId ?? selectedProjectId),
+      );
+      setCreateRunPrefill({ workflowPath: path, cwd: project?.cwd ?? "" });
+      setCreating(true);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function createProject() {    try {
       const response = await api.createProject(projectCwd, projectTitle);
       setProjects((current) => [
         response.project,
@@ -295,7 +421,7 @@ export function App() {
     try {
       if (harness) {
         await api.sendHarnessMessage(harness.harnessRunId, harnessText);
-        setHarnessText("");
+        updateHarnessText("");
         setHarness(
           await api
             .harness(harness.harnessRunId)
@@ -310,7 +436,7 @@ export function App() {
         );
         setHarness(response.harness);
         setHarnesses((current) => [response.harness, ...current]);
-        setHarnessText("");
+        updateHarnessText("");
         setDraftProjectId(null);
       }
     } catch (cause) {
@@ -510,14 +636,15 @@ export function App() {
               ) ?? null
             }
             text={harnessText}
-            onText={setHarnessText}
+            onText={updateHarnessText}
             onSend={() => void sendHarness()}
+            onRunWorkflow={() => void runExistingWorkflow()}
           />
         ) : (
           <HarnessConversation
             harness={harness}
             text={harnessText}
-            onText={setHarnessText}
+            onText={updateHarnessText}
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
             onComplete={() => {
@@ -555,6 +682,13 @@ export function App() {
                 );
               }
             }}
+            onReject={async (revision) => {
+              const response = await api.rejectWorkflowRevision(
+                harness.harnessRunId,
+                revision,
+              );
+              setHarness(response.harness);
+            }}
             onCreateExecution={(revision) => void createExecution(revision)}
             assignmentRevision={assignmentRevision}
             onAssignmentCancel={() => setAssignmentRevision(null)}
@@ -580,6 +714,7 @@ export function App() {
               }
             }}
             busy={busy}
+            lastEventAt={lastEventAt}
           />
         )}
       </section>
@@ -614,6 +749,8 @@ export function App() {
             <ExecutionDetail
               detail={executionDetail}
               busy={busy}
+              dynamicCount={executionDynamicCount}
+              harnessRunId={harness.harnessRunId}
               onControl={controlExecution}
               onAnswerBlock={async (blockId, answer) => {
                 setBusy(`answer:${blockId}`);
@@ -657,16 +794,19 @@ export function App() {
                 <span>当前独立运行记录</span>
                 <div className="workflow-run-picker">
                   {runs.map((run) => (
-                    <button
-                      key={run.runId}
-                      onClick={() => setSelectedId(run.runId)}
-                    >
-                      <i className={`dot ${run.status}`} />
-                      <div>
-                        <strong>{run.workflow.name}</strong>
-                        <small>{localeTime(run.createdAt)}</small>
-                      </div>
-                    </button>
+                    <article key={run.runId}>
+                      <button onClick={() => setSelectedId(run.runId)}>
+                        <i className={`dot ${run.status}`} />
+                        <div>
+                          <strong>{run.workflow.name}</strong>
+                          <small>{localeTime(run.createdAt)}</small>
+                        </div>
+                      </button>
+                      <details>
+                        <summary>诊断</summary>
+                        <code>{run.runId}</code>
+                      </details>
+                    </article>
                   ))}
                 </div>
               </>
@@ -690,9 +830,6 @@ export function App() {
             />
           </div>
           )}
-          <button className="legacy-workflow" onClick={() => setCreating(true)}>
-            从本地 workflow 启动
-          </button>
         </WorkflowPanelErrorBoundary>
       </aside>
       {!workflowPanelOpen && (
@@ -707,8 +844,13 @@ export function App() {
       {creating && (
         <CreateRunModal
           busy={busy === "create"}
+          initialWorkflowPath={createRunPrefill?.workflowPath ?? ""}
+          initialCwd={createRunPrefill?.cwd ?? ""}
           onCreate={createRun}
-          onClose={() => setCreating(false)}
+          onClose={() => {
+            setCreating(false);
+            setCreateRunPrefill(null);
+          }}
         />
       )}
       {creatingProject && (
@@ -728,6 +870,8 @@ export function App() {
           onRuntimeState={setRuntimeState}
           onClose={() => setSettingsOpen(false)}
           onError={setError}
+          theme={theme}
+          onTheme={setTheme}
         />
       )}
       {runtimeState && !runtimeState.harnessRuntimeId && (
@@ -840,6 +984,42 @@ function DesktopExitModal({
   );
 }
 
+/** 设置分区标识：通用 / Agent CLI / 诊断。 */
+type SettingsSection = "general" | "cli" | "diagnostics";
+
+/** 完整显示的长路径 + 点击复制（就地"已复制"反馈）。 */
+function CopyablePath({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="wf-copyable-path">
+      <code>{path}</code>
+      <button
+        type="button"
+        onClick={() => {
+          void navigator.clipboard
+            .writeText(path)
+            .then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1_500);
+            })
+            .catch(() => {});
+        }}
+      >
+        {copied ? "已复制" : "复制"}
+      </button>
+    </span>
+  );
+}
+
+/** 发现来源的中文文案。 */
+function discoveredFromLabel(from: CliRuntime["discoveredFrom"]): string {
+  return from === "manual"
+    ? "手动添加"
+    : from === "gui-path"
+      ? "从应用目录发现"
+      : "从终端 PATH 发现";
+}
+
 function RuntimeConnectionPanel({
   gateMode = false,
   runtimeState,
@@ -847,6 +1027,8 @@ function RuntimeConnectionPanel({
   onRuntimeState,
   onClose,
   onError,
+  theme,
+  onTheme,
 }: {
   gateMode?: boolean;
   runtimeState: CliRuntimeListResponse;
@@ -854,6 +1036,10 @@ function RuntimeConnectionPanel({
   onRuntimeState: (value: CliRuntimeListResponse) => void;
   onClose?: () => void;
   onError: (value: string) => void;
+  /** 当前主题（通用分区展示与切换）；gate 模式不展示通用分区，可为空。 */
+  theme?: ColorTheme;
+  /** 切换主题回调。 */
+  onTheme?: (theme: ColorTheme) => void;
 }) {
   const [manualPath, setManualPath] = useState("");
   const [manualCli, setManualCli] = useState<"codex" | "kimi">("codex");
@@ -864,6 +1050,9 @@ function RuntimeConnectionPanel({
   /** WKWebView 不支持 window.confirm；切换主控用两段式按钮确认，timer 只负责超时复位。 */
   const [confirmSwitchId, setConfirmSwitchId] = useState<string | null>(null);
   const confirmSwitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [section, setSection] = useState<SettingsSection>("cli");
+  const [engineStatus, setEngineStatus] = useState<DesktopStatusResponse | null>(null);
+  const [engineStatusError, setEngineStatusError] = useState<string | null>(null);
   const selected =
     runtimeState.runtimes.find(
       (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
@@ -871,7 +1060,21 @@ function RuntimeConnectionPanel({
   const reloadRuntimes = useCallback(async () => {
     onRuntimeState(await api.cliRuntimes());
   }, [onRuntimeState]);
+  const loadEngineStatus = useCallback(async () => {
+    try {
+      setEngineStatus(await api.desktopStatus());
+      setEngineStatusError(null);
+    } catch (cause) {
+      setEngineStatusError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+  useEffect(() => {
+    if (section === "diagnostics") void loadEngineStatus();
+  }, [section, loadEngineStatus]);
   async function scan() {
+    // PATH 扫描护栏：进行中禁止重复触发；结果写回 App 级 runtimeState，
+    // 扫描期间切换分区不会丢弃返回结果。
+    if (runtimeBusy || scanning) return;
     setRuntimeBusy(true);
     try {
       onRuntimeState((await api.scanCliRuntimes()).runtimes);
@@ -917,245 +1120,374 @@ function RuntimeConnectionPanel({
       setRuntimeBusy(false);
     }
   }
+
+  const cliContent = (
+    <>
+      <section className="runtime-status" aria-live="polite">
+        {selected ? (
+          <>
+            <div className="status-mark verified">✓</div>
+            <div>
+              <span>当前主控 CLI</span>
+              <strong>
+                {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+              </strong>
+              <CopyablePath path={selected.executablePath} />
+              <small>
+                {selected.version} · ACP adapter{" "}
+                {selected.verifiedAdapter.adapterVersion}
+              </small>
+            </div>
+            <em>已验证</em>
+          </>
+        ) : (
+          <>
+            <div className={`status-mark ${scanning ? "scanning" : ""}`}>
+              {scanning ? "···" : "◇"}
+            </div>
+            <div>
+              <span>
+                {scanning ? "正在检查本机 CLI" : "尚未设置主控 CLI"}
+              </span>
+              <strong>
+                {scanning ? "发现并验证可用候选" : "请选择一个已验证候选"}
+              </strong>
+              <small>
+                {scanning
+                  ? "正在安全验证 PATH 中的候选；不会修改默认项。"
+                  : "设置后才可进入工作台；手动添加不会自动设为主控。"}
+              </small>
+            </div>
+          </>
+        )}
+      </section>
+      <section className="connection-form runtime-actions">
+        <div className="section-row">
+          <div>
+            <strong>{selected ? "可用 CLI" : "已验证候选"}</strong>
+            <span>
+              {selected
+                ? "切换主控只影响新会话；进行中的主控回合会阻止切换。"
+                : "从 PATH 自动发现，或手动添加一个绝对路径。"}
+            </span>
+          </div>
+          {!gateMode && (
+            <button
+              className="button-secondary"
+              disabled={runtimeBusy || scanning}
+              onClick={() => void scan()}
+            >
+              {runtimeBusy || scanning ? "正在扫描…" : "重新扫描"}
+            </button>
+          )}
+        </div>
+        <button
+          className="button-secondary add-runtime"
+          disabled={runtimeBusy}
+          onClick={() => {
+            setManualError(null);
+            setManualOpen(true);
+          }}
+        >
+          手动添加 CLI
+        </button>
+      </section>
+      <section className="runtime-list">
+        <span className="list-caption">
+          {runtimeState.runtimes.length
+            ? "已验证 Runtime"
+            : scanning
+              ? "正在验证候选…"
+              : "尚未发现可用 CLI"}
+        </span>
+        {runtimeState.runtimes.map((runtime) => (
+          <article
+            key={runtime.runtimeId}
+            className={
+              runtimeState.harnessRuntimeId === runtime.runtimeId
+                ? "selected"
+                : ""
+            }
+          >
+            <div>
+              <strong>
+                {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+                <span className="runtime-cli-badge">{runtime.cli}</span>
+              </strong>
+              <CopyablePath path={runtime.executablePath} />
+              <small>
+                {runtime.version} · {discoveredFromLabel(runtime.discoveredFrom)} · adapter {runtime.verifiedAdapter.adapterId} ·{" "}
+                {runtime.verifiedAdapter.harnessTools ? "主控 + Worker" : "Worker"}
+              </small>
+              {runtime.diagnostic && <p>{runtime.diagnostic}</p>}
+            </div>
+            {runtimeState.harnessRuntimeId === runtime.runtimeId ? (
+              <span className="runtime-selected">当前主控</span>
+            ) : runtime.status === "verified" &&
+              runtime.verifiedAdapter.harnessTools ? (
+              <button
+                className="button-primary"
+                disabled={runtimeBusy}
+                onClick={() => void selectRuntime(runtime)}
+              >
+                {confirmSwitchId === runtime.runtimeId
+                  ? "确认切换主控？"
+                  : "设为主控"}
+              </button>
+            ) : (
+              <span className="runtime-passive">可用候选</span>
+            )}
+          </article>
+        ))}
+      </section>
+      {manualOpen && (
+        <div
+          className="connection-nested-backdrop"
+          onMouseDown={() => setManualOpen(false)}
+        >
+          <section
+            className="connection-panel connection-panel--nested"
+            aria-label="手动添加 CLI"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="connection-panel-head">
+              <div>
+                <span className="modal-kicker">手动添加</span>
+                <strong>验证本机 CLI</strong>
+                <p>
+                  输入绝对路径。验证会完成 realpath、版本与 ACP
+                  握手；成功后只加入候选列表。
+                </p>
+              </div>
+              <button
+                className="modal-close"
+                type="button"
+                onClick={() => setManualOpen(false)}
+                aria-label="关闭手动添加"
+              >
+                ×
+              </button>
+            </header>
+            <section className="connection-form">
+              <label className="connection-field">
+                <span>CLI 种类</span>
+                <select
+                  value={manualCli}
+                  onChange={(event) =>
+                    setManualCli(event.target.value as "codex" | "kimi")
+                  }
+                >
+                  <option value="codex">Codex CLI</option>
+                  <option value="kimi">Kimi CLI</option>
+                </select>
+              </label>
+              <label className="connection-field">
+                <span>CLI 绝对路径</span>
+                <input
+                  autoFocus
+                  value={manualPath}
+                  onChange={(event) => setManualPath(event.target.value)}
+                  placeholder={
+                    manualCli === "kimi"
+                      ? "/Users/you/.kimi-code/bin/kimi"
+                      : "/Users/you/.local/bin/codex"
+                  }
+                  spellCheck={false}
+                />
+              </label>
+              {manualError && (
+                <div className="manual-runtime-error" role="alert">
+                  <span>!</span>
+                  <p>{manualError}</p>
+                </div>
+              )}
+              <footer className="modal-actions">
+                <button
+                  className="button-secondary"
+                  onClick={() => setManualOpen(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="button-primary"
+                  disabled={runtimeBusy || !manualPath.trim()}
+                  onClick={() => void validate()}
+                >
+                  {runtimeBusy ? "正在验证…" : "验证并添加"}
+                </button>
+              </footer>
+            </section>
+          </section>
+        </div>
+      )}
+    </>
+  );
+
+  if (gateMode) {
+    return (
+      <div className="settings-backdrop connection-backdrop connection-backdrop--gate">
+        <section
+          className="connection-panel runtime-settings runtime-settings--gate"
+          aria-label="选择主控 CLI"
+          aria-modal="true"
+          role="dialog"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <header className="connection-panel-head">
+            <div>
+              <span className="modal-kicker">本机执行底座</span>
+              <strong>选择主控 CLI</strong>
+              <p>
+                Wave Flow 需要一个已验证的本机 CLI 才能开始主控会话。扫描只会发现候选，默认项始终由你明确设定。
+              </p>
+            </div>
+          </header>
+          {cliContent}
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`settings-backdrop connection-backdrop ${gateMode ? "connection-backdrop--gate" : ""}`}
-      onMouseDown={gateMode ? undefined : onClose}
+      className="settings-backdrop connection-backdrop"
+      onMouseDown={onClose}
     >
       <section
-        className={`connection-panel runtime-settings ${gateMode ? "runtime-settings--gate" : ""}`}
-        aria-label={gateMode ? "选择主控 CLI" : "主控与执行底座"}
+        className="connection-panel runtime-settings settings-panel"
+        aria-label="设置"
         aria-modal="true"
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="connection-panel-head">
           <div>
-            <span className="modal-kicker">本机执行底座</span>
-            <strong>{gateMode ? "选择主控 CLI" : "主控与执行底座"}</strong>
-            <p>
-              {gateMode
-                ? "Wave Flow 需要一个已验证的本机 CLI 才能开始主控会话。扫描只会发现候选，默认项始终由你明确设定。"
-                : "主控与 Worker 使用同一条已验证 CLI，但每次任务都创建独立 ACP 会话。"}
-            </p>
-          </div>
-          {!gateMode && (
-            <button
-              className="modal-close"
-              type="button"
-              onClick={onClose}
-              aria-label="关闭设置"
-            >
-              ×
-            </button>
-          )}
-        </header>
-        <section className="runtime-status" aria-live="polite">
-          {selected ? (
-            <>
-              <div className="status-mark verified">✓</div>
-              <div>
-                <span>当前主控 CLI</span>
-                <strong>
-                  {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
-                </strong>
-                <code title={selected.executablePath}>
-                  {selected.executablePath}
-                </code>
-                <small>
-                  {selected.version} · ACP adapter{" "}
-                  {selected.verifiedAdapter.adapterVersion}
-                </small>
-              </div>
-              <em>已验证</em>
-            </>
-          ) : (
-            <>
-              <div className={`status-mark ${scanning ? "scanning" : ""}`}>
-                {scanning ? "···" : "◇"}
-              </div>
-              <div>
-                <span>
-                  {scanning ? "正在检查本机 CLI" : "尚未设置主控 CLI"}
-                </span>
-                <strong>
-                  {scanning ? "发现并验证可用候选" : "请选择一个已验证候选"}
-                </strong>
-                <small>
-                  {scanning
-                    ? "正在安全验证 PATH 中的候选；不会修改默认项。"
-                    : "设置后才可进入工作台；手动添加不会自动设为主控。"}
-                </small>
-              </div>
-            </>
-          )}
-        </section>
-        <section className="connection-form runtime-actions">
-          <div className="section-row">
-            <div>
-              <strong>{selected ? "可用 CLI" : "已验证候选"}</strong>
-              <span>
-                {selected
-                  ? "切换主控只影响新会话；进行中的主控回合会阻止切换。"
-                  : "从 PATH 自动发现，或手动添加一个绝对路径。"}
-              </span>
-            </div>
-            {!gateMode && (
-              <button
-                className="button-secondary"
-                disabled={runtimeBusy || scanning}
-                onClick={() => void scan()}
-              >
-                {runtimeBusy || scanning ? "正在扫描…" : "重新扫描"}
-              </button>
-            )}
+            <span className="modal-kicker">Wave Flow</span>
+            <strong>设置</strong>
           </div>
           <button
-            className="button-secondary add-runtime"
-            disabled={runtimeBusy}
-            onClick={() => {
-              setManualError(null);
-              setManualOpen(true);
-            }}
+            className="modal-close"
+            type="button"
+            onClick={onClose}
+            aria-label="关闭设置"
           >
-            手动添加 CLI
+            ×
           </button>
-        </section>
-        <section className="runtime-list">
-          <span className="list-caption">
-            {runtimeState.runtimes.length
-              ? "已验证 Runtime"
-              : scanning
-                ? "正在验证候选…"
-                : "尚未发现可用 CLI"}
-          </span>
-          {runtimeState.runtimes.map((runtime) => (
-            <article
-              key={runtime.runtimeId}
-              className={
-                runtimeState.harnessRuntimeId === runtime.runtimeId
-                  ? "selected"
-                  : ""
-              }
-            >
-              <div>
-                <strong>
-                  {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
-                  <span className="runtime-cli-badge">{runtime.cli}</span>
-                </strong>
-                <code title={runtime.executablePath}>
-                  {runtime.executablePath}
-                </code>
-                <small>
-                  {runtime.version} · adapter {runtime.verifiedAdapter.adapterId} ·{" "}
-                  {runtime.verifiedAdapter.harnessTools ? "主控 + Worker" : "Worker"} ·{" "}
-                  {runtime.discoveredFrom === "manual"
-                    ? "手动添加"
-                    : "从终端 PATH 发现"}
-                </small>
-                {runtime.diagnostic && <p>{runtime.diagnostic}</p>}
-              </div>
-              {runtimeState.harnessRuntimeId === runtime.runtimeId ? (
-                <span className="runtime-selected">当前主控</span>
-              ) : runtime.status === "verified" &&
-                runtime.verifiedAdapter.harnessTools ? (
-                <button
-                  className="button-primary"
-                  disabled={runtimeBusy}
-                  onClick={() => void selectRuntime(runtime)}
-                >
-                  {confirmSwitchId === runtime.runtimeId
-                    ? "确认切换主控？"
-                    : "设为主控"}
-                </button>
-              ) : (
-                <span className="runtime-passive">可用候选</span>
-              )}
-            </article>
-          ))}
-        </section>
-        {manualOpen && (
-          <div
-            className="connection-nested-backdrop"
-            onMouseDown={() => setManualOpen(false)}
-          >
-            <section
-              className="connection-panel connection-panel--nested"
-              aria-label="手动添加 CLI"
-              role="dialog"
-              aria-modal="true"
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <header className="connection-panel-head">
-                <div>
-                  <span className="modal-kicker">手动添加</span>
-                  <strong>验证本机 CLI</strong>
-                  <p>
-                    输入绝对路径。验证会完成 realpath、版本与 ACP
-                    握手；成功后只加入候选列表。
-                  </p>
-                </div>
-                <button
-                  className="modal-close"
-                  type="button"
-                  onClick={() => setManualOpen(false)}
-                  aria-label="关闭手动添加"
-                >
-                  ×
-                </button>
-              </header>
-              <section className="connection-form">
-                <label className="connection-field">
-                  <span>CLI 种类</span>
-                  <select
-                    value={manualCli}
-                    onChange={(event) =>
-                      setManualCli(event.target.value as "codex" | "kimi")
-                    }
-                  >
-                    <option value="codex">Codex CLI</option>
-                    <option value="kimi">Kimi CLI</option>
-                  </select>
-                </label>
-                <label className="connection-field">
-                  <span>CLI 绝对路径</span>
-                  <input
-                    autoFocus
-                    value={manualPath}
-                    onChange={(event) => setManualPath(event.target.value)}
-                    placeholder={
-                      manualCli === "kimi"
-                        ? "/Users/you/.kimi-code/bin/kimi"
-                        : "/Users/you/.local/bin/codex"
-                    }
-                    spellCheck={false}
-                  />
-                </label>
-                {manualError && (
-                  <div className="manual-runtime-error" role="alert">
-                    <span>!</span>
-                    <p>{manualError}</p>
+        </header>
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="设置分区">
+            {(
+              [
+                ["general", "通用"],
+                ["cli", "Agent CLI"],
+                ["diagnostics", "诊断"],
+              ] as Array<[SettingsSection, string]>
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={section === key ? "active" : ""}
+                aria-current={section === key}
+                onClick={() => setSection(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="settings-content">
+            {section === "general" && (
+              <section className="settings-section">
+                <div className="section-row">
+                  <div>
+                    <strong>外观主题</strong>
+                    <span>明暗外观立即生效，并同步 macOS 原生标题栏。</span>
                   </div>
-                )}
-                <footer className="modal-actions">
+                </div>
+                <div className="settings-theme" role="radiogroup" aria-label="外观主题">
+                  <label>
+                    <input
+                      type="radio"
+                      name="settings-theme"
+                      checked={theme === "dark"}
+                      onChange={() => onTheme?.("dark")}
+                    />
+                    深色
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="settings-theme"
+                      checked={theme === "light"}
+                      onChange={() => onTheme?.("light")}
+                    />
+                    浅色
+                  </label>
+                </div>
+              </section>
+            )}
+            {section === "cli" && cliContent}
+            {section === "diagnostics" && (
+              <section className="settings-section">
+                <div className="section-row">
+                  <div>
+                    <strong>Desktop Engine 状态</strong>
+                    <span>来自 Engine 权威摘要；页面不由此推断或改变 Run 状态。</span>
+                  </div>
                   <button
                     className="button-secondary"
-                    onClick={() => setManualOpen(false)}
+                    onClick={() => void loadEngineStatus()}
                   >
-                    取消
+                    刷新
                   </button>
-                  <button
-                    className="button-primary"
-                    disabled={runtimeBusy || !manualPath.trim()}
-                    onClick={() => void validate()}
-                  >
-                    {runtimeBusy ? "正在验证…" : "验证并添加"}
-                  </button>
-                </footer>
+                </div>
+                {engineStatus ? (
+                  <dl className="settings-diag-list">
+                    <dt>协议版本</dt>
+                    <dd>{engineStatus.protocolVersion}</dd>
+                    <dt>运行中的 Run</dt>
+                    <dd>{engineStatus.activeRuns}</dd>
+                    <dt>等待决定的 Run</dt>
+                    <dd>{engineStatus.blockedRuns}</dd>
+                    <dt>进行中的主控回合</dt>
+                    <dd>{engineStatus.activeHarnesses}</dd>
+                    <dt>待恢复的 ACP Worker</dt>
+                    <dd>{engineStatus.acpWorkersNeedingResume}</dd>
+                  </dl>
+                ) : engineStatusError ? (
+                  <p className="manual-runtime-error">{engineStatusError}</p>
+                ) : (
+                  <p className="settings-note">正在读取…</p>
+                )}
+                <div className="section-row">
+                  <div>
+                    <strong>当前主控 Runtime 来源</strong>
+                    <span>用于审计本机执行底座的真实落点。</span>
+                  </div>
+                </div>
+                {selected ? (
+                  <dl className="settings-diag-list">
+                    <dt>CLI</dt>
+                    <dd>{selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}</dd>
+                    <dt>路径</dt>
+                    <dd><CopyablePath path={selected.executablePath} /></dd>
+                    <dt>版本</dt>
+                    <dd>{selected.version}</dd>
+                    <dt>发现来源</dt>
+                    <dd>{discoveredFromLabel(selected.discoveredFrom)}{selected.discoveredShell ? `（${selected.discoveredShell}）` : ""}</dd>
+                    <dt>验证 Adapter</dt>
+                    <dd>{selected.verifiedAdapter.adapterId} · {selected.verifiedAdapter.adapterVersion} · ACP v{selected.verifiedAdapter.acpProtocolVersion}</dd>
+                    <dt>验证时间</dt>
+                    <dd>{localeTime(selected.verifiedAt)}</dd>
+                  </dl>
+                ) : (
+                  <p className="settings-note">尚未设置主控 CLI。</p>
+                )}
               </section>
-            </section>
+            )}
           </div>
-        )}
+        </div>
       </section>
     </div>
   );
@@ -1356,11 +1688,14 @@ function DraftConversation({
   text,
   onText,
   onSend,
+  onRunWorkflow,
 }: {
   project: HarnessProject | null;
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
+  /** 打开原生选择器执行已有 Workflow（.ts）。 */
+  onRunWorkflow: () => void;
 }) {
   const ready = project !== null;
   return (
@@ -1416,6 +1751,16 @@ function DraftConversation({
           </button>
         </div>
       </div>
+      <div className="draft-workflow-entry">
+        <button
+          type="button"
+          className="button-secondary"
+          disabled={!ready}
+          onClick={onRunWorkflow}
+        >
+          执行已有的 Workflow（.ts）
+        </button>
+      </div>
     </div>
   );
 }
@@ -1430,6 +1775,7 @@ function HarnessConversation({
   hasWorkflow,
   onDraft,
   onAccept,
+  onReject,
   onCreateExecution,
   assignmentRevision,
   onAssignmentCancel,
@@ -1438,6 +1784,7 @@ function HarnessConversation({
   onAnswerDecision,
   onComplete,
   busy,
+  lastEventAt,
 }: {
   harness: HarnessSnapshot;
   text: string;
@@ -1448,6 +1795,8 @@ function HarnessConversation({
   hasWorkflow: boolean;
   onDraft: () => void;
   onAccept: (revision: number) => void;
+  /** 拒绝草案；最新会话快照由调用方写回 state。 */
+  onReject: (revision: number) => Promise<void>;
   onCreateExecution: (revision: number) => void;
   /** 分配卡当前展开的 revision；非 null 时内嵌在对应草案卡片下方。 */
   assignmentRevision: number | null;
@@ -1460,116 +1809,36 @@ function HarnessConversation({
   ) => Promise<void>;
   onComplete: () => void;
   busy: string | null;
+  /** 最近一次条目事件到达时间（Date.now() 毫秒）；无事件时为 null。 */
+  lastEventAt: number | null;
 }) {
-  const running = harness?.status === "running";
   return (
-    <div className="conversation">
-      <header>
-        <div>
-          <span className={`task-presence ${harness.status}`} />
-          <div>
-            <strong>{conversationTitle(harness)}</strong>
-            <small>{harness.cwd}</small>
-          </div>
-        </div>
-        <div className="conversation-actions">
-          {harness.status !== "completed" && (
-            <>
-              <button
-                disabled={
-                  running ||
-                  harness.executions.some((item) => item.finishedAt === null)
-                }
-                onClick={onComplete}
-              >
-                完成会话
-              </button>
-              <button onClick={onDraft}>提议 Workflow</button>
-            </>
-          )}
-          <button disabled={!hasWorkflow} onClick={onOpenWorkflow}>
-            查看 Workflow
-          </button>
-        </div>
-      </header>
-      <div className="conversation-scroll">
-        {harness.messages.length === 0 && (
-          <div className="conversation-intro">
-            <span>主控已就绪</span>
-            <h2>你想完成什么任务？</h2>
-            <p>
-              先告诉我目标和约束。后续 Workflow
-              启动后，会作为行动点出现在这条对话中。
-            </p>
-          </div>
-        )}
-        {harness.messages.map((message) => (
-          <Fragment key={message.id}>
-            <article className={`chat-message ${message.role}`}>
-              <div className="chat-avatar">
-                {message.role === "user" ? "你" : "W"}
-              </div>
-              <div>
-                <span>{message.role === "user" ? "你" : "主控 Agent"}</span>
-                <p>{message.text}</p>
-              </div>
-            </article>
-            {message.role === "assistant" &&
-              (harness.toolActivitiesByMessageId[message.id] ?? []).map(
-                (activity, index) => (
-                  <HarnessToolActivity
-                    key={`${message.id}:tool:${index}`}
-                    activity={activity}
-                  />
-                ),
-              )}
-          </Fragment>
-        ))}
-        {harness.status === "interrupted" && (
-          <article className="conversation-interruption" role="alert">
-            <strong>主控回合已中断</strong>
-            <p>{harness.diagnostic || "本回合未能产生完整回答。"}</p>
-            <small>可直接发送下一条消息重试；不会自动重发或执行 Workflow。</small>
-          </article>
-        )}
-        {harness.workflowRevisions.map((revision) => (
-          <article className="conversation-action workflow-revision" key={revision.revision}>
-            <span>Workflow 草案 v{revision.revision}</span>
-            <code>{revision.sourceHash.slice(0, 12)}</code>
-            <p>
-              {revision.acceptedAt
-                ? "已接受并冻结；可由用户显式创建 Execution。"
-                : "待确认；不会创建 Run 或 Worker。"}
-            </p>
-            {harness.status === "completed" ? null : !revision.acceptedAt ? (
-              <button onClick={() => onAccept(revision.revision)}>
-                接受并冻结
-              </button>
-            ) : assignmentRevision === revision.revision ? null : (
-              <button
-                disabled={
-                  harness.executions.some((item) => item.finishedAt === null)
-                }
-                onClick={() => onCreateExecution(revision.revision)}
-              >
-                {harness.executions.some((item) => item.finishedAt === null)
-                  ? "等待当前执行结束"
-                  : "创建执行"}
-              </button>
-            )}
-            {assignmentRevision === revision.revision && (
-              <ExecutionAssignmentFlow
-                harnessRunId={harness.harnessRunId}
-                revision={revision.revision}
-                onCancel={onAssignmentCancel}
-                onCreated={onAssignmentCreated}
-              />
-            )}
-            <details>
-              <summary>查看 workflow.ts</summary>
-              <pre>{revision.source}</pre>
-            </details>
-          </article>
+    <ConversationView
+      key={harness.harnessRunId}
+      harness={harness}
+      draft={text}
+      onDraft={onText}
+      onSend={onSend}
+      onAbort={onAbort}
+      onComplete={onComplete}
+      onProposeWorkflow={onDraft}
+      onOpenWorkflow={onOpenWorkflow}
+      hasWorkflow={hasWorkflow}
+      busy={busy}
+      lastEventAt={lastEventAt}
+    >
+      {harness.workflowRevisions.map((revision) => (
+          <WorkflowRevisionCard
+            key={revision.revision}
+            revision={revision}
+            harness={harness}
+            onAccept={onAccept}
+            onReject={onReject}
+            onCreateExecution={onCreateExecution}
+            assignmentRevision={assignmentRevision}
+            onAssignmentCancel={onAssignmentCancel}
+            onAssignmentCreated={onAssignmentCreated}
+          />
         ))}
         {harness.executions.map((execution) => (
           <ExecutionAction
@@ -1590,66 +1859,19 @@ function HarnessConversation({
               }
             />
           ))}
-        {running && (
-          <div className="harness-thinking">主控正在响应…</div>
-        )}
-      </div>
-      {harness.status !== "completed" && <div className="conversation-composer">
-        <textarea
-          value={text}
-          disabled={running}
-          onChange={(event) => onText(event.target.value)}
-          placeholder={
-            running
-              ? "主控正在处理当前消息"
-              : "给主控发送消息"
-          }
-          onKeyDown={(event) => {
-            if (shouldSubmitComposer(event)) {
-              event.preventDefault();
-              if (text.trim() && !running) onSend();
-            }
-          }}
-        />
-        <div className="composer-footer">
-          <div className="composer-guidance">
-            <span aria-hidden="true">＋</span>
-            <small>⌘/Ctrl + Enter 发送 · Enter 换行 · 思考过程不会保存</small>
-          </div>
-          {running ? (
-            <button className="stop-turn" onClick={onAbort}>
-              停止
-            </button>
-          ) : (
-            <button
-              className="send-message"
-              aria-label="发送消息"
-              disabled={!text.trim()}
-              onClick={onSend}
-            >
-              ↑
-            </button>
-          )}
-        </div>
-      </div>
-      }
-    </div>
+    </ConversationView>
   );
 }
 
 /**
  * 裸 Enter 始终留给 textarea 与 IME：它可确认中文候选、切换输入状态或换行。
  * 发送只接受显式的 ⌘/Ctrl + Enter，且 composition 期间一律不拦截事件。
+ * 实现复用 conversation 模块的同一判定。
  */
 function shouldSubmitComposer(
   event: ReactKeyboardEvent<HTMLTextAreaElement>,
 ): boolean {
-  return (
-    event.key === "Enter" &&
-    (event.metaKey || event.ctrlKey) &&
-    !event.nativeEvent.isComposing &&
-    !event.shiftKey
-  );
+  return conversationShouldSubmitComposer(event);
 }
 
 function ExecutionAction({
@@ -1688,38 +1910,20 @@ function HarnessDecisionCard({
   busy: boolean;
   onAnswer: (answer: Record<string, unknown>) => Promise<void>;
 }) {
-  const [text, setText] = useState("{}");
-  const [error, setError] = useState<string | null>(null);
-  async function submit() {
-    try {
-      const answer = JSON.parse(text) as unknown;
-      if (!answer || Array.isArray(answer) || typeof answer !== "object")
-        throw new Error("答案必须是 JSON 对象。 ");
-      setError(null);
-      await onAnswer(answer as Record<string, unknown>);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
   return (
     <article className="conversation-action harness-decision">
       <span>主控需要你的决定</span>
       <p>{decision.question}</p>
-      {decision.answerSchema && (
-        <details>
-          <summary>查看答案 Schema</summary>
-          <pre>{JSON.stringify(decision.answerSchema, null, 2)}</pre>
-        </details>
+      {decision.answerSchema ? (
+        <SchemaForm
+          schema={decision.answerSchema}
+          busy={busy}
+          submitLabel="提交决定"
+          onSubmit={onAnswer}
+        />
+      ) : (
+        <FreeJsonAnswer busy={busy} submitLabel="提交决定" onSubmit={onAnswer} />
       )}
-      <textarea
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        spellCheck={false}
-      />
-      <button disabled={busy} onClick={() => void submit()}>
-        {busy ? "正在交付…" : "提交决定"}
-      </button>
-      {error && <p className="answer-error">{error}</p>}
     </article>
   );
 }
@@ -1727,18 +1931,47 @@ function HarnessDecisionCard({
 function ExecutionDetail({
   detail,
   busy,
+  dynamicCount,
+  harnessRunId,
   onControl,
   onAnswer,
   onAnswerBlock,
 }: {
   detail: ExecutionResponse;
   busy: string | null;
+  /** 该 revision 静态无法枚举的动态节点数；0 表示无动态节点或不可用。 */
+  dynamicCount: number;
+  /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
+  harnessRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
 }) {
+  const executionId = detail.execution.executionId;
+  /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
+  const loadAllVisits = useCallback(async () => {
+    const items: import("./types").PhaseVisit[] = [];
+    let cursor: number | null = null;
+    // 顺序翻页直到读完全部 attempt 的耐久访问记录（上限防止异常循环）。
+    for (let page = 0; page < 10; page += 1) {
+      const response = await api.executionPhaseVisits(
+        harnessRunId,
+        executionId,
+        cursor === null ? {} : { cursor },
+      );
+      items.push(...response.items);
+      cursor = response.nextCursor;
+      if (cursor === null) break;
+    }
+    return items;
+  }, [harnessRunId, executionId]);
   return (
     <>
+      <ExecutionProgressCard
+        snapshot={detail.snapshot}
+        dynamicCount={dynamicCount}
+        plannedTotal={detail.execution.config?.assignments.length}
+      />
       <div className="execution-summary">
         <span>冻结 revision v{detail.execution.revision}</span>
         <code>{detail.execution.sourceHash}</code>
@@ -1758,7 +1991,7 @@ function ExecutionDetail({
         )}
       </div>
       <div className="actions">
-        {detail.snapshot.status === "running" && (
+        {detail.controllable && detail.snapshot.status === "running" && (
           <Action
             label="暂停"
             icon="Ⅱ"
@@ -1767,7 +2000,7 @@ function ExecutionDetail({
             onClick={() => void onControl("pause")}
           />
         )}
-        {detail.snapshot.status === "paused" && (
+        {detail.controllable && detail.snapshot.status === "paused" && (
           <Action
             label="恢复执行"
             icon="▶"
@@ -1776,7 +2009,7 @@ function ExecutionDetail({
             onClick={() => void onControl("recover")}
           />
         )}
-        {(detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled") && (
+        {(detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled" || (!detail.controllable && detail.snapshot.status !== "completed")) && (
           <Action
             label={detail.snapshot.status === "cancelled" ? "恢复已停止 Execution" : "恢复中断 Execution"}
             icon="↻"
@@ -1785,7 +2018,7 @@ function ExecutionDetail({
             onClick={() => void onControl("resume")}
           />
         )}
-        {["running", "pausing", "recovering", "paused"].includes(
+        {detail.controllable && ["running", "pausing", "recovering", "paused"].includes(
           detail.snapshot.status,
         ) && (
           <Action
@@ -1797,6 +2030,12 @@ function ExecutionDetail({
           />
         )}
       </div>
+      {!detail.controllable && detail.snapshot.status !== "completed" && detail.snapshot.status !== "interrupted" && detail.snapshot.status !== "cancelled" && (
+        <div className="diagnostic">
+          该 Execution 不在当前 Engine 的可控制生命周期内（Engine 已重启）；只能显式
+          resume 创建新 attempt，pause/stop 与决策门回答都会被拒绝。
+        </div>
+      )}
       {detail.snapshot.diagnostic && (
         <div className="diagnostic">{detail.snapshot.diagnostic}</div>
       )}
@@ -1810,60 +2049,17 @@ function ExecutionDetail({
             onAnswer={(answer) => onAnswer(gate.gateId, answer)}
           />
         ))}
-      <ExecutionSnapshotDetail snapshot={detail.snapshot} busy={busy} onAnswer={onAnswerBlock} />
+      <TeamPanel
+        runId={detail.execution.executionId}
+        currentExecutionAttemptId={detail.snapshot.currentExecutionAttemptId}
+        phaseTitles={detail.snapshot.phases.map((phase) => phase.title)}
+        visits={detail.snapshot.phaseVisits}
+        fallbackPhases={detail.snapshot.phases}
+        busy={busy}
+        onAnswer={onAnswerBlock}
+        loadAllVisits={loadAllVisits}
+      />
     </>
-  );
-}
-
-function ExecutionSnapshotDetail({
-  snapshot,
-  busy,
-  onAnswer,
-}: {
-  snapshot: RunSnapshot;
-  busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-}) {
-  return (
-    <div className="execution-phases">
-      {snapshot.phases.map((phase) => (
-        <section className="phase" key={phase.title}>
-          <div className="phase-title">
-            <div className="phase-heading">
-              <h2>{phase.title}</h2>
-              <small>
-                {phase.agents.length} 名 Agent · {phase.batches.length}{" "}
-                个调度批次
-              </small>
-            </div>
-          </div>
-          {phase.batches.map((batch) => (
-            <div
-              className={`execution-batch ${batch.mode}`}
-              key={batch.sequence}
-            >
-              <div className="batch-head">
-                <span>
-                  {batch.mode === "parallel" ? "并行批次" : "顺序批次"} #
-                  {batch.sequence}
-                </span>
-              </div>
-              <div className="agent-grid">
-                {batch.agents.map((agent) => (
-                  <AgentCard
-                    key={agent.id}
-                    agent={agent}
-                    busy={busy}
-                    onAnswer={onAnswer}
-                    expanded
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
-        </section>
-      ))}
-    </div>
   );
 }
 
@@ -1876,6 +2072,37 @@ function GateCard({
   busy: boolean;
   onAnswer: (answer: Record<string, unknown>) => Promise<void>;
 }) {
+  return (
+    <article className="conversation-action execution-gate">
+      <span>Execution 决策门 · {gate.gateId}</span>
+      <p>{gate.question}</p>
+      {gate.answerSchema ? (
+        <SchemaForm
+          schema={gate.answerSchema}
+          busy={busy}
+          submitLabel="提交答案"
+          onSubmit={onAnswer}
+        />
+      ) : (
+        <FreeJsonAnswer busy={busy} submitLabel="提交答案" onSubmit={onAnswer} />
+      )}
+    </article>
+  );
+}
+
+/** 无 answerSchema 时的单行 JSON 输入；提交载荷与既有裸 JSON 行为一致（必须是 JSON 对象）。 */
+function FreeJsonAnswer({
+  busy,
+  submitLabel,
+  onSubmit,
+}: {
+  /** 提交中禁用。 */
+  busy: boolean;
+  /** 提交按钮文案。 */
+  submitLabel: string;
+  /** 提交回调。 */
+  onSubmit: (answer: Record<string, unknown>) => Promise<void>;
+}) {
   const [text, setText] = useState("{}");
   const [error, setError] = useState<string | null>(null);
   async function submit() {
@@ -1884,31 +2111,24 @@ function GateCard({
       if (!answer || Array.isArray(answer) || typeof answer !== "object")
         throw new Error("答案必须是 JSON 对象。 ");
       setError(null);
-      await onAnswer(answer as Record<string, unknown>);
+      await onSubmit(answer as Record<string, unknown>);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
   return (
-    <article className="conversation-action execution-gate">
-      <span>Execution 决策门 · {gate.gateId}</span>
-      <p>{gate.question}</p>
-      {gate.answerSchema && (
-        <details>
-          <summary>查看答案 Schema</summary>
-          <pre>{JSON.stringify(gate.answerSchema, null, 2)}</pre>
-        </details>
-      )}
-      <textarea
+    <div className="wf-free-answer">
+      <input
         value={text}
         onChange={(event) => setText(event.target.value)}
         spellCheck={false}
+        aria-label="答案 JSON"
       />
       <button disabled={busy} onClick={() => void submit()}>
-        {busy ? "正在交付…" : "提交答案"}
+        {busy ? "正在交付…" : submitLabel}
       </button>
       {error && <p className="answer-error">{error}</p>}
-    </article>
+    </div>
   );
 }
 
@@ -1962,29 +2182,7 @@ function WorkflowDraftModal({
   );
 }
 
-/** MCP 工具是回复的低密度尾注；只展示、也只耐久最小安全摘要。 */
-function HarnessToolActivity({
-  activity,
-}: {
-  activity: { readonly label: string; readonly outcome: "running" | "completed" | "failed" };
-}) {
-  const stateText =
-    activity.outcome === "running"
-      ? "正在执行"
-      : activity.outcome === "completed"
-        ? "已完成"
-        : "未完成";
-  return (
-    <details className={`harness-tool ${activity.outcome}`}>
-      <summary>
-        <span aria-hidden="true">⌁</span>
-        {activity.label}
-        <em>{stateText}</em>
-      </summary>
-      <p>仅保留动作名称与结果；不保存参数、路径、命令或完整输出。</p>
-    </details>
-  );
-}
+/** MCP 工具尾注组件已迁入 conversation/conversation-view.tsx（legacy 回合回落渲染）。 */
 
 function conversationTitle(harness: HarnessSnapshot): string {
   return (
@@ -1998,10 +2196,16 @@ function conversationTitle(harness: HarnessSnapshot): string {
 
 function CreateRunModal({
   busy,
+  initialWorkflowPath,
+  initialCwd,
   onCreate,
   onClose,
 }: {
   busy: boolean;
+  /** 原生选择器选中的 Workflow 路径（只读展示）。 */
+  initialWorkflowPath: string;
+  /** 默认项目目录（可编辑）。 */
+  initialCwd: string;
   onCreate: (value: {
     workflowPath: string;
     cwd: string;
@@ -2009,10 +2213,18 @@ function CreateRunModal({
   }) => Promise<void>;
   onClose: () => void;
 }) {
-  const [workflowPath, setWorkflowPath] = useState("");
-  const [cwd, setCwd] = useState("");
+  const [workflowPath, setWorkflowPath] = useState(initialWorkflowPath);
+  const [cwd, setCwd] = useState(initialCwd);
   const [input, setInput] = useState("{}");
   const [error, setError] = useState<string | null>(null);
+  async function pickAgain() {
+    try {
+      const picked = await pickWorkflowFile();
+      if (picked) setWorkflowPath(picked);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
   async function submit(event: FormEvent) {
     event.preventDefault();
     try {
@@ -2020,7 +2232,7 @@ function CreateRunModal({
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object")
         throw new Error("输入必须是 JSON 对象。 ");
       if (!workflowPath.trim() || !cwd.trim())
-        throw new Error("请填写 workflow 路径和项目目录。 ");
+        throw new Error("请先选择 Workflow 文件并填写项目目录。 ");
       setError(null);
       await onCreate({
         workflowPath: workflowPath.trim(),
@@ -2048,15 +2260,21 @@ function CreateRunModal({
             ×
           </button>
         </div>
-        <label>
-          Workflow 路径
-          <input
-            value={workflowPath}
-            onChange={(event) => setWorkflowPath(event.target.value)}
-            placeholder="/绝对路径/flow.ts 或项目内相对路径"
-            autoFocus
-          />
-        </label>
+        <div className="create-field">
+          <span>Workflow 文件</span>
+          {workflowPath ? (
+            <div className="create-picked-path">
+              <code>{workflowPath}</code>
+              <button type="button" onClick={() => void pickAgain()}>
+                重新选择
+              </button>
+            </div>
+          ) : (
+            <button type="button" onClick={() => void pickAgain()}>
+              选择本地 .ts 文件…
+            </button>
+          )}
+        </div>
         <label>
           项目目录 cwd
           <input
@@ -2078,7 +2296,11 @@ function CreateRunModal({
           <button type="button" onClick={onClose}>
             取消
           </button>
-          <button className="primary" disabled={busy} type="submit">
+          <button
+            className="primary"
+            disabled={busy || !workflowPath.trim()}
+            type="submit"
+          >
             {busy ? "正在创建…" : "创建 Run"}
           </button>
         </div>
@@ -2159,11 +2381,7 @@ function RunDetail({
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
 }) {
   const active = ["running", "pausing", "recovering"].includes(run.status);
-  const [defaultView, setDefaultView] = usePersistedView();
-  const [expanded, setExpanded] = useState<AgentSnapshot | null>(null);
   const [attempt, setAttempt] = useState<CurrentAttemptResponse | null>(null);
-  const [visit, setVisit] = useState<PhaseVisit | null>(null);
-  const [visitLoading, setVisitLoading] = useState<number | null>(null);
   const [history, setHistory] = useState<PhaseVisit[] | null>(null);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -2172,7 +2390,6 @@ function RunDetail({
   const [historyAttempt, setHistoryAttempt] = useState<number | null>(null);
   useEffect(() => {
     let activeRequest = true;
-    setVisit(null);
     setAttempt(null);
     setHistory(null);
     setHistoryCursor(null);
@@ -2205,41 +2422,6 @@ function RunDetail({
     const timer = window.setInterval(reload, 1_000);
     return () => { activeRequest = false; window.clearInterval(timer); };
   }, [active, run.runId]);
-  useEffect(() => {
-    if (!attempt) return;
-    const currentVisitId = Math.max(
-      ...attempt.summary.phases.flatMap((phase) =>
-        phase.currentVisitId === null ? [] : [phase.currentVisitId],
-      ),
-    );
-    if (!Number.isFinite(currentVisitId)) return;
-    let activeRequest = true;
-    setVisitLoading(currentVisitId);
-    void api
-      .phaseVisit(run.runId, currentVisitId)
-      .then((response) => {
-        if (activeRequest) setVisit(response.visit);
-      })
-      .finally(() => {
-        if (activeRequest) setVisitLoading(null);
-      });
-    return () => {
-      activeRequest = false;
-    };
-  }, [attempt, run.runId]);
-  useEffect(() => {
-    if (!expanded) return;
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpanded(null);
-    };
-    window.addEventListener("keydown", close);
-    const original = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", close);
-      document.body.style.overflow = original;
-    };
-  }, [expanded]);
   return (
     <>
       <div className="run-header">
@@ -2287,11 +2469,6 @@ function RunDetail({
             />
           )}
         </div>
-        <ViewSwitcher
-          value={defaultView}
-          onChange={setDefaultView}
-          label="默认视图"
-        />
       </div>
       <div className="run-meta">
         <Status status={run.status} />
@@ -2306,41 +2483,13 @@ function RunDetail({
             <div className="attempt-label">
               当前执行尝试 #{attempt.summary.executionAttemptId}
             </div>
-            {attempt.summary.phases.map((phase, index) => (
-              <section
-                className={`phase ${phase.currentVisitId !== null ? "current" : ""}`}
-                key={phase.title}
-              >
-                <PhaseHeader
-                  phase={phase}
-                  index={index}
-                  loading={
-                    visitLoading ===
-                    (phase.currentVisitId ?? phase.latestVisitId)
-                  }
-                  onOpen={async (phaseVisitId) => {
-                    setVisitLoading(phaseVisitId);
-                    try {
-                      setVisit(
-                        (await api.phaseVisit(run.runId, phaseVisitId)).visit,
-                      );
-                    } finally {
-                      setVisitLoading(null);
-                    }
-                  }}
-                />
-                {visit?.title === phase.title && (
-                  <PhaseVisitDetail
-                    visit={visit}
-                    view={defaultView}
-                    busy={busy}
-                    onAnswer={onAnswer}
-                    onOpen={setExpanded}
-                    onClose={() => setVisit(null)}
-                  />
-                )}
-              </section>
-            ))}
+            <TeamPanel
+              runId={run.runId}
+              currentExecutionAttemptId={attempt.summary.executionAttemptId}
+              phaseTitles={attempt.summary.phases.map((phase) => phase.title)}
+              busy={busy}
+              onAnswer={onAnswer}
+            />
             <section className="history-panel">
               <div>
                 <strong>执行记录</strong>
@@ -2427,16 +2576,14 @@ function RunDetail({
                 <ol>
                   {history.map((item) => (
                     <li key={`${item.executionAttemptId}:${item.phaseVisitId}`}>
-                      <button onClick={() => setVisit(item)}>
-                        {item.title} · 第 {item.occurrence} 轮{" "}
-                        <small>
-                          {item.batches.reduce(
-                            (count, batch) => count + batch.agents.length,
-                            0,
-                          )}{" "}
-                          名 Agent
-                        </small>
-                      </button>
+                      {item.title} · 第 {item.occurrence} 轮{" "}
+                      <small>
+                        {item.batches.reduce(
+                          (count, batch) => count + batch.agents.length,
+                          0,
+                        )}{" "}
+                        名 Agent
+                      </small>
                     </li>
                   ))}
                 </ol>
@@ -2447,375 +2594,9 @@ function RunDetail({
           <div className="empty-phase">正在读取当前执行摘要…</div>
         )}
       </div>
-      {expanded && (
-        <AgentDetailModal
-          runId={run.runId}
-          agent={expanded}
-          busy={busy}
-          onAnswer={onAnswer}
-          onClose={() => setExpanded(null)}
-        />
-      )}
     </>
   );
 }
-
-function PhaseHeader({
-  phase,
-  index,
-  loading,
-  onOpen,
-}: {
-  phase: import("./types").PhaseSummary;
-  index: number;
-  loading: boolean;
-  onOpen: (phaseVisitId: number) => void;
-}) {
-  const visitId = phase.currentVisitId ?? phase.latestVisitId;
-  const state = phase.currentVisitId !== null ? "当前轮" : "最近一轮";
-  return (
-    <div className="phase-title">
-      <span>{String(index + 1).padStart(2, "0")}</span>
-      <div className="phase-heading">
-        <div className="phase-name-row">
-          <h2>{phase.title}</h2>
-          {phase.currentVisitId !== null && <em>当前进行中</em>}
-        </div>
-        <small>
-          已进入 {phase.visits} 次 · {phase.agents} 名 Agent ·{" "}
-          {Object.entries(phase.statusCounts)
-            .filter(([, count]) => count)
-            .map(([status, count]) => `${statusLabel(status)} ${count}`)
-            .join(" · ") || "暂无 Agent"}
-        </small>
-      </div>
-      {visitId !== null ? (
-        <button
-          className="phase-action"
-          disabled={loading}
-          onClick={() => onOpen(visitId)}
-        >
-          {loading ? "正在读取…" : `查看${state}`}
-        </button>
-      ) : (
-        <small className="phase-empty">尚无可查看的 Agent 轮次</small>
-      )}
-      <i />
-    </div>
-  );
-}
-
-function PhaseVisitDetail({
-  visit,
-  view,
-  busy,
-  onAnswer,
-  onOpen,
-  onClose,
-}: {
-  visit: PhaseVisit;
-  view: ViewMode;
-  busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-  onOpen: (agent: AgentSnapshot) => void;
-  onClose: () => void;
-}) {
-  return (
-    <section className="visit-detail">
-      <div className="visit-title">
-        <div>
-          <span>
-            {visit.title} · 第 {visit.occurrence} 轮
-          </span>
-          <small>
-            本轮{" "}
-            {visit.batches.reduce(
-              (count, batch) => count + batch.agents.length,
-              0,
-            )}{" "}
-            名 Agent
-          </small>
-        </div>
-        <button onClick={onClose}>收起本轮</button>
-      </div>
-      <div className="batch-list">
-        {visit.batches.map((batch, index) => (
-          <ExecutionBatch
-            key={batch.sequence}
-            batch={batch}
-            index={index}
-            view={view}
-            busy={busy}
-            onAnswer={onAnswer}
-            onOpen={onOpen}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-type ViewMode = "cards" | "tags";
-
-function usePersistedView(): [ViewMode, (view: ViewMode) => void] {
-  const storageKey = "wave-flow:agent-view:v2";
-  const [view, setView] = useState<ViewMode>(() =>
-    localStorage.getItem(storageKey) === "cards" ? "cards" : "tags",
-  );
-  const update = (next: ViewMode) => {
-    localStorage.setItem(storageKey, next);
-    setView(next);
-  };
-  return [view, update];
-}
-
-function ViewSwitcher({
-  value,
-  onChange,
-  label,
-}: {
-  value: ViewMode;
-  onChange: (view: ViewMode) => void;
-  label: string;
-}) {
-  return (
-    <div className="view-switcher" aria-label={label}>
-      <button
-        className={value === "cards" ? "active" : ""}
-        onClick={() => onChange("cards")}
-      >
-        卡片
-      </button>
-      <button
-        className={value === "tags" ? "active" : ""}
-        onClick={() => onChange("tags")}
-      >
-        标签
-      </button>
-    </div>
-  );
-}
-
-function ExecutionBatch({
-  batch,
-  index,
-  view,
-  busy,
-  onAnswer,
-  onOpen,
-}: {
-  batch: {
-    sequence: number;
-    mode: "serial" | "parallel";
-    agents: AgentSnapshot[];
-  };
-  index: number;
-  view: ViewMode;
-  busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-  onOpen: (agent: AgentSnapshot) => void;
-}) {
-  return (
-    <div className={`execution-batch ${batch.mode} ${view}`}>
-      <div className="batch-head">
-        <span>
-          {batch.mode === "parallel"
-            ? `可并行执行 · ${batch.agents.length} 名 Agent`
-            : "顺序执行"}
-        </span>
-        {index > 0 && <i>等待上一批完成</i>}
-      </div>
-      {view === "cards" ? (
-        <div className="agent-rail">
-          <div className="agent-grid">
-            {batch.agents.map((agent) => (
-              <AgentCard
-                key={agent.id}
-                agent={agent}
-                busy={busy}
-                onAnswer={onAnswer}
-                onOpen={() => onOpen(agent)}
-              />
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="agent-tags">
-          {batch.agents.map((agent) => (
-            <button
-              key={agent.id}
-              className={`agent-tag ${agent.status}`}
-              onClick={() => onOpen(agent)}
-            >
-              <span />
-              <strong>{agent.label}</strong>
-              <small>{statusLabel(agent.status)}</small>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AgentCard({
-  agent,
-  busy,
-  onAnswer,
-  onOpen,
-  expanded = false,
-}: {
-  agent: AgentSnapshot;
-  busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-  onOpen?: () => void;
-  expanded?: boolean;
-}) {
-  const [answer, setAnswer] = useState("{}"),
-    [answerError, setAnswerError] = useState<string | null>(null);
-  const paused = ["pausing", "paused", "recovering"].includes(agent.status);
-  const persona = agentPersona(agent);
-  async function submit() {
-    try {
-      const parsed = JSON.parse(answer) as unknown;
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object")
-        throw new Error("Answer must be a JSON object.");
-      await onAnswer(
-        agent.block!.blockRequestId,
-        parsed as Record<string, unknown>,
-      );
-    } catch (cause) {
-      setAnswerError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-  return (
-    <article
-      className={`agent-card ${agent.status} ${expanded ? "expanded" : ""}`}
-    >
-      <div className="agent-top">
-        <div className={`agent-avatar ${persona.tint}`}>
-          <span>{persona.initial}</span>
-          <i />
-        </div>
-        <div className="agent-identity">
-          <h3>{agent.label}</h3>
-          <span
-            className="cli-badge"
-            title={`所用 Agent CLI：${cliLabel(agent.cli)}${agent.request?.assignedRuntimeId ? ` · 分配 Runtime ${agent.request.assignedRuntimeId.slice(0, 8)}` : ""}`}
-          >
-            {cliLabel(agent.cli)}
-            {agent.request?.assignedRuntimeId && (
-              <small> · {agent.request.assignedRuntimeId.slice(0, 8)}</small>
-            )}
-          </span>
-        </div>
-        <Status status={agent.status} />
-      </div>
-      <div className="agent-presence">
-        <span className={`presence-dot ${agent.status}`} />
-        {persona.message}
-      </div>
-      <div className="agent-context">
-        <span>工作目录</span>
-        <code title={agent.cwd}>{shortPath(agent.cwd)}</code>
-      </div>
-      {agent.diagnostic && (
-        <div className="agent-report">
-          <span>最新汇报</span>
-          <p>{agent.diagnostic}</p>
-        </div>
-      )}
-      {agent.result && (
-        <details>
-          <summary>结构化结果</summary>
-          <pre>{JSON.stringify(agent.result, null, 2)}</pre>
-        </details>
-      )}
-      {agent.block && (
-        <div className="block-panel">
-          <div className="block-label">需要你的输入</div>
-          <p>{agent.block.needHelp}</p>
-          {paused ? (
-            <div className="paused-help">暂停中。恢复后才能交付答案。</div>
-          ) : agent.block.answered ? (
-            <div className="answered-help">
-              答案已交付，等待 Agent continue。
-            </div>
-          ) : (
-            <>
-              <textarea
-                value={answer}
-                onChange={(event) => setAnswer(event.target.value)}
-                spellCheck={false}
-              />
-              <button
-                className="submit-answer"
-                disabled={busy === `answer:${agent.block.blockRequestId}`}
-                onClick={() => void submit()}
-              >
-                {busy === `answer:${agent.block.blockRequestId}`
-                  ? "正在交付…"
-                  : "交付答案"}
-              </button>
-              {answerError && (
-                <span className="answer-error">{answerError}</span>
-              )}
-            </>
-          )}
-        </div>
-      )}
-      {!expanded && onOpen && (
-        <button className="expand-agent" onClick={onOpen}>
-          展开阅读
-        </button>
-      )}
-    </article>
-  );
-}
-
-function AgentDetailModal({
-  runId,
-  agent,
-  busy,
-  onAnswer,
-  onClose,
-}: {
-  runId: string;
-  agent: AgentSnapshot;
-  busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="agent-modal-backdrop"
-      role="presentation"
-      onMouseDown={onClose}
-    >
-      <section
-        className="agent-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${agent.label} 完整信息`}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="modal-head">
-          <div>
-            <span>Agent 完整信息</span>
-            <strong>{agent.label}</strong>
-          </div>
-          <div className="modal-actions">
-            <button onClick={onClose} aria-label="关闭完整信息">
-              ×
-            </button>
-          </div>
-        </div>
-        <AgentCard agent={agent} busy={busy} onAnswer={onAnswer} expanded />
-      </section>
-    </div>
-  );
-}
-
 function Status({ status }: { status: string }) {
   return <span className={`status ${status}`}>{statusLabel(status)}</span>;
 }
@@ -2855,38 +2636,4 @@ function statusLabel(status: string): string {
       } as Record<string, string>
     )[status] ?? status
   );
-}
-
-function shortPath(path: string): string {
-  const fragments = path.split("/").filter(Boolean);
-  return fragments.length > 3 ? `…/${fragments.slice(-3).join("/")}` : path;
-}
-
-function agentPersona(agent: AgentSnapshot): {
-  initial: string;
-  message: string;
-  tint: string;
-} {
-  const initial = agent.label.trim().slice(0, 1).toUpperCase() || "A";
-  const message =
-    (
-      {
-        queued: "正在等待工作安排",
-        running: "正在专注处理这项工作",
-        blocked: "有一个问题需要你拍板",
-        pausing: "正在收尾手头的动作",
-        paused: "暂时休息，保留当前上下文",
-        recovering: "正在回到工作状态",
-        completed: "已经交付了本次工作",
-        cancelled: "这项工作已被停止",
-        interrupted: "执行被打断，等待下一步安排",
-      } as Record<string, string>
-    )[agent.status] ?? "正在等待状态更新";
-  const tint =
-    ["sky", "lilac", "mint", "peach"][agent.id.charCodeAt(0) % 4] ?? "sky";
-  return { initial, message, tint };
-}
-
-function cliLabel(cli: AgentSnapshot["cli"]): string {
-  return ({ codex: "Codex CLI", kimi: "Kimi CLI" } as const)[cli];
 }

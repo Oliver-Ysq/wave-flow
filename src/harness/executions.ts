@@ -22,10 +22,11 @@ export type HarnessExecutionExecutor = {
 
 /** Engine 注入的真实执行器接线；测试可全部省略。 */
 export type HarnessExecutionHooks = {
-  /** 真实执行器须在节点启动前绑定 ControlServer；由 Engine 注入，测试不注入。 */
-  readonly wireControl?: (runtime: RunRuntime, wiring: unknown) => void | Promise<void>;
-  /** 执行结束后的清理（如关闭终端观察器）；由 Engine 注入。 */
-  readonly onSettled?: (executionId: string) => void | Promise<void>;
+  /**
+   * 节点启动前绑定本实例的 ControlServer；缺省不接线。可返回同步释放器，捕获
+   * 本次具体资源身份，在耐久终态后退役时调用一次；不得按 executionId 清理新实例。
+   */
+  readonly wireControl?: (runtime: RunRuntime, wiring: unknown) => void | (() => void) | Promise<void | (() => void)>;
 };
 
 /**
@@ -35,16 +36,14 @@ export type HarnessExecutionHooks = {
  * Engine 重启后不做任何自动继续；只有显式 resume 才重新编译冻结源码。
  */
 export class HarnessExecutionService {
-  /** 当前 Engine 生命周期内活跃的 Execution Runtime；离线档案只读重开。 */
-  #runtimes = new Map<string, RunRuntime>();
-  /** 活跃 Execution 的后台执行任务；控制操作要求任务在册。 */
-  #tasks = new Map<string, Promise<void>>();
+  /** 当前 Engine 的唯一活跃执行实例；Runtime 与控制资源共同取得/撤销所有权。 */
+  #instances = new Map<string, ExecutionInstance>();
   /** 同一 Execution 的控制操作单飞；与 Engine runControl 同一纪律。 */
   #controlRequests = new Map<string, { readonly kind: string; readonly promise: Promise<unknown> }>();
   /** 同一 Execution 的 resume 单飞；必须在任一 await 前登记。 */
   #resumeRequests = new Map<string, Promise<RunSnapshot>>();
-  /** 同一 Harness 的创建事务串行化；先登记成功才允许下一份冻结源码/Journal 出现。 */
-  #creationLocks = new Map<string, Promise<void>>();
+  /** 同一 Harness 的执行生命周期事务：创建、resume 与终态发布不能交错换代。 */
+  #lifecycleLocks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly harness: HarnessService,
@@ -62,7 +61,7 @@ export class HarnessExecutionService {
 
   /** 创建并后台启动一次 Execution；只有已接受冻结的 revision 可以执行，且必须携带分配卡冻结的执行配置。 */
   async createExecution(harnessRunId: string, revisionNumber: number, input: JsonObject = {}, config?: ExecutionConfigSnapshot): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
-    return this.withCreationLock(harnessRunId, () => this.createExecutionOnce(harnessRunId, revisionNumber, input, config ?? null));
+    return this.withLifecycleLock(harnessRunId, () => this.createExecutionOnce(harnessRunId, revisionNumber, input, config ?? null));
   }
 
   /**
@@ -106,19 +105,19 @@ export class HarnessExecutionService {
       await rm(directory, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
-    await this.hooks.wireControl?.(runtime, created.wiring);
-    this.startExecution(harnessRunId, executionId, runtime, module, policy);
+    const releaseControl = await this.hooks.wireControl?.(runtime, created.wiring);
+    this.startExecution(harnessRunId, executionId, runtime, module, policy, releaseControl);
     return { execution: record, snapshot: runtime.snapshot() };
   }
 
-  /** 同一 Harness 按请求到达顺序创建；失败不会毒化之后的创建请求。 */
-  private async withCreationLock<T>(harnessRunId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#creationLocks.get(harnessRunId) ?? Promise.resolve();
+  /** 同一 Harness 按到达顺序提交执行生命周期事务；失败不毒化后续请求。 */
+  private async withLifecycleLock<T>(harnessRunId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#lifecycleLocks.get(harnessRunId) ?? Promise.resolve();
     const task = previous.catch(() => undefined).then(operation);
     const settled = task.then(() => undefined, () => undefined);
-    this.#creationLocks.set(harnessRunId, settled);
+    this.#lifecycleLocks.set(harnessRunId, settled);
     try { return await task; }
-    finally { if (this.#creationLocks.get(harnessRunId) === settled) this.#creationLocks.delete(harnessRunId); }
+    finally { if (this.#lifecycleLocks.get(harnessRunId) === settled) this.#lifecycleLocks.delete(harnessRunId); }
   }
 
   /** Harness 的 Execution 登记列表；重开 Harness Journal 即可还原，不依赖内存。 */
@@ -188,6 +187,44 @@ export class HarnessExecutionService {
     return (await this.runtimeFor(harnessRunId, executionId)).snapshot();
   }
 
+  /**
+   * 只读分页读取 Execution 的 Phase 访问。attempt 缺省时聚合全部已耐久 attempt，
+   * 按（attempt, phaseVisitId）稳定排序，cursor 编码为 attempt * 1_000_000 + phaseVisitId；
+   * 指定 attempt 时语义与 RunRuntime 单尝试分页一致（cursor 为 phaseVisitId）。
+   * 用途：UI 补齐"本次未访问但历史访问已交付并被 replay 复用"的 Phase → Agent 关系；
+   * 数据全部来自耐久 Journal，不得用于推断 TypeScript 控制流。
+   */
+  async listExecutionPhaseVisits(
+    harnessRunId: string,
+    executionId: string,
+    options: { readonly attempt?: number | null; readonly cursor?: number | null; readonly includeEmpty?: boolean; readonly limit?: number } = {},
+  ): Promise<{ readonly items: readonly import("../runtime/run-types").PhaseVisitSnapshot[]; readonly nextCursor: number | null }> {
+    const runtime = await this.runtimeFor(harnessRunId, executionId);
+    const limit = options.limit ?? 20;
+    const cursor = options.cursor ?? null;
+    const includeEmpty = options.includeEmpty === true;
+    if (options.attempt !== undefined && options.attempt !== null) {
+      if (!runtime.state.hasExecutionAttempt(options.attempt)) throw new Error("指定执行尝试不存在。 ");
+      return runtime.state.listPhaseVisits(options.attempt, cursor, limit, includeEmpty);
+    }
+    const attempts = runtime.state.executionAttemptIds();
+    const all = attempts.flatMap((attempt) => runtime.state.listPhaseVisits(attempt, null, Number.MAX_SAFE_INTEGER, includeEmpty).items);
+    const keyOf = (visit: import("../runtime/run-types").PhaseVisitSnapshot): number => visit.executionAttemptId * 1_000_000 + visit.phaseVisitId;
+    const sorted = [...all].sort((left, right) => keyOf(left) - keyOf(right));
+    const visible = cursor === null ? sorted : sorted.filter((visit) => keyOf(visit) > cursor);
+    const items = visible.slice(0, limit);
+    return { items, nextCursor: visible.length > items.length ? keyOf(items.at(-1)!) : null };
+  }
+
+  /**
+   * Execution 是否处于当前 Engine 的可控制生命周期内（本进程持有活跃实例）。
+   * Engine 重启后旧 Execution 的耐久状态可能仍是 running/paused，但 pause/stop/answerGate
+   * 都会拒绝；UI 依此提供显式 resume 入口，而不是展示注定失败的控制按钮。
+   */
+  isControllable(executionId: string): boolean {
+    return this.#instances.has(executionId);
+  }
+
   /** 暂停当前 Execution：阻断后续调度并停止既有节点；只对活跃实例有效。 */
   async pause(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
     return this.control(harnessRunId, executionId, "pause", async (runtime) => {
@@ -211,22 +248,26 @@ export class HarnessExecutionService {
 
   /** Desktop 退出时同步写 cancelled，随后异步请求已启动 Worker 停止。 */
   async cancelForDesktopExit(engineInstanceId: string): Promise<void> {
-    for (const [executionId, runtime] of [...this.#runtimes]) {
+    for (const [executionId, instance] of [...this.#instances]) {
+      const { runtime } = instance;
       const snapshot = runtime.snapshot();
       if (snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "interrupted") continue;
       const harnessRunId = runtime.journal.manifest.harness?.harnessRunId;
-      await runtime.cancelForDesktopExit(engineInstanceId);
-      if (harnessRunId) await this.harness.recordExecutionFinished(harnessRunId, executionId, "cancelled", "退出 Wave Flow 时停止。 ", null);
-      // 终态 Execution 只保留 Journal/登记事实；不再保留可控 Runtime，否则
-      // 同一 Engine 内的显式 resume 会被误判为“仍在运行”。
-      this.#runtimes.delete(executionId);
+      if (!harnessRunId) continue;
+      await this.withLifecycleLock(harnessRunId, async () => {
+        if (this.#instances.get(executionId) !== instance) return;
+        await runtime.cancelForDesktopExit(engineInstanceId);
+        await this.harness.recordExecutionFinished(harnessRunId, executionId, "cancelled", "退出 Wave Flow 时停止。 ", null);
+        // 耐久取消后立即退役，不等待旧调用栈；释放器与实例在此一起撤销所有权。
+        this.retireInstance(executionId, instance);
+      });
     }
   }
 
   /** 用户对脚本决策门提交答案；Execution 必须在当前 Engine 活跃，否则应先显式 resume。 */
   async answerGate(harnessRunId: string, executionId: string, gateId: string, answer: JsonObject): Promise<RunSnapshot> {
-    const runtime = this.#runtimes.get(executionId);
-    if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
+    const runtime = this.#instances.get(executionId)?.runtime;
+    if (!runtime) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
     await runtime.answerGate(gateId, answer);
     await this.harness.notifyExecutionChanged(harnessRunId, executionId);
     return runtime.snapshot();
@@ -239,13 +280,13 @@ export class HarnessExecutionService {
   async resume(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
     const inFlight = this.#resumeRequests.get(executionId);
     if (inFlight) return inFlight;
-    const task = this.resumeOnce(harnessRunId, executionId).finally(() => this.#resumeRequests.delete(executionId));
+    const task = this.withLifecycleLock(harnessRunId, () => this.resumeOnce(harnessRunId, executionId)).finally(() => this.#resumeRequests.delete(executionId));
     this.#resumeRequests.set(executionId, task);
     return task;
   }
 
   private async resumeOnce(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
-    if (this.#runtimes.has(executionId)) throw new Error("该 Execution 已在当前 Engine 运行，不能重复 resume。 ");
+    if (this.#instances.has(executionId)) throw new Error("该 Execution 已在当前 Engine 运行，不能重复 resume。 ");
     const snapshot = await this.harness.snapshot(harnessRunId);
     const record = snapshot.executions.find((item) => item.executionId === executionId);
     if (!record) throw new Error("未知 WorkflowExecution。 ");
@@ -295,14 +336,14 @@ export class HarnessExecutionService {
     // 才能写入新的 execution_finished，而不是被旧终态拒绝。
     if (record.status === "interrupted" || record.status === "cancelled") await this.harness.recordExecutionResumed(harnessRunId, executionId);
     const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root, record.config);
-    await this.hooks.wireControl?.(runtime, resumedExecutor.wiring);
-    this.startExecution(harnessRunId, executionId, runtime, module, record.policy);
+    const releaseControl = await this.hooks.wireControl?.(runtime, resumedExecutor.wiring);
+    this.startExecution(harnessRunId, executionId, runtime, module, record.policy, releaseControl);
     return runtime.snapshot();
   }
 
   private async runtimeFor(harnessRunId: string, executionId: string): Promise<RunRuntime> {
     validateRunId(executionId);
-    const live = this.#runtimes.get(executionId);
+    const live = this.#instances.get(executionId)?.runtime;
     if (live) return live;
     const snapshot = await this.harness.snapshot(harnessRunId);
     if (!snapshot.executions.some((item) => item.executionId === executionId)) throw new Error("未知 WorkflowExecution。 ");
@@ -316,8 +357,8 @@ export class HarnessExecutionService {
       throw new Error(`该 Execution 正在执行 ${active.kind}，不能同时执行 ${kind}。`);
     }
     const task = (async () => {
-      const runtime = this.#runtimes.get(executionId);
-      if (!runtime || !this.#tasks.has(executionId)) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
+      const runtime = this.#instances.get(executionId)?.runtime;
+      if (!runtime) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
       return operation(runtime);
     })().finally(() => this.#controlRequests.delete(executionId));
     this.#controlRequests.set(executionId, { kind, promise: task });
@@ -327,14 +368,15 @@ export class HarnessExecutionService {
   }
 
   /** 后台执行受限脚本；结束后登记终态事实并做展示通知。 */
-  private startExecution(harnessRunId: string, executionId: string, runtime: RunRuntime, module: ReturnType<typeof compileRestrictedWorkflow>, policy: WorkflowExecutionRecord["policy"]): void {
-    this.#runtimes.set(executionId, runtime);
+  private startExecution(harnessRunId: string, executionId: string, runtime: RunRuntime, module: ReturnType<typeof compileRestrictedWorkflow>, policy: WorkflowExecutionRecord["policy"], releaseControl: void | (() => void)): void {
+    const instance: ExecutionInstance = { runtime, releaseControl };
+    this.#instances.set(executionId, instance);
     // run() 的返回值需要进入 summary，经闭包传递；整个 Execution 只调用一次 run()。
     let runtimeResult: unknown = null;
     // run() 的 rejection 是本 attempt 失败的直接原因，必须保留到 settle 登记；
     // 否则 resume 重放被拒等场景下只能读到上一次 attempt 的旧诊断，真实错误永久丢失。
     let runtimeError: Error | null = null;
-    const task = runtime.run(module, { policy })
+    void runtime.run(module, { policy })
       .then((result) => { runtimeResult = result; }, (error: unknown) => { runtimeError = error instanceof Error ? error : new Error(String(error)); })
       .then(async () => {
         // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。
@@ -355,16 +397,31 @@ export class HarnessExecutionService {
         const diagnostic = terminal === "completed" ? null
           : terminal === "interrupted" && runtimeError ? runtimeError.message
           : snapshot.diagnostic;
-        await this.harness.recordExecutionFinished(harnessRunId, executionId, terminal, diagnostic, summary);
+        // 终态发布与 resume 共用 Harness 事务锁：身份校验和 append 之间不能换代。
+        await this.withLifecycleLock(harnessRunId, async () => {
+          if (this.#instances.get(executionId) !== instance) return;
+          await this.harness.recordExecutionFinished(harnessRunId, executionId, terminal, diagnostic, summary);
+          this.retireInstance(executionId, instance);
+        });
       })
       .catch(() => undefined)
-      .finally(async () => {
-        this.#tasks.delete(executionId);
-        // 终态 Execution 只保留 Journal/登记事实；若继续保留 Runtime，用户在
-        // 同一 Engine 内显式 resume 会被误判为“仍在运行”。
-        this.#runtimes.delete(executionId);
-        await this.hooks.onSettled?.(executionId);
+      .finally(() => {
+        this.retireInstance(executionId, instance);
       });
-    this.#tasks.set(executionId, task);
+  }
+
+  /** 只退役仍归本实例所有的资源；迟到任务不能按稳定业务 id 删除新实例。 */
+  private retireInstance(executionId: string, instance: ExecutionInstance): void {
+    if (this.#instances.get(executionId) !== instance) return;
+    this.#instances.delete(executionId);
+    instance.releaseControl?.();
   }
 }
+
+/** Engine 内一次实际执行的所有权；对象身份独立于持久 executionId/attempt。 */
+type ExecutionInstance = {
+  /** 该实例独占的 Runtime、调用栈和决策门等待者。 */
+  readonly runtime: RunRuntime;
+  /** 接线时捕获的同步资源释放器；缺省表示没有外部 Control 资源。 */
+  readonly releaseControl: void | (() => void);
+};

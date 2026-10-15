@@ -34,6 +34,9 @@ async function main(): Promise<void> {
   // Engine 进程重启时绝不认领旧 ACP session。必须在接受任何新 action 前将
   // 上一个进程遗留的活跃事实收敛，避免 UI 短暂展示一个实际上无人持有的 Worker。
   await engine.convergeStaleAcpWorkers();
+  // 事件帧与请求响应共用同一 stdout JSONL 通道：响应带 requestId，事件帧不带；
+  // Tauri 按帧形状分流，迟到旧进程帧由 generation 校验丢弃。
+  engine.subscribeEvents((frame) => write(frame));
   write({ type: "ready", protocolVersion: 1 });
   const reader = new TextDecoder();
   let buffered = "";

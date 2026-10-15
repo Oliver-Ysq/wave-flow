@@ -9,8 +9,9 @@ import type {
 
 /**
  * 冻结 revision 后的分配卡流程：卡片一 CLI 分配（主控 CLI / 随机 / 自然语言规则），
- * 卡片二模型分配（本期只读“跟随 CLI 默认”），确认页逐 Worker 展示来源与回退路径。
- * 两张卡横向滑动切换；只有用户确认后才携带 config 创建 Execution。
+ * 卡片二确认启动。当前两个 ACP Adapter 都不支持模型覆盖，Worker 一律使用所选 CLI
+ * 的默认模型，因此流程不提供任何模型选择控件。两张卡横向滑动切换；只有用户确认后
+ * 才携带 config 创建 Execution。
  */
 export function ExecutionAssignmentFlow({
   harnessRunId,
@@ -121,10 +122,6 @@ export function ExecutionAssignmentFlow({
       setAppliedRule(ruleText.trim());
       if (result.degraded || !result.assignments) {
         // 解析失败绝不静默猜测：显式标注退化并落回随机分配。
-        setRuleDegraded(true);
-        setRuleDiagnostic(
-          result.diagnostic ?? "主控未能给出合规的分配结果。",
-        );
         await applyRandom(plan);
         setMode("rule");
         setAppliedRule(ruleText.trim());
@@ -211,7 +208,7 @@ export function ExecutionAssignmentFlow({
         </button>
       </div>
       <p className="assignment-note">
-        脚本写死的 cli/model 在受限 Execution 中不直接生效；节点落点以这里冻结的分配为准。
+        脚本写死的 cli 在受限 Execution 中不直接生效；节点落点以这里冻结的分配为准。Worker 使用所选 CLI 的默认模型。
       </p>
       {!plan ? (
         <p className="assignment-note">{error ?? "正在枚举 Worker…"}</p>
@@ -225,7 +222,7 @@ export function ExecutionAssignmentFlow({
           )}
           <div className="assignment-cards" ref={scrollRef}>
             <section className="assignment-card">
-              <span className="assignment-kicker">卡片 1 / 3</span>
+              <span className="assignment-kicker">卡片 1 / 2</span>
               <h3>CLI 分配</h3>
               <div className="assignment-modes" role="radiogroup" aria-label="CLI 分配方式">
                 <label>
@@ -304,31 +301,14 @@ export function ExecutionAssignmentFlow({
               </ul>
             </section>
             <section className="assignment-card">
-              <span className="assignment-kicker">卡片 2 / 3</span>
-              <h3>模型分配</h3>
-              <p className="assignment-note">
-                本期每个 Worker 都跟随 CLI 默认模型；模型覆盖尚未验证，不提供选择。
-              </p>
-              <ul className="assignment-list">
-                {assignments.map((item) => (
-                  <li key={item.agentId}>
-                    <strong>{item.agentId}</strong>
-                    <span>{runtimeLabel(item.runtimeId)}</span>
-                    <em>跟随 CLI 默认</em>
-                  </li>
-                ))}
-              </ul>
-            </section>
-            <section className="assignment-card">
-              <span className="assignment-kicker">卡片 3 / 3</span>
-              <h3>确认分配</h3>
+              <span className="assignment-kicker">卡片 2 / 2</span>
+              <h3>确认启动</h3>
               <ul className="assignment-list">
                 {assignments.map((item) => (
                   <li key={item.agentId}>
                     <strong>{item.agentId}</strong>
                     <span>
-                      {item.cli === "codex" ? "Codex" : "Kimi"} · 跟随 CLI
-                      默认 · {sourceLabel(item.source)}
+                      {item.cli === "codex" ? "Codex" : "Kimi"} · {sourceLabel(item.source)}
                     </span>
                     <em>{runtimeLabel(item.runtimeId)}</em>
                   </li>
@@ -350,9 +330,6 @@ export function ExecutionAssignmentFlow({
               CLI
             </button>
             <button type="button" className="button-secondary" onClick={() => scrollToCard(1)}>
-              模型
-            </button>
-            <button type="button" className="button-secondary" onClick={() => scrollToCard(2)}>
               确认
             </button>
           </div>

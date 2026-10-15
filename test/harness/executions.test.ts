@@ -56,6 +56,48 @@ async function waitFor(condition: () => Promise<boolean> | boolean): Promise<voi
 }
 
 describe("HarnessExecutionService", () => {
+  test("退出后旧任务迟到收尾不能覆盖 resume 实例或释放其控制资源", async () => {
+    const { harness, harnessRunId, root } = await fixture();
+    let releaseOld!: () => void;
+    const oldTail = new Promise<void>(resolve => { releaseOld = resolve; });
+    let oldReturned!: () => void;
+    const oldReturn = new Promise<void>(resolve => { oldReturned = resolve; });
+    const runtimes: import("../../src/runtime/run-runtime").RunRuntime[] = [];
+    const releases: number[] = [];
+    const executions = new HarnessExecutionService(harness, () => ({ executor: new DeterministicExecutor() }), {
+      wireControl(runtime) {
+        runtimes.push(runtime);
+        const instanceNumber = runtimes.length;
+        const run = runtime.run.bind(runtime);
+        // 只在测试中精确控制旧调用栈退场时机，不依赖 sleep 或机器负载撞竞态。
+        if (instanceNumber === 1) runtime.run = async (...args) => {
+          try { return await run(...args); }
+          finally { await oldTail; oldReturned(); }
+        };
+        return () => { releases.push(instanceNumber); };
+      },
+    }, root);
+    try {
+      await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
+      await harness.acceptWorkflowRevision(harnessRunId, 1);
+      const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
+      await waitFor(() => runtimes[0].snapshot().gates.length === 1);
+      await executions.cancelForDesktopExit("test-exit");
+      expect(releases).toEqual([1]);
+      await executions.resume(harnessRunId, execution.executionId);
+      releaseOld();
+      await oldReturn;
+      // 等待旧后台 promise 的 then/finally 执行完，且不让新回合提前完成。
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(releases).toEqual([1]);
+      await expect(executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true })).resolves.toBeDefined();
+      await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
+      expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
+      const reopened = await HarnessJournal.open(harnessRunId, root);
+      expect(reopened.snapshot.executions[0].status).toBe("completed");
+      expect(releases).toEqual([1, 2]);
+    } finally { releaseOld(); }
+  });
   test("草稿与未接受 revision 永远不能创建 Execution", async () => {
     const { harness, executions, harnessRunId } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
@@ -230,11 +272,13 @@ describe("HarnessExecutionService", () => {
     const records = await executions2.listExecutions(harnessRunId);
     expect(records).toHaveLength(1);
     expect(records[0].status).toBe("running");
+    expect(executions2.isControllable(execution.executionId)).toBe(false);
     await expect(executions2.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true })).rejects.toThrow("可控制生命周期");
 
     // 显式 resume：w1 复用 completed 结果，已创建的 gate 不重复落盘，等待原 gate 答案。
     const resumed = await executions2.resume(harnessRunId, execution.executionId);
     expect(resumed.status).toBe("running");
+    expect(executions2.isControllable(execution.executionId)).toBe(true);
     await executions2.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
     await waitFor(async () => (await executions2.listExecutions(harnessRunId))[0].status === "completed");
     const detail = await executions2.snapshotExecution(harnessRunId, execution.executionId);
@@ -285,6 +329,15 @@ describe("HarnessExecutionService", () => {
     const detail = await restarted.snapshotExecution(harnessRunId, execution.executionId);
     expect(detail.currentExecutionAttemptId).toBe(2);
     expect(resumedNodes).toBe(1);
+
+    // 跨 attempt 聚合读取：两个 attempt 的 Phase 访问都按（attempt, visitId）稳定可见，
+    // 供 UI 补齐"历史访问已交付、本次 replay 复用"的 Phase → Agent 关系。
+    const all = await restarted.listExecutionPhaseVisits(harnessRunId, execution.executionId);
+    expect(all.items.map((item) => [item.executionAttemptId, item.title])).toEqual([[1, "工作"], [2, "工作"]]);
+    expect(all.items[0].batches.flatMap((batch) => batch.agents).map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w1:completed"]);
+    expect(all.items[1].batches.flatMap((batch) => batch.agents).map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w2:completed"]);
+    await expect(restarted.listExecutionPhaseVisits(harnessRunId, execution.executionId, { attempt: 99 })).rejects.toThrow("指定执行尝试不存在");
+    await expect(restarted.listExecutionPhaseVisits(harnessRunId, execution.executionId, { attempt: 1 })).resolves.toMatchObject({ items: [{ executionAttemptId: 1 }], nextCursor: null });
   });
 
   test("损坏的嵌套 Execution 不阻止后续 active Execution 在重启时收敛", async () => {

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { HarnessJournal } from "../../src/harness/journal";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessService } from "../../src/harness/service";
@@ -10,6 +12,50 @@ import { harnessRunsRoot } from "../../src/journal/paths";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+
+test("revision 预览提案时耐久，旧档案并发补齐一次，重开不重复保存", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'wave-flow-preview-durable-')); directories.push(cwd);
+  const root = harnessRunsRoot(cwd);
+  const source = `const meta = { name: 'durable-preview', description: '预览', phases: [{ title: '检查' }] }; async function run(args) { phase('检查'); for (const item of args.items) await agent('检查', { id: item.id, cli: 'kimi', label: '检查 Agent' }); return {}; }`;
+  const service = new HarnessService(root, async () => new FakePi());
+  const created = await service.create(cwd);
+  const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
+  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 1, sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
+  const saved = await HarnessJournal.open(created.harnessRunId, root);
+  expect(saved.snapshot.workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
+  expect(saved.events.filter(event => event.type === 'workflow.revision_preview_saved')).toHaveLength(0);
+
+  const legacyId = crypto.randomUUID();
+  const journal = await HarnessJournal.create({ harnessRunId: legacyId, cwd, version: 5, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
+  const revision = { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
+  await journal.append({ type: 'workflow.revision_proposed', at: revision.createdAt, harnessRunId: legacyId, revision });
+  await journal.append({ type: 'workflow.revision_accepted', at: revision.createdAt, harnessRunId: legacyId, revision: 1 });
+  const opened = new HarnessService(root, async () => new FakePi());
+  const snapshots = await Promise.all([opened.snapshot(legacyId), opened.snapshot(legacyId), opened.snapshot(legacyId)]);
+  expect(snapshots[0]?.workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
+  const once = await HarnessJournal.open(legacyId, root);
+  expect(once.events.filter(event => event.type === 'workflow.revision_preview_saved')).toHaveLength(1);
+  expect(once.snapshot.executions).toEqual([]);
+  expect(once.snapshot.workflowRevisions[0]?.acceptedAt).toBe(revision.createdAt);
+  const reopened = new HarnessService(root, async () => new FakePi());
+  // 已保存预览重开不得再进入编译/AST 生成路径。
+  (reopened as unknown as { buildRevisionPreview: () => never }).buildRevisionPreview = () => { throw new Error('unexpected preview rebuild'); };
+  await reopened.snapshot(legacyId);
+  expect((await reopened.snapshot(legacyId)).workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
+  expect((await HarnessJournal.open(legacyId, root)).events).toEqual(once.events);
+});
+
+test("旧源码不再满足编译规则时只降级预览，不阻断聊天重开", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'wave-flow-preview-legacy-')); directories.push(cwd);
+  const root = harnessRunsRoot(cwd), harnessRunId = crypto.randomUUID();
+  const journal = await HarnessJournal.create({ harnessRunId, cwd, version: 5, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
+  const source = 'old invalid source';
+  await journal.append({ type: 'workflow.revision_proposed', at: new Date().toISOString(), harnessRunId, revision: { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(), acceptedAt: null } });
+  const opened = new HarnessService(root, async () => new FakePi());
+  expect((await opened.snapshot(harnessRunId)).workflowRevisions[0]?.preview).toBeUndefined();
+  expect((await opened.snapshot(harnessRunId)).status).toBe('idle');
+  expect((await HarnessJournal.open(harnessRunId, root)).events).toHaveLength(2);
+});
 const testModel = { model: "test", baseUrl: "https://example.test/v1", apiKey: "test-key" };
 
 class FakePi implements HarnessPiSession {
@@ -125,7 +171,7 @@ describe("HarnessService", () => {
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "idle", messages: [{ role: "user", text: "hello" }, { role: "assistant", text: "durable answer" }] });
   });
 
-  test("主控回合的工具安全摘要绑定完整 assistant，重开会话仍可恢复", async () => {
+  test("主控回合的工具事实以颗粒化条目耐久，重开会话仍可恢复", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-tool-summary-")); directories.push(cwd);
     let service!: HarnessService;
     const pi: HarnessPiSession = {
@@ -142,14 +188,14 @@ describe("HarnessService", () => {
     await service.send(created.harnessRunId, "读取项目");
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
     const completed = await service.snapshot(created.harnessRunId);
-    const assistant = completed.messages.at(-1)!;
-    expect(completed.toolActivitiesByMessageId[assistant.id]).toEqual([
-      expect.objectContaining({ label: "查询项目状态", outcome: "completed", finishedAt: expect.any(String) }),
-    ]);
+    // v5 起新回合不再写 harness.tool_activity 批量摘要（它会让新界面出现重复工具行）；
+    // 工具目标、输出与状态由颗粒化条目承载，重开回放同源一致。
+    const tool = completed.conversationEntries.find((entry) => entry.kind === "tool");
+    expect(tool).toMatchObject({ kind: "tool", name: "查询项目状态", toolKind: "command", target: "pwd", status: "completed", source: "engine-mcp", hasDetail: true, legacy: false });
+    expect(tool && tool.kind === "tool" ? tool.output : null).toContain(cwd.split("/").at(-1) ?? "");
+    expect(completed.toolActivitiesByMessageId).toEqual({});
     const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
-    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({
-      toolActivitiesByMessageId: { [assistant.id]: [{ label: "查询项目状态", outcome: "completed" }] },
-    });
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ conversationEntries: completed.conversationEntries });
   });
 
   test("部分流或 provider 中断不耐久 assistant 消息", async () => {
@@ -206,7 +252,7 @@ describe("HarnessService", () => {
     expect(proposed.workflowRevisions).toHaveLength(1);
     expect(proposed.workflowRevisions[0]).toMatchObject({ revision: 1, source, acceptedAt: null, sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
     await expect(service.acceptWorkflowRevision(created.harnessRunId, 1)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1, acceptedAt: expect.any(String) }] });
-    await expect(service.acceptWorkflowRevision(created.harnessRunId, 1)).rejects.toThrow("最新未接受草案");
+    await expect(service.acceptWorkflowRevision(created.harnessRunId, 1)).rejects.toThrow("未接受且未拒绝");
     const next = await service.proposeWorkflowRevision(created.harnessRunId, `${source}\n// revision 2`);
     expect(next.workflowRevisions).toHaveLength(2);
     expect(next.workflowRevisions[0].revision).toBe(1);
@@ -302,6 +348,256 @@ describe("HarnessService", () => {
     const snapshot = await service.snapshot(created.harnessRunId);
     expect(snapshot.workflowRevisions).toMatchObject([{ revision: 1, acceptedAt: null }]);
     expect(snapshot.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "assistant", text: "草案已提交" })]));
+  });
+
+  test("正文与思考分段耐久：正文完成、思考各自计时，重开完整回放", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-stream-")); directories.push(cwd);
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "hello");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const snapshot = await service.snapshot(created.harnessRunId);
+    const body = snapshot.conversationEntries.find((entry) => entry.kind === "body");
+    const thoughts = snapshot.conversationEntries.filter((entry) => entry.kind === "thought");
+    expect(body).toMatchObject({ kind: "body", text: "durable answer", completed: true, truncated: false, finishedAt: expect.any(String) });
+    expect(thoughts).toHaveLength(1);
+    expect(thoughts[0]).toMatchObject({ kind: "thought", status: "completed", text: "<think>hello</think>", startedAt: expect.any(String), finishedAt: expect.any(String) });
+    expect(snapshot.conversationEntries.map((entry) => entry.seq)).toEqual([1, 2]);
+    // 重开回放必须与实时投影同源一致：条目 ID、正文、计时事实全部来自 Journal。
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ conversationEntries: snapshot.conversationEntries });
+  });
+
+  test("思考被正文/工具切断时分段为独立条目", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-thought-segments-")); directories.push(cwd);
+    class SegmentedPi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        const emit = (event: HarnessStreamEvent) => { for (const listener of this.#listeners) listener(event); };
+        emit({ type: "reasoning_delta", delta: "第一段" });
+        emit({ type: "assistant_delta", delta: "中间正文" });
+        emit({ type: "reasoning_delta", delta: "第二段" });
+        emit({ type: "assistant_delta", delta: "完整回答" });
+        return "中间正文完整回答";
+      }
+      abort() {}
+    }
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new SegmentedPi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "分段思考");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const thoughts = (await service.snapshot(created.harnessRunId)).conversationEntries.filter((entry) => entry.kind === "thought");
+    expect(thoughts.map((entry) => entry.kind === "thought" ? entry.text : "")).toEqual(["第一段", "第二段"]);
+    expect(thoughts.every((entry) => entry.kind === "thought" && entry.status === "completed")).toBe(true);
+  });
+
+  test("正文被工具/思考切断时另建条目，回放顺序与真实流一致", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-body-segments-")); directories.push(cwd);
+    let service!: HarnessService;
+    class BodySegmentPi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        const emit = (event: HarnessStreamEvent) => { for (const listener of this.#listeners) listener(event); };
+        emit({ type: "assistant_delta", delta: "先读取项目" });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        emit({ type: "assistant_delta", delta: "读取完成" });
+        emit({ type: "reasoning_delta", delta: "检查结果" });
+        emit({ type: "assistant_delta", delta: "准备验证" });
+        emit({ type: "acp_tool_call", call: { callId: "native-check", title: "验证", name: "shell", toolKind: "command", status: "completed", locations: [], contentText: "ok", rawInput: null, rawOutput: null } });
+        emit({ type: "assistant_delta", delta: "验证完成" });
+        return "先读取项目读取完成准备验证验证完成";
+      }
+      abort() {}
+    }
+    service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new BodySegmentPi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "正文分段");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const entries = (await service.snapshot(created.harnessRunId)).conversationEntries;
+    // 工具后的新文字必须另建正文条目，不能并回首个正文段（否则回放顺序错乱）。
+    expect(entries.map((entry) => entry.kind)).toEqual(["body", "tool", "body", "thought", "body", "tool", "body"]);
+    expect(entries.map((entry) => entry.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    const bodies = entries.filter((entry) => entry.kind === "body");
+    expect(bodies.map((entry) => entry.kind === "body" ? entry.text : "")).toEqual(["先读取项目", "读取完成", "准备验证", "验证完成"]);
+    expect(bodies.every((entry) => entry.kind === "body" && entry.completed)).toBe(true);
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ conversationEntries: entries });
+  });
+
+  test("工具调用在回合进行中已耐久可见：运行中条目先于回合结束出现", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-live-tool-")); directories.push(cwd);
+    let service!: HarnessService;
+    const pi: HarnessPiSession = {
+      isRunning: false,
+      subscribe: () => () => {},
+      async prompt() {
+        const result = await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "request_user_decision", arguments: { question: "继续吗？" } } });
+        return `决定：${JSON.stringify((result as { answer: unknown }).answer)}`;
+      },
+      abort() {},
+    };
+    service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    const events: HarnessStreamEvent[] = [];
+    await service.subscribe(created.harnessRunId, (event) => events.push(event));
+    await service.send(created.harnessRunId, "需要决定");
+    // 回合仍在进行（决策未答），运行中工具条目必须已经耐久并出现在快照里。
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).conversationEntries.some((entry) => entry.kind === "tool"));
+    const mid = await service.snapshot(created.harnessRunId);
+    const runningTool = mid.conversationEntries.find((entry) => entry.kind === "tool");
+    expect(runningTool).toMatchObject({ kind: "tool", name: "等待用户决定", toolKind: "mcp", status: "running", target: "继续吗？", hasDetail: true, legacy: false });
+    expect(mid.status).toBe("running");
+    expect(events.some((event) => event.type === "entry_started" && event.entry.kind === "tool")).toBe(true);
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).decisions.length > 0);
+    const decision = (await service.snapshot(created.harnessRunId)).decisions.at(-1)!;
+    await service.answerUserDecision(created.harnessRunId, decision.decisionId, { continue: true });
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const done = (await service.snapshot(created.harnessRunId)).conversationEntries.find((entry) => entry.kind === "tool");
+    expect(done).toMatchObject({ status: "completed", finishedAt: expect.any(String) });
+    expect(done && done.kind === "tool" ? done.output : null).toContain("continue");
+  });
+
+  test("工具输出遮蔽已知凭据形态，超限时标记截断", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-redact-")); directories.push(cwd);
+    let service!: HarnessService;
+    const pi: HarnessPiSession = {
+      isRunning: false,
+      subscribe: () => () => {},
+      async prompt() {
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "request_user_decision", arguments: { question: "key?" } } });
+        return "done";
+      },
+      abort() {},
+    };
+    service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => pi);
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "redact");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).decisions.length > 0);
+    const decision = (await service.snapshot(created.harnessRunId)).decisions.at(-1)!;
+    await service.answerUserDecision(created.harnessRunId, decision.decisionId, { key: "sk-abcdefghSECRETKEY0123456789" });
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const tool = (await service.snapshot(created.harnessRunId)).conversationEntries.find((entry) => entry.kind === "tool");
+    expect(tool && tool.kind === "tool" ? tool.output : "").not.toContain("SECRETKEY0123456789");
+    expect(tool && tool.kind === "tool" ? tool.output : "").toContain("sk-abcdefgh…");
+  });
+
+  test("中断回合保留未完成正文与 interrupted 条目，重开如实回放", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-interrupt-entries-")); directories.push(cwd);
+    class HangingPi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      prompt(): Promise<string> { this.isRunning = true; for (const listener of this.#listeners) listener({ type: "assistant_delta", delta: "写了一半" }); return new Promise(() => {}); }
+      abort() { this.isRunning = false; }
+    }
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new HangingPi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "写长文");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "running");
+    await service.interruptForDesktopExit();
+    const snapshot = await service.snapshot(created.harnessRunId);
+    expect(snapshot.status).toBe("interrupted");
+    const body = snapshot.conversationEntries.find((entry) => entry.kind === "body");
+    expect(body).toMatchObject({ kind: "body", text: "写了一半", completed: false, finishedAt: expect.any(String) });
+    expect(snapshot.messages).toHaveLength(1);
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ conversationEntries: snapshot.conversationEntries });
+  });
+
+  test("崩溃恢复：旧进程遗留的未终结条目在重启收敛时补写 interrupted", async () => {    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-orphan-entries-")); directories.push(cwd);
+    class DeltaThenHangPi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      prompt(): Promise<string> { this.isRunning = true; for (const listener of this.#listeners) listener({ type: "assistant_delta", delta: "残留文本" }); return new Promise(() => {}); }
+      abort() { this.isRunning = false; }
+    }
+    const original = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new DeltaThenHangPi());
+    const created = await original.create(cwd);
+    await original.send(created.harnessRunId, "模拟进程崩溃");
+    // 等正文片段已耐久落盘（合并窗口刷新完成），随后模拟原进程直接消失。
+    await waitFor(async () => (await original.snapshot(created.harnessRunId)).conversationEntries.some((entry) => entry.kind === "body" && entry.text.length > 0), 2_000);
+    const restarted = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
+    await restarted.convergeStaleTurns();
+    const snapshot = await restarted.snapshot(created.harnessRunId);
+    expect(snapshot.status).toBe("interrupted");
+    const body = snapshot.conversationEntries.find((entry) => entry.kind === "body");
+    expect(body).toMatchObject({ kind: "body", text: "残留文本", completed: false, finishedAt: expect.any(String) });
+  });
+
+  test("ACP 侧 mcp__server__tool 编码名通知与 Engine 包装器归并，不产生重复工具条目", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-acp-dedupe-")); directories.push(cwd);
+    await writeFile(join(cwd, "package.json"), '{"name":"dedupe"}', "utf8");
+    let service!: HarnessService;
+    class DedupePi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        // 形态一：name 携带编码名；形态二：name 缺省、仅 title 携带（真实 Kimi CLI 行为）。
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-1", title: "mcp__wave-flow-harness__read_project_file", name: "mcp__wave-flow-harness__read_project_file", toolKind: "file-read", status: "in_progress", locations: [], contentText: null, rawInput: { path: "package.json" }, rawOutput: null } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "read_project_file", arguments: { path: "package.json" } } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "acp-1", patch: { status: "completed", contentText: "{}" } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-2", title: "mcp__wave-flow-harness__query_project", name: null, toolKind: "command", status: "in_progress", locations: [], contentText: null, rawInput: null, rawOutput: null } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "acp-2", patch: { status: "completed" } });
+        return "已读取。";
+      }
+      abort() {}
+    }
+    service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new DedupePi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "读取 package.json");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const tools = (await service.snapshot(created.harnessRunId)).conversationEntries.filter((entry) => entry.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools.map((entry) => entry.kind === "tool" ? entry.source : "")).toEqual(["engine-mcp", "engine-mcp"]);
+  });
+
+  test("ACP 原生工具的 content 更新按替换语义记录，终态保留最新快照", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-acp-replace-")); directories.push(cwd);
+    class NativeToolPi implements HarnessPiSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "n-1", title: "运行测试", name: "shell", toolKind: "command", status: "in_progress", locations: [], contentText: null, rawInput: { cmd: "bun test" }, rawOutput: null } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "n-1", patch: { contentText: "第一行" } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "n-1", patch: { contentText: "第一行\n第二行" } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "n-1", patch: { status: "completed", contentText: "第一行\n第二行\n完成" } });
+        return "测试完成。";
+      }
+      abort() {}
+    }
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new NativeToolPi());
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, "运行测试");
+    await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    const tool = (await service.snapshot(created.harnessRunId)).conversationEntries.find((entry) => entry.kind === "tool");
+    expect(tool).toMatchObject({ kind: "tool", source: "acp", name: "运行测试", toolKind: "command", status: "completed" });
+    expect(tool && tool.kind === "tool" ? tool.output : null).toBe("第一行\n第二行\n完成");
+  });
+
+  test("拒绝草案写入耐久事实：拒绝后不能接受，已接受不能反向拒绝", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-reject-")); directories.push(cwd);
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
+    const created = await service.create(cwd);
+    const source = 'const meta = { name: "reject-draft", description: "拒绝路径", phases: [{ title: "p" }] };\nasync function run(args) { return args; }';
+    await service.proposeWorkflowRevision(created.harnessRunId, source);
+    await expect(service.rejectWorkflowRevision(created.harnessRunId, 1)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1, acceptedAt: null, rejectedAt: expect.any(String) }] });
+    await expect(service.acceptWorkflowRevision(created.harnessRunId, 1)).rejects.toThrow("未接受且未拒绝");
+    await expect(service.rejectWorkflowRevision(created.harnessRunId, 1)).rejects.toThrow("只能拒绝最新未接受且未拒绝草案");
+    const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
+    await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1, rejectedAt: expect.any(String) }] });
+    // 已接受草案不能反向拒绝。
+    const second = await service.create(cwd);
+    await service.proposeWorkflowRevision(second.harnessRunId, source);
+    await service.acceptWorkflowRevision(second.harnessRunId, 1);
+    await expect(service.rejectWorkflowRevision(second.harnessRunId, 1)).rejects.toThrow("只能拒绝最新未接受且未拒绝草案");
   });
 });
 

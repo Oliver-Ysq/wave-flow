@@ -8,6 +8,7 @@ import type { ExecutionConfigSnapshot, WorkerAssignment } from "../../src/harnes
 import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
+import type { ExecutionPlanResponse } from "../../src/desktop/types";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -50,13 +51,36 @@ describe("Engine executions.plan / randomize / create 校验", () => {
   test("plan 枚举字面量 Worker、已验证池与主控 Runtime，并标注动态 id 数量", async () => {
     const { engine, harnessRunId, kimi, codex } = await fixture();
     try {
-      const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 1 }) as { workers: { id: string }[]; dynamicCount: number; pool: { runtimeId: string }[]; harnessRuntime: { runtimeId: string } | null };
+      const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 1 }) as ExecutionPlanResponse;
       expect(plan.workers.map((worker) => worker.id)).toEqual(["w1", "w2"]);
+      expect(plan.phaseTitles).toEqual(["工作"]);
+      expect(plan.workers.map((worker) => worker.phaseTitle)).toEqual(["工作", "工作"]);
+      expect(plan.previewAgents.map((agent) => [agent.name, agent.phaseTitle])).toEqual([["w1", "工作"], ["w2", "工作"]]);
       expect(plan.dynamicCount).toBe(0);
       expect(plan.pool.map((runtime) => runtime.runtimeId).sort()).toEqual([kimi.runtimeId, codex.runtimeId].sort());
       expect(plan.harnessRuntime?.runtimeId).toBe(kimi.runtimeId);
       // 草稿或不存在 revision 拒绝规划。
       await expect(engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 99 })).rejects.toMatchObject({ status: 400 });
+    } finally { engine.shutdown(); }
+  });
+
+  test("预览用完整校验 meta，不受引号或长源码干扰，且不创建 Execution", async () => {
+    const { engine, harnessRunId } = await fixture();
+    try {
+      const source = `const meta = { name: 'preview-literals', description: '${"x".repeat(2200)}', phases: [{ title: '分析' }, { title: '验证' }] };
+async function run(args) {
+  phase('验证');
+  await agent('只读验证', { id: 'verify', cli: 'kimi' });
+  return {};
+}`;
+      await engine.handleDesktopAction("harnesses.proposeRevision", { harnessRunId, source });
+      await expect(engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 })).rejects.toMatchObject({ status: 400 });
+      await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId, revision: 2 });
+      const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 }) as ExecutionPlanResponse;
+      expect(plan.phaseTitles).toEqual(["分析", "验证"]);
+      expect(plan.workers).toMatchObject([{ id: "verify", phaseTitle: "验证" }]);
+      expect(plan.previewAgents).toMatchObject([{ name: "verify", phaseTitle: "验证", cli: "kimi" }]);
+      expect(await engine.handleDesktopAction("executions.list", { harnessRunId })).toMatchObject({ executions: [] });
     } finally { engine.shutdown(); }
   });
 

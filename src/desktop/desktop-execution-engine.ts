@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
@@ -15,6 +15,7 @@ import { AgentStartLimiter, LimitedAgentExecutor } from "../runtime/agent-start-
 import { HarnessService } from "../harness/service";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
+import { repairHarnessHomePermissions } from "../harness/journal";
 import { CliRuntimeRegistry } from "../runtimes/registry";
 import type { CliRuntimeRecord, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
@@ -32,6 +33,24 @@ import { buildRandomAssignments, buildRulePrompt, parseRuleReply, validateExecut
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
+
+/**
+ * Engine → Tauri 私有 JSONL 事件帧。与请求响应帧分流：无 requestId、带协议版本、
+ * 流标识、会话 ID 与该流内单调序号；Tauri 校验 Engine generation 后转发给 Web。
+ */
+export type EngineEventFrame = {
+  readonly type: "event";
+  /** 事件帧协议版本；当前固定为 1。 */
+  readonly protocolVersion: 1;
+  /** 事件流标识；当前只有主控会话流。 */
+  readonly stream: "harness";
+  /** 事件归属的 Harness Run ID。 */
+  readonly harnessRunId: string;
+  /** 该流内单调递增序号；Web 据此去重与检测漏帧，Engine 重启后重新计数并要求重读快照。 */
+  readonly seq: number;
+  /** 耐久事实派生的会话事件；瞬时 delta 不上帧，保证实时展示与回放同源。 */
+  readonly event: import("../harness/types").HarnessStreamEvent;
+};
 
 /** Desktop Execution Engine 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
 export type DesktopExecutionEngineOptions = {
@@ -84,10 +103,15 @@ export class DesktopExecutionEngine {
   #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly promise: Promise<RunResponse> }>();
   /** 明确退出一旦开始，禁止再接受会产生或改变业务状态的新 Desktop action。 */
   #exitRequested = false;
+  /** Engine 事件总线的订阅者；engine-main 注册后把事件帧写入私有 JSONL 通道。 */
+  #eventSinks = new Set<(frame: EngineEventFrame) => void>();
+  /** 每个 Harness 流的单调序号；Engine 进程内重新计数，Web 重启后必须重读快照对齐。 */
+  #harnessEventSeq = new Map<string, number>();
   readonly instanceId = crypto.randomUUID();
 
   private readonly deterministicForTest: boolean;
   private readonly storeRoot: string;
+  private readonly harnessRoot: string;
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
   private readonly hasCustomHarnessSession: boolean;
@@ -103,6 +127,7 @@ export class DesktopExecutionEngine {
     this.deterministicForTest = normalized.deterministicForTest === true;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
+    this.harnessRoot = harnessRoot;
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
     this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
@@ -129,11 +154,11 @@ export class DesktopExecutionEngine {
       const runtime = await this.#cliRuntimes.resolveSelectedHarness();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
     });
+    // 事件总线：只把耐久事实派生的事件推给订阅者；瞬时 reasoning/assistant delta 不上帧，
+    // Web 实时展示与重开回放因此始终同源（Journal → 投影/事件帧）。
+    this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
-      // Execution 已写入终态后不再允许 Control 接口接收其旧 Worker 上报；释放
-      // Engine 生命周期内映射，避免长时间使用后保留不可达的 ControlServer。
-      onSettled: (executionId) => { this.#controls.delete(executionId); },
     }, harnessRoot);
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
@@ -147,6 +172,19 @@ export class DesktopExecutionEngine {
     this.#harnessControlPipes.clear();
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
+  }
+
+  /** 订阅 Engine 事件帧；engine-main 在启动时注册，把帧写入私有 JSONL stdout。 */
+  subscribeEvents(sink: (frame: EngineEventFrame) => void): () => void { this.#eventSinks.add(sink); return () => this.#eventSinks.delete(sink); }
+
+  /** 只发布耐久事实派生的事件；瞬时 delta 与 ACP 原始通知不上帧（已由条目事件承载）。 */
+  private publishHarnessEvent(harnessRunId: string, event: import("../harness/types").HarnessStreamEvent): void {
+    if (this.#eventSinks.size === 0) return;
+    if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed") return;
+    const seq = (this.#harnessEventSeq.get(harnessRunId) ?? 0) + 1;
+    this.#harnessEventSeq.set(harnessRunId, seq);
+    const frame: EngineEventFrame = { type: "event", protocolVersion: 1, stream: "harness", harnessRunId, seq, event };
+    for (const sink of this.#eventSinks) sink(frame);
   }
 
   /** Desktop 明确退出：先耐久取消，再由 Runtime/Executor 尽力停止受管 Worker。 */
@@ -166,8 +204,10 @@ export class DesktopExecutionEngine {
 
   /** Engine 重启后，所有未终结节点一律 interrupted；恢复只能由用户显式 resume 发起。 */
   async convergeStaleAcpWorkers(): Promise<void> {
-    let runIds: string[];
-    try { runIds = await readdir(this.storeRoot); } catch { return; }
+    let runIds: readonly string[] = [];
+    // 全局 Run Store 不存在（纯 Harness 使用）不能提前返回：下方 Harness Execution
+    // 与主控回合的收敛与全局 Store 无关，跳过会让失联 Execution 停在"工作中"。
+    try { runIds = await readdir(this.storeRoot); } catch { runIds = []; }
     for (const runId of runIds) {
       try {
         const runtime = await RunRuntime.open(runId, new DeterministicExecutor(), this.storeRoot);
@@ -207,9 +247,14 @@ export class DesktopExecutionEngine {
     }
     // HarnessExecution 的嵌套 Run 不在全局 Run Store，因此上面的扫描覆盖不到。
     // 必须按 Harness 档案再次收敛，避免重启后 Web 把已失联的 Worker 显示为工作中。
-    const harnesses = await this.#harness.list();
-    for (const harness of harnesses) {
-      try { await this.#executions.convergeStaleExecutions(harness.harnessRunId); }
+    // 先修复旧版本以 0755 创建的状态目录权限：否则读取校验会让档案对收敛不可见，
+    // 失联 Execution 永远停在"工作中"。再按目录项逐个收敛而不是 HarnessService.list()：
+    // list() 会静默丢弃读取失败的档案，恰好让最需要收敛的档案逃过收敛。
+    await repairHarnessHomePermissions(this.harnessRoot);
+    let harnessIds: readonly string[] = [];
+    try { harnessIds = await readdir(this.harnessRoot); } catch { harnessIds = []; }
+    for (const harnessRunId of harnessIds) {
+      try { await this.#executions.convergeStaleExecutions(harnessRunId); }
       catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
     }
     await this.#harness.convergeStaleTurns();
@@ -235,13 +280,15 @@ export class DesktopExecutionEngine {
    * runId 注册，Worker 的 complete/block/continue 经本节点私有 FIFO MCP 到达 Control，
    * 不知道自己在 Execution 中。
    */
-  private wireExecutionControl(runtime: RunRuntime, wiring: unknown): void {
+  private wireExecutionControl(runtime: RunRuntime, wiring: unknown): void | (() => void) {
     if (this.deterministicForTest || !wiring || !isControlBoundExecutor(wiring as AgentNodeExecutor)) return;
     const control = runtime.createControlServer();
     (wiring as ControlBoundExecutor).bindControl(control);
     const runId = runtime.journal.manifest.runId;
     if (this.#controls.has(runId)) throw new Error("该 Execution 的 ControlServer 已注册。 ");
     this.#controls.set(runId, control);
+    // 释放器捕获具体 Control 身份，不按 runId 误删 resume 后的新控制资源。
+    return () => { if (this.#controls.get(runId) === control) this.#controls.delete(runId); };
   }
 
 
@@ -369,6 +416,8 @@ export class DesktopExecutionEngine {
   private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value as CompleteHarnessRequest)) throw new EngineActionError(400, "Harness complete 不接受请求字段。 "); try { return { harness: await this.#harness.complete(harnessRunId) }; } catch (error) { throw this.executionError(error); } }
   private async proposeWorkflowRevision(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ProposeWorkflowRevisionRequest).source !== "string") throw new EngineActionError(400, "Workflow 草案请求无效。 "); return { harness: await this.#harness.proposeWorkflowRevision(harnessRunId, (value as ProposeWorkflowRevisionRequest).source) }; }
   private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
+  /** 拒绝最新未接受草案；拒绝是不可逆耐久事实。 */
+  private async rejectWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "拒绝 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.rejectWorkflowRevision(harnessRunId, revision) }; }
 
   /** 创建并后台启动 Execution；编译失败在任何耐久事实之前拒绝。 */
   private async createExecution(harnessRunId: string, value: unknown): Promise<ExecutionResponse> {
@@ -379,7 +428,8 @@ export class DesktopExecutionEngine {
     try {
       if (!this.deterministicForTest) await this.requireWorkerCandidate();
       const config = await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
-      return await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
+      const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
+      return { ...created, controllable: this.#executions.isControllable(created.execution.executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -412,11 +462,11 @@ export class DesktopExecutionEngine {
       const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
       if (!revision || revision.acceptedAt === null) throw new Error("只能为已接受冻结的 revision 规划执行分配。 ");
       // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
-      compileRestrictedWorkflow(revision.source);
+      const compiled = compileRestrictedWorkflow(revision.source);
       const extracted = extractAgentWorkers(revision.source);
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
-      return { harnessRunId, revision: revisionNumber, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: list.harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === list.harnessRuntimeId) ?? null : null };
+      return { harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: list.harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === list.harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -466,7 +516,21 @@ export class DesktopExecutionEngine {
     const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
     if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
     try {
-      return { execution, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId) };
+      return { execution, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+    } catch (error) { throw this.executionError(error); }
+  }
+
+  /** Execution 的 Phase 访问分页；attempt 缺省时跨全部 attempt 聚合，供 UI 补齐 replay 复用的 Phase → Agent 关系。 */
+  private async executionPhaseVisits(value: unknown): Promise<ExecutionPhaseVisitPageResponse> {
+    const harnessRunId = requiredString(value, "harnessRunId");
+    const executionId = requiredString(value, "executionId");
+    const attempt = optionalInteger(value, "attempt");
+    const cursor = optionalInteger(value, "cursor");
+    const options = object(value);
+    if (options.includeEmpty !== undefined && typeof options.includeEmpty !== "boolean") throw new EngineActionError(400, "includeEmpty 必须为布尔值。 ");
+    try {
+      const page = await this.#executions.listExecutionPhaseVisits(harnessRunId, executionId, { attempt, cursor, includeEmpty: options.includeEmpty === true });
+      return { executionId, executionAttemptId: attempt ?? null, ...page };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -476,7 +540,7 @@ export class DesktopExecutionEngine {
       const snapshot = kind === "pause" ? await this.#executions.pause(harnessRunId, executionId) : kind === "recover" ? await this.#executions.recover(harnessRunId, executionId) : await this.#executions.stop(harnessRunId, executionId);
       const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
-      return { execution, snapshot };
+      return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -487,7 +551,7 @@ export class DesktopExecutionEngine {
       const snapshot = await this.#executions.resume(harnessRunId, executionId);
       const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
-      return { execution, snapshot };
+      return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -498,7 +562,7 @@ export class DesktopExecutionEngine {
       const snapshot = await this.#executions.answerGate(harnessRunId, executionId, gateId, (value as AnswerDecisionRequest).answer);
       const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
-      return { execution, snapshot };
+      return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -574,6 +638,7 @@ export class DesktopExecutionEngine {
       case "harnesses.complete": return this.completeHarness(requiredString(value, "harnessRunId"), {});
       case "harnesses.proposeRevision": return this.proposeWorkflowRevision(requiredString(value, "harnessRunId"), value);
       case "harnesses.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
+      case "harnesses.rejectRevision": return this.rejectWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
       case "harnesses.answerDecision": return this.answerHarnessDecision(requiredString(value, "harnessRunId"), requiredString(value, "decisionId"), value);
       case "executions.create": return this.createExecution(requiredString(value, "harnessRunId"), value);
       case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
@@ -581,6 +646,7 @@ export class DesktopExecutionEngine {
       case "executions.randomize": return this.randomizeExecutionAssignment(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
+      case "executions.phaseVisits": return this.executionPhaseVisits(value);
       case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
       case "executions.resume": return this.resumeExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), { authorized: true });
       case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);

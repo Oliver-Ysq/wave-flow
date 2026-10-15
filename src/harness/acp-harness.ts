@@ -1,6 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { AcpSessionClient, type AcpLauncher } from "../adapters/acp-session";
-import type { HarnessMessage, HarnessStreamEvent } from "./types";
+import type { HarnessAcpToolCall, HarnessAcpToolCallPatch, HarnessMessage, HarnessStreamEvent, HarnessToolKind } from "./types";
 import type { HarnessSession } from "./session";
 
 /** ACP Harness 创建时注入的 session-private MCP server。 */
@@ -69,6 +69,56 @@ export class AcpHarnessSession implements HarnessSession {
   private onUpdate(update: acp.SessionUpdate): void {
     if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") { this.#assistantText += update.content.text; this.emit({ type: "assistant_delta", delta: update.content.text }); }
     if (update.sessionUpdate === "agent_thought_chunk" && update.content.type === "text") { this.#reasoningText += update.content.text; this.emit({ type: "reasoning_delta", delta: update.content.text }); }
+    if (update.sessionUpdate === "tool_call") { const call = normalizeToolCall(update); if (call) this.emit({ type: "acp_tool_call", call }); }
+    if (update.sessionUpdate === "tool_call_update") { const patch = normalizeToolPatch(update); if (patch) this.emit({ type: "acp_tool_update", callId: update.toolCallId, patch }); }
   }
   private emit(event: HarnessStreamEvent): void { for (const listener of this.#listeners) listener(event); }
+}
+
+/** ACP ToolKind → 展示分类；think/switch_mode 不属于用户可见工具活动，返回 null 过滤。 */
+function mapToolKind(kind: acp.ToolKind | null | undefined): HarnessToolKind | null {
+  if (kind === "read") return "file-read";
+  if (kind === "edit" || kind === "delete" || kind === "move") return "file-write";
+  if (kind === "search") return "search";
+  if (kind === "execute") return "command";
+  if (kind === "fetch" || kind === "other" || kind === null || kind === undefined) return "unknown";
+  return null;
+}
+
+/** 从 ToolCallContent 提取文本；diff 以路径占位摘要表示，terminal 不内嵌终端流。 */
+function contentText(content: readonly acp.ToolCallContent[] | null | undefined): string | null {
+  if (!content || content.length === 0) return null;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (item.type === "content" && item.content.type === "text") parts.push(item.content.text);
+    else if (item.type === "diff") parts.push(`[文件差异] ${item.path}`);
+    else if (item.type === "terminal") parts.push(`[终端输出] ${item.terminalId}`);
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+function mapStatus(status: acp.ToolCallStatus | null | undefined): HarnessAcpToolCall["status"] {
+  if (status === "completed" || status === "failed") return status;
+  if (status === "in_progress") return "in_progress";
+  return "pending";
+}
+
+function normalizeToolCall(update: acp.SessionUpdate & { sessionUpdate: "tool_call" }): HarnessAcpToolCall | null {
+  const toolKind = mapToolKind(update.kind);
+  if (!toolKind) return null;
+  return { callId: update.toolCallId, title: update.title ?? "", name: update.name ?? null, toolKind, status: mapStatus(update.status), locations: (update.locations ?? []).map((location) => ({ path: location.path, line: location.line ?? null })), contentText: contentText(update.content), rawInput: update.rawInput ?? null, rawOutput: update.rawOutput ?? null };
+}
+
+function normalizeToolPatch(update: acp.SessionUpdate & { sessionUpdate: "tool_call_update" }): HarnessAcpToolCallPatch | null {
+  const patch: HarnessAcpToolCallPatch = {};
+  if (update.kind !== undefined && update.kind !== null) { const toolKind = mapToolKind(update.kind); if (!toolKind) return null; patch.toolKind = toolKind; }
+  if (update.title) patch.title = update.title;
+  if (update.name) patch.name = update.name;
+  if (update.status) patch.status = mapStatus(update.status);
+  if (update.locations) patch.locations = update.locations.map((location) => ({ path: location.path, line: location.line ?? null }));
+  const text = contentText(update.content);
+  if (text) patch.contentText = text;
+  if (update.rawInput !== undefined) patch.rawInput = update.rawInput;
+  if (update.rawOutput !== undefined) patch.rawOutput = update.rawOutput;
+  return Object.keys(patch).length > 0 ? patch : null;
 }
