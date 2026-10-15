@@ -6,6 +6,7 @@ import { createHarnessActionTools, HARNESS_ACTION_TOOL_NAMES, type HarnessAction
 import { isHarnessToolAllowed, type HarnessPiSession } from "../../src/harness/pi-harness";
 import { HarnessService } from "../../src/harness/service";
 import type { HarnessStreamEvent } from "../../src/harness/types";
+import { HarnessJournal } from "../../src/harness/journal";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -66,9 +67,11 @@ describe("Harness action tools", () => {
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).decisions.length === 1);
     expect(captured).not.toBeNull();
     const [decision] = (await service.snapshot(created.harnessRunId)).decisions;
-    await expect(service.answerUserDecision(created.harnessRunId, decision.decisionId, { choice: "安全模式" })).resolves.toMatchObject({
-      decisions: [{ decisionId: decision.decisionId, answer: { choice: "安全模式" } }],
-    });
+    const before=(await HarnessJournal.open(created.harnessRunId,cwd)).events.length;
+    await expect(service.answerUserDecision(created.harnessRunId,decision.decisionId,{choice:42})).rejects.toThrow("answerSchema");
+    expect((await HarnessJournal.open(created.harnessRunId,cwd)).events.length).toBe(before);
+    const answers=await Promise.allSettled([service.answerUserDecision(created.harnessRunId,decision.decisionId,{choice:"安全模式"}),service.answerUserDecision(created.harnessRunId,decision.decisionId,{choice:"重复"})]);
+    expect(answers.filter(answer=>answer.status==="fulfilled")).toHaveLength(1);
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({
       messages: [{ role: "user" }, { role: "assistant", text: "用户选择：安全模式" }],
@@ -85,5 +88,7 @@ describe("Harness action tools", () => {
     await service.abort(created.harnessRunId);
     await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "interrupted");
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ diagnostic: "用户已停止 Harness 主控回合。 " });
+    const decision=(await service.snapshot(created.harnessRunId)).decisions[0];
+    await expect(service.answerUserDecision(created.harnessRunId,decision.decisionId,{choice:"迟到"})).rejects.toThrow("失效");
   });
 });

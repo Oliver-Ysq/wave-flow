@@ -56,6 +56,34 @@ async function waitFor(condition: () => Promise<boolean> | boolean): Promise<voi
 }
 
 describe("HarnessExecutionService", () => {
+  test("控制初始化失败保留原Execution并收敛interrupted，不创建Worker",async()=>{
+    const {harness,harnessRunId,root}=await fixture();let workers=0;
+    const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{workers++;return {};}}}),{wireControl:()=>{throw Error("接线失败");}},root);
+    await harness.proposeWorkflowRevision(harnessRunId,SIMPLE_SOURCE);await harness.acceptWorkflowRevision(harnessRunId,1);
+    await expect(executions.createExecution(harnessRunId,1,{},testConfig())).rejects.toThrow("接线失败");
+    const records=await executions.listExecutions(harnessRunId);expect(records).toHaveLength(1);expect(records[0].status).toBe("interrupted");expect(workers).toBe(0);
+    expect((await executions.snapshotExecution(harnessRunId,records[0].executionId)).status).toBe("interrupted");
+  });
+  test("新任务首份执行后拒绝第二份创建，拒绝不新增嵌套 Run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-task-execution-")); directories.push(root);
+    const harness = new HarnessService(root, async (_id,_cwd,_prior,actions) => ({ isRunning:false, subscribe:()=>()=>{}, abort:()=>{}, prompt:async()=> { await actions.proposeWorkflowRevision(SIMPLE_SOURCE,"检查目标","只读"); return "方案已提出"; } }));
+    const executions = new HarnessExecutionService(harness, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    const task = await harness.startTask(root, { clientRequestId:crypto.randomUUID(),projectId:"project",text:"验证启动资格" });
+    await waitFor(async()=> (await harness.snapshot(task.harnessRunId)).status === "idle");
+    await harness.acceptWorkflowRevision(task.harnessRunId, 1);
+    const { execution: first } = await executions.createExecution(task.harnessRunId, 1, {}, testConfig());
+    await waitFor(async()=> (await executions.snapshotExecution(task.harnessRunId,first.executionId)).status === "completed");
+    const before = await readdir(join(root,task.harnessRunId,"executions"));
+    await expect(executions.createExecution(task.harnessRunId,1,{},testConfig())).rejects.toThrow("多轮");
+    expect(await readdir(join(root,task.harnessRunId,"executions"))).toEqual(before);
+    expect((await harness.snapshot(task.harnessRunId)).executions).toHaveLength(1);
+    const evidence=await executions.attemptResults(task.harnessRunId,first.executionId,1);
+    expect(evidence.attempt).toBe(1);expect(evidence.nodes).toHaveLength(1);expect(evidence.summary).not.toBeNull();
+    await expect(executions.attemptResults(task.harnessRunId,first.executionId,999)).rejects.toThrow("不存在");
+    const unrelated=await harness.create(root);
+    await expect(executions.snapshotExecution(unrelated.harnessRunId,first.executionId)).rejects.toThrow("未知");
+    await expect(executions.attemptResults(unrelated.harnessRunId,first.executionId,1)).rejects.toThrow("未知");
+  });
   test("退出后旧任务迟到收尾不能覆盖 resume 实例或释放其控制资源", async () => {
     const { harness, harnessRunId, root } = await fixture();
     let releaseOld!: () => void;
@@ -151,12 +179,17 @@ describe("HarnessExecutionService", () => {
   });
 
   test("一个 Harness 顺序拥有多个 Execution：活跃期拒绝新执行", async () => {
-    const { harness, executions, harnessRunId } = await fixture();
+    const { harness, executions, harnessRunId,root } = await fixture();
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
     const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
     // 第一个 Execution 停在决策门上，未达终态。
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
+    expect(executions.attention(execution.executionId)).toEqual({workerRequests:0,scriptGates:1});
+    const unrelated=await harness.create(root);
+    await expect(executions.answerGate(unrelated.harnessRunId,execution.executionId,"confirm",{ok:true})).rejects.toThrow("未知");
+    await expect(executions.stop(unrelated.harnessRunId,execution.executionId)).rejects.toThrow("不属于");
+    expect((await executions.snapshotExecution(harnessRunId,execution.executionId)).gates[0].answer).toBeNull();
     await expect(executions.createExecution(harnessRunId, 1, {}, testConfig())).rejects.toThrow("未结束");
     await executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
@@ -242,6 +275,12 @@ describe("HarnessExecutionService", () => {
     expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
     const reopened = await HarnessJournal.open(harnessRunId, root);
     expect(reopened.snapshot.executions[0]).toMatchObject({ status: "completed" });
+    const history=reopened.snapshot.executionHistory!;
+    expect(history.filter(item=>item.kind==="finished").map(item=>item.status)).toEqual(["cancelled","completed"]);
+    expect(history.find(item=>item.status==="cancelled")?.summary).toBeNull();
+    expect(history.find(item=>item.status==="completed")?.attempt).toBe(2);
+    expect((await executions.attemptResults(harnessRunId,execution.executionId,1)).status).toBe("cancelled");
+    expect((await executions.attemptResults(harnessRunId,execution.executionId,2)).status).toBe("completed");
   });
 
   test("用户取消的 Execution 可显式 resume 为新 attempt", async () => {
@@ -252,7 +291,9 @@ describe("HarnessExecutionService", () => {
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
     await executions.stop(harnessRunId, execution.executionId);
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "cancelled");
-    await expect(executions.resume(harnessRunId, execution.executionId)).resolves.toMatchObject({ status: "cancelled" });
+    await executions.resume(harnessRunId, execution.executionId);
+    await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId === 2);
+    expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).status).toBe("running");
     await executions.answerGate(harnessRunId, execution.executionId, "confirm", { ok: true });
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].status === "completed");
     expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);

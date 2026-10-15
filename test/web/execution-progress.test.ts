@@ -86,3 +86,13 @@ test("无节点快照返回 0/0；动态节点不在统计内（由调用方另�
   expect(result.completed).toBe(0);
   expect(result.items).toEqual([]);
 });
+
+test("恢复进度包含历史已交付节点，不重复计算新 attempt 同 id", () => {
+  const current = snapshot([phase("收尾", [{ mode: "serial", agents: [agent("b", "completed")] }])]);
+  current.currentExecutionAttemptId = 2;
+  const visits = [{ executionAttemptId: 1, phaseVisitId: 1, title: "准备", occurrence: 1, createdAt: current.createdAt, batches: [{ sequence: 1, mode: "serial" as const, agents: [agent("a", "completed"), agent("b", "completed"), agent("c", "cancelled")] }] }];
+  const result = computeExecutionProgress(current, 2, visits);
+  expect(result.completed).toBe(2);
+  expect(result.total).toBe(2);
+  expect(result.items.map(item => item.id)).toEqual(["b", "a"]);
+});

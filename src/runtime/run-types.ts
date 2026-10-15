@@ -116,6 +116,8 @@ export type CurrentAttemptSummary = {
 
 /** Phase → Agent 视图中可展示的 pending block 摘要。 */
 export type BlockSnapshot = {
+  /** 原 Worker 请求的答案Schema；缺省允许JSON对象，Engine仍最终验证。 */
+  readonly answerSchema?:JsonObject;
   /** 用于 answer / continue 绑定的稳定请求 id。 */
   readonly blockRequestId: string;
   /** Agent 为何无法安全继续、希望人如何帮助的说明。 */

@@ -10,13 +10,20 @@ import {
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
+import { WorkflowProposalSummary, WorkflowExecutionSummary } from "./conversation/workflow-summary";
+import { workflowCells, editableRevision, type WorkbenchRoute } from "./workbench-navigation";
+import { routeMatchesTask, newerTaskSnapshot, OperationTracker, RequestFence, UnreadTracker } from "./workbench-state";
+import { ViewCache } from "./workbench-state";
+const taskExpansions=new ViewCache<boolean>();
+const detailPositions=new ViewCache<number>();
+const resultAttempts=new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
 import { SchemaForm } from "./forms/schema-form";
+import {PersistedDetails} from "./persisted-details";
 import {
   acceptEnvelope,
   applyHarnessEventToSnapshot,
@@ -58,15 +65,6 @@ function syncNativeWindowTheme(theme: ColorTheme) {
   void invoke("set_window_theme", { theme }).catch(() => {});
 }
 
-/** 原生文件选择器：只接受本地 .ts Workflow；用户取消返回 null。 */
-async function pickWorkflowFile(): Promise<string | null> {
-  const picked = await openFileDialog({
-    multiple: false,
-    directory: false,
-    filters: [{ name: "Workflow", extensions: ["ts"] }],
-  });
-  return typeof picked === "string" ? picked : null;
-}
 
 export function App() {
   const [runs, setRuns] = useState<RunListItem[]>([]);
@@ -78,18 +76,84 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  /** "执行已有的 Workflow"的原生选择器预填：路径只读，cwd 默认当前项目目录。 */
-  const [createRunPrefill, setCreateRunPrefill] = useState<{
-    workflowPath: string;
-    cwd: string;
-  } | null>(null);
+  const [busyOperations,setBusyOperations]=useState<Record<string,string>>({});
+  const operationTracker=useRef(new OperationTracker());
+  const beginBusy=(owner:string,action:string)=>{
+    const release=operationTracker.current.begin(owner,action);
+    setBusyOperations(current=>({...current,[owner]:action}));
+    return ()=>{if(!release())return;setBusyOperations(current=>{const next={...current};delete next[owner];return next;});};
+  };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
-  const [workflowPanelOpen, setWorkflowPanelOpen] = useState(false);
+  const [route, setRoute] = useState<WorkbenchRoute>({ kind: "conversation" });
+  const [navOpen, setNavOpen] = useState(false);
+  const navigationButton=useRef<HTMLButtonElement|null>(null);
+  const navigationPanel=useRef<HTMLElement|null>(null);
+  useEffect(()=>{
+    if(!navOpen)return;
+    navigationPanel.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const keydown=(event:KeyboardEvent)=>{
+      if(event.key==="Escape"){event.preventDefault();setNavOpen(false);navigationButton.current?.focus();}
+      if(event.key==="Tab"&&window.matchMedia("(max-width:900px)").matches){
+        const controls=[...navigationPanel.current?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),[tabindex="0"]')??[]].filter(element=>element.getClientRects().length>0);
+        const first=controls[0],last=controls.at(-1);
+        if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+      }
+    };
+    window.addEventListener("keydown",keydown);
+    return()=>window.removeEventListener("keydown",keydown);
+  },[navOpen]);
+  const [search, setSearch] = useState("");
+  const [taskTitle, setTaskTitle] = useState("");
+  const createRequest = useRef<string | null>(null);
+  const sending = useRef(false);
+  const routeRef = useRef(route); routeRef.current = route;
+  const harnessRef = useRef(harness); harnessRef.current = harness;
+  const detailToken = useRef(0);
+  const requestFence=useRef(new RequestFence());
+  const unreadTracker=useRef(new UnreadTracker());
+  const [,refreshRead]=useState(0);
+  const markRead=useCallback((owner:string,ids:string[])=>{const task=harnessRef.current;if(!task||task.harnessRunId!==owner||routeRef.current.kind!=="conversation")return;unreadTracker.current.mark(owner,ids);refreshRead(value=>value+1);},[]);
+  const unreadCounts=new Map(harnesses.map(task=>[task.harnessRunId,unreadTracker.current.count(harness?.harnessRunId===task.harnessRunId?newerTaskSnapshot(task,harness):task,false)]));
+  const navigationToken = useRef(0);
+  const workflowLocations = useRef(new Map<string, WorkbenchRoute>());
+  const previousTask = useRef<string | null>(null);
+  useEffect(() => {
+    navigationToken.current += 1;
+    const currentTask = harness?.harnessRunId ?? null;
+    if (previousTask.current !== currentTask) {
+      workflowLocations.current.clear();
+      previousTask.current = currentTask;
+    }
+    if (route.kind !== "workflow") return;
+    const key = `${route.taskId}:${route.cardId}`;
+    workflowLocations.current.delete(key);
+    workflowLocations.current.set(key, route);
+    if (workflowLocations.current.size > 64) workflowLocations.current.delete(workflowLocations.current.keys().next().value!);
+  }, [route, harness?.harnessRunId, draftProjectId]);
+  const workflowPanelOpen = route.kind === "workflow" || selectedId !== null;
+  const centralScroll=useRef<HTMLElement|null>(null);
+  const pageKey=route.kind==="workflow"?`${route.taskId}:${route.cardId}:${route.revision}:${route.section}:${route.executionId??""}:${route.attempt??"current"}`:"conversation";
+  useEffect(()=>{
+    const el=centralScroll.current;if(!el||route.kind!=="workflow")return;
+    el.scrollTop=detailPositions.get(pageKey)??0;
+    return()=>{detailPositions.set(pageKey,el.scrollTop);};
+  },[pageKey]);
+  function setWorkflowPanelOpen(open: boolean) { if (!open) setRoute({ kind: "conversation" }); }
+  function openWorkflow(task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) {
+    setHarness(task); setSelectedId(null); setDraftProjectId(null);
+    const cardId = revision.cardId ?? `legacy:${revision.revision}`;
+    const saved = harnessRef.current?.harnessRunId === task.harnessRunId ? workflowLocations.current.get(`${task.harnessRunId}:${cardId}`) : undefined;
+    const linked = task.executions.find(item => item.revision === revision.revision);
+    const next: WorkbenchRoute = !section && saved?.kind === "workflow" && task.workflowRevisions.some(item => item.revision === saved.revision)
+      ? saved : { kind: "workflow", taskId: task.harnessRunId, cardId, revision: revision.revision, section: section ?? (linked ? "execution" : "plan"), executionId: executionId ?? linked?.executionId };
+    setRoute(next);
+    setNavOpen(false);
+    setSelectedExecutionId(next.executionId ?? null); setExecutionDetail(null); setAssignmentRevision(null);
+  }
   const [projectCwd, setProjectCwd] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
   const [harnessText, setHarnessText] = useState("");
@@ -103,6 +167,7 @@ export function App() {
   const updateHarnessText = useCallback(
     (value: string) => {
       draftCacheRef.current.set(draftKey, value);
+      if (draftCacheRef.current.size > 64) draftCacheRef.current.delete(draftCacheRef.current.keys().next().value!);
       setHarnessText(value);
     },
     [draftKey],
@@ -116,7 +181,6 @@ export function App() {
     useState<CliRuntimeListResponse | null>(null);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
   const runtimeScanStarted = useRef(false);
-  const [draftingRevision, setDraftingRevision] = useState(false);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(
     null,
   );
@@ -126,18 +190,7 @@ export function App() {
   const [executionDynamicCount, setExecutionDynamicCount] = useState(0);
   useEffect(() => {
     if (!harness || !executionDetail) return;
-    let active = true;
-    api
-      .planExecution(harness.harnessRunId, executionDetail.execution.revision)
-      .then((plan) => {
-        if (active) setExecutionDynamicCount(plan.dynamicCount);
-      })
-      .catch(() => {
-        if (active) setExecutionDynamicCount(0);
-      });
-    return () => {
-      active = false;
-    };
+    setExecutionDynamicCount(executionDetail.dynamicCount??0);
   }, [harness?.harnessRunId, executionDetail?.execution.revision]);
   /** 分配卡当前服务的已接受 revision；非 null 时展示两卡横滑流程。 */
   const [assignmentRevision, setAssignmentRevision] = useState<number | null>(
@@ -171,6 +224,7 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const valid=requestFence.current.begin("task-list");
     try {
       const [next, harnessList, projectList, runtimes] = await Promise.all([
         api.listRuns(),
@@ -178,8 +232,9 @@ export function App() {
         api.projects(),
         api.cliRuntimes(),
       ]);
+      if(!valid())return;
       setRuns(next);
-      setHarnesses(harnessList.harnesses);
+      setHarnesses(current=>harnessList.harnesses.map(next=>{const old=current.find(item=>item.harnessRunId===next.harnessRunId);return old?newerTaskSnapshot(old,next):next;}));
       setProjects(projectList.projects);
       setRuntimeState(runtimes);
       setSelectedProjectId((current) =>
@@ -193,17 +248,10 @@ export function App() {
       );
       // Desktop 没有 HTTP/SSE 控制面；轮询只读取 Engine 的耐久完整快照。未完成
       // reasoning 与 delta 不进入 Journal，因此页面不会把半条模型输出误当结果。
-      setHarness((current) => {
-        if (!current) return current;
-        return (
-          harnessList.harnesses.find(
-            (item) => item.harnessRunId === current.harnessRunId,
-          ) ?? current
-        );
-      });
       setConnected(true);
       setError(null);
     } catch (cause) {
+      if(!valid())return;
       setConnected(false);
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -257,17 +305,23 @@ export function App() {
   }, []);
 
   const selected = runs.find((run) => run.runId === selectedId) ?? null;
+  const taskBusy=harness?busyOperations[`task:${harness.harnessRunId}`]??null:null;
+  const executionBusy=selectedExecutionId?busyOperations[`execution:${selectedExecutionId}`]??null:null;
+  const runBusy=selectedId?busyOperations[`run:${selectedId}`]??null:null;
   useEffect(() => {
     if (!harness?.harnessRunId) return;
     let active = true;
+    let request = 0;
     const refreshHarness = () => {
+      const token = ++request;
+      const valid=requestFence.current.begin(`task:${harness.harnessRunId}`);
       void api
         .harness(harness.harnessRunId)
         .then((response) => {
-          if (active) setHarness(response.harness);
+          if (active && token === request && valid()) setHarness(current=>current?newerTaskSnapshot(current,response.harness):current);
         })
         .catch((cause) =>
-          setError(cause instanceof Error ? cause.message : String(cause)),
+          { if (active && token === request && valid()) setError(cause instanceof Error ? cause.message : String(cause)); },
         );
     };
     refreshHarness();
@@ -284,11 +338,12 @@ export function App() {
     let disposed = false;
     setLastEventAt(null);
     const resync = () => {
+      const valid=requestFence.current.begin(`task:${harnessRunId}`);
       void api
         .harness(harnessRunId)
         .then((response) => {
-          if (disposed) return;
-          setHarness(response.harness);
+          if (disposed || !valid()) return;
+          setHarness(current=>current?newerTaskSnapshot(current,response.harness):current);
           setLastEventAt(Date.now());
         })
         .catch(() => {});
@@ -297,6 +352,7 @@ export function App() {
       if (disposed) return;
       if (envelope.frame.stream !== "harness") return;
       if (envelope.frame.harnessRunId !== harnessRunId) return;
+      if(tracker.generation !== -1 && tracker.generation < envelope.generation)requestFence.current.advance();
       const decision = acceptEnvelope(tracker, envelope);
       if (decision === "skip") return;
       if (decision === "resync") {
@@ -305,6 +361,7 @@ export function App() {
         return;
       }
       const event = envelope.frame.event;
+      requestFence.current.begin(`task:${harnessRunId}`);
       if (
         event.type === "turn_finished" ||
         event.type === "turn_interrupted" ||
@@ -329,7 +386,7 @@ export function App() {
 
   async function control(action: "pause" | "recover" | "stop" | "resume") {
     if (!selected) return;
-    setBusy(action);
+    const finishBusy=beginBusy(`run:${selected.runId}`,action);
     try {
       const response = await api[action](selected.runId);
       setRuns((current) =>
@@ -341,52 +398,10 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(null);
+      finishBusy();
     }
   }
 
-  async function createRun(value: {
-    workflowPath: string;
-    cwd: string;
-    input: Record<string, unknown>;
-  }) {
-    setBusy("create");
-    try {
-      const response = await api.createRun({
-        ...value,
-        clientRequestId: crypto.randomUUID(),
-      });
-      const item = toRunListItem(response);
-      setRuns((current) => [
-        item,
-        ...current.filter((run) => run.runId !== item.runId),
-      ]);
-      setSelectedId(response.runId);
-      setCreating(false);
-      setCreateRunPrefill(null);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  /** 草稿窗口"执行已有的 Workflow"：原生选择器选中后预填并打开创建弹窗；取消无副作用。 */
-  async function runExistingWorkflow() {
-    try {
-      const path = await pickWorkflowFile();
-      if (!path) return;
-      const project = projects.find(
-        (item) => item.projectId === (draftProjectId ?? selectedProjectId),
-      );
-      setCreateRunPrefill({ workflowPath: path, cwd: project?.cwd ?? "" });
-      setCreating(true);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
 
   async function createProject() {    try {
       const response = await api.createProject(projectCwd, projectTitle);
@@ -412,62 +427,61 @@ export function App() {
     setDraftProjectId(projectId);
     setHarness(null);
     setHarnessText("");
+    createRequest.current = null; setTaskTitle(""); setSelectedId(null);
     setWorkflowPanelOpen(false);
     setAssignmentRevision(null);
     setError(null);
   }
   async function sendHarness() {
-    if (!harnessText.trim()) return;
+    if (!harnessText.trim() || sending.current) return;
+    sending.current = true; const owner = harness?.harnessRunId; const text = harnessText;
+    const pageToken = navigationToken.current;
     try {
       if (harness) {
-        await api.sendHarnessMessage(harness.harnessRunId, harnessText);
-        updateHarnessText("");
-        setHarness(
-          await api
-            .harness(harness.harnessRunId)
-            .then((response) => response.harness),
-        );
+        await api.sendHarnessMessage(harness.harnessRunId, text);
+        if(draftCacheRef.current.get(owner!)===text)draftCacheRef.current.set(owner!, "");
+        const next = (await api.harness(owner!)).harness;
+        if (harnessRef.current?.harnessRunId === owner) { setHarness(current=>current?newerTaskSnapshot(current,next):current); setHarnessText(draftCacheRef.current.get(owner!)??""); }
       } else {
         const projectId = draftProjectId ?? selectedProjectId;
         if (!projectId) return;
         const response = await api.startHarnessConversation(
           projectId,
-          harnessText,
+          text,
+          createRequest.current ?? (createRequest.current = crypto.randomUUID()),
+          taskTitle || undefined,
         );
-        setHarness(response.harness);
-        setHarnesses((current) => [response.harness, ...current]);
-        updateHarnessText("");
-        setDraftProjectId(null);
+        setHarnesses((current) => [response.harness, ...current.filter(item=>item.harnessRunId !== response.harness.harnessRunId)]);
+        if (navigationToken.current === pageToken && !harnessRef.current) {
+          setHarness(response.harness); updateHarnessText(""); setDraftProjectId(null);
+        }
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      sending.current = false;
     }
   }
-  const selectExecution = useCallback(
-    async (executionId: string) => {
-      if (!harness) return;
-      try {
-        const detail = await api.execution(harness.harnessRunId, executionId);
-        setSelectedExecutionId(executionId);
-        setExecutionDetail(detail);
-        setWorkflowPanelOpen(true);
-      } catch (cause) {
-        setError(executionLoadMessage(cause));
-      }
-    },
-    [harness],
-  );
+  const selectExecution = useCallback(async (executionId: string,attempt?:number) => {
+    if (!harness) return;
+    const execution = harness.executions.find(item=>item.executionId === executionId);
+    const revision = harness.workflowRevisions.find(item=>item.revision === execution?.revision);
+    if (revision){openWorkflow(harness, revision, "execution", executionId);if(attempt)setRoute({kind:"workflow",taskId:harness.harnessRunId,cardId:revision.cardId??`legacy:${revision.revision}`,revision:revision.revision,section:"execution",executionId,attempt});}
+  }, [harness]);
   useEffect(() => {
-    if (!harness || !selectedExecutionId) return;
-    let active = true;
+    if (!harness || !selectedExecutionId || route.kind !== "workflow" || route.taskId !== harness.harnessRunId) return;
+    let active = true; setExecutionDetail(null);
+    const owner = harness.harnessRunId;
     const reload = () => {
+      const token = ++detailToken.current;
+      const valid=requestFence.current.begin(`execution:${owner}:${selectedExecutionId}`);
       void api
         .execution(harness.harnessRunId, selectedExecutionId)
         .then((value) => {
-          if (active) setExecutionDetail(value);
+          if (active && valid() && token === detailToken.current && harnessRef.current?.harnessRunId === owner) setExecutionDetail(value);
         })
         .catch((cause) => {
-          if (active)
+          if (active && valid())
             setError(executionLoadMessage(cause));
         });
     };
@@ -479,7 +493,7 @@ export function App() {
       active = false;
       window.clearInterval(fallback);
     };
-  }, [harness?.harnessRunId, selectedExecutionId]);
+  }, [harness?.harnessRunId, selectedExecutionId, route.kind]);
   async function createExecution(revision: number) {
     if (!harness) return;
     // 创建 Execution 必须经过分配卡：脚本字面量 cli/model 在受限 Execution 中不直接生效。
@@ -487,18 +501,29 @@ export function App() {
   }
   async function finishAssignment(detail: ExecutionResponse) {
     if (!harness) return;
+    if (harnessRef.current?.harnessRunId !== harness.harnessRunId || routeRef.current.kind !== "workflow" || routeRef.current.revision !== detail.execution.revision) return;
     setAssignmentRevision(null);
     setExecutionDetail(detail);
     setSelectedExecutionId(detail.execution.executionId);
-    setWorkflowPanelOpen(true);
-    setHarness((await api.harness(harness.harnessRunId)).harness);
+    const owner = harness.harnessRunId;
+    const next = (await api.harness(owner)).harness;
+    if (harnessRef.current?.harnessRunId === owner) setHarness(current=>current?newerTaskSnapshot(current,next):current);
     setError(null);
+  }
+  /** 所有 Task mutation 回包共享同资源门禁；后台动作完成不改变当前导航。 */
+  async function taskMutation(owner:string,operation:()=>Promise<{harness:HarnessSnapshot}>) {
+    const valid=requestFence.current.begin(`task:${owner}`);
+    const response=await operation();
+    if(valid())setHarnesses(current=>current.map(item=>item.harnessRunId===owner?response.harness:item));
+    if(valid()&&harnessRef.current?.harnessRunId===owner)setHarness(current=>current?newerTaskSnapshot(current,response.harness):current);
+    return response;
   }
   async function controlExecution(
     action: "pause" | "recover" | "stop" | "resume",
   ) {
     if (!harness || !executionDetail) return;
-    setBusy(`execution:${action}`);
+    const valid=requestFence.current.begin(`execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`);
+    const finishBusy=beginBusy(`execution:${executionDetail.execution.executionId}`,`execution:${action}`);
     try {
       const detail =
         action === "resume"
@@ -511,20 +536,24 @@ export function App() {
               executionDetail.execution.executionId,
               action,
             );
-      setExecutionDetail(detail);
-      setHarness((await api.harness(harness.harnessRunId)).harness);
+      const owner = harness.harnessRunId;
+      if (valid() && harnessRef.current?.harnessRunId === owner && routeRef.current.kind === "workflow" && routeRef.current.executionId === detail.execution.executionId) setExecutionDetail(detail);
+      const next = (await api.harness(owner)).harness;
+      if (harnessRef.current?.harnessRunId === owner) setHarness(current=>current?newerTaskSnapshot(current,next):current);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(null);
+      finishBusy();
     }
   }
 
   return (
     <main
-      className={`agent-workbench theme-${theme} ${workflowPanelOpen ? "workflow-open" : ""}`}
+      className={`agent-workbench theme-${theme} ${navOpen ? "nav-open" : ""}`}
     >
+      <button ref={navigationButton} className="navigation-toggle" aria-label={navOpen?"关闭任务导航":"打开任务导航"} aria-expanded={navOpen} aria-controls="task-navigation" onClick={()=>setNavOpen(value=>!value)}>☰</button>
+      {navOpen&&<button className="navigation-scrim" aria-label="关闭任务导航" onClick={()=>{setNavOpen(false);navigationButton.current?.focus();}} />}
       {error && (
         <div className="toast-layer" role="status" aria-live="polite">
           <div className="notice">
@@ -536,7 +565,7 @@ export function App() {
           </div>
         </div>
       )}
-      <aside className="task-rail">
+      <aside id="task-navigation" ref={navigationPanel} className="task-rail">
         <header>
           <div className="brand">
             <span className="brand-mark">W</span>
@@ -584,7 +613,7 @@ export function App() {
             }
           }}
         >
-          ⊕ {selectedProjectId ? "新建会话" : "新建项目"}
+          ⊕ {selectedProjectId ? "新建任务" : "新建项目"}
         </button>
         <div className="task-section-title">
           <div className="harness-tabs" role="tablist" aria-label="会话状态">
@@ -595,23 +624,29 @@ export function App() {
             ↻
           </button>
         </div>
+        <label className="task-search"><span>搜索任务</span><input value={search} onChange={event=>setSearch(event.target.value)} /></label>
         <nav className="task-list">
+          {runs.length > 0 && <details><summary>独立运行历史</summary>{runs.map(run => <button key={run.runId} onClick={()=>{setHarness(null);setDraftProjectId(null);setRoute({kind:"conversation"});setSelectedId(run.runId);setNavOpen(false);}}>{run.workflow.name} · {localeTime(run.createdAt)} · {run.runId.slice(0,8)}</button>)}</details>}
           {projects.map((project) => (
             <ProjectGroup
               key={project.projectId}
               project={project}
-              harnesses={harnesses.filter((item) => item.projectId === project.projectId && (harnessView === "completed" ? item.status === "completed" : item.status !== "completed"))}
+              harnesses={harnesses.filter((item) => item.projectId === project.projectId && (!search || conversationTitle(item).includes(search) || item.workflowRevisions.some(revision=>revision.goal?.includes(search))) && (harnessView === "completed" ? item.status === "completed" : item.status !== "completed"))}
+              route={route}
+              onSelectWorkflow={openWorkflow}
               activeHarnessId={harness?.harnessRunId ?? null}
+              unreadCounts={unreadCounts}
               showNewSession={harnessView === "active"}
               onSelectProject={() => {
                 setSelectedProjectId(project.projectId);
                 setHarness(null);
                 setDraftProjectId(null);
+                setRoute({kind:"conversation"}); setSelectedId(null);
               }}
               onNewSession={() => beginHarnessDraft(project.projectId)}
               onSelectHarness={(item) => {
                 setSelectedProjectId(project.projectId);
-                setHarness(item);
+                setHarness(item); setSelectedId(null); setRoute({kind:"conversation"}); setNavOpen(false);
                 setDraftProjectId(null);
                 setAssignmentRevision(null);
               }}
@@ -626,7 +661,7 @@ export function App() {
           </small>
         </footer>
       </aside>
-      <section className="conversation-pane">
+      <section className="conversation-pane" hidden={workflowPanelOpen}>
         {!harness ? (
           <DraftConversation
             project={
@@ -638,7 +673,7 @@ export function App() {
             text={harnessText}
             onText={updateHarnessText}
             onSend={() => void sendHarness()}
-            onRunWorkflow={() => void runExistingWorkflow()}
+            title={taskTitle} onTitle={setTaskTitle}
           />
         ) : (
           <HarnessConversation
@@ -648,10 +683,11 @@ export function App() {
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
             onComplete={() => {
-              setBusy("complete-harness");
-              void api.completeHarness(harness.harnessRunId)
+              const finishBusy=beginBusy(`task:${harness.harnessRunId}`,"complete-harness");
+              const pageToken=navigationToken.current;
+              void taskMutation(harness.harnessRunId,()=>api.completeHarness(harness.harnessRunId))
                 .then((response) => {
-                  setHarnesses((current) => current.map((item) => item.harnessRunId === response.harness.harnessRunId ? response.harness : item));
+                  if(pageToken!==navigationToken.current||harnessRef.current?.harnessRunId!==response.harness.harnessRunId)return;
                   // 会话归档成功后，明确回到进行中视图的第一项目草稿页；不能依赖
                   // beginHarnessDraft 的早退或当前已完成会话的渲染状态。
                   const firstProjectId = projects[0]?.projectId ?? null;
@@ -664,18 +700,17 @@ export function App() {
                   setError(null);
                 })
                 .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-                .finally(() => setBusy(null));
+                .finally(finishBusy);
             }}
-            onOpenWorkflow={() => setWorkflowPanelOpen(true)}
-            hasWorkflow={harness.executions.length > 0}
-            onDraft={() => setDraftingRevision(true)}
+            onOpenWorkflow={() => { const revision = workflowCells(harness).at(-1); if (revision) openWorkflow(harness,revision); }}
+            hasWorkflow={harness.workflowRevisions.length > 0}
+            onDraft={() => {}}
             onAccept={async (revision) => {
               try {
-                const response = await api.acceptWorkflowRevision(
+                await taskMutation(harness.harnessRunId,()=>api.acceptWorkflowRevision(
                   harness.harnessRunId,
                   revision,
-                );
-                setHarness(response.harness);
+                ));
               } catch (cause) {
                 setError(
                   cause instanceof Error ? cause.message : String(cause),
@@ -683,90 +718,119 @@ export function App() {
               }
             }}
             onReject={async (revision) => {
-              const response = await api.rejectWorkflowRevision(
+              await taskMutation(harness.harnessRunId,()=>api.rejectWorkflowRevision(
                 harness.harnessRunId,
                 revision,
-              );
-              setHarness(response.harness);
+              ));
             }}
             onCreateExecution={(revision) => void createExecution(revision)}
             assignmentRevision={assignmentRevision}
             onAssignmentCancel={() => setAssignmentRevision(null)}
             onAssignmentCreated={(detail) => void finishAssignment(detail)}
-            onSelectExecution={(executionId) =>
-              void selectExecution(executionId)
+            onSelectRevision={(revision) => openWorkflow(harness, revision, "plan")}
+            onSelectExecution={(executionId,attempt) =>
+              void selectExecution(executionId,attempt)
             }
             onAnswerDecision={async (decisionId, answer) => {
-              setBusy(`decision:${decisionId}`);
+              const finishBusy=beginBusy(`task:${harness.harnessRunId}`,`decision:${decisionId}`);
               try {
-                const response = await api.answerHarnessDecision(
+                const response = await taskMutation(harness.harnessRunId,()=>api.answerHarnessDecision(
                   harness.harnessRunId,
                   decisionId,
                   answer,
-                );
-                setHarness(response.harness);
+                ));
               } catch (cause) {
                 setError(
                   cause instanceof Error ? cause.message : String(cause),
                 );
               } finally {
-                setBusy(null);
+                finishBusy();
               }
             }}
-            busy={busy}
+            busy={taskBusy}
             lastEventAt={lastEventAt}
+            visible={!workflowPanelOpen}
+            onRead={markRead}
           />
         )}
       </section>
       <aside
-        className={`workflow-pane ${workflowPanelOpen ? "open" : "closed"}`}
+        ref={centralScroll}
+        onScroll={()=>{if(route.kind==="workflow"&&centralScroll.current)detailPositions.set(pageKey,centralScroll.current.scrollTop);}}
+        className="central-workflow" hidden={!workflowPanelOpen}
       >
         <WorkflowPanelErrorBoundary
           onClose={() => setWorkflowPanelOpen(false)}
         >
-          <header>
+          <header className="workflow-page-header">
           <div>
             <span>
-              {executionDetail
-                ? `Execution · revision v${executionDetail.execution.revision}`
-                : "Workflow 运行详情"}
+              {harness && route.kind === "workflow" ? `${conversationTitle(harness)} / 工作流` : "独立运行记录"}
             </span>
             <strong>
-              {executionDetail?.snapshot.workflow.name ??
-                selected?.workflow.name ??
-                "尚未选择"}
+              {(route.kind === "workflow" ? harness?.workflowRevisions.find(item=>item.revision === route.revision)?.goal : null) ?? selected?.workflow.name ?? "工作流详情"}
             </strong>
           </div>
           <button
             onClick={() => setWorkflowPanelOpen(false)}
-            aria-label="隐藏 Workflow 详情"
+            aria-label="返回主控对话"
           >
-            ×
+            返回主控对话
           </button>
           </header>
-          {executionDetail && harness ? (
+          {harness && route.kind === "workflow" && !routeMatchesTask(harness,route) && <p role="alert">所选工作流记录已失效，请返回主控对话重新选择。</p>}
+          {harness && route.kind === "workflow" && routeMatchesTask(harness,route) && (
+            <div className="central-plan">
+              <div className="workflow-page-tabs" role="tablist" aria-label="工作流详情" onKeyDown={event=>{if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;const buttons=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=buttons.indexOf(document.activeElement as HTMLButtonElement);const next=event.key==="Home"?0:event.key==="End"?buttons.length-1:(index+(event.key==="ArrowRight"?1:-1)+buttons.length)%buttons.length;event.preventDefault();buttons[next]?.focus();buttons[next]?.click();}}>
+              <button role="tab" aria-selected={route.section === "plan"} onClick={()=>setRoute({...route,section:"plan"})}>方案</button>
+              <button role="tab" aria-selected={route.section === "execution"} disabled={!harness.executions.some(item=>item.revision === route.revision)} onClick={()=> { const ex = harness.executions.find(item=>item.revision === route.revision); if(ex) setSelectedExecutionId(ex.executionId); setRoute({...route,section:"execution",executionId:ex?.executionId,attempt:undefined}); }}>执行</button>
+              <button role="tab" aria-selected={route.section === "results"} disabled={!harness.executions.some(item=>item.revision === route.revision)} onClick={()=>{const ex=harness.executions.find(item=>item.revision===route.revision);if(ex)setSelectedExecutionId(ex.executionId);setRoute({...route,section:"results",executionId:ex?.executionId});}}>结果</button>
+              </div>
+              {harness.status === "running" && <button onClick={()=>setRoute({kind:"conversation"})}>{harness.decisions.some(item=>!item.answer) ? "主控需要回答" : "主控正在处理"} · 返回对话</button>}
+              {(unreadCounts.get(harness.harnessRunId)??0)>0&&<button onClick={()=>setRoute({kind:"conversation"})}>{unreadCounts.get(harness.harnessRunId)} 条未读 · 返回主控对话</button>}
+              {harness.executions.filter(execution=>{const attention=harnesses.find(task=>task.harnessRunId===harness.harnessRunId)?.executionAttention?.[execution.executionId];return attention&&(attention.workerRequests>0||attention.scriptGates>0);}).map(execution=><button key={execution.executionId} onClick={()=>void selectExecution(execution.executionId)}>执行需要回答 · 前往所属执行</button>)}
+              {route.section === "plan" && (()=> {
+                const revisions=harness.workflowRevisions.filter(item=>(item.cardId ?? `legacy:${item.revision}`) === route.cardId);
+                const revision=revisions.find(item=>item.revision === route.revision);
+                if(!revision) return <p>方案不存在，请返回对话。</p>;
+                return <><div className="workflow-version-toolbar"><label>方案版本<select value={revision.revision} onChange={event=>{setSelectedExecutionId(null);setExecutionDetail(null);setAssignmentRevision(null);setRoute({...route,revision:Number(event.target.value),executionId:undefined,attempt:undefined});}}>{revisions.map(item=><option key={item.revision} value={item.revision}>第 {item.revision} 版</option>)}</select></label><small>每次修改保留原方案，批准仅对当时的版本生效</small></div>
+                  <WorkflowRevisionCard key={`${route.taskId}:${revision.revision}`} revision={revision} harness={harness}
+                    onAccept={async number=>{ await taskMutation(harness.harnessRunId,()=>api.acceptWorkflowRevision(harness.harnessRunId,number)); }}
+                    onReject={async number=>{ await taskMutation(harness.harnessRunId,()=>api.rejectWorkflowRevision(harness.harnessRunId,number)); }}
+                    onCreateExecution={number=>void createExecution(number)} assignmentRevision={assignmentRevision} onAssignmentCancel={()=>setAssignmentRevision(null)} onAssignmentCreated={detail=>void finishAssignment(detail)} />
+                  {editableRevision(harness,revision) && <><button onClick={()=>{ const request=`请修改工作流版本 ${revision.revision}（${revision.goal}）：\n`; if(!harnessText)updateHarnessText(request); else setError("已有对话草稿，请在原草稿中补充修改要求。"); setRoute({kind:"conversation"}); }}>请主控修改</button><button onClick={async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }}>放弃候选</button></>}
+                  {revision.abandonedAt && <p>候选已放弃，仅供查看。</p>}</>;
+              })()}
+              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} />}
+            </div>
+          )}
+          {executionDetail && harness && route.kind === "workflow" && routeMatchesTask(harness,route) && route.section === "execution" ? (
           <div className="workflow-detail-scroll">
             <ExecutionDetail
               detail={executionDetail}
-              busy={busy}
+              selectedAttempt={route.attempt}
+              onSelectAttempt={attempt=>setRoute({...route,attempt})}
+              busy={executionBusy}
               dynamicCount={executionDynamicCount}
               harnessRunId={harness.harnessRunId}
               onControl={controlExecution}
               onAnswerBlock={async (blockId, answer) => {
-                setBusy(`answer:${blockId}`);
+                const valid=requestFence.current.begin(`execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`);
+                const finishBusy=beginBusy(`execution:${executionDetail.execution.executionId}`,`answer:${blockId}`);
                 try {
                   await api.answer(blockId, answer);
                   const next = await api.execution(
                     harness.harnessRunId,
                     executionDetail.execution.executionId,
                   );
-                  setExecutionDetail(next);
+                  if (valid() && harnessRef.current?.harnessRunId === harness.harnessRunId && routeRef.current.kind === "workflow" && routeRef.current.executionId === next.execution.executionId) setExecutionDetail(next);
                 } finally {
-                  setBusy(null);
+                  finishBusy();
                 }
               }}
               onAnswer={async (gateId, answer) => {
-                setBusy(`gate:${gateId}`);
+                const valid=requestFence.current.begin(`execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`);
+                const finishBusy=beginBusy(`execution:${executionDetail.execution.executionId}`,`gate:${gateId}`);
                 try {
                   const next = await api.answerExecutionGate(
                     harness.harnessRunId,
@@ -774,14 +838,14 @@ export function App() {
                     gateId,
                     answer,
                   );
-                  setExecutionDetail(next);
+                  if (valid() && harnessRef.current?.harnessRunId === harness.harnessRunId && routeRef.current.kind === "workflow" && routeRef.current.executionId === next.execution.executionId) setExecutionDetail(next);
                 } finally {
-                  setBusy(null);
+                  finishBusy();
                 }
               }}
             />
           </div>
-          ) : !selected ? (
+          ) : route.kind === "workflow" ? null : !selected ? (
           <div className="workflow-empty">
             <div>◇</div>
             <strong>等待主控发起 Workflow</strong>
@@ -816,15 +880,15 @@ export function App() {
           <div className="workflow-detail-scroll">
             <RunDetail
               run={selected}
-              busy={busy}
+              busy={runBusy}
               onControl={control}
               onAnswer={async (blockId, answer) => {
-                setBusy(`answer:${blockId}`);
+                const finishBusy=beginBusy(`run:${selected.runId}`,`answer:${blockId}`);
                 try {
                   await api.answer(blockId, answer);
                   await refresh();
                 } finally {
-                  setBusy(null);
+                  finishBusy();
                 }
               }}
             />
@@ -832,27 +896,6 @@ export function App() {
           )}
         </WorkflowPanelErrorBoundary>
       </aside>
-      {!workflowPanelOpen && (
-        <button
-          className="workflow-peek"
-          onClick={() => setWorkflowPanelOpen(true)}
-        >
-          <span>Workflow</span>
-          <b>{runs.filter((run) => !terminal.has(run.status)).length}</b>
-        </button>
-      )}
-      {creating && (
-        <CreateRunModal
-          busy={busy === "create"}
-          initialWorkflowPath={createRunPrefill?.workflowPath ?? ""}
-          initialCwd={createRunPrefill?.cwd ?? ""}
-          onCreate={createRun}
-          onClose={() => {
-            setCreating(false);
-            setCreateRunPrefill(null);
-          }}
-        />
-      )}
       {creatingProject && (
         <ProjectCreateModal
           cwd={projectCwd}
@@ -881,23 +924,6 @@ export function App() {
           scanning={runtimeScanning}
           onRuntimeState={setRuntimeState}
           onError={setError}
-        />
-      )}
-      {draftingRevision && harness && (
-        <WorkflowDraftModal
-          onClose={() => setDraftingRevision(false)}
-          onPropose={async (source) => {
-            try {
-              const response = await api.proposeWorkflowRevision(
-                harness.harnessRunId,
-                source,
-              );
-              setHarness(response.harness);
-              setDraftingRevision(false);
-            } catch (cause) {
-              setError(cause instanceof Error ? cause.message : String(cause));
-            }
-          }}
         />
       )}
       {exitConfirmOpen && (
@@ -1525,10 +1551,13 @@ function HarnessListItem({
   item,
   active,
   onClick,
+  unread=0,
 }: {
   item: HarnessSnapshot;
   active: boolean;
   onClick: () => void;
+  /** 未阅读的耐久条目数；不按流式片段计数。 */
+  unread?: number;
 }) {
   return (
     <button
@@ -1538,6 +1567,7 @@ function HarnessListItem({
       <span className={`task-presence ${item.status}`} />
       <div>
         <strong>{conversationTitle(item)}</strong>
+        {unread>0 && <span className="task-unread">{unread} 条未读</span>}
         <small>
           {item.status === "running"
             ? "进行中"
@@ -1547,15 +1577,25 @@ function HarnessListItem({
                 ? "已完成"
               : "待命"}{" "}
           · {localeTime(item.completedAt ?? item.createdAt)}
+          {item.executions.some(execution=>execution.finishedAt === null) && " · 工作流运行中"}
+          {item.decisions.some(decision=>decision.answer === null) && item.status === "running" && " · 主控需要回答"}
+          {Object.values(item.executionAttention ?? {}).some(value=>value.workerRequests>0||value.scriptGates>0) && " · 执行需要回答"}
         </small>
       </div>
     </button>
   );
 }
+function TaskTreeItem({item,active,route,unread,onClick,onWorkflow}:{item:HarnessSnapshot;unread:number;active:boolean;route:WorkbenchRoute;onClick:()=>void;onWorkflow:(revision:import("./types").WorkflowRevision)=>void}) {
+  const [expanded,setExpanded]=useState(()=>taskExpansions.get(item.harnessRunId)??false);
+  useEffect(()=>{if(route.kind==="workflow" && route.taskId===item.harnessRunId)setExpanded(true);},[route.kind==="workflow" ? route.cardId : null]);
+  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>}</div>;
+}
 function ProjectGroup({
   project,
   harnesses,
   activeHarnessId,
+  unreadCounts,
+  route, onSelectWorkflow,
   showNewSession,
   onSelectProject,
   onNewSession,
@@ -1564,6 +1604,10 @@ function ProjectGroup({
   project: HarnessProject;
   harnesses: HarnessSnapshot[];
   activeHarnessId: string | null;
+  /** 各 Task 的本地阅读计数；不构成业务状态。 */
+  unreadCounts: Map<string,number>;
+  route: WorkbenchRoute;
+  onSelectWorkflow: (task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) => void;
   showNewSession: boolean;
   onSelectProject: () => void;
   onNewSession: () => void;
@@ -1593,12 +1637,7 @@ function ProjectGroup({
       {harnesses.length > 0 ? (
         <div className="project-conversations">
           {harnesses.map((item) => (
-            <HarnessListItem
-              key={item.harnessRunId}
-              item={item}
-              active={item.harnessRunId === activeHarnessId}
-              onClick={() => onSelectHarness(item)}
-            />
+            <TaskTreeItem key={item.harnessRunId} item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={revision=>onSelectWorkflow(item,revision)} />
           ))}
         </div>
       ) : null}
@@ -1688,14 +1727,13 @@ function DraftConversation({
   text,
   onText,
   onSend,
-  onRunWorkflow,
+  title, onTitle,
 }: {
   project: HarnessProject | null;
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
-  /** 打开原生选择器执行已有 Workflow（.ts）。 */
-  onRunWorkflow: () => void;
+  title: string; onTitle: (value: string) => void;
 }) {
   const ready = project !== null;
   return (
@@ -1704,7 +1742,7 @@ function DraftConversation({
         <div>
           <span className="task-presence" />
           <div>
-            <strong>新对话</strong>
+            <strong>新建任务</strong>
             <small>{project?.title ?? "未选择项目"}</small>
           </div>
         </div>
@@ -1713,7 +1751,9 @@ function DraftConversation({
       </header>
       <div className="conversation-scroll">
         <div className="conversation-intro">
-          <span>新对话</span>
+          <span>自动编排</span>
+          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button disabled>预置工作流 · 尚未开放</button><button disabled>本地工作流 · 尚未开放</button></div>
+          <label>任务标题（可选）<input value={title} maxLength={120} onChange={event=>onTitle(event.target.value)} /></label>
           <h2>你想完成什么任务？</h2>
           <p>
             先告诉我目标和约束。发送第一条消息后，这条会话才会保存到当前项目。
@@ -1751,16 +1791,7 @@ function DraftConversation({
           </button>
         </div>
       </div>
-      <div className="draft-workflow-entry">
-        <button
-          type="button"
-          className="button-secondary"
-          disabled={!ready}
-          onClick={onRunWorkflow}
-        >
-          执行已有的 Workflow（.ts）
-        </button>
-      </div>
+
     </div>
   );
 }
@@ -1781,10 +1812,13 @@ function HarnessConversation({
   onAssignmentCancel,
   onAssignmentCreated,
   onSelectExecution,
+  onSelectRevision,
   onAnswerDecision,
   onComplete,
   busy,
   lastEventAt,
+  visible,
+  onRead,
 }: {
   harness: HarnessSnapshot;
   text: string;
@@ -1802,7 +1836,8 @@ function HarnessConversation({
   assignmentRevision: number | null;
   onAssignmentCancel: () => void;
   onAssignmentCreated: (detail: ExecutionResponse) => void;
-  onSelectExecution: (executionId: string) => void;
+  onSelectExecution: (executionId: string,attempt?:number) => void;
+  onSelectRevision: (revision: import("./types").WorkflowRevision) => void;
   onAnswerDecision: (
     decisionId: string,
     answer: Record<string, unknown>,
@@ -1811,6 +1846,10 @@ function HarnessConversation({
   busy: string | null;
   /** 最近一次条目事件到达时间（Date.now() 毫秒）；无事件时为 null。 */
   lastEventAt: number | null;
+  /** 当前主控页可见性，隐藏页不能清未读。 */
+  visible:boolean;
+  /** 当前视口耐久身份阅读回调。 */
+  onRead:(taskId:string,ids:string[])=>void;
 }) {
   return (
     <ConversationView
@@ -1821,34 +1860,21 @@ function HarnessConversation({
       onSend={onSend}
       onAbort={onAbort}
       onComplete={onComplete}
-      onProposeWorkflow={onDraft}
       onOpenWorkflow={onOpenWorkflow}
       hasWorkflow={hasWorkflow}
       busy={busy}
       lastEventAt={lastEventAt}
+      visible={visible}
+      onRead={onRead}
+      timelineEvents={[
+        ...harness.workflowRevisions.map(revision => ({ key: `revision:${revision.revision}`, at: revision.createdAt, content: <WorkflowProposalSummary task={harness} revision={revision} onOpen={()=>onSelectRevision(revision)} /> })),
+        ...(harness.executionHistory?.length?harness.executionHistory.map(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);return {key:item.key,at:item.at,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null};}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
+      ]}
     >
-      {harness.workflowRevisions.map((revision) => (
-          <WorkflowRevisionCard
-            key={revision.revision}
-            revision={revision}
-            harness={harness}
-            onAccept={onAccept}
-            onReject={onReject}
-            onCreateExecution={onCreateExecution}
-            assignmentRevision={assignmentRevision}
-            onAssignmentCancel={onAssignmentCancel}
-            onAssignmentCreated={onAssignmentCreated}
-          />
-        ))}
-        {harness.executions.map((execution) => (
-          <ExecutionAction
-            key={execution.executionId}
-            execution={execution}
-            onSelect={() => onSelectExecution(execution.executionId)}
-          />
-        ))}
+      {harness.task && harness.executions.length > 0 && <p className="workflow-event">多轮工作流尚未开放；可查看或恢复原执行，聊天仍可讨论结果。</p>}
+      {harness.task && harness.diagnostic?.includes("主控启动失败") && <button onClick={()=>void api.retryInitialization(harness.harnessRunId)}>重试启动主控（不重复创建任务）</button>}
         {harness.decisions
-          .filter((decision) => decision.answer === null)
+          .filter((decision) => decision.answer === null && harness.status === "running")
           .map((decision) => (
             <HarnessDecisionCard
               key={decision.decisionId}
@@ -1928,8 +1954,21 @@ function HarnessDecisionCard({
   );
 }
 
+/** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
+function HistoricalResults({taskId,executionId,currentAttempt}:{taskId:string;executionId:string;currentAttempt:number}) {
+  const resultKey=`${taskId}:${executionId}`;
+  const [attempt,setAttempt]=useState(()=>{const saved=resultAttempts.get(resultKey);return saved&&saved<=currentAttempt?saved:currentAttempt;});
+  useEffect(()=>resultAttempts.set(resultKey,attempt),[resultKey,attempt]);
+  const [value,setValue]=useState<Awaited<ReturnType<typeof api.attemptResults>>|null>(null);
+  const [error,setError]=useState<string|null>(null);
+  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt]);
+  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据，不代表目标已验收；自动汇总尚未开放。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+}
+
 function ExecutionDetail({
   detail,
+  selectedAttempt,
+  onSelectAttempt,
   busy,
   dynamicCount,
   harnessRunId,
@@ -1946,8 +1985,13 @@ function ExecutionDetail({
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  /** 阅读指定耐久 attempt；缺省显示当前执行，不改变业务状态。 */
+  selectedAttempt?: number;
+  /** 只更新阅读路由，不恢复或派发。 */
+  onSelectAttempt?: (attempt: number) => void;
 }) {
   const executionId = detail.execution.executionId;
+  const [allVisits, setAllVisits] = useState<PhaseVisit[]>([]);
   /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
   const loadAllVisits = useCallback(async () => {
     const items: import("./types").PhaseVisit[] = [];
@@ -1965,12 +2009,24 @@ function ExecutionDetail({
     }
     return items;
   }, [harnessRunId, executionId]);
+  useEffect(() => {
+    let active = true;
+    void loadAllVisits().then(items => { if (active) setAllVisits(items); }).catch(() => {});
+    return () => { active = false; };
+  }, [loadAllVisits, detail.snapshot.currentExecutionAttemptId, detail.snapshot.status]);
+  const attemptIds = [...new Set([detail.snapshot.currentExecutionAttemptId, ...allVisits.map(visit=>visit.executionAttemptId)])].sort((a,b)=>a-b);
+  const readingAttempt = selectedAttempt ?? detail.snapshot.currentExecutionAttemptId;
+  const historical = readingAttempt !== detail.snapshot.currentExecutionAttemptId;
+  if(selectedAttempt&&!attemptIds.includes(selectedAttempt))return <p role="alert">所选执行尝试不存在或尚未读取，请选择当前执行查看。</p>;
   return (
     <>
+      <label>执行尝试<select value={readingAttempt} onChange={event=>onSelectAttempt?.(Number(event.target.value))}>{attemptIds.map(attempt=><option key={attempt} value={attempt}>attempt #{attempt}{attempt === detail.snapshot.currentExecutionAttemptId ? "（当前）" : "（历史只读）"}</option>)}</select></label>
+      {historical ? <><p>历史访问证据，只读；控制原执行请切回当前 attempt。</p><TeamPanel readOnly key={`${executionId}:${readingAttempt}`} runId={executionId} currentExecutionAttemptId={readingAttempt} phaseTitles={detail.snapshot.phases.map(phase=>phase.title)} visits={allVisits.filter(visit=>visit.executionAttemptId === readingAttempt)} busy={null} onAnswer={async()=>{throw new Error("历史 attempt 不能回答。");}} /></> : <>
       <ExecutionProgressCard
         snapshot={detail.snapshot}
         dynamicCount={dynamicCount}
         plannedTotal={detail.execution.config?.assignments.length}
+        allVisits={allVisits}
       />
       <div className="execution-summary">
         <span>冻结 revision v{detail.execution.revision}</span>
@@ -2040,7 +2096,7 @@ function ExecutionDetail({
         <div className="diagnostic">{detail.snapshot.diagnostic}</div>
       )}
       {detail.snapshot.gates
-        .filter((gate) => gate.answer === null)
+        .filter((gate) => gate.answer === null && detail.controllable && detail.snapshot.status === "running")
         .map((gate) => (
           <GateCard
             key={gate.gateId}
@@ -2050,6 +2106,7 @@ function ExecutionDetail({
           />
         ))}
       <TeamPanel
+        readOnly={!detail.controllable||terminal.has(detail.snapshot.status)}
         runId={detail.execution.executionId}
         currentExecutionAttemptId={detail.snapshot.currentExecutionAttemptId}
         phaseTitles={detail.snapshot.phases.map((phase) => phase.title)}
@@ -2058,7 +2115,9 @@ function ExecutionDetail({
         busy={busy}
         onAnswer={onAnswerBlock}
         loadAllVisits={loadAllVisits}
+        waitingVisitId={detail.snapshot.gates.find(gate=>gate.answer === null && gate.executionAttemptId === detail.snapshot.currentExecutionAttemptId)?.phaseVisitId??undefined}
       />
+      </>}
     </>
   );
 }
@@ -2132,61 +2191,12 @@ function FreeJsonAnswer({
   );
 }
 
-function WorkflowDraftModal({
-  onClose,
-  onPropose,
-}: {
-  onClose: () => void;
-  onPropose: (source: string) => void;
-}) {
-  const [source, setSource] = useState(
-    'const meta = { name: "draft-workflow", description: "待确认的 Workflow 草案", phases: [{ title: "计划" }] };\n\nasync function run(args) {\n  phase("计划");\n  return agent("请完成已确认的任务", { id: "plan", cli: "codex" });\n}',
-  );
-  return (
-    <div className="connection-backdrop" onMouseDown={onClose}>
-      <section
-        className="connection-panel workflow-draft"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workflow-draft-title"
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}
-      >
-        <header>
-          <div>
-            <span>Workflow 提案</span>
-            <strong id="workflow-draft-title">冻结前的草案</strong>
-          </div>
-          <button aria-label="关闭 Workflow 草案" onClick={onClose}>×</button>
-        </header>
-        <p>
-          保存后只产生不可变 hash 草案；接受动作也不会创建 Worker
-          或执行代码。创建 Execution 前请使用受限语法：顶层仅 const meta 与
-          async function run(args)，不得 export/import 或访问 Bun/Node。
-        </p>
-        <textarea
-          aria-label="Workflow 草案源码"
-          autoFocus
-          value={source}
-          onChange={(event) => setSource(event.target.value)}
-          spellCheck={false}
-        />
-        <div>
-          <button onClick={onClose}>取消</button>
-          <button className="primary" onClick={() => onPropose(source)}>
-            保存草案
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
 
 /** MCP 工具尾注组件已迁入 conversation/conversation-view.tsx（legacy 回合回落渲染）。 */
 
 function conversationTitle(harness: HarnessSnapshot): string {
   return (
-    harness.messages
+    harness.task?.title || harness.messages
       .find((message) => message.role === "user")
       ?.text.slice(0, 28) ||
     harness.cwd.split("/").filter(Boolean).at(-1) ||
@@ -2194,120 +2204,6 @@ function conversationTitle(harness: HarnessSnapshot): string {
   );
 }
 
-function CreateRunModal({
-  busy,
-  initialWorkflowPath,
-  initialCwd,
-  onCreate,
-  onClose,
-}: {
-  busy: boolean;
-  /** 原生选择器选中的 Workflow 路径（只读展示）。 */
-  initialWorkflowPath: string;
-  /** 默认项目目录（可编辑）。 */
-  initialCwd: string;
-  onCreate: (value: {
-    workflowPath: string;
-    cwd: string;
-    input: Record<string, unknown>;
-  }) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [workflowPath, setWorkflowPath] = useState(initialWorkflowPath);
-  const [cwd, setCwd] = useState(initialCwd);
-  const [input, setInput] = useState("{}");
-  const [error, setError] = useState<string | null>(null);
-  async function pickAgain() {
-    try {
-      const picked = await pickWorkflowFile();
-      if (picked) setWorkflowPath(picked);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    try {
-      const parsed = JSON.parse(input) as unknown;
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object")
-        throw new Error("输入必须是 JSON 对象。 ");
-      if (!workflowPath.trim() || !cwd.trim())
-        throw new Error("请先选择 Workflow 文件并填写项目目录。 ");
-      setError(null);
-      await onCreate({
-        workflowPath: workflowPath.trim(),
-        cwd: cwd.trim(),
-        input: parsed as Record<string, unknown>,
-      });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-  return (
-    <div className="create-backdrop" role="presentation" onMouseDown={onClose}>
-      <form
-        className="create-run"
-        aria-label="新建 Run"
-        onSubmit={(event) => void submit(event)}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="create-head">
-          <div>
-            <span>新建任务</span>
-            <strong>从本地 workflow 启动</strong>
-          </div>
-          <button type="button" onClick={onClose} aria-label="关闭">
-            ×
-          </button>
-        </div>
-        <div className="create-field">
-          <span>Workflow 文件</span>
-          {workflowPath ? (
-            <div className="create-picked-path">
-              <code>{workflowPath}</code>
-              <button type="button" onClick={() => void pickAgain()}>
-                重新选择
-              </button>
-            </div>
-          ) : (
-            <button type="button" onClick={() => void pickAgain()}>
-              选择本地 .ts 文件…
-            </button>
-          )}
-        </div>
-        <label>
-          项目目录 cwd
-          <input
-            value={cwd}
-            onChange={(event) => setCwd(event.target.value)}
-            placeholder="/绝对路径/项目目录"
-          />
-        </label>
-        <label>
-          输入 JSON
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            spellCheck={false}
-          />
-        </label>
-        {error && <div className="create-error">{error}</div>}
-        <div className="create-actions">
-          <button type="button" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="primary"
-            disabled={busy || !workflowPath.trim()}
-            type="submit"
-          >
-            {busy ? "正在创建…" : "创建 Run"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
 
 function Metric({
   label,

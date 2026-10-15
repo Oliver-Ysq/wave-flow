@@ -54,7 +54,7 @@ test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async (
   send({ requestId: "project", method: "engine.action", action: "projects.create", args: { cwd } });
   const project = await next() as { result: { project: { projectId: string } } };
   const projectId = project.result.project.projectId;
-  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId, text: "大帧测试".repeat(4_500) } });
+  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId, clientRequestId:crypto.randomUUID(), text: "大帧测试".repeat(4_500) } });
   expect(await next()).toMatchObject({ ok: true });
   send({ requestId: "list-0", method: "engine.action", action: "harnesses.list", args: {} });
   const created = await next() as { result: { harnesses: { harnessRunId: string }[] } };
@@ -170,7 +170,7 @@ test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响�
   const frames: { seq: number; event: { type: string }; harnessRunId: string }[] = [];
   let harnessRunId = "";
   // 等待响应的同时收集事件帧：中文正文跨 pipe 读取块时帧也必须完整可解析。
-  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId: project.result.project.projectId, text: "观察事件帧".repeat(2_000) } });
+  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId: project.result.project.projectId, clientRequestId:crypto.randomUUID(), text: "观察事件帧".repeat(2_000) } });
   let sawTurnFinished = false;
   for (let attempt = 0; attempt < 400 && !sawTurnFinished; attempt += 1) {
     const frame = await next();
@@ -266,7 +266,7 @@ test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", a
     // 无 harnessTools 的 runtime 即使空闲也不能设为主控。
     await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: workerOnly.runtimeId })).rejects.toMatchObject({ status: 400 });
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, text: "进行中的回合" });
+    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId:crypto.randomUUID(), text: "进行中的回合" });
     await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: second.runtimeId })).rejects.toMatchObject({ status: 409 });
     release!();
     for (let attempt = 0; attempt < 200; attempt += 1) {

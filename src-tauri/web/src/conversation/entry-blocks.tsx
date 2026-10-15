@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from "react";
+import { ViewCache } from "../workbench-state";
+const entryExpansion=new ViewCache<boolean>(256);
 import type {
   HarnessThoughtEntry,
   HarnessToolEntry,
@@ -75,6 +77,7 @@ function CollapsibleEntryRow({
   status,
   defaultOpen = false,
   detail,
+  identity,
 }: {
   /** 左侧小图标种类。 */
   glyph: HarnessToolKind | "thought";
@@ -94,8 +97,11 @@ function CollapsibleEntryRow({
   defaultOpen?: boolean;
   /** 展开区内容；为 null 时行不可展开。 */
   detail: ReactNode;
+  /** 原耐久条目/聚合首条身份；不用名称或时间猜跨任务归属。 */
+  identity?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const expansionKey=identity??`${startedAt}:${labelText}`;
+  const [open, setOpen] = useState(()=>entryExpansion.get(expansionKey)??defaultOpen);
   const badge = statusBadge(status);
   return (
     <div className={`wf-entry ${badge.className}`}>
@@ -120,7 +126,7 @@ function CollapsibleEntryRow({
             className="wf-entry-toggle"
             aria-expanded={open}
             aria-label={open ? `收起 ${labelText}` : `展开 ${labelText}`}
-            onClick={() => setOpen((current) => !current)}
+            onClick={() => setOpen((current) => {entryExpansion.set(expansionKey,!current);return !current;})}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path d={open ? "M4 10l4-4 4 4" : "M4 6l4 4 4-4"} />
@@ -143,6 +149,7 @@ export function ToolGroupBlock({ entries }: { entries: HarnessToolEntry[] }) {
   const { startedAt, finishedAt } = toolGroupTimes(entries);
   return (
     <CollapsibleEntryRow
+      identity={entries[0]?.entryId}
       glyph={entries[0]?.toolKind ?? "unknown"}
       name={label}
       labelText={label}
@@ -167,6 +174,7 @@ export function ThoughtBlock({ entry }: { entry: HarnessThoughtEntry }) {
   if (entry.legacy) {
     return (
       <CollapsibleEntryRow
+        identity={entry.entryId}
         glyph="thought"
         name="思考过程"
         labelText="思考过程"
@@ -180,6 +188,7 @@ export function ThoughtBlock({ entry }: { entry: HarnessThoughtEntry }) {
   }
   return (
     <CollapsibleEntryRow
+      identity={entry.entryId}
       glyph="thought"
       name="思考过程"
       labelText="思考过程"
@@ -231,6 +240,7 @@ export function ToolBlock({ entry }: { entry: HarnessToolEntry }) {
   if (entry.legacy || !entry.hasDetail) {
     return (
       <CollapsibleEntryRow
+        identity={entry.entryId}
         glyph={entry.toolKind}
         name={name}
         labelText={entry.name}
@@ -319,6 +329,7 @@ export function ToolBlock({ entry }: { entry: HarnessToolEntry }) {
       name={name}
       labelText={entry.name}
       summary={entry.target}
+      identity={entry.entryId}
       startedAt={entry.startedAt}
       finishedAt={entry.finishedAt}
       status={entry.status}

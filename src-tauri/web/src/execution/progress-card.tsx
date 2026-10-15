@@ -31,6 +31,7 @@ export function ExecutionProgressCard({
   snapshot,
   dynamicCount = 0,
   plannedTotal,
+  allVisits,
 }: {
   /** 当前 Execution/Run 的权威快照。 */
   snapshot: RunSnapshot;
@@ -38,8 +39,10 @@ export function ExecutionProgressCard({
   dynamicCount?: number;
   /** 计划静态枚举的 Worker 总数（执行配置快照的 assignments 数）；未知时不传。 */
   plannedTotal?: number;
+  /** 已读取的全部耐久访问；用于标明历史完成节点，不触发执行或授权 replay。 */
+  allVisits?: RunSnapshot["phaseVisits"];
 }) {
-  const progress = computeExecutionProgress(snapshot, plannedTotal);
+  const progress = computeExecutionProgress(snapshot, plannedTotal, allVisits);
   return (
     <section className="wf-progress-card" aria-label="执行进度">
       <header>

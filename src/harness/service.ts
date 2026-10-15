@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir, realpath } from "node:fs/promises";
-import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, type HarnessManifest } from "./journal";
+import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, validateDecisionAnswer, validateDecisionSchema, type HarnessManifest } from "./journal";
 import { TurnConversationRecorder, type EngineToolStart } from "./conversation-recorder";
 import type { HarnessSession } from "./session";
 import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
@@ -13,14 +13,17 @@ import type { ResolvedHarnessModelConfig } from "./config";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
 import { REVISION_PREVIEW_VERSION, previewMatchesSource, type RevisionPreview } from "./revision-preview";
+import { TaskLifecycle } from "./task-lifecycle";
+import { assertStartable, candidateRevision, normalizeTaskCreation, taskIdForRequest, type TaskCreation, type TaskMetadata } from "./task-contract";
 
 /** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
+  /** 所有 Task/Execution 生命周期共享短事务仲裁。 */
+  readonly lifecycle = new TaskLifecycle();
+  private readonly creations = new Map<string, { hash: string; promise: Promise<HarnessSnapshot> }>();
   #sessions = new Map<string, HarnessEntry>();
   /** 首次读取及旧预览补齐共享同一 Promise，避免并发快照重复打开或追加。 */
   #opening = new Map<string, Promise<HarnessEntry>>();
-  /** 同一 Harness 的 Journal 状态变更必须串行；不同 Harness 仍可并行。 */
-  #mutations = new Map<string, Promise<void>>();
   /** 回合内 request_user_decision 的等待者；键为 harnessRunId:decisionId。 */
   #decisionWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
   /** Engine 级事件总线监听器；携带 harnessRunId 扇出全部会话事件（含耐久条目事件）。 */
@@ -46,18 +49,54 @@ export class HarnessService {
   }
 
   /** 在已验证项目 cwd 内创建会话；projectId 只由 Project Store 提供。 */
-  async create(cwd: string, projectId = "test-project"): Promise<HarnessSnapshot> {
+  async create(cwd: string, projectId = "test-project", task?: TaskMetadata): Promise<HarnessSnapshot> {
     const resolvedCwd = await realpath(cwd).catch(() => { throw new Error("Harness cwd 不可验证。 "); });
     if (!projectId.trim()) throw new Error("Harness 必须归属已验证项目。 ");
-    const identity = await this.resolveSessionIdentity(); const modelFingerprint = identity.fingerprint;
+    const identity = task ? {fingerprint:createHash("sha256").update("wave-flow-task-uninitialized").digest("hex")} : await this.resolveSessionIdentity(); const modelFingerprint = identity.fingerprint;
     if (!/^[a-f0-9]{64}$/i.test(modelFingerprint) && modelFingerprint !== "injected-harness-session") throw new Error("Harness session fingerprint 无效。 ");
-    const manifest: HarnessManifest = { harnessRunId: crypto.randomUUID(), projectId, version: HARNESS_JOURNAL_VERSION, cwd: resolvedCwd, modelFingerprint, ...(identity.runtime ? { runtime: identity.runtime } : {}), createdAt: new Date().toISOString() };
+    const id = task ? taskIdForRequest(task.clientRequestId) : crypto.randomUUID();
+    const manifest: HarnessManifest = { harnessRunId: id, ...(task ? { task } : {}), projectId, version: HARNESS_JOURNAL_VERSION, cwd: resolvedCwd, modelFingerprint, ...(identity.runtime ? { runtime: identity.runtime } : {}), createdAt: new Date().toISOString() };
     const journal = await HarnessJournal.create(manifest, this.root);
     const opened = await HarnessJournal.open(manifest.harnessRunId, this.root);
     const entry: HarnessEntry = { journal, projection: new HarnessProjection(manifest), session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, recorder: null };
     for (const event of opened.events) entry.projection.apply(event);
     this.#sessions.set(manifest.harnessRunId, entry);
     return entry.projection.snapshot();
+  }
+
+  /** 自动编排唯一创建入口；请求先单飞，部分失败仍返回原 Task。 */
+  startTask(cwd: string, raw: TaskCreation): Promise<HarnessSnapshot> {
+    const value = normalizeTaskCreation(raw);
+    const pending = this.creations.get(value.clientRequestId);
+    if (pending) { if (pending.hash !== value.payloadHash) return Promise.reject(new Error("相同任务请求标识不能携带不同目标。")); return pending.promise; }
+    const id = taskIdForRequest(value.clientRequestId);
+    const promise = this.lifecycle.run(id, async () => {
+      const recovered = await HarnessJournal.recoverCreation(id, this.root);
+      if (recovered) {
+        if (recovered.task?.payloadHash !== value.payloadHash || recovered.projectId !== value.projectId) throw new Error("任务请求载荷与耐久档案冲突。");
+      } else await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text });
+      const entry = await this.entry(id);
+      if(entry.projection.snapshot().status==="completed")return entry.projection.snapshot();
+      const opened = await HarnessJournal.open(id, this.root);
+      if (!opened.events.some(event => event.type === "harness.turn_started")) {
+        try { await this.send(id, value.text, true); }
+        catch (error) {
+          const event = { type: "harness.initialization_failed" as const, at: new Date().toISOString(), harnessRunId: id, diagnostic: `任务已创建，主控启动失败：${error instanceof Error ? error.message : String(error)}` };
+          await entry.journal.append(event); entry.projection.apply(event);
+        }
+      }
+      return entry.projection.snapshot();
+    });
+    this.creations.set(value.clientRequestId, { hash: value.payloadHash, promise });
+    void promise.finally(() => { if (this.creations.get(value.clientRequestId)?.promise === promise) this.creations.delete(value.clientRequestId); }).catch(() => {});
+    return promise;
+  }
+
+  /** 只重试尚未启动的初始回合，不能重发已开始的 prompt。 */
+  async retryInitialization(id: string): Promise<HarnessSnapshot> {
+    const snapshot = await this.snapshot(id);
+    if (!snapshot.task || !snapshot.projectId) throw new Error("历史会话没有可重试的初始任务。");
+    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title });
   }
 
   /**
@@ -115,31 +154,40 @@ export class HarnessService {
     }
   }
 
-  async send(harnessRunId: string, text: string): Promise<void> {
+  async send(harnessRunId: string, text: string, reuseInitial = false): Promise<void> {
     if (!text.trim() || text.length > 20_000) throw new Error("Harness 消息必须为 1-20000 个字符。 ");
     const entry = await this.entry(harnessRunId);
     await this.mutate(harnessRunId, async () => {
     if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档；请创建新会话继续。 ");
     if (entry.projection.snapshot().status === "running" || entry.turn) throw new Error("Harness 当前回合仍在运行。 ");
+    if (entry.projection.snapshot().task && !reuseInitial && entry.projection.snapshot().messages.length === 1 && entry.projection.snapshot().diagnostic?.includes("主控启动失败")) throw new Error("请先重试启动主控，不能跳过尚未开始的初始目标。");
     // 摘要只属于这一轮 prompt；发生中断时没有可安全绑定的完整 assistant 消息，
     // 因而会在 finally 丢弃，绝不把过程遗留给下一轮。
+    const turnToken = crypto.randomUUID();
     const actions = this.actionCallbacks(harnessRunId);
-    const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, entry.projection.snapshot().messages, actions, entry.journal.manifest.runtime);
+    const prior = reuseInitial ? [] : entry.projection.snapshot().messages;
+    if(reuseInitial&&entry.projection.snapshot().task&&!entry.projection.snapshot().runtime){
+      const identity=await this.resolveSessionIdentity();
+      if(identity.runtime){const event={type:"harness.runtime_initialized" as const,at:new Date().toISOString(),harnessRunId,runtime:identity.runtime};await entry.journal.append(event);entry.projection.apply(event);}
+    }
+    const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
     entry.session = session;
-    const user: HarnessMessage = { id: crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString() };
+    const user: HarnessMessage = reuseInitial ? entry.projection.snapshot().messages[0] : { id: crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString() };
     const userEvent = { type: "harness.user_message" as const, at: user.createdAt, harnessRunId, message: user };
-    await entry.journal.append(userEvent); entry.projection.apply(userEvent);
+    if (!reuseInitial) { await entry.journal.append(userEvent); entry.projection.apply(userEvent); }
     const started = { type: "harness.turn_started" as const, at: new Date().toISOString(), harnessRunId, userMessageId: user.id };
     await entry.journal.append(started); entry.projection.apply(started);
+    entry.turnToken = turnToken;
     // 对话事实记录器随回合创建：正文/思考/工具事件先串行耐久并同步投影，成功后才向界面发布。
     entry.recorder = new TurnConversationRecorder(entry.journal, harnessRunId, user.id, (event) => this.emit(entry, harnessRunId, event), (event) => entry.projection.apply(event));
     const unsubscribe = session.subscribe((event) => { entry.recorder?.handleStreamEvent(event); for (const listener of entry.listeners) listener(event); });
-    entry.turn = (async () => {
+    entry.turn = this.lifecycle.outside(async () => {
       try {
         const answer = await session.prompt(text);
+        await this.mutate(harnessRunId,async()=>{
         // 退出或异常收敛可能已在 prompt 等待期间写入 turn_interrupted。迟到的
         // provider 回答不能再追加 assistant_message，否则 Journal 状态顺序损坏。
-        if (entry.projection.snapshot().status !== "running") return;
+        if (entry.projection.snapshot().status !== "running" || entry.turnToken !== turnToken) return;
         // 回合全部条目先终结落盘（正文标完成、残留工具诚实标 interrupted），
         // 再写权威 assistant 消息；回放顺序因此永远先过程后结论。
         await entry.recorder?.finishTurn();
@@ -152,11 +200,12 @@ export class HarnessService {
         const finished = { type: "harness.turn_finished" as const, at: new Date().toISOString(), harnessRunId, messageId: assistant.id };
         await entry.journal.append(finished); entry.projection.apply(finished);
         this.emit(entry, harnessRunId, { type: "turn_finished", messageId: assistant.id, text: assistant.text });
+        });
       } catch (error) {
         const diagnostic = error instanceof Error ? error.message : String(error);
         // 退出/重启路径可能已先耐久 interrupted；原 prompt 随后 rejection 时不能
         // 再追加第二条 turn_interrupted，否则 Journal 重开会拒绝该 Harness。
-        if (entry.projection.snapshot().status === "running") {
+        await this.mutate(harnessRunId,async()=>{if (entry.projection.snapshot().status === "running" && entry.turnToken===turnToken) {
           // 条目终结失败时保留 running 现场，交由下次启动的 convergeStaleTurns 诚实
           // 收敛；绝不补写一个会让重放因未终结条目而 fail closed 的 turn_interrupted。
           const finalized = await entry.recorder?.abortTurn().then(() => true, () => false) ?? true;
@@ -165,7 +214,7 @@ export class HarnessService {
             await entry.journal.append(interrupted); entry.projection.apply(interrupted);
             this.emit(entry, harnessRunId, { type: "turn_interrupted", diagnostic });
           }
-        }
+        }});
         // 不认领 provider 可能遗留的 partial assistant state。下一条消息只能从
         // 已耐久 capsule 重建独立 ACP session，避免未完成文本/工具调用进入新回合。
         entry.session?.close?.();
@@ -178,7 +227,7 @@ export class HarnessService {
             entry.recorder = null;
         entry.turn = null;
       }
-    })();
+    });
     });
   }
 
@@ -198,10 +247,11 @@ export class HarnessService {
   async abort(harnessRunId: string): Promise<void> {
     const entry = await this.entry(harnessRunId);
     if (!entry.turn || !entry.session?.isRunning) throw new Error("Harness 当前没有可取消回合。 ");
-    // ACP cancel 不保证第三方工具实现会自行响应 AbortSignal；先拒绝本服务
-    // 管理的 decision waiter，确保 prompt() 可回到 turn 的 interrupted 收敛路径。
-    this.rejectDecisionWaiters(harnessRunId, "用户已停止 Harness 主控回合。 ");
-    entry.session.abort();
+    // durable-first：用户停止是已授权的终态意图。ACP cancel 不保证第三方工具实现会
+    // 响应 AbortSignal；若把中断事实寄托在 prompt() 随后的 rejection 上，provider 不
+    // 响应时回合永久楔死在 running。与退出收敛共用同一条路径：先落盘、再关闭会话，
+    // turn catch 的迟到二次写入被 status/turnToken 双检挡住。
+    await this.interruptRunningTurn(harnessRunId, entry, "用户已停止 Harness 主控回合。 ");
   }
 
   /** 用户显式完成会话；保留审计内容，后续在已完成列表按项目展示。 */
@@ -212,6 +262,7 @@ export class HarnessService {
       if (snapshot.status === "running" || entry.turn) throw new Error("主控回合运行中不能完成会话。 ");
       if (snapshot.status === "completed") throw new Error("该会话已完成。 ");
       if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution，不能完成会话。 ");
+      if (snapshot.task && candidateRevision(snapshot)) throw new Error("请先放弃尚未执行的候选，再归档任务。");
       const event = { type: "harness.completed" as const, at: new Date().toISOString(), harnessRunId };
       await entry.journal.append(event); entry.projection.apply(event);
       entry.session?.close?.(); entry.session = null;
@@ -224,33 +275,38 @@ export class HarnessService {
     if (request.operation === "list") return { tools: [
       { name: "read_project_file", description: "读取当前项目内常规文件片段", inputSchema: { type: "object", required: ["path"], properties: { path: { type: "string" }, startLine: { type: "integer" }, endLine: { type: "integer" } } } },
       { name: "query_project", description: "执行受限只读项目查询", inputSchema: { type: "object", required: ["command", "args"], properties: { command: { type: "string", enum: ["pwd", "git", "rg", "ls"] }, args: { type: "array", items: { type: "string" } } } } },
-      { name: "propose_workflow_revision", description: "提交 workflow 草案，不执行", inputSchema: { type: "object", required: ["source"], properties: { source: { type: "string" } } } },
+      { name: "propose_workflow_revision", description: "提交 workflow 方案及本轮目标/范围，不执行", inputSchema: { type: "object", required: ["source", "goal", "scope"], properties: { source: { type: "string" }, goal: { type: "string" }, scope: { type: "string" } } } },
       { name: "inspect_execution", description: "读取 Execution 登记", inputSchema: { type: "object", properties: { executionId: { type: "string" } } } },
       { name: "read_run_capsule", description: "读取耐久 Harness capsule", inputSchema: { type: "object" } },
       { name: "request_user_decision", description: "请求用户决策", inputSchema: { type: "object", required: ["question"], properties: { question: { type: "string" }, answerSchema: { type: "object" } } } },
     ] };
     const { name, arguments: args = {} } = request.value as { name?: unknown; arguments?: unknown };
     if (typeof name !== "string" || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("Harness MCP 工具请求无效。 ");
-    const value = args as Record<string, unknown>; const actions = this.actionCallbacks(harnessRunId);
+    const value = args as Record<string, unknown>; const actions = this.actionCallbacks(harnessRunId,entry.turnToken);
     /** 受控工具执行包装器：目标/分类/参数摘要与限长输出在此进入耐久对话事实，界面实时可见“运行中 → 终态”。 */
     const runTool = async <T>(spec: EngineToolStart, operation: () => Promise<T>, extractOutput: (result: T) => string | null): Promise<T> => {
       const toolCallId = crypto.randomUUID();
+      // 工具 promise 可能在回合终结后才 settle；迟到的 UI 事件绝不能携带新状态的
+      // 序号基线发布（recorder 路径已由 #closed 门丢弃，这里挡住的是直发 emit）。
+      // 无 turnToken 的调用不属于任何回合（测试/内部直调），不存在迟到问题。
+      const turnToken = entry.turnToken;
+      const currentTurn = () => turnToken === undefined || (entry.turnToken === turnToken && entry.projection.snapshot().status === "running");
       this.emit(entry, harnessRunId, { type: "tool_started", toolCallId, label: spec.name });
       entry.recorder?.engineToolStarted(toolCallId, spec);
       try {
         const result = await operation();
-        this.emit(entry, harnessRunId, { type: "tool_finished", toolCallId, outcome: "completed" });
+        if (currentTurn()) this.emit(entry, harnessRunId, { type: "tool_finished", toolCallId, outcome: "completed" });
         entry.recorder?.engineToolFinished(toolCallId, "completed", { output: extractOutput(result) });
         return result;
       } catch (error) {
-        this.emit(entry, harnessRunId, { type: "tool_finished", toolCallId, outcome: "failed" });
+        if (currentTurn()) this.emit(entry, harnessRunId, { type: "tool_finished", toolCallId, outcome: "failed" });
         entry.recorder?.engineToolFinished(toolCallId, "failed", { output: error instanceof Error ? error.message : String(error) });
         throw error;
       }
     };
     if (name === "read_project_file") { const path = String(value.path ?? ""); const range = { path, ...(typeof value.startLine === "number" ? { startLine: value.startLine } : {}), ...(typeof value.endLine === "number" ? { endLine: value.endLine } : {}) }; return runTool({ name: "读取项目文件", toolKind: "file-read", target: path, paramsSummary: JSON.stringify(range) }, async () => ({ text: await readProjectFile(entry.projection.snapshot().cwd, range) }), (result) => result.text); }
     if (name === "query_project") { const query = { command: value.command as "pwd" | "git" | "rg" | "ls", args: Array.isArray(value.args) ? value.args.map(String) : [] }; return runTool({ name: "查询项目状态", toolKind: query.command === "rg" ? "search" : "command", target: [query.command, ...query.args].join(" "), paramsSummary: JSON.stringify(query) }, async () => ({ text: await executeReadOnlyProjectQuery(entry.projection.snapshot().cwd, query) }), (result) => result.text); }
-    if (name === "propose_workflow_revision") { const source = String(value.source ?? ""); return runTool({ name: "提交 Workflow 草案", toolKind: "mcp", target: null, paramsSummary: JSON.stringify({ sourceLength: source.length }) }, () => actions.proposeWorkflowRevision(source), (result) => JSON.stringify(result)); }
+    if (name === "propose_workflow_revision") { const source = String(value.source ?? ""); return runTool({ name: "提交 Workflow 草案", toolKind: "mcp", target: null, paramsSummary: JSON.stringify({ sourceLength: source.length }) }, () => actions.proposeWorkflowRevision(source, String(value.goal ?? ""), String(value.scope ?? "")), (result) => JSON.stringify(result)); }
     if (name === "inspect_execution") { const executionId = typeof value.executionId === "string" ? value.executionId : undefined; return runTool({ name: "读取执行状态", toolKind: "mcp", target: executionId ?? null, paramsSummary: JSON.stringify({ executionId: executionId ?? null }) }, () => actions.inspectExecution(executionId), (result) => JSON.stringify(result)); }
     if (name === "read_run_capsule") return runTool({ name: "读取会话摘要", toolKind: "mcp", target: null, paramsSummary: null }, () => actions.readRunCapsule(), (result) => JSON.stringify(result));
     if (name === "request_user_decision") { const question = String(value.question ?? ""); const schema = value.answerSchema && typeof value.answerSchema === "object" && !Array.isArray(value.answerSchema) ? value.answerSchema as JsonObject : undefined; return runTool({ name: "等待用户决定", toolKind: "mcp", target: question, paramsSummary: JSON.stringify({ question, hasSchema: !!schema }) }, async () => ({ answer: await actions.requestUserDecision(question, schema) }), (result) => JSON.stringify(result.answer)); }
@@ -272,19 +328,26 @@ export class HarnessService {
    * 因此不能再调用 public proposeWorkflowRevision() 排到本回合之后；否则工具
    * 会等待自己的 turn 结束而死锁。用户 API 仍在 running 时拒绝直接修改草案。
    */
-  private async proposeWorkflowRevisionFromAction(harnessRunId: string, source: string): Promise<HarnessSnapshot> {
+  private async proposeWorkflowRevisionFromAction(harnessRunId: string, source: string, goal?: string, scope?: string, token?: string): Promise<HarnessSnapshot> {
     if (!source.trim() || source.length > 200_000) throw new Error("Workflow 草案必须为 1-200000 个字符。 ");
     const entry = await this.entry(harnessRunId);
     if (!entry.turn || entry.projection.snapshot().status !== "running") throw new Error("仅当前主控回合可以提交 Workflow 草案。 ");
-    return this.appendWorkflowRevision(harnessRunId, entry, source);
+    return this.mutate(harnessRunId, async () => {
+      if (!entry.turn || entry.projection.snapshot().status !== "running" || token && entry.turnToken !== token) throw new Error("提案不属于当前主控回合。");
+      return this.appendWorkflowRevision(harnessRunId, entry, source, goal, scope);
+    });
   }
 
   /** 同一 Journal 追加实现由用户 API 与受控主控工具共享，避免 revision 规则漂移。 */
-  private async appendWorkflowRevision(harnessRunId: string, entry: Awaited<ReturnType<HarnessService["entry"]>>, source: string): Promise<HarnessSnapshot> {
+  private async appendWorkflowRevision(harnessRunId: string, entry: Awaited<ReturnType<HarnessService["entry"]>>, source: string, goal?: string, scope?: string): Promise<HarnessSnapshot> {
     // 草案必须通过完整受限编译门禁才允许冻结：语法、顶层形状与 meta 在提案时即校验，
     // 用户绝不会在"创建执行"时才发现草案不可运行。编译只建 vm realm，不执行 run()。
     const preview = this.buildRevisionPreview(source);
-    const revision: import("./types").WorkflowRevision = { revision: entry.projection.snapshot().workflowRevisions.length + 1, source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
+    const snapshot = entry.projection.snapshot();
+    if (snapshot.task && snapshot.executions.length) throw new Error("多轮工作流尚未开放；不能提案下一份流程，可以查看或恢复原执行。");
+    if (snapshot.task && (!goal?.trim() || !scope?.trim() || goal.length > 20000 || scope.length > 20000)) throw new Error("方案必须明确提供本轮目标与范围。");
+    const candidate = candidateRevision(snapshot);
+    const revision: import("./types").WorkflowRevision = { revision: snapshot.workflowRevisions.length + 1, ...(snapshot.task ? { cardId: candidate?.cardId ?? crypto.randomUUID(), parentRevision: candidate?.revision ?? null, goal: goal!.trim(), scope: scope!.trim(), abandonedAt: null, turnId: snapshot.messages.filter(item => item.role === "user").at(-1)!.id } : {}), source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
     const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision };
     await entry.journal.append(event); entry.projection.apply(event);
     return entry.projection.snapshot();
@@ -298,6 +361,7 @@ export class HarnessService {
       // 先校验再追加：projection 在 append 之后才 apply，缺失前置检查会把非法事件
       // 写进 Journal 并让档案永远无法重开。
       const latest = entry.projection.snapshot().workflowRevisions.at(-1);
+      if (latest?.abandonedAt) throw new Error("候选已放弃，不能接受或拒绝。");
       if (!latest || latest.revision !== revision || latest.acceptedAt !== null || (latest.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能按最新未接受且未拒绝草案冻结。 ");
       const event = { type: "workflow.revision_accepted" as const, at: new Date().toISOString(), harnessRunId, revision };
       await entry.journal.append(event); entry.projection.apply(event);
@@ -312,10 +376,21 @@ export class HarnessService {
       if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能拒绝 Workflow 草案。 ");
       if (entry.projection.snapshot().status === "running") throw new Error("主控回合运行中不能拒绝 Workflow 草案。 ");
       const latest = entry.projection.snapshot().workflowRevisions.at(-1);
+      if (latest?.abandonedAt) throw new Error("候选已放弃，不能接受或拒绝。");
       if (!latest || latest.revision !== revision || latest.acceptedAt !== null || (latest.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能拒绝最新未接受且未拒绝草案。 ");
       const event = { type: "workflow.revision_rejected" as const, at: new Date().toISOString(), harnessRunId, revision };
       await entry.journal.append(event); entry.projection.apply(event);
       return entry.projection.snapshot();
+    });
+  }
+
+  /** 放弃尚未执行候选，保留所有版本与批准证据。 */
+  async abandonWorkflowCard(id: string, cardId: string): Promise<HarnessSnapshot> {
+    return this.mutate(id, async () => {
+      const entry = await this.entry(id), snapshot = entry.projection.snapshot();
+      if (snapshot.status !== "idle" || entry.turn || candidateRevision(snapshot)?.cardId !== cardId) throw new Error("只能在主控空闲时放弃当前未执行候选。");
+      const event = { type: "workflow.card_abandoned" as const, at: new Date().toISOString(), harnessRunId: id, cardId };
+      await entry.journal.append(event); entry.projection.apply(event); return entry.projection.snapshot();
     });
   }
 
@@ -324,6 +399,8 @@ export class HarnessService {
     return this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
       if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能创建 Execution。 ");
+      // 先验证再落盘；非法直接调用不能把不可重放事件写入 Journal。
+      assertStartable(entry.projection.snapshot(), execution.revision);
       const event = { type: "workflow.execution_created" as const, at: execution.createdAt, harnessRunId, execution };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, harnessRunId, { type: "execution_changed", executionId: execution.executionId });
@@ -338,7 +415,7 @@ export class HarnessService {
    * Execution 登记终态。第二条 execution_finished 会让 Journal 重放永久失败，
    * 因此必须在 append 之前按投影拒绝重复终态；只允许显式 resume 后的新终态。
    */
-  async recordExecutionFinished(harnessRunId: string, executionId: string, status: WorkflowExecutionRecord["status"], diagnostic: string | null, summary: JsonObject | null): Promise<void> {
+  async recordExecutionFinished(harnessRunId: string, executionId: string, status: WorkflowExecutionRecord["status"], diagnostic: string | null, summary: JsonObject | null, attempt?: number): Promise<void> {
     await this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
       if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能修改 Execution。 ");
@@ -347,7 +424,7 @@ export class HarnessService {
       // 已有终态事实时静默返回：两条路径都完成了自己的登记意图，重复 append
       // 才是真正的数据损坏。
       if (record.finishedAt !== null) return;
-      const event = { type: "workflow.execution_finished" as const, at: new Date().toISOString(), harnessRunId, executionId, status, diagnostic, summary };
+      const event = { type: "workflow.execution_finished" as const, at: new Date().toISOString(), harnessRunId, executionId, status, diagnostic, summary, ...(attempt ? {attempt} : {}) };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, harnessRunId, { type: "execution_changed", executionId });
     });
@@ -358,6 +435,9 @@ export class HarnessService {
     return this.mutate(harnessRunId, async () => {
       const entry = await this.entry(harnessRunId);
       if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能恢复 Execution。 ");
+      const snapshot=entry.projection.snapshot(),record=snapshot.executions.find(item=>item.executionId===executionId);
+      if(!record||record.finishedAt===null||!["cancelled","interrupted"].includes(record.status))throw new Error("只有原已终结中断执行可以恢复。");
+      if(snapshot.task&&(snapshot.status!=="idle"||entry.turn))throw new Error("主控回合未收尾，不能恢复原执行。");
       const event = { type: "workflow.execution_resumed" as const, at: new Date().toISOString(), harnessRunId, executionId };
       await entry.journal.append(event); entry.projection.apply(event);
       this.emit(entry, harnessRunId, { type: "execution_changed", executionId });
@@ -373,28 +453,44 @@ export class HarnessService {
 
   /**
    * 主控窄工具 request_user_decision：先耐久请求再等待答案。
-   * 答案经独立 API 在回合运行中写入，不经过 mutation 锁，避免与工具等待互相死锁。
+   * 锁内登记请求与等待者，锁外等待人工；答案独立进入短事务，不占用模型回合锁。
    */
   async requestUserDecision(harnessRunId: string, question: string, answerSchema?: JsonObject): Promise<JsonObject> {
     const entry = await this.entry(harnessRunId);
     if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能请求用户决定。 ");
     if (typeof question !== "string" || !question.trim()) throw new Error("决策请求必须包含非空问题。 ");
+    validateDecisionSchema(answerSchema);
     const decision: HarnessDecision = { decisionId: crypto.randomUUID(), question, answerSchema, createdAt: new Date().toISOString(), answer: null, answeredAt: null };
     const event = { type: "harness.decision_requested" as const, at: decision.createdAt, harnessRunId, decision };
-    await entry.journal.append(event); entry.projection.apply(event);
     const key = `${harnessRunId}:${decision.decisionId}`;
-    return new Promise<JsonObject>((resolve, reject) => {
-      this.#decisionWaiters.set(key, { resolve, reject });
+    let waiting!:Promise<JsonObject>;
+    await this.mutate(harnessRunId,async()=>{
+      if(entry.projection.snapshot().status!=="running"||!entry.turn)throw new Error("原主控回合已结束，不能请求决定。");
+      // 先注册等待者再落盘：append 让出事件循环期间，回合 finally 的 rejectDecisionWaiters
+      // 可能已扫过等待者表；后注册会让这个 Promise 永远悬挂在已关闭的会话上。
+      // append 失败时同步摘除并拒绝，不遗留孤儿等待者。
+      let rejectWaiting!:(error:Error)=>void;
+      waiting=new Promise<JsonObject>((resolve, reject) => { rejectWaiting=reject; this.#decisionWaiters.set(key, { resolve, reject }); });
+      try {
+        await entry.journal.append(event); entry.projection.apply(event);
+      } catch (error) {
+        if (this.#decisionWaiters.delete(key)) rejectWaiting(error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
     });
+    return waiting;
   }
 
   /** 用户提交决策答案；durable-first 写入后只唤醒原工具调用，不推进任何其他状态。 */
   async answerUserDecision(harnessRunId: string, decisionId: string, answer: JsonObject): Promise<HarnessSnapshot> {
+    return this.mutate(harnessRunId,async()=>{
     const entry = await this.entry(harnessRunId);
     if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档，不能提交决定答案。 ");
     const decision = entry.projection.snapshot().decisions.find((item) => item.decisionId === decisionId);
     if (!decision) throw new Error("未知 Harness 决策请求。 ");
     if (decision.answer !== null) throw new Error("Harness 决策不能重复回答。 ");
+    if(!this.#decisionWaiters.has(`${harnessRunId}:${decisionId}`))throw new Error("该决定已失效，原回合不再等待答案。");
+    validateDecisionAnswer(decision.answerSchema,answer);
     const event = { type: "harness.decision_answered" as const, at: new Date().toISOString(), harnessRunId, decisionId, answer };
     // Projection.apply 会按 answerSchema 重新校验；先追加失败则答案不落盘也不唤醒。
     await entry.journal.append(event);
@@ -406,13 +502,15 @@ export class HarnessService {
       waiter.resolve(answer);
     }
     return entry.projection.snapshot();
+    });
   }
 
   /** 为当前 Harness 绑定最小行动面；每项仍回到本服务做耐久校验。 */
-  private actionCallbacks(harnessRunId: string): HarnessActionCallbacks {
+  private actionCallbacks(harnessRunId: string, token?: string): HarnessActionCallbacks {
     return {
-      proposeWorkflowRevision: async (source) => {
-        const snapshot = await this.proposeWorkflowRevisionFromAction(harnessRunId, source);
+      proposeWorkflowRevision: async (source, goal, scope) => {
+        const lease = token ?? (await this.entry(harnessRunId)).turnToken;
+        const snapshot = await this.proposeWorkflowRevisionFromAction(harnessRunId, source, goal, scope, lease);
         const revision = snapshot.workflowRevisions.at(-1);
         if (!revision) throw new Error("Workflow 草案未能耐久。 ");
         return { revision: revision.revision, sourceHash: revision.sourceHash };
@@ -467,11 +565,9 @@ export class HarnessService {
     this.#sessions.set(harnessRunId, entry); return entry;
   }
   private async interruptRunningTurn(harnessRunId: string, entry: HarnessEntry, diagnostic: string): Promise<void> {
+    return this.mutate(harnessRunId,async()=>{
     if (entry.projection.snapshot().status !== "running") return;
-    // 不能经 mutate() 排队：当前 mutation 正在 await ACP prompt，而这个 prompt
-    // 正是退出要中止的对象。等待它会让关闭应用死锁。HarnessJournal 自己串行
-    // append；单线程 projection 在此处先进入 interrupted，原回合随后返回时会
-    // 发现已不是 running，从而不会重复写 turn_finished/interrupted。
+    // 与提案、答案和终结共享短事务；模型 prompt 在锁外，退出不等待模型结束。
     // 先终结回合内全部未关闭条目：存活回合走记录器队列；崩溃恢复（记录器已随
     // 旧进程消失）按投影中的未终结条目逐个补写 interrupted 终态。条目终结失败
     // 时保留 running 现场，交给下次启动收敛，绝不补写会让重放 fail closed 的事实。
@@ -485,6 +581,7 @@ export class HarnessService {
     entry.session?.abort(); entry.session?.close?.(); entry.session = null;
     entry.recorder = null;
     this.emit(entry, harnessRunId, { type: "turn_interrupted", diagnostic });
+    });
   }
 
   /** 崩溃恢复：为旧进程遗留的未终结条目补写 interrupted 终态；全部成功才算完成收敛。 */
@@ -499,17 +596,15 @@ export class HarnessService {
       return true;
     } catch { return false; }
   }
-  private emit(entry: { readonly listeners: Set<(event: HarnessStreamEvent) => void> }, harnessRunId: string, event: HarnessStreamEvent): void { for (const listener of entry.listeners) listener(event); for (const listener of this.#globalListeners) listener(harnessRunId, event); }
+  private emit(entry: { readonly listeners: Set<(event: HarnessStreamEvent) => void>;readonly projection?:HarnessProjection }, harnessRunId: string, event: HarnessStreamEvent): void {const durable={...event,snapshotSequence:entry.projection?.snapshot().snapshotSequence};for (const listener of entry.listeners) listener(durable); for (const listener of this.#globalListeners) listener(harnessRunId, durable); }
   private async mutate<T>(harnessRunId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#mutations.get(harnessRunId) ?? Promise.resolve();
-    const task = previous.catch(() => undefined).then(operation);
-    const settled = task.then(() => undefined, () => undefined);
-    this.#mutations.set(harnessRunId, settled);
-    try { return await task; } finally { if (this.#mutations.get(harnessRunId) === settled) this.#mutations.delete(harnessRunId); }
+    return this.lifecycle.run(harnessRunId, operation);
   }
 }
 
 type HarnessEntry = {
+  /** 当前主控回合租约身份；迟到工具不能提交到新回合。 */
+  turnToken?: string;
   readonly journal: HarnessJournal;
   readonly projection: HarnessProjection;
   session: HarnessSession | null;

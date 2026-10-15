@@ -24,6 +24,32 @@ export class RunStateMachine {
 
   constructor(readonly manifest: RunManifest) {}
 
+  /**
+   * 只校验不应用：在副本上试算同一事件。任何先 append 后 apply 的写入方都必须先
+   * 通过它核验——如果 apply 在 append 之后抛错，非法事件会永久留在 Journal 里，
+   * 导致整个 Run 档案无法重放。
+   */
+  assertApplicable(event: JournalEvent): void { this.cloneForValidation().apply(event); }
+
+  /** 校验副本：所有可变容器都是不可变更新，浅拷贝 Map/Set 即可隔离试算。 */
+  private cloneForValidation(): RunStateMachine {
+    const copy = new RunStateMachine(this.manifest);
+    copy.#created = this.#created;
+    copy.#status = this.#status;
+    copy.#diagnostic = this.#diagnostic;
+    copy.#endedAt = this.#endedAt;
+    copy.#agents = new Map(this.#agents);
+    copy.#gates = new Map(this.#gates);
+    copy.#logicalSequences = new Map(this.#logicalSequences);
+    copy.#recordedSessions = new Set(this.#recordedSessions);
+    copy.#acpBindings = new Map(this.#acpBindings);
+    copy.#sessionRuntimes = new Map(this.#sessionRuntimes);
+    copy.#blockSchemas = new Map(this.#blockSchemas);
+    copy.#currentExecutionAttemptId = this.#currentExecutionAttemptId;
+    copy.#phaseVisits = new Map(this.#phaseVisits);
+    return copy;
+  }
+
   /** 应用一条已耐久 Journal 事实；非法顺序或转移立即拒绝。 */
   apply(event: JournalEvent): void {
     if (event.runId !== this.manifest.runId) throw new Error("事件不属于当前 Run。");
@@ -319,7 +345,7 @@ export class RunStateMachine {
     if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("block.created 必须属于当前 running 的原 Agent 会话。");
     if (agent.block) throw new Error("同一 Agent 不能同时创建多个 block。");
     this.#applyAgentStatus(event.nodeId, "blocked", event.at, event.diagnostic, null, event.agentSessionId);
-    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false } });
+    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false, ...(event.answerSchema?{answerSchema:event.answerSchema}:{}) } });
     this.#blockSchemas.set(event.blockRequestId, event.answerSchema);
   }
 
@@ -366,7 +392,7 @@ export class RunStateMachine {
   }
 }
 
-function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
+export function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
   if (from === "queued") return to === "running" || to === "cancelled" || to === "interrupted";
   if (from === "running") return to === "blocked" || to === "pausing" || terminalAgentStatuses.has(to);
   if (from === "blocked") return to === "pausing" || to === "running" || terminalAgentStatuses.has(to);
@@ -376,7 +402,7 @@ function canTransition(from: AgentNodeStatus, to: AgentNodeStatus): boolean {
   return false;
 }
 
-function canRunTransition(from: RunStatus, to: RunStatus): boolean {
+export function canRunTransition(from: RunStatus, to: RunStatus): boolean {
   if (from === "running") return to === "pausing" || to === "completed" || to === "cancelled" || to === "interrupted";
   if (from === "pausing") return to === "paused" || to === "cancelled" || to === "interrupted";
   if (from === "paused") return to === "recovering" || to === "cancelled" || to === "interrupted";

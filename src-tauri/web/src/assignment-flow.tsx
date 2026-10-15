@@ -6,6 +6,11 @@ import type {
   ExecutionResponse,
   WorkerAssignment,
 } from "./types";
+import { ViewCache } from "./workbench-state";
+
+/** 分配草稿只保留在当前会话，按 Task+revision 隔离，不落盘参数。 */
+const assignmentDrafts=new ViewCache<{assignments:WorkerAssignment[];defaultAssignment:WorkerAssignment|null;mode:"harness-cli"|"random"|"rule";ruleText:string;appliedRule:string|null;ruleDegraded:boolean;ruleDiagnostic:string|null}>();
+const assignmentPositions=new ViewCache<number>();
 
 /**
  * 冻结 revision 后的分配卡流程：卡片一 CLI 分配（主控 CLI / 随机 / 自然语言规则），
@@ -38,6 +43,18 @@ export function ExecutionAssignmentFlow({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const mounted=useRef(true);
+  const submitting=useRef(false);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+  const draftKey=`${harnessRunId}:${revision}`;
+  useEffect(()=>{if(!plan)return;const el=scrollRef.current;if(el)el.scrollLeft=assignmentPositions.get(draftKey)??0;return()=>{if(el)assignmentPositions.set(draftKey,el.scrollLeft);};},[draftKey,plan!==null]);
+  const restoring=useRef(true);
+  useEffect(()=>{
+    const saved=assignmentDrafts.get(draftKey);
+    if(saved){setAssignments(saved.assignments);setDefaultAssignment(saved.defaultAssignment);setMode(saved.mode);setRuleText(saved.ruleText);setAppliedRule(saved.appliedRule);setRuleDegraded(saved.ruleDegraded);setRuleDiagnostic(saved.ruleDiagnostic);}
+    restoring.current=false;
+  },[draftKey]);
+  useEffect(()=>{if(!restoring.current&&defaultAssignment)assignmentDrafts.set(draftKey,{assignments,defaultAssignment,mode,ruleText,appliedRule,ruleDegraded,ruleDiagnostic});},[draftKey,assignments,defaultAssignment,mode,ruleText,appliedRule,ruleDegraded,ruleDiagnostic]);
 
   useEffect(() => {
     let active = true;
@@ -47,7 +64,7 @@ export function ExecutionAssignmentFlow({
         if (!active) return;
         setPlan(value);
         // 首次进入生成一次分配：默认全部用主控 CLI；之后只在用户切换或重新随机时变化。
-        if (value.harnessRuntime) applyHarnessCli(value);
+        if (value.harnessRuntime) { if(!assignmentDrafts.get(draftKey))applyHarnessCli(value); }
         else setError("尚未设置已验证的主控 CLI；请先在“执行底座”中设置，再创建 Execution。");
       })
       .catch((cause) => {
@@ -97,6 +114,7 @@ export function ExecutionAssignmentFlow({
         harnessRunId,
         revision,
       );
+      if(!mounted.current)return;
       setAssignments(result.assignments);
       setDefaultAssignment(result.defaultAssignment);
       setMode("random");
@@ -119,6 +137,7 @@ export function ExecutionAssignmentFlow({
         revision,
         ruleText.trim(),
       );
+      if(!mounted.current)return;
       setAppliedRule(ruleText.trim());
       if (result.degraded || !result.assignments) {
         // 解析失败绝不静默猜测：显式标注退化并落回随机分配。
@@ -155,7 +174,8 @@ export function ExecutionAssignmentFlow({
   }
 
   async function confirm() {
-    if (!defaultAssignment) return;
+    if (!defaultAssignment || submitting.current) return;
+    submitting.current=true;
     setBusy("create");
     try {
       const config: ExecutionConfigSnapshot = {
@@ -168,10 +188,11 @@ export function ExecutionAssignmentFlow({
         assignments,
       };
       const detail = await api.createExecution(harnessRunId, revision, config);
-      onCreated(detail);
+      if(mounted.current)onCreated(detail);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      submitting.current=false;
       setBusy(null);
     }
   }

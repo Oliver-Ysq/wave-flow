@@ -67,7 +67,16 @@ export class ControlServer {
   #answering = new Set<string>();
   #continuing = new Set<string>();
 
-  constructor(private readonly journal: RunJournal, private readonly state: RunStateMachine) {}
+  constructor(
+    private readonly journal: RunJournal,
+    private readonly state: RunStateMachine,
+    /**
+     * 同一 Run 的耐久事实互斥区。Worker FIFO 上报与用户 IPC 控制（stop/退出）没有
+     * 共享调用栈：校验、结果/校验文件写入、Journal 追加与内存 apply 必须在同一
+     * 临界区内完成，否则 cancelled 会插进 complete 的磁盘窗口，使档案永久不可重放。
+     */
+    private readonly exclusive: <T>(operation: () => Promise<T>) => Promise<T> = (operation) => operation(),
+  ) {}
 
   /** 当前 Control 所属 Run；供真实执行器构造受管环境，不对 Workflow 作者 API 暴露。 */
   get runId(): string { return this.journal.manifest.runId; }
@@ -96,6 +105,7 @@ export class ControlServer {
 
   /** 耐久记录已投递任务的会话坐标，避免 complete 指向不可恢复或错误的终端。 */
   async recordSession(record: RecordedAgentSession): Promise<void> {
+    await this.exclusive(async () => {
     const key = controlKey(record.runId, record.nodeId);
     const node = this.#nodes.get(key);
     if (!node || node.agentSessionId !== record.agentSessionId) throw new Error("会话记录的 Control 节点或会话身份不匹配。");
@@ -108,9 +118,11 @@ export class ControlServer {
       agentSessionId: record.agentSessionId, diagnostic: record.delivery,
       delivery: "acp", acp: record.acp,
     };
+    this.state.assertApplicable(event);
     await this.journal.append(event);
     this.state.apply(event);
     this.#recordedSessions.add(key);
+    });
   }
 
   /** 节点当前 attempt 的 agent.session 是否已耐久；执行器仅在 false 时允许启动前回退。 */
@@ -134,6 +146,7 @@ export class ControlServer {
     if (this.#completing.has(key)) throw new Error("该节点正在处理 complete，拒绝并发上报。");
     this.#completing.add(key);
     try {
+    await this.exclusive(async () => {
     if (!request.summary.trim()) throw new Error("complete summary 必须非空。");
     const snapshot = this.state.agent(request.nodeId);
     if (snapshot.status !== "running") throw new Error(`complete 只允许当前 running 节点，实际为 ${snapshot.status}。`);
@@ -142,10 +155,14 @@ export class ControlServer {
     const resultPath = await this.journal.writeResult(request.nodeId, request.result, request.agentSessionId);
     const validationPath = await this.journal.writeValidation(request.nodeId, snapshot.request.schema ?? {}, request.result, request.agentSessionId);
     const event: JournalEvent = { type: "agent.completed", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId, agentSessionId: request.agentSessionId, diagnostic: request.summary, resultPath, validationPath, result: request.result };
+    // 追加前在状态机副本上试算：与 stop/退出的 cancelled 交错时在这里干净拒绝，
+    // 绝不让非法转移先落盘再在 apply 时爆炸（那会永久污染档案）。
+    this.state.assertApplicable(event);
     await this.journal.append(event);
     this.state.apply(event);
     this.#nodes.delete(key);
     try { node.onCompleted?.(request.result); } catch {}
+    });
     } finally {
       this.#completing.delete(key);
     }
@@ -153,27 +170,42 @@ export class ControlServer {
 
   /**
    * 让原 Agent 调用等待人类答案；状态先 durable 变为 blocked，答案不会直接恢复节点。
+   *
+   * ACP 客户端可能中途放弃一次长时间未返回的工具调用（Codex code-mode 约 31s 后
+   * 把脚本转为后台 cell，模型未必取回结果）。因此 block 是有界等待：原 Agent 携带
+   * 同一 blockRequestId 与完全相同的请求内容重连时，不创建第二个 block、不写新
+   * Journal 事实，只重新挂载等待者；节点此时必须已是 blocked。
    */
   async block(request: BlockSubmission): Promise<BlockResolution> {
     const key = controlKey(request.runId, request.nodeId);
+    // 互斥区内完成身份/状态核验与 block.created 落盘；等待答案在互斥区外。
+    const pending = await this.exclusive(async () => {
     this.requireCurrentNode(key, request);
     if (!this.#recordedSessions.has(key)) throw new Error("首条任务投递的会话坐标尚未耐久记录，拒绝 block。");
     if (!request.needHelp.trim()) throw new Error("block --need-help 必须非空。");
     const snapshot = this.state.agent(request.nodeId);
+    if (this.#blocks.has(request.blockRequestId)) {
+      if (snapshot.status !== "blocked") throw new Error(`重连 block 只允许当前 blocked 节点，实际为 ${snapshot.status}。`);
+      if (snapshot.block?.blockRequestId !== request.blockRequestId) throw new Error("重连 block 不是该节点当前等待的 block。");
+      return this.#blocks.assertSameSubmission(request);
+    }
     if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
-    const pending = this.#blocks.create(request);
+    const created = this.#blocks.create(request);
     try {
       const event: JournalEvent = {
         type: "block.created", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
-        agentSessionId: request.agentSessionId, diagnostic: request.needHelp, blockRequestId: pending.blockRequestId,
+        agentSessionId: request.agentSessionId, diagnostic: request.needHelp, blockRequestId: created.blockRequestId,
         needHelp: request.needHelp, ...(request.answerSchema ? { answerSchema: request.answerSchema } : {}),
       };
+      this.state.assertApplicable(event);
       await this.journal.append(event);
       this.state.apply(event);
     } catch (error) {
-      this.#blocks.discard(pending.blockRequestId);
+      this.#blocks.discard(created.blockRequestId);
       throw error;
     }
+    return created;
+    });
     // 只有 Journal 已经证明节点 blocked 后，原 Agent 才可开始等待答案。
     return this.#blocks.wait(pending.blockRequestId);
   }
@@ -183,17 +215,21 @@ export class ControlServer {
     if (this.#answering.has(submission.blockRequestId)) throw new Error("该 block 正在处理答案，拒绝并发 answer。");
     this.#answering.add(submission.blockRequestId);
     try {
+    await this.exclusive(async () => {
     const snapshot = this.state.agentForBlock(submission.blockRequestId);
     if (snapshot?.status === "paused" || snapshot?.status === "pausing" || snapshot?.status === "recovering") throw new Error("Agent 当前处于暂停中；请先 wave-flow recover 后再交付答案。 ");
+    if (snapshot?.status !== "blocked") throw new Error("block 所属节点当前不在等待答案状态，拒绝交付。 ");
     const pending = this.#blocks.validateAnswer(submission);
     const event: JournalEvent = {
       type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,
       agentSessionId: pending.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId, answer: submission.answer,
     };
+    this.state.assertApplicable(event);
     await this.journal.append(event);
     this.state.apply(event);
     // durable-first：只有答案已成为 Journal 事实后，才允许原 Agent 收到它。
     this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer);
+    });
     } finally {
       this.#answering.delete(submission.blockRequestId);
     }
@@ -207,6 +243,7 @@ export class ControlServer {
     if (this.#continuing.has(request.blockRequestId)) throw new Error("该 block 正在处理 continue，拒绝并发请求。");
     this.#continuing.add(request.blockRequestId);
     try {
+    await this.exclusive(async () => {
     const key = controlKey(request.runId, request.nodeId);
     this.requireCurrentNode(key, request);
     const snapshot = this.state.agent(request.nodeId);
@@ -216,9 +253,11 @@ export class ControlServer {
       type: "agent.continued", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
       agentSessionId: request.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId,
     };
+    this.state.assertApplicable(event);
     await this.journal.append(event);
     this.state.apply(event);
     this.#blocks.finishContinue(pending.blockRequestId);
+    });
     } finally {
       this.#continuing.delete(request.blockRequestId);
     }

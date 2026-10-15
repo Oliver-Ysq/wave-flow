@@ -7,6 +7,11 @@ import type {
 } from "../types";
 
 import { groupWorkersByPhase } from "./plan-groups";
+import { editableRevision } from "../workbench-navigation";
+import { revisionSummaryState } from "./workflow-summary";
+import { ViewCache } from "../workbench-state";
+import {PersistedDetails} from "../persisted-details";
+const assignmentVisibility=new ViewCache<boolean>();
 
 /** 目标摘要：该会话首条用户消息前 80 字；无则"未提供目标"。 */
 function goalSummary(harness: HarnessSnapshot): string {
@@ -27,7 +32,7 @@ const localeTime = (value: string | null | undefined) =>
 
 /**
  * 计划卡（Workflow 草案卡）：状态、目标摘要、冻结后的 Phase/Worker 预览、
- * 诊断信息折叠与生命周期操作（接受并冻结 / 拒绝草案 / 创建执行）。
+ * 诊断信息折叠与生命周期操作（接受方案 / 拒绝草案 / 创建执行）。
  */
 export function WorkflowRevisionCard({
   revision,
@@ -56,12 +61,20 @@ export function WorkflowRevisionCard({
 }) {
   const rejected = revision.rejectedAt != null;
   const accepted = revision.acceptedAt !== null;
-  const status = rejected ? "已拒绝" : accepted ? "已冻结" : "待确认";
+  const state = revisionSummaryState(harness, revision);
+  const status = state.status;
   const [confirmingReject, setConfirmingReject] = useState(false);
   const [rejectBusy, setRejectBusy] = useState(false);
   const [rejectError, setRejectError] = useState<string | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const plan = revision.preview;
+  const editable = editableRevision(harness, revision);
+  const visibilityKey=`${harness.harnessRunId}:${revision.cardId??"legacy"}:${revision.revision}`;
+  const restoreAssignment=useRef(assignmentVisibility.get(visibilityKey)===true);
+  useEffect(()=>{
+    if(editable&&accepted&&restoreAssignment.current)onCreateExecution(revision.revision);
+  },[visibilityKey]);
+  useEffect(()=>{if(editable&&(!restoreAssignment.current||assignmentRevision===revision.revision)){assignmentVisibility.set(visibilityKey,assignmentRevision===revision.revision);restoreAssignment.current=false;}},[assignmentRevision,visibilityKey,editable]);
 
   useEffect(() => {
     return () => {
@@ -94,14 +107,17 @@ export function WorkflowRevisionCard({
   return (
     <article className={`conversation-action workflow-revision ${rejected ? "rejected" : ""}`}>
       <div className="wf-plan-head">
-        <span>Workflow 草案 v{revision.revision}</span>
+        <span>{state.supersededBy ? "历史方案" : "当前方案"} · 第 {revision.revision} 版</span>
         <em className={`wf-plan-status ${rejected ? "rejected" : accepted ? "accepted" : "pending"}`}>
           {status}
         </em>
       </div>
-      <p className="wf-plan-goal">{goalSummary(harness)}</p>
-      {accepted && !rejected && (
+      <p className="wf-plan-goal">{revision.goal ?? "历史方案未保存独立目标"}</p>
+      <p className="wf-plan-scope">{revision.scope ?? "历史方案未保存独立范围"}</p>
+      {plan && <section className="wf-declared-phases"><h3>声明阶段</h3><div>{plan.phaseTitles.map(title=><span key={title}>{title}</span>)}</div><p>阶段词表，不代表实际调用顺序或依赖关系</p></section>}
+      {(
         <div className="wf-plan-preview">
+          <h3>Worker 调用示意</h3>
           {!plan ? (
             <p className="wf-plan-note">此历史草案的展示预览不可用，可查看源码；执行分配仍会独立预检。</p>
           ) : (
@@ -130,9 +146,9 @@ export function WorkflowRevisionCard({
         </div>
       )}
       <div className="wf-plan-actions">
-        {harness.status !== "completed" && !accepted && !rejected && (
+        {editable && !accepted && !rejected && (
           <>
-            <button onClick={() => onAccept(revision.revision)}>接受并冻结</button>
+            <button onClick={() => onAccept(revision.revision)}>接受方案</button>
             <button
               className="wf-plan-reject"
               disabled={rejectBusy}
@@ -142,9 +158,9 @@ export function WorkflowRevisionCard({
             </button>
           </>
         )}
-        {harness.status !== "completed" && accepted && !rejected && assignmentRevision !== revision.revision && (
+        {editable && accepted && !rejected && assignmentRevision !== revision.revision && (
           <button disabled={executionRunning} onClick={() => onCreateExecution(revision.revision)}>
-            {executionRunning ? "等待当前执行结束" : "创建执行"}
+            {executionRunning ? "等待当前执行结束" : "配置并运行"}
           </button>
         )}
       </div>
@@ -157,7 +173,7 @@ export function WorkflowRevisionCard({
           onCreated={onAssignmentCreated}
         />
       )}
-      <details>
+      <PersistedDetails identity={`${visibilityKey}:diagnostic`}>
         <summary>诊断信息</summary>
         <dl className="wf-plan-diag">
           <dt>revision</dt>
@@ -171,11 +187,11 @@ export function WorkflowRevisionCard({
           <dt>拒绝时间</dt>
           <dd>{localeTime(revision.rejectedAt)}</dd>
         </dl>
-        <details>
+        <PersistedDetails identity={`${visibilityKey}:source`}>
           <summary>查看 workflow.ts</summary>
           <pre>{revision.source}</pre>
-        </details>
-      </details>
+        </PersistedDetails>
+      </PersistedDetails>
     </article>
   );
 }

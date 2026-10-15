@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -65,8 +65,16 @@ describe("RunRuntime ACP-neutral core", () => {
     const control = runtime.createControlServer();
     control.register({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1" });
     await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
+    // 等待真正的 durable blocked 投影；固定 10ms 在全量测试的文件系统负载下不可靠。
+    let notifyBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => { notifyBlocked = resolve; });
+    const apply = runtime.state.apply.bind(runtime.state);
+    const applied = spyOn(runtime.state, "apply").mockImplementation((event) => {
+      apply(event);
+      if (event.type === "block.created") notifyBlocked();
+    });
     const blockFailure = control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, (error: unknown) => error);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    try { await blocked; } finally { applied.mockRestore(); }
     expect(await Promise.race([blockFailure, Promise.resolve("pending")])).toBe("pending");
     expect(runtime.snapshot().phases[0].agents[0].status).toBe("blocked");
     const snapshot = await runtime.cancelForDesktopExit("test-engine");
@@ -186,5 +194,53 @@ describe("RunRuntime ACP-neutral core", () => {
     const resumed = await RunRuntime.resume(initial.snapshot().id, { execute: async () => ({ ok: true }) }, root);
     await expect(resumed.run(workflow)).resolves.toEqual({ ok: true });
     expect(resumed.snapshot()).toMatchObject({ status: "completed", currentExecutionAttemptId: 3 });
+  });
+  test("complete 磁盘窗口与 Desktop 退出并发：complete 持锁完成，退出跳过该节点的 cancelled", async () => {
+    let entered!: () => void;
+    const enteredExecution = new Promise<void>((resolve) => { entered = resolve; });
+    const runtime = await create({ execute: async () => { entered(); return new Promise<JsonObject>(() => {}); }, stop: async () => {} });
+    void runtime.run(workflow).catch(() => undefined);
+    await enteredExecution;
+    const agentSessionId = runtime.snapshot().phases[0].agents[0].agentSessionId!;
+    const control = runtime.createControlServer();
+    control.register({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1" });
+    await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
+    // 把 complete 卡在结果文件写入窗口内；此时退出收敛必须等待同一互斥区，
+    // 不能把 cancelled 插进 complete 的校验与落盘之间。
+    let writeStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writing = new Promise<void>((resolve) => { writeStarted = resolve; });
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const originalWriteResult = runtime.journal.writeResult.bind(runtime.journal);
+    const spy = spyOn(runtime.journal, "writeResult").mockImplementation(async (...args: Parameters<RunJournal["writeResult"]>) => { writeStarted(); await writeGate; return originalWriteResult(...args); });
+    const completing = control.complete({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", summary: "done", result: { ok: true } }).then(() => "completed", (error: unknown) => error as Error);
+    await writing;
+    const exiting = runtime.cancelForDesktopExit("test-engine");
+    releaseWrite();
+    await exiting;
+    spy.mockRestore();
+    expect(await completing).toBe("completed");
+    expect(runtime.snapshot()).toMatchObject({ status: "cancelled", phases: [{ agents: [{ id: "worker", status: "completed", result: { ok: true } }] }] });
+    // Journal 必须可重开重放：没有 cancelled 落在 completed 之后污染档案。
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.completed", nodeId: "worker" }));
+    expect(reopened.events.some((event) => event.type === "agent.status" && event.nodeId === "worker" && event.status === "cancelled")).toBe(false);
+    expect(reopened.events).toContainEqual(expect.objectContaining({ type: "run.status", status: "cancelled" }));
+  });
+  test("Desktop 退出已收敛后，迟到的 complete 被拒绝且 Journal 零污染", async () => {
+    let entered!: () => void;
+    const enteredExecution = new Promise<void>((resolve) => { entered = resolve; });
+    const runtime = await create({ execute: async () => { entered(); return new Promise<JsonObject>(() => {}); }, stop: async () => {} });
+    void runtime.run(workflow).catch(() => undefined);
+    await enteredExecution;
+    const agentSessionId = runtime.snapshot().phases[0].agents[0].agentSessionId!;
+    const control = runtime.createControlServer();
+    control.register({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1" });
+    await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
+    await runtime.cancelForDesktopExit("test-engine");
+    await expect(control.complete({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", summary: "late", result: { ok: true } })).rejects.toThrow("只允许当前 running 节点");
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    expect(reopened.events.some((event) => event.type === "agent.completed")).toBe(false);
+    expect(reopened.events.at(-1)).toMatchObject({ type: "run.status", status: "cancelled" });
   });
 });

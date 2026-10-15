@@ -21,6 +21,9 @@ import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
 
+/** 会话内有界阅读位置；不落盘正文或参数。 */
+const conversationPositions = new Map<string, { top: number; stuck: boolean }>();
+
 /**
  * 裸 Enter 始终留给 textarea 与 IME：它可确认中文候选、切换输入状态或换行。
  * 发送只接受显式的 ⌘/Ctrl + Enter，且 composition 期间一律不拦截事件。
@@ -41,6 +44,7 @@ function BodyBlock({ entry }: { entry: HarnessBodyEntry }) {
   const streaming = !entry.completed && entry.finishedAt === null;
   return (
     <article
+      data-read-identity={entry.completed ? `body:${entry.entryId}` : undefined}
       className={`chat-message assistant wf-body ${streaming ? "streaming" : ""}`}
     >
       <div className="chat-avatar">W</div>
@@ -117,7 +121,7 @@ function ConversationTurnView({
       })}
       {turnNeedsAssistantFallback(turn) && turn.assistant && (
         <Fragment>
-          <article className="chat-message assistant">
+          <article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}>
             <div className="chat-avatar">W</div>
             <div>
               <span>主控 Agent</span>
@@ -149,12 +153,14 @@ export function ConversationView({
   onSend,
   onAbort,
   onComplete,
-  onProposeWorkflow,
   onOpenWorkflow,
   hasWorkflow,
   busy,
   lastEventAt,
   children,
+  timelineEvents = [],
+  onRead,
+  visible=true,
 }: {
   /** 当前 Harness 会话权威快照。 */
   harness: HarnessSnapshot;
@@ -168,8 +174,6 @@ export function ConversationView({
   onAbort: () => void;
   /** 归档完成会话。 */
   onComplete: () => void;
-  /** 打开 Workflow 草案编辑。 */
-  onProposeWorkflow: () => void;
   /** 打开 Workflow 详情面板。 */
   onOpenWorkflow: () => void;
   /** 是否已有可查看的 Workflow 执行。 */
@@ -180,6 +184,12 @@ export function ConversationView({
   lastEventAt: number | null;
   /** 时间线之后的行动点（草案卡、Execution、决策卡）。 */
   children?: ReactNode;
+  /** 耐久行动点，按保存时间插入对应回合；key 绑定原版本或执行。 */
+  timelineEvents?: Array<{ key: string; at: string; content: ReactNode }>;
+  /** 视口内耐久正文/原消息/版本阅读标记，不按 delta 计数。 */
+  onRead?: (taskId:string,ids:string[])=>void;
+  /** 隐藏页面不更新已读标记。 */
+  visible?: boolean;
 }) {
   const running = harness.status === "running";
   const turns = composeConversationTurns(harness);
@@ -189,6 +199,28 @@ export function ConversationView({
   const stuckRef = useRef(true);
   const [stuck, setStuck] = useState(true);
   const [pendingNew, setPendingNew] = useState(false);
+  useEffect(()=>{
+    if(!visible||!onRead||!scrollRef.current)return;
+    const root=scrollRef.current;
+    const observer=new IntersectionObserver(entries=>{
+      const ids=entries.filter(entry=>entry.isIntersecting).map(entry=>(entry.target as HTMLElement).dataset.readIdentity!).filter(Boolean);
+      if(ids.length)onRead(harness.harnessRunId,ids);
+    },{root,threshold:0.1});
+    root.querySelectorAll("[data-read-identity]").forEach(element=>observer.observe(element));
+    return()=>observer.disconnect();
+  },[harness,visible,onRead]);
+  useLayoutEffect(() => {
+    const saved = conversationPositions.get(harness.harnessRunId);
+    if (saved && scrollRef.current) {
+      scrollRef.current.scrollTop = saved.top;
+      stuckRef.current = saved.stuck;
+      setStuck(saved.stuck);
+    }
+    return ()=>{
+      const el=scrollRef.current;
+      if(el){conversationPositions.set(harness.harnessRunId,{top:el.scrollTop,stuck:stuckRef.current});if(conversationPositions.size>64)conversationPositions.delete(conversationPositions.keys().next().value!);}
+    };
+  }, [harness.harnessRunId]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -196,6 +228,9 @@ export function ConversationView({
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
     stuckRef.current = near;
     setStuck(near);
+    conversationPositions.delete(harness.harnessRunId);
+    conversationPositions.set(harness.harnessRunId, { top: el.scrollTop, stuck: near });
+    if (conversationPositions.size > 64) conversationPositions.delete(conversationPositions.keys().next().value!);
     if (near) setPendingNew(false);
   };
   useLayoutEffect(() => {
@@ -240,9 +275,8 @@ export function ConversationView({
                 }
                 onClick={onComplete}
               >
-                {busy === "complete-harness" ? "正在完成…" : "完成会话"}
+                {busy === "complete-harness" ? "正在归档…" : "归档任务"}
               </button>
-              <button onClick={onProposeWorkflow}>提议 Workflow</button>
             </>
           )}
           <button disabled={!hasWorkflow} onClick={onOpenWorkflow}>
@@ -261,12 +295,15 @@ export function ConversationView({
             </p>
           </div>
         )}
-        {turns.map((turn) => (
+        {turns.map((turn, index) => (
+          <Fragment key={turn.turnId}>
           <ConversationTurnView
             key={turn.turnId}
             turn={turn}
             harness={harness}
           />
+          {timelineEvents.filter(event => event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt)).sort((a,b)=>a.at.localeCompare(b.at)).map(event => <div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
+          </Fragment>
         ))}
         {harness.status === "interrupted" && (
           <article className="conversation-interruption" role="alert">
@@ -336,7 +373,7 @@ export function ConversationView({
 /** 会话标题：第一条用户消息前 28 字，退化为目录名。 */
 function conversationTitle(harness: HarnessSnapshot): string {
   return (
-    harness.messages
+    harness.task?.title || harness.messages
       .find((message) => message.role === "user")
       ?.text.slice(0, 28) ||
     harness.cwd.split("/").filter(Boolean).at(-1) ||

@@ -128,6 +128,10 @@ export type CreateHarnessRunRequest = {
 };
 /** 首次发送创建 Harness；草稿文本只在浏览器内存中，Engine 仅在此 action 抵达后创建档案。 */
 export type StartHarnessConversationRequest = {
+  /** Task 创建重试 UUID，必填；重试保持原身份，无字段请求拒绝且不创建档案。 */
+  readonly clientRequestId: string;
+  /** 固定任务标题；缺省取初始目标首行，1–120 个单行字符。 */
+  readonly title?: string;
   /** 已选择的耐久项目 id；Engine 从 Project Store 获取 cwd。 */
   readonly projectId: string;
   /** 新会话的首条非空用户消息；成功后才产生 Harness manifest 与 Journal。 */
@@ -146,8 +150,6 @@ export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
 export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
 /** 发送一条用户消息；响应确认 Engine 已耐久接收，完整消息由后续快照读取。 */
 export type HarnessMessageRequest = { readonly text: string };
-/** 提交主控会话中的 workflow.ts 草案；仅耐久提案，不执行。 */
-export type ProposeWorkflowRevisionRequest = { readonly source: string };
 /** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
 export type AcceptWorkflowRevisionRequest = { readonly revision: number };
 
@@ -203,6 +205,8 @@ export type ExecutionParseRuleResponse = {
 
 /** Execution 创建、控制或答题后的权威响应。 */
 export type ExecutionResponse = {
+  /** 原冻结源码静态无法枚举的调用数；只作进度分母提示，不代表实际节点数。 */
+  readonly dynamicCount?:number;
   /** Execution 登记事实；终态与摘要由 harness.execution_finished 固定。 */
   readonly execution: WorkflowExecutionRecord;
   /** Execution 内嵌 Run 的 Engine 权威快照；gates 字段携带决策门状态。 */
@@ -213,6 +217,27 @@ export type ExecutionResponse = {
    * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
    */
   readonly controllable: boolean;
+};
+
+/** 单个执行尝试的只读结果证据；缺失结果不从其他 attempt 补造。 */
+export type ExecutionAttemptResultsResponse = {
+  /** 所属 Execution UUID。 */
+  readonly executionId:string;
+  /** 已耐久且存在的正整数尝试号。 */
+  readonly attempt:number;
+  /** 原终态；尚未登记为 null。 */
+  readonly status:WorkflowExecutionRecord["status"]|null;
+  /** 原脚本对象返回值；未保存或非对象为 null。 */
+  readonly summary:JsonObject|null;
+  /** 本 attempt 真正完成的节点；不混入其他尝试的新结果。 */
+  readonly nodes:readonly {
+    /** Run 内稳定节点身份。 */
+    readonly id:string;
+    /** 原耐久可读名称。 */
+    readonly label:string;
+    /** 原完成 JSON 结果。 */
+    readonly result:JsonObject|null;
+  }[];
 };
 
 /** Harness 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */

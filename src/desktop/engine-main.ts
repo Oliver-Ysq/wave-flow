@@ -113,7 +113,9 @@ if (process.argv[2] === "__codex-acp") {
   await import("@agentclientprotocol/codex-acp");
 } else if (process.argv[2] === "__worker-mcp") {
   const { runWorkerMcpServer } = await import("../runtime/worker-mcp-server");
-  await runWorkerMcpServer();
+  // 测试注入的小预算走显式参数；生产路径永远使用默认 25s，不读取任何用户配置。
+  const budgetOverride = Number(process.env.WF_WORKER_BLOCK_WAIT_BUDGET_MS);
+  await runWorkerMcpServer(Number.isFinite(budgetOverride) && budgetOverride > 0 ? budgetOverride : undefined);
 } else if (process.argv[2] === "__harness-mcp") {
   const { runHarnessMcpServer } = await import("../harness/mcp-server");
   await runHarnessMcpServer();

@@ -73,17 +73,29 @@ export class WorkerControlPipe {
     try {
       for await (const line of reader) {
         if (this.#closed || !line.trim()) continue;
-        const response = await this.dispatch(line);
-        await this.write(response);
-        if (response.ok && this.isComplete(line)) {
-          // 让 MCP 先收到成功确认，再回收不会再被使用的端点。
-          queueMicrotask(() => { this.onCompleted?.(); this.close(); });
-        }
+        // 并发处理请求：block 是有界等待并重连的，串行 dispatch 会让重连请求排在
+        // 首个未答 block 之后，永远无法及时处理。Control 自身按动作做并发仲裁，
+        // 业务顺序由模型串行调用与状态机校验保证，不依赖本通道的到达顺序。
+        void this.serve(line);
       }
     } catch {
       // Worker/Engine 任一端关闭都不应把读取器错误写成业务状态；Runtime 负责
       // 把没有 complete 的会话收敛为 cancelled 或 interrupted。
     } finally { reader.close(); }
+  }
+
+  private async serve(line: string): Promise<void> {
+    try {
+      const response = await this.dispatch(line);
+      await this.write(response);
+      if (response.ok && this.isComplete(line)) {
+        // 让 MCP 先收到成功确认，再回收不会再被使用的端点。
+        queueMicrotask(() => { this.onCompleted?.(); this.close(); });
+      }
+    } catch {
+      // 并发处理中通道关闭或写入失败只影响该请求；等待中的调用由 Control 的
+      // cancelForSession 或 MCP 侧有界等待收尾。
+    }
   }
 
   private async dispatch(line: string): Promise<PipeResponse> {

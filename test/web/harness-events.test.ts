@@ -36,6 +36,13 @@ function makeSnapshot(
   };
 }
 
+test("耐久事件同步档案序号，旧帧不覆盖较新正文",()=>{
+ const entry=makeBody({text:"新正文"});const snapshot=makeSnapshot({snapshotSequence:12,conversationEntries:[entry]});
+ const old=applyHarnessEventToSnapshot(snapshot,{type:"entry_appended",entryId:entry.entryId,text:"旧片段",truncated:false,snapshotSequence:11});expect(old).toBe(snapshot);
+ const next=applyHarnessEventToSnapshot(snapshot,{type:"entry_appended",entryId:entry.entryId,text:"新片段",truncated:false,snapshotSequence:13});expect(next.snapshotSequence).toBe(13);expect((next.conversationEntries[0] as HarnessBodyEntry).text).toBe("新正文新片段");
+ expect(applyHarnessEventToSnapshot(next,{type:"entry_appended",entryId:entry.entryId,text:"新片段",truncated:false,snapshotSequence:13})).toBe(next);
+});
+
 /** 构造正文条目。 */
 function makeBody(overrides: Partial<HarnessBodyEntry> = {}): HarnessBodyEntry {
   return {
@@ -275,6 +282,7 @@ test("acceptEnvelope：generation 变化 resync、重复 seq skip、连续 apply
     "resync",
   );
   expect(tracker.generation).toBe(2);
+  expect(acceptEnvelope(tracker,makeEnvelope(1,100,{type:"execution_changed",executionId:"old"}))).toBe("skip");
   expect(tracker.lastSeq).toBe(1);
   expect(acceptEnvelope(tracker, makeEnvelope(2, 2, first.frame.event))).toBe(
     "apply",

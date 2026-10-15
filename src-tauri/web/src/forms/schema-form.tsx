@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   coerceValue,
   initialValueFor,
@@ -132,6 +132,7 @@ function SchemaField({
   return (
     <label className={`wf-schema-field ${error ? "invalid" : ""}`}>
       {label}
+      {typeof schema.description === "string" && <small className="wf-field-description">{schema.description}</small>}
       {control}
       {error && <small className="wf-field-error">{error}</small>}
     </label>
@@ -158,6 +159,7 @@ export function SchemaForm({
   /** 校验通过后的提交回调；抛错时错误展示在表单底部。 */
   onSubmit: (value: Record<string, unknown>) => Promise<void>;
 }) {
+  const schemaIdentity=JSON.stringify(schema);
   const support = isSupportedSchema(schema);
   const [value, setValue] = useState<Record<string, unknown>>(() =>
     support.supported && schema.type === "object"
@@ -166,6 +168,11 @@ export function SchemaForm({
   );
   const [fieldErrors, setFieldErrors] = useState<SchemaFieldError[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  useEffect(()=>{
+    const next=isSupportedSchema(schema);
+    setValue(next.supported&&schema.type==="object"?(initialValueFor(schema) as Record<string,unknown>):{});
+    setFieldErrors([]);setSubmitError(null);
+  },[schemaIdentity]);
 
   if (!support.supported || schema.type !== "object") {
     return (

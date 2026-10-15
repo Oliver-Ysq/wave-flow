@@ -75,10 +75,9 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(source).toContain("<WorkflowPanelErrorBoundary");
   expect(css).toContain("white-space:pre-wrap");
   expect(css).toContain(".workflow-render-error");
-  expect(css).toContain(".workflow-open { grid-template-columns:240px minmax(0,1fr) 0");
-  expect(css).toContain(".workflow-pane { position:fixed");
-  expect(css).toContain("visibility:hidden; pointer-events:none");
-  expect(css).toContain(".workflow-pane.open { opacity:1; visibility:visible; pointer-events:auto");
+  expect(css).toContain("grid-template-columns: 260px minmax(0, 1fr)");
+  expect(source).toContain('className="central-workflow"');
+  expect(source).not.toContain('className="workflow-peek"');
 });
 
 test("工具过程作为 assistant 正文下方的安全尾注恢复，不显示敏感调用细节", async () => {
@@ -102,7 +101,9 @@ test("Workflow 草案是受对话列宽约束的内联行动点，不能挤占�
   expect(css).toContain("width:min(720px, 100%)");
   expect(css).toContain("min-width:0");
   expect(css).toContain("overflow-wrap:anywhere");
-  expect(css).toContain(".agent-workbench .workflow-pane { position:fixed");
+  expect(css).not.toContain(".agent-workbench .workflow-pane");
+  expect(css).not.toContain(".agent-workbench .workflow-peek");
+  expect(css).toContain(".agent-workbench .central-workflow");
 });
 
 test("Execution 详情读取失败时说明 Desktop Engine 重连，而不是误报 Workflow 失败", async () => {

@@ -145,6 +145,7 @@ describe("ControlServer block / answer / continue", () => {
     const blockRequestId = crypto.randomUUID();
     const waiting = value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助", answerSchema: { type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } } });
     await waitFor(() => value.state.agent("node").status === "blocked");
+    expect(value.state.snapshot().phases[0].agents[0].block?.answerSchema).toMatchObject({type:"object",required:["resolved"]});
     await expect(value.control.answer({ blockRequestId, answer: {} })).rejects.toThrow("answer-schema");
     await expect(value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: "foreign", capability: value.capability })).rejects.toThrow("不匹配");
     await value.control.answer({ blockRequestId, answer: { resolved: true } });
@@ -183,6 +184,42 @@ describe("ControlServer block / answer / continue", () => {
     await waitFor(() => value.state.agent("node").status === "blocked");
     value.control.unregister(value.runId, "node", value.agentSessionId);
     await expect(waiting).rejects.toThrow("会话已结束");
+    expect(value.control.hasBlock(blockRequestId)).toBe(false);
+  });
+
+  test("同一 blockRequestId 的重连不写新 Journal 事实，答案交付给所有等待者", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要整数 x", answerSchema: { type: "object", properties: { x: { type: "integer" } }, required: ["x"] } };
+    const first = value.control.block(submission);
+    await waitFor(() => value.state.agent("node").status === "blocked");
+    // ACP 客户端放弃长时间未返回的工具调用后，原 Agent 以相同内容重连继续等待。
+    const reconnect = value.control.block(submission);
+    const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
+    expect(events.filter((event) => event.type === "block.created")).toHaveLength(1);
+    await value.control.answer({ blockRequestId, answer: { x: 7 } });
+    await expect(first).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
+    await expect(reconnect).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
+    // 答案已交付后的重连立即返回同一答案，用于答案与预算到期竞争的边界。
+    await expect(value.control.block(submission)).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.filter((event) => event.type === "block.created")).toHaveLength(1);
+    await value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
+    expect(value.state.agent("node").status).toBe("running");
+  });
+
+  test("重连 block 的内容、身份或当前等待关系不一致时拒绝", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const base = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要整数 x" };
+    const waiting = value.control.block(base);
+    await waitFor(() => value.state.agent("node").status === "blocked");
+    await expect(value.control.block({ ...base, needHelp: "换一个问题" })).rejects.toThrow("不一致");
+    await expect(value.control.block({ ...base, answerSchema: { type: "object" } })).rejects.toThrow("不一致");
+    await expect(value.control.block({ ...base, agentSessionId: "foreign" })).rejects.toThrow("不匹配");
+    // 节点 running 时不存在可重连的 block，旧 id 已被 finishContinue 清理后按新 block 处理。
+    await value.control.answer({ blockRequestId, answer: {} });
+    await waiting;
+    await value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
     expect(value.control.hasBlock(blockRequestId)).toBe(false);
   });
 });

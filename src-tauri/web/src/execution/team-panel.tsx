@@ -1,7 +1,12 @@
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { api } from "../api";
 import type { AgentSnapshot, PhaseVisit, RunSnapshot } from "../types";
 import { computeReusedAgents, type ReusedAgentGroup } from "./reused-agents";
+import { SchemaForm } from "../forms/schema-form";
+import { ViewCache } from "../workbench-state";
+import {PersistedDetails} from "../persisted-details";
+const agentExpansion=new ViewCache<boolean>(256);
+const AnswerAllowed=createContext(true);
 
 /** 节点状态文案（与工作台既有措辞一致）。 */
 function statusLabel(status: string): string {
@@ -57,6 +62,7 @@ function BlockAnswerForm({
   blockRequestId,
   busy,
   onAnswer,
+  schema,
 }: {
   /** 阻塞请求 id；答案只唤醒原命令。 */
   blockRequestId: string;
@@ -64,9 +70,12 @@ function BlockAnswerForm({
   busy: boolean;
   /** 交付回调（api.answer）。 */
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  /** 原Worker答案Schema，不从自然语言猜测。 */
+  schema?:Record<string,unknown>;
 }) {
   const [text, setText] = useState("{}");
   const [error, setError] = useState<string | null>(null);
+  if(schema)return <SchemaForm schema={schema} busy={busy} submitLabel="交付答案" onSubmit={answer=>onAnswer(blockRequestId,answer)} />;
   async function submit() {
     try {
       const parsed = JSON.parse(text) as unknown;
@@ -122,7 +131,9 @@ function AgentRow({
   /** Worker block 答题回调。 */
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
+  const viewKey=`${runId}:${executionAttemptId}:${phaseVisitId??"reused"}:${agent.id}`;
+  const [open, setOpen] = useState(()=>agentExpansion.get(viewKey)??false);
+  const answerAllowed=useContext(AnswerAllowed);
   const paused = ["pausing", "paused", "recovering"].includes(agent.status);
   return (
     <div className={`wf-agent-row ${agent.status}`}>
@@ -130,7 +141,7 @@ function AgentRow({
         type="button"
         className="wf-agent-row-head"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen((current) => {agentExpansion.set(viewKey,!current);return !current;})}
       >
         <Identicon seed={agent.id} />
         <span className="wf-agent-name">{agent.label}</span>
@@ -157,20 +168,21 @@ function AgentRow({
             <div className="wf-agent-line">
               <span>需要你的输入</span>
               <p>{agent.block.needHelp}</p>
-              {paused ? (
+              {!answerAllowed ? <p className="wf-agent-note">历史记录只读，不能交付答案。</p> : paused ? (
                 <p className="wf-agent-note">暂停中。恢复后才能交付答案。</p>
               ) : agent.block.answered ? (
                 <p className="wf-agent-note">答案已交付，等待 Agent continue。</p>
               ) : (
                 <BlockAnswerForm
                   blockRequestId={agent.block.blockRequestId}
+                  schema={agent.block.answerSchema}
                   busy={busy === `answer:${agent.block.blockRequestId}`}
                   onAnswer={onAnswer}
                 />
               )}
             </div>
           )}
-          <details className="wf-agent-diag">
+          <PersistedDetails identity={`${viewKey}:diagnostic`} className="wf-agent-diag">
             <summary>诊断</summary>
             <dl>
               <dt>runId</dt>
@@ -194,7 +206,7 @@ function AgentRow({
               <dt>cwd</dt>
               <dd>{agent.cwd}</dd>
             </dl>
-          </details>
+          </PersistedDetails>
         </div>
       )}
     </div>
@@ -299,6 +311,8 @@ export function TeamPanel({
   busy,
   onAnswer,
   loadAllVisits,
+  waitingVisitId,
+  readOnly=false,
 }: {
   /** Run id（独立 Run）或 Execution id（Harness Execution）。 */
   runId: string;
@@ -320,6 +334,10 @@ export function TeamPanel({
    * 否则只展示当前 attempt 视野（独立 Run 现状）。
    */
   loadAllVisits?: () => Promise<PhaseVisit[]>;
+  /** 当前 attempt 未回答脚本 gate 所属访问；不从自然语言猜等待状态。 */
+  waitingVisitId?: number;
+  /** 历史或已封存执行只读，不渲染Worker提交表单。 */
+  readOnly?:boolean;
 }) {
   const attemptId = currentExecutionAttemptId;
   const [fetchedVisits, setFetchedVisits] = useState<PhaseVisit[] | null>(null);
@@ -398,7 +416,7 @@ export function TeamPanel({
       );
     }
     return (
-      <div className="wf-team-panel">
+      <AnswerAllowed.Provider value={!readOnly}><div className="wf-team-panel">
         {fallbackPhases.map((phase) => {
           const active = phase.batches.some((batch) =>
             batch.agents.some((agent) => ACTIVE_STATUSES.has(agent.status)),
@@ -424,7 +442,7 @@ export function TeamPanel({
             </section>
           );
         })}
-      </div>
+      </div></AnswerAllowed.Provider>
     );
   }
 
@@ -442,9 +460,10 @@ export function TeamPanel({
     return <ReusedBlock group={group} runId={runId} busy={busy} onAnswer={onAnswer} />;
   };
   return (
-    <div className="wf-team-panel">
+    <AnswerAllowed.Provider value={!readOnly}><div className="wf-team-panel">
       {sorted.map((visit) => {
-        const current = visitIsCurrent(visit);
+        const waiting = visit.phaseVisitId === waitingVisitId;
+        const current = visitIsCurrent(visit) || waiting;
         return (
           <section className={`wf-visit ${current ? "current" : ""}`} key={visit.phaseVisitId}>
             <header>
@@ -452,7 +471,7 @@ export function TeamPanel({
                 {visit.title}
                 {visit.occurrence > 1 && <span className="wf-revisit">回访 #{visit.occurrence}</span>}
               </strong>
-              <em>{current ? "当前访问" : "已完成访问"}</em>
+              <em>{waiting ? "等待你的回答" : current ? "当前访问" : "已完成访问"}</em>
             </header>
             <VisitBatches
               visit={visit}
@@ -475,6 +494,6 @@ export function TeamPanel({
         </section>
       ))}
       {sorted.length === 0 && unvisited.length === 0 && <p>暂无 Phase 轨迹。</p>}
-    </div>
+    </div></AnswerAllowed.Provider>
   );
 }

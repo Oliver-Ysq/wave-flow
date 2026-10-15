@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -238,6 +238,53 @@ async function run(args) {
     // 已答 g1 与 completed 的 w1 都被复用：整个 resume 没有新的真实执行。
     expect(executions).toBe(1);
     expect(resumed.snapshot().status).toBe("completed");
+  });
+
+  test("resume 重跑节点后首次创建 gate 绑定新 attempt 的真实阶段访问", async () => {
+    const source = `${VALID_HEAD}
+async function run(args) {
+  phase("scan");
+  await agent("先执行", { id: "work-1", cli: "codex" });
+  return decisionGate("approve-after-restart", "是否继续？", { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] });
+}`;
+    const module = compileRestrictedWorkflow(source);
+    const { runtime } = await gateRuntime({ execute: async () => null }, source);
+    await runtime.run(module).catch(() => undefined);
+    expect(runtime.snapshot().status).toBe("interrupted");
+    expect(runtime.snapshot().gates).toHaveLength(0);
+
+    const resumed = await RunRuntime.resume(runtime.snapshot().id, { execute: async () => ({ done: true }) }, join(runtime.journal.directory, ".."));
+    const task = resumed.run(module);
+    await waitFor(() => resumed.snapshot().gates.length === 1);
+    expect(resumed.snapshot().gates[0]).toMatchObject({ gateId: "approve-after-restart", executionAttemptId: 2, phaseVisitId: 1 });
+    await resumed.answerGate("approve-after-restart", { ok: true });
+    await expect(task).resolves.toEqual({ ok: true });
+  });
+
+  test("completed 前缀后 gate 首次写入失败，resume 只重建 gate 而不重跑 Worker", async () => {
+    const source = `${VALID_HEAD}
+async function run(args) {
+  phase("scan");
+  await agent("已交付", { id: "work-1", cli: "codex" });
+  return decisionGate("new-gate", "是否继续？");
+}`;
+    let workers = 0;
+    const { runtime, module } = await gateRuntime({ execute: async () => { workers++; return { done: true }; } }, source);
+    const append = runtime.journal.append.bind(runtime.journal);
+    const injected = spyOn(runtime.journal, "append").mockImplementation(async event => {
+      if (event.type === "gate.created") throw new Error("gate 写入故障");
+      return append(event);
+    });
+    try { await expect(runtime.run(module)).rejects.toThrow("gate 写入故障"); }
+    finally { injected.mockRestore(); }
+    expect(runtime.snapshot().gates).toHaveLength(0);
+    const resumed = await RunRuntime.resume(runtime.snapshot().id, { execute: async () => { workers++; return { done: true }; } }, join(runtime.journal.directory, ".."));
+    const task = resumed.run(module);
+    await waitFor(() => resumed.snapshot().gates.length === 1);
+    expect(resumed.snapshot().gates[0]).toMatchObject({ gateId: "new-gate", executionAttemptId: 2, phaseVisitId: 1 });
+    expect(workers).toBe(1);
+    await resumed.answerGate("new-gate", { ok: true });
+    await expect(task).resolves.toEqual({ ok: true });
   });
 
   test("replay 中 gate 请求与已耐久事实不匹配时拒绝", async () => {

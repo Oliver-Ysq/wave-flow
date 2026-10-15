@@ -43,6 +43,7 @@ export function acceptEnvelope(
   envelope: EngineEventEnvelope,
 ): "apply" | "skip" | "resync" {
   const seq = envelope.frame.seq;
+  if(envelope.generation<tracker.generation)return "skip";
   if (envelope.generation !== tracker.generation) {
     tracker.generation = envelope.generation;
     tracker.lastSeq = seq;
@@ -66,6 +67,10 @@ export function applyHarnessEventToSnapshot(
   snapshot: HarnessSnapshot,
   event: HarnessStreamEvent,
 ): HarnessSnapshot {
+  if(event.snapshotSequence!==undefined){
+    if((snapshot.snapshotSequence??0)>=event.snapshotSequence)return snapshot;
+    snapshot={...snapshot,snapshotSequence:event.snapshotSequence};
+  }
   switch (event.type) {
     case "entry_started": {
       if (

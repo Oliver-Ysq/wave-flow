@@ -1,4 +1,5 @@
 import type { AgentStatus, RunSnapshot } from "../types";
+import { computeReusedAgents } from "./reused-agents";
 
 /** 待办卡中的一个静态枚举 Agent 节点条目。 */
 export type ExecutionProgressItem = {
@@ -31,6 +32,7 @@ export type ExecutionProgress = {
 export function computeExecutionProgress(
   snapshot: RunSnapshot,
   plannedTotal?: number,
+  allVisits?: RunSnapshot["phaseVisits"],
 ): ExecutionProgress {
   const items: ExecutionProgressItem[] = [];
   for (const phase of snapshot.phases) {
@@ -38,6 +40,14 @@ export function computeExecutionProgress(
       for (const agent of batch.agents) {
         items.push({ id: agent.id, label: agent.label, status: agent.status });
       }
+    }
+  }
+  // 与团队面板共享耐久历史投影；只展示原 completed 证据，不把被取消节点算作复用。
+  const present = new Set(items.map(item => item.id));
+  if (allVisits) for (const group of computeReusedAgents(allVisits, snapshot.currentExecutionAttemptId).values()) {
+    for (const agent of group.agents) if (!present.has(agent.id)) {
+      present.add(agent.id);
+      items.push({ id: agent.id, label: `${agent.label}（历史已交付）`, status: agent.status });
     }
   }
   const fromPlan = plannedTotal !== undefined && plannedTotal >= items.length;

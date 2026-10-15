@@ -200,7 +200,7 @@ function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.ag
 
 function managedPrompt(node: AgentNodeSnapshot): string {
   const schema = node.request.schema ? `\n最终 JSON 必须符合此 resultSchema：${JSON.stringify(node.request.schema)}` : "";
-  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n本 session 注入了三个私有 MCP 工具：wave_flow_complete、wave_flow_block、wave_flow_continue。完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block；它返回 blockRequestId 与用户 JSON 答案，确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
+  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n本 session 注入了三个私有 MCP 工具：wave_flow_complete、wave_flow_block、wave_flow_continue。完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，直接调用 MCP 工具 wave_flow_block（不要用 exec/代码模式包装调用）。它单次最多等待约 25 秒：返回 { status: "answered", blockRequestId, answer } 表示用户已作答；返回 { status: "waiting", blockRequestId } 表示尚未作答，你必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用 wave_flow_block 继续等待，直到 answered 为止——不要结束回合、不要修改参数、不要新建 block、不要把 waiting 当作答案。收到答案并确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
 }
 
 function recoveryPrompt(): string {
@@ -208,7 +208,7 @@ function recoveryPrompt(): string {
 }
 
 function completionReminderPrompt(): string {
-  return "上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，调用私有 MCP 工具 wave_flow_complete 并提供最终 JSON 对象与简短摘要。若无法安全构造结果，改用 wave_flow_block。完成上报后才可结束本回合。";
+  return "上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，调用私有 MCP 工具 wave_flow_complete 并提供最终 JSON 对象与简短摘要。若节点仍在等待人工答案，必须沿用原 blockRequestId 重连 wave_flow_block 继续等待，不要新建 block；其余无法安全构造结果的情况也改用 wave_flow_block。完成上报后才可结束本回合。";
 }
 
 async function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

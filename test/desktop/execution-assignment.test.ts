@@ -9,6 +9,10 @@ import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
 import type { ExecutionPlanResponse } from "../../src/desktop/types";
+import { HarnessService } from "../../src/harness/service";
+import { DeterministicHarnessSession } from "../../src/harness/deterministic-session";
+const fixtureServices = new Map<string, HarnessService>();
+const fixtureOptions = new Map<string, ConstructorParameters<typeof DesktopExecutionEngine>[0]>();
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -37,9 +41,17 @@ async function fixture(session?: HarnessSession): Promise<{ engine: DesktopExecu
   const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true, ...(session ? { createHarnessSession: async () => session } : {}) });
   const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
   const harness = await engine.handleDesktopAction("harnesses.create", { projectId: project.project.projectId }) as { harness: { harnessRunId: string } };
-  await engine.handleDesktopAction("harnesses.proposeRevision", { harnessRunId: harness.harness.harnessRunId, source: SOURCE });
-  await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: harness.harness.harnessRunId, revision: 1 });
-  return { engine, harnessRunId: harness.harness.harnessRunId, kimi, codex };
+  const journal = await import("../../src/harness/journal");
+  const sourceHash = (await import("node:crypto")).createHash("sha256").update(SOURCE).digest("hex");
+  const existing = await journal.HarnessJournal.open(harness.harness.harnessRunId, join(root,"harness-runs"));
+  await existing.journal.append({ type:"workflow.revision_proposed",at:new Date().toISOString(),harnessRunId:harness.harness.harnessRunId,revision:{revision:1,source:SOURCE,sourceHash,createdAt:new Date().toISOString(),acceptedAt:null} });
+  // Fixture 通过已耐久档案重建新 Engine；生产删除手工源码 action，不能用它建测试状态。
+  engine.shutdown();
+  const loaded = new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true,...(session ? {createHarnessSession:async()=>session}: {})});
+  fixtureServices.set(harness.harness.harnessRunId, new HarnessService(join(root,"harness-runs"),async()=>new DeterministicHarnessSession()));
+  fixtureOptions.set(harness.harness.harnessRunId, {storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true});
+  await loaded.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: harness.harness.harnessRunId, revision: 1 });
+  return { engine: loaded, harnessRunId: harness.harness.harnessRunId, kimi, codex };
 }
 
 function configOf(kimi: CliRuntimeRecord, codex: CliRuntimeRecord, overrides: Partial<ExecutionConfigSnapshot> = {}): ExecutionConfigSnapshot {
@@ -48,6 +60,41 @@ function configOf(kimi: CliRuntimeRecord, codex: CliRuntimeRecord, overrides: Pa
 }
 
 describe("Engine executions.plan / randomize / create 校验", () => {
+  test("自动编排Task的旧版/放弃版本在直接IPC均拒绝，不创建Execution",async()=>{
+    const {engine:harnessEngine,harnessRunId,kimi,codex}=await fixture();
+    const options=fixtureOptions.get(harnessRunId) as Exclude<ConstructorParameters<typeof DesktopExecutionEngine>[0],boolean|undefined>;
+    const root=await mkdtemp(join(tmpdir(),"wave-flow-task-ipc-"));roots.push(root);
+    const registry=new CliRuntimeRegistry(root);await registry.saveVerified(kimi);await registry.saveVerified(codex);await registry.select(kimi.runtimeId);
+    const optionsTask={...options,harnessRoot:join(root,"tasks"),createHarnessSession:async(_id:string,_cwd:string,_prior:readonly import("../../src/harness/types").HarnessMessage[],actions:import("../../src/harness/action-tools").HarnessActionCallbacks)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async()=>{await actions.proposeWorkflowRevision(SOURCE,"目标","只读范围");return "方案已提交";}})};
+    const engine=new DesktopExecutionEngine(optionsTask);
+    try{
+      const project=await engine.handleDesktopAction("projects.create",{cwd:root}) as {project:{projectId:string}};
+      const args={projectId:project.project.projectId,clientRequestId:crypto.randomUUID(),text:"创建任务"};
+      await expect(engine.handleDesktopAction("harnesses.startConversation",{projectId:args.projectId,text:args.text})).rejects.toThrow("UUID");
+      const created=await engine.handleDesktopAction("harnesses.startConversation",args) as {harness:{harnessRunId:string}};
+      const id=created.harness.harnessRunId;
+      for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:{status:string}};if(snapshot.harness.status==="idle")break;await Bun.sleep(5);}
+      await engine.handleDesktopAction("harnesses.acceptRevision",{harnessRunId:id,revision:1});
+      await engine.handleDesktopAction("harnesses.send",{harnessRunId:id,text:"修改"});
+      for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:{status:string}};if(snapshot.harness.status==="idle")break;await Bun.sleep(5);}
+      await expect(engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:1})).rejects.toThrow("取代");
+      await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:1,config:configOf(kimi,codex)})).rejects.toThrow();
+      const snapshot=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      const card=snapshot.harness.workflowRevisions.at(-1)!.cardId!;
+      await engine.handleDesktopAction("harnesses.abandonCard",{harnessRunId:id,cardId:card});
+      await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:2,config:configOf(kimi,codex)})).rejects.toThrow();
+      const list=await engine.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]};expect(list.executions).toHaveLength(0);
+      await expect(engine.handleDesktopAction("harnesses.proposeRevision",{harnessRunId:id,source:SOURCE})).rejects.toThrow("未知");
+      await engine.handleDesktopAction("harnesses.send",{harnessRunId:id,text:"重新准备首份"});
+      for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:{status:string}};if(snapshot.harness.status==="idle")break;await Bun.sleep(5);}
+      await engine.handleDesktopAction("harnesses.acceptRevision",{harnessRunId:id,revision:3});
+      const createdExecution=await engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)}) as {execution:{executionId:string}};
+      for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("executions.get",{harnessRunId:id,executionId:createdExecution.execution.executionId}) as {snapshot:{status:string}};if(snapshot.snapshot.status==="completed")break;await Bun.sleep(5);}
+      await expect(engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:3})).rejects.toThrow("多轮");
+      await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)})).rejects.toThrow("多轮");
+      expect((await engine.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]}).executions).toHaveLength(1);
+    }finally{engine.shutdown();harnessEngine.shutdown();}
+  });
   test("plan 枚举字面量 Worker、已验证池与主控 Runtime，并标注动态 id 数量", async () => {
     const { engine, harnessRunId, kimi, codex } = await fixture();
     try {
@@ -73,14 +120,20 @@ async function run(args) {
   await agent('只读验证', { id: 'verify', cli: 'kimi' });
   return {};
 }`;
-      await engine.handleDesktopAction("harnesses.proposeRevision", { harnessRunId, source });
-      await expect(engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 })).rejects.toMatchObject({ status: 400 });
-      await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId, revision: 2 });
-      const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 }) as ExecutionPlanResponse;
-      expect(plan.phaseTitles).toEqual(["分析", "验证"]);
-      expect(plan.workers).toMatchObject([{ id: "verify", phaseTitle: "验证" }]);
-      expect(plan.previewAgents).toMatchObject([{ name: "verify", phaseTitle: "验证", cli: "kimi" }]);
-      expect(await engine.handleDesktopAction("executions.list", { harnessRunId })).toMatchObject({ executions: [] });
+      const author = fixtureServices.get(harnessRunId)!;
+      await expect(engine.handleDesktopAction("harnesses.proposeRevision", { harnessRunId, source })).rejects.toThrow("未知 Desktop action");
+      await author.proposeWorkflowRevision(harnessRunId, source);
+      engine.shutdown();
+      const reopened = new DesktopExecutionEngine(fixtureOptions.get(harnessRunId));
+      try {
+        await expect(reopened.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 })).rejects.toMatchObject({status:400});
+        await reopened.handleDesktopAction("harnesses.acceptRevision", {harnessRunId, revision:2});
+        const plan = await reopened.handleDesktopAction("executions.plan", {harnessRunId, revision:2}) as ExecutionPlanResponse;
+        expect(plan.phaseTitles).toEqual(["分析", "验证"]);
+        expect(plan.workers).toMatchObject([{id:"verify",phaseTitle:"验证"}]);
+        expect(plan.previewAgents).toMatchObject([{name:"verify",phaseTitle:"验证",cli:"kimi"}]);
+        expect(await reopened.handleDesktopAction("executions.list", {harnessRunId})).toMatchObject({executions:[]});
+      } finally { reopened.shutdown(); }
     } finally { engine.shutdown(); }
   });
 

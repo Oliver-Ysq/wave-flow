@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import {renderToStaticMarkup} from "react-dom/server";
+import {SchemaForm} from "../../src-tauri/web/src/forms/schema-form";
 import {
   coerceValue,
   initialValueFor,
@@ -84,3 +86,4 @@ test("validateAnswer：必填/类型/枚举错误定位到字段路径", () => {
   expect(byPath.get("level")).toBe("取值不在允许范围内");
   expect(byPath.get("addr.city")).toBe("必填字段未填写");
 });
+test("SchemaForm显示字段描述与必填，不支持Schema不回退裸JSON",()=>{const html=renderToStaticMarkup(<SchemaForm schema={{type:"object",required:["ready"],properties:{ready:{type:"boolean",description:"是否继续"}}}} busy={false} onSubmit={async()=>{}}/>);expect(html).toContain("ready");expect(html).toContain("必填");expect(html).toContain("是否继续");const unsupported=renderToStaticMarkup(<SchemaForm schema={{type:"array"}} busy={false} onSubmit={async()=>{}}/>);expect(unsupported).toContain("暂不支持表单回答");expect(unsupported).not.toContain("答案 JSON");});

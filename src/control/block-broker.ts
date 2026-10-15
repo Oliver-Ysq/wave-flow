@@ -59,7 +59,7 @@ export class BlockBroker {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已在等待中。");
     if (submission.answerSchema) new Ajv({ allErrors: true, strict: false }).compile(submission.answerSchema);
-    const pending: PendingBlock = { ...submission, answer: null, resolve: null, reject: null };
+    const pending: PendingBlock = { ...submission, answer: null, waiters: [] };
     this.#pending.set(submission.blockRequestId, pending);
     return pending;
   }
@@ -74,7 +74,7 @@ export class BlockBroker {
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已恢复。");
     if (submission.answerSchema) new Ajv({ allErrors: true, strict: false }).compile(submission.answerSchema);
     if (answer) validateAnswer(submission.answerSchema, answer);
-    this.#pending.set(submission.blockRequestId, { ...submission, answer, resolve: null, reject: null });
+    this.#pending.set(submission.blockRequestId, { ...submission, answer, waiters: [] });
   }
 
   /** 验证重连请求恰好对应 Journal 中的同一个 block，而非创建第二个 block。 */
@@ -84,12 +84,16 @@ export class BlockBroker {
     return pending;
   }
 
-  /** 原 block HTTP 调用等待人类答案；答案先到时立即返回。 */
+  /**
+   * 原 Agent 调用等待人类答案；答案先到时立即返回。
+   * 同一 block 允许多个等待者：ACP 客户端（如 Codex code-mode）会中途放弃长时间
+   * 未返回的工具调用，原 Agent 随后以同一 blockRequestId 重连等待；旧等待者只是
+   * 不再有人读取的孤儿，答案到达时一并 resolve，绝不能因此拒绝重连。
+   */
   wait(blockRequestId: string): Promise<BlockResolution> {
     const pending = this.require(blockRequestId);
     if (pending.answer) return Promise.resolve({ blockRequestId, answer: pending.answer });
-    if (pending.resolve) throw new Error("同一 block 只能有一个原 Agent 等待者。");
-    return new Promise((resolve, reject) => { pending.resolve = resolve; pending.reject = reject; });
+    return new Promise((resolve, reject) => { pending.waiters.push({ resolve, reject }); });
   }
 
   /** 校验答案，但尚不交付；调用方必须先将答案耐久写入 Journal。 */
@@ -105,9 +109,8 @@ export class BlockBroker {
     const pending = this.require(blockRequestId);
     if (pending.answer) throw new Error("该 block 已有答案，拒绝覆盖。");
     pending.answer = answer;
-    pending.resolve?.({ blockRequestId, answer });
-    pending.resolve = null;
-    pending.reject = null;
+    const waiters = pending.waiters.splice(0);
+    for (const waiter of waiters) waiter.resolve({ blockRequestId, answer });
     return pending;
   }
 
@@ -127,7 +130,8 @@ export class BlockBroker {
     for (const [id, pending] of this.#pending) {
       if (pending.runId !== runId || pending.nodeId !== nodeId || pending.agentSessionId !== agentSessionId) continue;
       this.#pending.delete(id);
-      pending.reject?.(new Error(reason));
+      const waiters = pending.waiters.splice(0);
+      for (const waiter of waiters) waiter.reject(new Error(reason));
     }
   }
 
@@ -144,8 +148,7 @@ export class BlockBroker {
 type PendingBlock = BlockSubmission & {
   readonly blockRequestId: string;
   answer: JsonObject | null;
-  resolve: ((resolution: BlockResolution) => void) | null;
-  reject: ((error: Error) => void) | null;
+  waiters: { resolve: (resolution: BlockResolution) => void; reject: (error: Error) => void }[];
 };
 
 function validateAnswer(schema: JsonSchema | undefined, answer: JsonObject): void {

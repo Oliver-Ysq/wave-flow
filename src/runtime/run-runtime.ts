@@ -11,6 +11,7 @@ import { RunRuntimeHost } from "./run-runtime-host";
 import { RunStateMachine } from "./run-state-machine";
 import type { AgentNodeExecutor, RunSnapshot } from "./run-types";
 import { ControlServer } from "../control/control-server";
+import { canRunTransition, canTransition } from "./run-state-machine";
 
 /** 创建一次耐久 Run 所需的公开配置。 */
 export type CreateRunOptions = {
@@ -145,7 +146,10 @@ export class RunRuntime {
   }
 
   /** 供 Engine 在真实 Agent 启动前创建并注册 ControlServer；不对 Workflow 作者 API 暴露。 */
-  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return this.host.controlContext(); }
+  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine; readonly exclusive: <T>(operation: () => Promise<T>) => Promise<T> } { return this.host.controlContext(); }
+
+  /** 启动/恢复收敛的耐久写入；与 Worker/控制路径共用同一互斥区与可重放核验。 */
+  async commitConvergence(event: JournalEvent): Promise<void> { await this.host.commitEvent(event); }
 
   /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后才唤醒等待中的脚本。 */
   answerGate(gateId: string, answer: JsonObject): Promise<void> { return this.host.answerGate(gateId, answer); }
@@ -153,7 +157,7 @@ export class RunRuntime {
   /** 为当前 Run 创建唯一 ControlServer；真实执行器须在节点启动前绑定它。 */
   createControlServer(): ControlServer {
     const context = this.controlContext();
-    return new ControlServer(context.journal, context.state);
+    return new ControlServer(context.journal, context.state, context.exclusive);
   }
 
   /** 用户暂停：先耐久 intent 并阻断新调度，再由 Executor 停止既有真实节点。 */
@@ -194,8 +198,7 @@ export class RunRuntime {
         const recovery = await this.host.recoverNode(this.state.agent(node.id), control.signal);
         if (recovery.acp) {
           const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 ACP session 的恢复回合已启动。", acp: recovery.acp };
-          await this.journal.append(event);
-          this.state.apply(event);
+          await this.host.commitEvent(event);
         }
         await this.applyAgentStatus(node.id, node.block ? "blocked" : "running", node.agentSessionId, node.block ? "恢复后继续等待原 block。" : "已在同一会话恢复。 ");
       }
@@ -229,11 +232,14 @@ export class RunRuntime {
     const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering");
     try {
       for (const node of targets) {
+        // 节点可能在停止期间自行 complete（Worker FIFO 与 IPC 是两条通道）；
+        // 已终态的节点保持其已完成证据，不再落 cancelled。
+        if (!canTransition(this.state.agent(node.id).status, "cancelled")) continue;
         this.host.beginStop(node.id);
         await this.host.stopNode(node);
-        await this.applyAgentStatus(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
+        await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
       }
-      await this.transitionRun("cancelled", "用户停止 Run。 ");
+      await this.transitionRunIfLive("cancelled", "用户停止 Run。 ");
       return this.snapshot();
     } catch (error) {
       const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
@@ -253,7 +259,7 @@ export class RunRuntime {
   async cancelForDesktopExit(engineInstanceId: string): Promise<RunSnapshot> {
     const status = this.state.snapshot().status;
     if (status === "completed" || status === "cancelled" || status === "interrupted") return this.snapshot();
-    await this.journal.append({ type: "desktop.exit_requested", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "用户退出 Wave Flow。 ", engineInstanceId });
+    await this.host.commitEvent({ type: "desktop.exit_requested", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "用户退出 Wave Flow。 ", engineInstanceId });
     this.host.pauseScheduling(); this.#stopping = true;
     this.host.rejectPendingGates("退出 Wave Flow，决策门不再等待答案。 ");
     const activeControl = this.#controlAbort;
@@ -266,13 +272,14 @@ export class RunRuntime {
       node.status === "queued" || node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering",
     );
     for (const node of targets) {
-      await this.applyAgentStatus(node.id, "cancelled", node.agentSessionId, "退出 Wave Flow 时停止。 ");
-      if (node.status !== "queued" && this.host.stopNode) {
+      // 与并发 complete 交错时已终态节点保持原证据，只收敛仍存活的节点。
+      const cancelled = await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "退出 Wave Flow 时停止。 ");
+      if (cancelled && node.status !== "queued" && this.host.stopNode) {
         this.host.beginStop(node.id);
         void this.host.stopNode(node).catch(() => undefined).finally(() => this.host.endStop(node.id));
       }
     }
-    await this.transitionRun("cancelled", "退出 Wave Flow 时停止。 ");
+    await this.transitionRunIfLive("cancelled", "退出 Wave Flow 时停止。 ");
     return this.snapshot();
   }
 
@@ -302,14 +309,40 @@ export class RunRuntime {
 
   private async applyAgentStatus(nodeId: string, status: import("./run-types").AgentNodeStatus, agentSessionId: string | null, diagnostic: string): Promise<void> {
     const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic, status };
-    await this.journal.append(event);
-    this.state.apply(event);
+    await this.host.commitEvent(event);
+  }
+
+  /**
+   * 收敛类写入（stop/退出）：节点可能恰好在写入前自行 complete。已终态的节点跳过
+   * 而不是落一条非法转移——cancelled 写在 completed 之后会让 Journal 永久不可重放。
+   * 返回是否真的写入了该状态。
+   */
+  private async applyAgentStatusIfLive(nodeId: string, status: import("./run-types").AgentNodeStatus, agentSessionId: string | null, diagnostic: string): Promise<boolean> {
+    return this.host.mutationExclusive(async () => {
+      if (!canTransition(this.state.agent(nodeId).status, status)) return false;
+      const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic, status };
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+      return true;
+    });
   }
 
   private async transitionRun(status: import("./run-types").RunStatus, diagnostic: string | null): Promise<void> {
     const event: JournalEvent = { type: "run.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic, status };
-    await this.journal.append(event);
-    this.state.apply(event);
+    await this.host.commitEvent(event);
+  }
+
+  /** 收敛类 Run 转移：Run 恰已终态时跳过，不覆盖已封存的结果。 */
+  private async transitionRunIfLive(status: import("./run-types").RunStatus, diagnostic: string | null): Promise<boolean> {
+    return this.host.mutationExclusive(async () => {
+      if (!canRunTransition(this.state.snapshot().status, status)) return false;
+      const event: JournalEvent = { type: "run.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic, status };
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+      return true;
+    });
   }
 }
 

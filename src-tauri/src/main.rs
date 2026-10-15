@@ -15,8 +15,6 @@ struct EngineRequest<'a> { request_id: String, method: &'a str, action: Option<&
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EngineResponse { request_id: String, ok: bool, result: Option<serde_json::Value>, error: Option<String> }
-#[derive(Deserialize)]
-struct EngineReady { r#type: String, #[serde(rename = "protocolVersion")] protocol_version: u32 }
 
 /** Tauri 是 Engine 的唯一父进程，持有私有 stdin/stdout 与请求关联表。 */
 struct EngineState {
@@ -40,10 +38,13 @@ async fn ensure_engine(app: tauri::AppHandle) -> Result<(), String> { start_engi
 
 /** React 的私有 Engine action 代理；不通过 TCP、HTTP 或 URL 路由。 */
 #[tauri::command]
-async fn engine_request(app: tauri::AppHandle, action: String, args: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+async fn engine_request(app: tauri::AppHandle, action: String, args: Option<serde_json::Value>, timeout_secs: Option<u64>) -> Result<serde_json::Value, String> {
   if action.trim().is_empty() { return Err("桌面 action 无效。".to_string()); }
   start_engine(&app).await?;
-  dispatch(&app, EngineRequest { request_id: request_id(), method: "engine.action", action: Some(&action), args }).await
+  // 个别长动作（如分配规则解析，Engine 侧允许 120 秒）由调用方显式给出更长
+  // 超时；默认 60 秒，上限 600 秒防止无限悬挂。
+  let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60).clamp(1, 600));
+  dispatch_with_timeout(&app, EngineRequest { request_id: request_id(), method: "engine.action", action: Some(&action), args }, timeout).await
 }
 
 #[tauri::command]
@@ -79,7 +80,9 @@ async fn start_engine(app: &tauri::AppHandle) -> Result<(), String> {
   *child_slot = Some(child);
   let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
   drop(child_slot);
-  // 新 child 不得继承上一轮启动/退出残留的错误、半帧或已超时响应。
+  // 新 child 不得继承上一轮启动/退出残留的错误、半帧、已超时响应或就绪标志；
+  // ready 不重置会让新 Engine 启动阶段的 stderr 被当成诊断噪音吞掉。
+  *state.ready.lock().map_err(|_| "Engine 状态锁不可用。".to_string())? = false;
   *state.startup_error.lock().map_err(|_| "Engine 状态锁不可用。".to_string())? = None;
   state.stdout_buffer.lock().map_err(|_| "Engine 状态锁不可用。".to_string())?.clear();
   state.responses.lock().map_err(|_| "Engine 状态锁不可用。".to_string())?.clear();
@@ -142,24 +145,25 @@ fn process_stdout(app: &tauri::AppHandle, bytes: &[u8]) {
   }
 }
 fn process_line(app: &tauri::AppHandle, line: &str) {
-  if let Ok(ready) = serde_json::from_str::<EngineReady>(line) { if ready.r#type == "ready" && ready.protocol_version == 1 { if let Ok(mut value) = app.state::<EngineState>().ready.lock() { *value = true; } } return; }
+  // 先按帧形状分流：EngineReady 只有 type/protocolVersion 两个字段，serde 会忽略
+  // 未知字段，若先尝试反序列化 EngineReady，事件帧（type: "event"）也会被成功解析
+  // 并在这里被 return 吞掉，整条事件通道静默失效。
+  let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else { return; };
+  let frame_type = frame.get("type").and_then(|value| value.as_str());
+  let protocol = frame.get("protocolVersion").and_then(|value| value.as_u64());
+  if frame_type == Some("ready") && protocol == Some(1) { if let Ok(mut value) = app.state::<EngineState>().ready.lock() { *value = true; } return; }
   // 事件帧与请求响应分流：事件帧没有 requestId，type 恒为 "event"。Tauri 附加当前
   // Engine generation 后转发给 Web；旧 Engine 的迟到帧已在 stdout 消费层被丢弃。
-  if let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) {
-    if frame.get("type").and_then(|value| value.as_str()) == Some("event") && frame.get("protocolVersion").and_then(|value| value.as_u64()) == Some(1) {
-      let generation = app.state::<EngineState>().generation.load(Ordering::Acquire);
-      let _ = app.emit("engine-event", serde_json::json!({ "generation": generation, "frame": frame }));
-      return;
-    }
+  if frame_type == Some("event") && protocol == Some(1) {
+    let generation = app.state::<EngineState>().generation.load(Ordering::Acquire);
+    let _ = app.emit("engine-event", serde_json::json!({ "generation": generation, "frame": frame }));
+    return;
   }
   if let Ok(response) = serde_json::from_str::<EngineResponse>(line) {
     let state = app.state::<EngineState>();
     let accepted = state.pending.lock().map(|mut pending| pending.remove(&response.request_id)).unwrap_or(false);
     if accepted { if let Ok(mut responses) = state.responses.lock() { responses.insert(response.request_id.clone(), response); } }
   }
-}
-async fn dispatch(app: &tauri::AppHandle, request: EngineRequest<'_>) -> Result<serde_json::Value, String> {
-  dispatch_with_timeout(app, request, std::time::Duration::from_secs(60)).await
 }
 async fn dispatch_with_timeout(app: &tauri::AppHandle, request: EngineRequest<'_>, timeout: std::time::Duration) -> Result<serde_json::Value, String> {
   let id = request.request_id.clone(); let bytes = format!("{}\n", serde_json::to_string(&request).map_err(|error| error.to_string())?).into_bytes();

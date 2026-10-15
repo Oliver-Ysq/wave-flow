@@ -8,7 +8,7 @@ import type { JsonObject } from "../shared/json";
  */
 export type HarnessActionCallbacks = {
   /** 提交新的 workflow.ts 草案；只产生耐久 revision，不创建执行。 */
-  readonly proposeWorkflowRevision: (source: string) => Promise<{ readonly revision: number; readonly sourceHash: string }>;
+  readonly proposeWorkflowRevision: (source: string, goal?: string, scope?: string) => Promise<{ readonly revision: number; readonly sourceHash: string }>;
   /** 查看本 Harness 的 Execution 登记或单个 Execution 的权威快照；省略 id 时返回列表。 */
   readonly inspectExecution: (executionId?: string) => Promise<unknown>;
   /** 读取本任务的耐久 capsule：消息摘要、revision 与 Execution 状态。 */
@@ -27,10 +27,10 @@ export function createHarnessActionTools(actions: HarnessActionCallbacks): Agent
       name: "propose_workflow_revision",
       label: "提议 Workflow 草案",
       description: "提交一份新的受限 workflow TypeScript 草案，返回 revision 序号与源码 hash。草案只在用户于界面明确接受后才可能创建 Execution；本工具不会执行任何代码、不会创建 Worker。",
-      parameters: Type.Object({ source: Type.String({ description: "受限 workflow.ts 源码：顶层只有纯字面量 meta 与 async function run(args)，只能调用 agent/phase/parallel/pipeline/log/decisionGate" }) }),
+      parameters: Type.Object({ source: Type.String({ description: "受限 workflow.ts 源码" }), goal: Type.String({ description: "本轮工作流目标，不能沿用整个任务初始目标代替" }), scope: Type.String({ description: "本轮工作范围与边界" }) }),
       execute: async (_id, params) => {
-        const { source } = params as { source: string };
-        const result = await actions.proposeWorkflowRevision(source);
+        const { source, goal, scope } = params as { source: string; goal: string; scope: string };
+        const result = await actions.proposeWorkflowRevision(source, goal, scope);
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: { operation: "propose_workflow_revision", ...result } };
       },
       executionMode: "sequential",

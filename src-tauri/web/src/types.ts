@@ -17,7 +17,16 @@ export type AgentSnapshot = {
   /** 当前可展示的诊断信息；无信息为 null。 */
   diagnostic: string | null;
   /** 当前人工协助请求；非 blocked 节点为 null。 */
-  block: { blockRequestId: string; needHelp: string; answered: boolean } | null;
+  block: {
+    /** 原阻塞请求身份；答案仅交付原Worker。 */
+    blockRequestId:string;
+    /** 原请求说明。 */
+    needHelp:string;
+    /** 是否已耐久交付，仍需原Worker continue。 */
+    answered:boolean;
+    /** 原答案Schema；缺省时使用JSON对象输入。 */
+    answerSchema?:Record<string,unknown>;
+  } | null;
   /** 生效请求摘要；assignedRuntimeId 仅在受限 Execution 中由分配快照注入。 */
   request?: { assignedRuntimeId?: string; model?: string };
 };
@@ -51,7 +60,7 @@ export type RunSnapshot = {
   /** 当前尝试的阶段访问（含 occurrence 回访轮次与耐久批次）；两类 Run 统一以此呈现 Phase 轨迹。 */
   phaseVisits: PhaseVisit[];
   /** 脚本声明的决策门；未回答时可由 Execution 专用端点交付 JSON 答案。 */
-  gates: Array<{ gateId: string; question: string; answerSchema: Record<string, unknown> | undefined; executionAttemptId: number; phaseVisitId: number; createdAt: string; answeredAt: string | null; answer: Record<string, unknown> | null }>;
+  gates: Array<{ gateId: string; question: string; answerSchema: Record<string, unknown> | undefined; executionAttemptId: number; phaseVisitId: number | null; createdAt: string; answeredAt: string | null; answer: Record<string, unknown> | null }>;
 };
 
 export type PhaseSummary = {
@@ -123,16 +132,29 @@ export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; ca
 /** 耐久对话条目；实时展示与重开回放同源。 */
 export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
 /** Engine 事件帧中的会话事件（耐久派生子集）。 */
-export type HarnessStreamEvent =
+export type HarnessStreamEvent = (
   | { type: "entry_started"; entry: HarnessConversationEntry }
   | { type: "entry_appended"; entryId: string; text: string; truncated: boolean }
   | { type: "entry_finished"; entry: HarnessConversationEntry }
   | { type: "turn_finished"; messageId: string; text: string }
   | { type: "turn_interrupted"; diagnostic: string }
-  | { type: "execution_changed"; executionId: string };
+  | { type: "execution_changed"; executionId: string }) & {/** 已耐久档案序号；旧帧缺省。 */snapshotSequence?:number};
 /** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
 export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
-export type WorkflowRevision = { revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null; rejectedAt?: string | null;
+export type WorkflowRevision = {
+  /** 稳定候选卡身份；旧档案缺省，仅生成只读导航。 */
+  cardId?: string;
+  /** 同卡上一版本；首版为 null，历史未知时缺省。 */
+  parentRevision?: number | null;
+  /** 主控明确提出的本卡目标；历史未知时缺省。 */
+  goal?: string;
+  /** 本卡处理范围；历史未知时缺省。 */
+  scope?: string;
+  /** 放弃时刻；null/缺省表示未放弃，不删除批准证据。 */
+  abandonedAt?: string | null;
+  /** 提案原主控回合身份；用于定位历史，不作为授权。 */
+  turnId?: string;
+  revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null; rejectedAt?: string | null;
   /** 随 revision 耐久的展示预览；旧档案补齐失败时缺省，不代表执行失败。 */
   preview?: {
     /** 正整数解析规则版本。 */
@@ -187,7 +209,14 @@ export type ExecutionParseRuleResponse = { degraded: boolean; diagnostic: string
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
-export type HarnessSnapshot = { harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+export type HarnessSnapshot = {
+  /** 原执行创建/终态的历史链接；attempt未知不猜测。 */
+  executionHistory?:Array<{key:string;at:string;executionId:string;revision:number;attempt?:number;kind:"created"|"finished";status:RunStatus;diagnostic:string|null;summary:Record<string,unknown>|null}>;
+  /** 此档案已应用事件数；仅用于迟到响应防倒退。历史兼容缺省。 */
+  snapshotSequence?:number;
+  /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
+  executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
+  task?: { clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
@@ -201,5 +230,8 @@ export type HarnessProject = { projectId: string; cwd: string; title: string; cr
 export type HarnessProjectResponse = { project: HarnessProject };
 export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
-export type ExecutionResponse = { execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };
+export type ExecutionResponse = {
+  /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
+  dynamicCount?:number;
+  execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };
 export type ExecutionListResponse = { harnessRunId: string; executions: WorkflowExecution[] };

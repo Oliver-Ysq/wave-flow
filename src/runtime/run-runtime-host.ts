@@ -24,6 +24,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #phaseOccurrences = new Map<string, number>();
   #replayAttemptStarted = false;
   #replayPhaseTitle: string | null = null;
+  /** 同一 Run 所有耐久事实的互斥尾链：核验、Journal 追加与内存 apply 原子完成。 */
+  #mutationTail: Promise<unknown> = Promise.resolve();
   /** 等待用户答案的决策门；stop 时必须拒绝，避免 Workflow 永远悬挂。 */
   #gateWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
 
@@ -47,8 +49,29 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     }
   }
 
-  /** 返回当前 Run 的耐久存储与状态机，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
-  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine } { return { journal: this.journal, state: this.state }; }
+  /** 返回当前 Run 的耐久存储、状态机与互斥区，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
+  controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine; readonly exclusive: <T>(operation: () => Promise<T>) => Promise<T> } { return { journal: this.journal, state: this.state, exclusive: (operation) => this.mutationExclusive(operation) }; }
+
+  /**
+   * 同一 Run 的耐久事实互斥区。Worker 上报（FIFO 通道）与用户控制（IPC 通道）没有
+   * 共享调用栈：complete/block 的磁盘写入窗口内可能插入 stop/exit 的 cancelled，
+   * 若校验与 append 分离，非法事件会先落盘再在 apply 时爆炸，使档案永久不可重放。
+   * 互斥区内必须先 assertApplicable 核验、再 append、再 apply。
+   */
+  mutationExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.#mutationTail.then(operation);
+    this.#mutationTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** 互斥区内的标准耐久写入：副本试算可重放后才追加；落盘失败不改动内存状态。 */
+  async commitEvent(event: JournalEvent): Promise<void> {
+    await this.mutationExclusive(async () => {
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+    });
+  }
 
   /** Runtime 的运行控制只经此受限边界调用执行器，不能直接接触 Adapter 内部。 */
   pauseNode(node: import("./run-types").AgentNodeSnapshot, signal: AbortSignal): Promise<void> {
@@ -191,9 +214,17 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       if (existing.question !== request.question || !isDeepStrictEqual(existing.answerSchema, request.answerSchema)) throw new WorkflowContractError(`decisionGate 与已耐久决策门不匹配：${request.id}`);
       if (!this.replay) throw new WorkflowContractError(`decisionGate 的 id 在同一 Run 内必须唯一：${request.id}`);
       if (existing.answer !== null) return existing.answer;
+      // completed 前缀后的未答 gate 也是恢复边界；校验原问题/Schema 后建立新 attempt，
+      // 不能让外层已运行而内层仍 cancelled，且不能自动回答或重跑 completed 前缀。
+      await this.ensureReplayAttempt(phaseVisit?.title ?? this.#replayPhaseTitle ?? "default");
       return this.waitForGateAnswer(request.id);
     }
-    const created = this.event({ type: "gate.created", nodeId: null, gateId: request.id, question: request.question, answerSchema: request.answerSchema, executionAttemptId: this.state.snapshot().currentExecutionAttemptId, phaseVisitId: phaseVisit?.phaseVisitId ?? null });
+    // resume 首个重跑节点会把脚本 phase() 的占位访问（phaseVisitId=0）替换为
+    // 新 attempt 的真实耐久访问；后续首次创建 gate 必须绑定这个新身份。
+    const activeVisit = this.replay
+      ? await this.ensureReplayAttempt(phaseVisit?.title ?? this.#replayPhaseTitle ?? "default")
+      : phaseVisit;
+    const created = this.event({ type: "gate.created", nodeId: null, gateId: request.id, question: request.question, answerSchema: request.answerSchema, executionAttemptId: this.state.snapshot().currentExecutionAttemptId, phaseVisitId: activeVisit?.phaseVisitId ?? null });
     await this.durableApply(created);
     return this.waitForGateAnswer(request.id);
   }
@@ -220,6 +251,9 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   }
 
   private waitForGateAnswer(gateId: string): Promise<JsonObject> {
+    // resume 建立 attempt 期间答案可能先耐久；注册等待者前复核，避免丢失唤醒。
+    const saved = this.state.gate(gateId)?.answer;
+    if (saved !== null && saved !== undefined) return Promise.resolve(saved);
     return new Promise<JsonObject>((resolve, reject) => {
       this.#gateWaiters.set(gateId, { resolve, reject });
     });
@@ -264,8 +298,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   }
 
   private async durableApply(event: JournalEvent): Promise<void> {
-    await this.journal.append(event);
-    this.state.apply(event);
+    await this.commitEvent(event);
   }
 
   /** resume 的已完成前缀不产生事实；首个重跑节点才开启新尝试与第一轮阶段访问。 */

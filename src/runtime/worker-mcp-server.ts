@@ -6,18 +6,28 @@ import { createInterface } from "node:readline";
 import type { JsonObject } from "../shared/json";
 
 /**
+ * 单次 wave_flow_block 调用的最长等待时间。
+ *
+ * Codex code-mode（exec JS REPL）在脚本运行约 31 秒后不返回工具结果，而是把脚本
+ * 转为后台 cell，是否取回结果完全取决于模型行为——已实证 81 秒答案投递后模型
+ * 空转到回合中止。因此 block 必须在远低于该阈值的窗口内返回；未答时返回
+ * waiting，由模型携带同一 blockRequestId 重连继续等待。
+ */
+export const WORKER_BLOCK_WAIT_BUDGET_MS = 25_000;
+
+/**
  * 为单个受管 Coding Worker 提供的完成协议 MCP sidecar。
  *
  * 环境变量只在该 ACP session 的 MCP 子进程可见：仅有一对随机私有 FIFO 路径。
  * 身份与 capability 由 Engine 在 FIFO 服务端绑定，Control 仍复核节点状态与
  * Schema；sidecar 不读写 Journal、Runtime、业务工作区或任意 shell。
  */
-export async function runWorkerMcpServer(): Promise<void> {
+export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAIT_BUDGET_MS): Promise<void> {
   const control = new WorkerControlPipeClient(required("WF_WORKER_MCP_REQUEST_FIFO"), required("WF_WORKER_MCP_RESPONSE_FIFO"));
   const server = new Server({ name: "wave-flow-worker-control", version: "1" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
     { name: "wave_flow_complete", description: "完成当前受管节点。传入最终 JSON 对象与简短摘要；Control 会校验节点 Schema 并耐久写入结果。成功后才可以结束 ACP turn。", inputSchema: { type: "object", required: ["summary", "result"], properties: { summary: { type: "string" }, result: { type: "object" } }, additionalProperties: false } },
-    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时阻塞当前节点。调用会等待用户在 Wave Flow 界面提交 JSON 答案。", inputSchema: { type: "object", required: ["needHelp"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object" } }, additionalProperties: false } },
+    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时阻塞当前节点。单次调用最多等待约 25 秒：返回答案时为 { status: \"answered\", blockRequestId, answer }；尚未收到答案时返回 { status: \"waiting\", blockRequestId }，此时必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用本工具继续等待，直到 answered；不要结束回合、不要改参数、不要新建 block。收到答案并确认问题解决后调用 wave_flow_continue。", inputSchema: { type: "object", required: ["needHelp"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object" }, blockRequestId: { type: "string", description: "重连等待时必传：第一次调用返回的 blockRequestId；首次调用不要传。" } }, additionalProperties: false } },
     { name: "wave_flow_continue", description: "在 wave_flow_block 已返回答案且你确认可继续后恢复当前节点。", inputSchema: { type: "object", required: ["blockRequestId"], properties: { blockRequestId: { type: "string" } }, additionalProperties: false } },
   ] }));
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
@@ -29,9 +39,14 @@ export async function runWorkerMcpServer(): Promise<void> {
     }
     if (params.name === "wave_flow_block") {
       if (typeof args.needHelp !== "string" || !args.needHelp.trim() || (args.answerSchema !== undefined && !isObject(args.answerSchema))) throw new Error("wave_flow_block 参数无效。 ");
-      const blockRequestId = crypto.randomUUID();
-      const result = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, ...(args.answerSchema ? { answerSchema: args.answerSchema } : {}) });
-      return text(result);
+      if (args.blockRequestId !== undefined && (typeof args.blockRequestId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.blockRequestId))) throw new Error("wave_flow_block 的 blockRequestId 必须是首次调用返回的 UUID。 ");
+      const blockRequestId = typeof args.blockRequestId === "string" && args.blockRequestId.trim() ? args.blockRequestId : crypto.randomUUID();
+      const waiting = control.request({ action: "block", blockRequestId, needHelp: args.needHelp, ...(args.answerSchema ? { answerSchema: args.answerSchema } : {}) });
+      // 有界等待：预算到期不改变任何状态，原 FIFO 请求仍在等待；答案到达时旧
+      // 请求一并 resolve（无人读取，无害），重连的新调用会立即拿到同一答案。
+      const resolution = await Promise.race([waiting, Bun.sleep(waitBudgetMs).then(() => null)]);
+      if (!resolution) return text({ status: "waiting", blockRequestId });
+      return text({ status: "answered", ...(resolution as { blockRequestId: string; answer: JsonObject }) });
     }
     if (params.name === "wave_flow_continue") {
       if (typeof args.blockRequestId !== "string" || !args.blockRequestId.trim()) throw new Error("wave_flow_continue 需要 blockRequestId。 ");

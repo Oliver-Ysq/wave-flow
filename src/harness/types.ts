@@ -129,6 +129,14 @@ export type HarnessAcpToolCall = {
 
 /** 一个可恢复读取、但不认领原生 Pi session 的主控会话快照。 */
 export type HarnessSnapshot = {
+  /** 由原Journal派生的执行历史链接；只展示，不授权操作。 */
+  readonly executionHistory?:readonly ExecutionHistoryItem[];
+  /** 此档案已应用事件数；用于展示快照防倒退，不是业务授权。 */
+  readonly snapshotSequence?: number;
+  /** Engine 当前活跃执行待答计数；只作轻量展示，历史缺省，不包含节点内容或授权。 */
+  readonly executionAttention?: Readonly<Record<string,{readonly workerRequests:number;readonly scriptGates:number}>>;
+  /** 自动编排元数据；历史 Harness 缺省，不补造卡身份。 */
+  readonly task?: import("./task-contract").TaskMetadata;
   /** Harness Run UUID。 */
   readonly harnessRunId: string;
   /** 所属耐久项目 id；历史未归类 Harness 为 null。 */
@@ -159,8 +167,42 @@ export type HarnessSnapshot = {
   readonly decisions: readonly HarnessDecision[];
 };
 
+/** 聊天执行历史的稳定投影，不复制节点权威状态。 */
+export type ExecutionHistoryItem={
+  /** 同一档案内稳定事件键。 */
+  readonly key:string;
+  /** 原保存时间。 */
+  readonly at:string;
+  /** 原执行身份。 */
+  readonly executionId:string;
+  /** 原冻结版本。 */
+  readonly revision:number;
+  /** 原尝试号；历史未知时缺省。 */
+  readonly attempt?:number;
+  /** 原事件类型。 */
+  readonly kind:"created"|"finished";
+  /** 事件当时状态，不随最新执行变化。 */
+  readonly status:WorkflowExecutionRecord["status"];
+  /** 原终态诊断，创建事件为null。 */
+  readonly diagnostic:string|null;
+  /** 原终态返回值，创建或无结果为null；不套最新结果。 */
+  readonly summary:JsonObject|null;
+};
+
 /** 主控会话中的不可变 workflow.ts 草案。 */
 export type WorkflowRevision = {
+  /** 准备过程的稳定 UUID；历史版本缺省。 */
+  readonly cardId?: string;
+  /** 同卡前一版本；首版为 null。 */
+  readonly parentRevision?: number | null;
+  /** 版本目标，不从 Task 首条消息推断。 */
+  readonly goal?: string;
+  /** 人类可读工作范围。 */
+  readonly scope?: string;
+  /** 整卡放弃时间；批准证据保持不变。 */
+  readonly abandonedAt?: string | null;
+  /** 提案所属主控回合消息。 */
+  readonly turnId?: string;
   /** 耐久展示预览；旧档案缺省，Engine 首次加载时补算保存，不作为执行授权。 */
   readonly preview?: import("./revision-preview").RevisionPreview;
   /** Harness 内递增 revision；同一序号的 source/hash 不可改变。 */
@@ -262,7 +304,7 @@ export type HarnessDecision = {
 };
 
 /** Pi adapter 向 HarnessService 公开的最小流事件；不暴露 Pi 原始对象。 */
-export type HarnessStreamEvent =
+export type HarnessStreamEvent = (
   | { readonly type: "reasoning_delta"; readonly delta: string }
   | { readonly type: "assistant_delta"; readonly delta: string }
   /** 当前回合中 MCP 窄工具开始执行；仅供瞬时过程展示，不写入 Harness Journal。 */
@@ -282,7 +324,7 @@ export type HarnessStreamEvent =
   /** 当前回合已耐久的完整主控消息；只供同一 SSE 回合尾部渲染，不额外持久化。 */
   | { readonly type: "turn_finished"; readonly messageId: string; readonly text: string }
   | { readonly type: "turn_interrupted"; readonly diagnostic: string }
-  | { readonly type: "execution_changed"; readonly executionId: string };
+  | { readonly type: "execution_changed"; readonly executionId: string }) & {/** 对应已应用档案事件数；原生未耐久事件缺省。 */ readonly snapshotSequence?:number};
 
 /** ACP 工具调用增量补丁；仅携带发生变化的字段（可变形状，便于 adapter 逐项组装）。 */
 export type HarnessAcpToolCallPatch = { -readonly [K in keyof Omit<HarnessAcpToolCall, "callId">]?: HarnessAcpToolCall[K] };

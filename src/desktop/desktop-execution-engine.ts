@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ProposeWorkflowRevisionRequest, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
@@ -13,6 +13,7 @@ import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION } from "../journal/types";
 import { AgentStartLimiter, LimitedAgentExecutor } from "../runtime/agent-start-limiter";
 import { HarnessService } from "../harness/service";
+import { assertStartable, type TaskCreation } from "../harness/task-contract";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
 import { repairHarnessHomePermissions } from "../harness/journal";
@@ -65,7 +66,7 @@ export type DesktopExecutionEngineOptions = {
   /** 全局同时启动的真实 ACP Worker 上限。 */
   readonly maxActiveAgents?: number;
   /** 自动测试注入；生产省略时使用 selected ACP CLI Harness。 */
-  readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks) => Promise<import("../harness/session").HarnessSession>;
+  readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks, runtime?:import("../runtimes/types").RuntimeProvenance) => Promise<import("../harness/session").HarnessSession>;
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
   /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
@@ -222,8 +223,7 @@ export class DesktopExecutionEngine {
               : "Desktop Engine 重启时节点尚未取得可验证会话；等待用户显式 resume。",
             status: "interrupted",
           };
-          await runtime.journal.append(event);
-          runtime.state.apply(event);
+          await runtime.commitConvergence(event);
           if (node.agentSessionId) this.#acpWorkersNeedingResume += 1;
           interrupted = true;
         }
@@ -238,8 +238,7 @@ export class DesktopExecutionEngine {
               : "Desktop Engine 重启时原 Workflow 调用栈已丢失；等待用户显式 resume。",
             status: "interrupted",
           };
-          await runtime.journal.append(event);
-          runtime.state.apply(event);
+          await runtime.commitConvergence(event);
         }
         // 启动收敛后的 Run 已经是离线终态，不能放入 #runs（该表只代表当前
         // Engine 持有的可控会话）。后续只读查询会从刚更新的 Journal 重开。
@@ -308,9 +307,8 @@ export class DesktopExecutionEngine {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as StartHarnessConversationRequest).projectId !== "string" || (value as StartHarnessConversationRequest).projectId !== projectId || typeof (value as StartHarnessConversationRequest).text !== "string") throw new EngineActionError(400, "新会话首条消息请求无效。 ");
     try {
       const project = await this.#projects.get(projectId);
-      // 首发前验证 Runtime，避免先创建不可运行的 Harness manifest/Journaling。
-      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness();
-      const harness = await this.#harness.start(project.cwd, project.projectId, (value as StartHarnessConversationRequest).text);
+      // 唯一新建任务路径：缺失重试身份拒绝，旧档案仍兼容读取。
+      const harness = await this.#harness.startTask(project.cwd, value as TaskCreation);
       await this.#projects.touch(project.projectId);
       return { harness };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
@@ -405,8 +403,9 @@ export class DesktopExecutionEngine {
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
-  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { return { harness: await this.#harness.snapshot(harnessRunId) }; }
-  private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: await this.#harness.list() }; }
+  private taskPresentation(task:import("../harness/types").HarnessSnapshot):import("../harness/types").HarnessSnapshot { return {...task,executionAttention:Object.fromEntries(task.executions.filter(execution=>execution.finishedAt===null).map(execution=>[execution.executionId,this.#executions.attention(execution.executionId)]))}; }
+  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { return { harness:this.taskPresentation(await this.#harness.snapshot(harnessRunId)) }; }
+  private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: (await this.#harness.list()).map(task=>this.taskPresentation(task)) }; }
   private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as HarnessMessageRequest).text !== "string") throw new EngineActionError(400, "Harness 消息请求无效。 ");
     await this.#harness.send(harnessRunId, (value as HarnessMessageRequest).text);
@@ -414,7 +413,6 @@ export class DesktopExecutionEngine {
   }
   private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
   private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value as CompleteHarnessRequest)) throw new EngineActionError(400, "Harness complete 不接受请求字段。 "); try { return { harness: await this.#harness.complete(harnessRunId) }; } catch (error) { throw this.executionError(error); } }
-  private async proposeWorkflowRevision(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ProposeWorkflowRevisionRequest).source !== "string") throw new EngineActionError(400, "Workflow 草案请求无效。 "); return { harness: await this.#harness.proposeWorkflowRevision(harnessRunId, (value as ProposeWorkflowRevisionRequest).source) }; }
   private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
   /** 拒绝最新未接受草案；拒绝是不可逆耐久事实。 */
   private async rejectWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "拒绝 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.rejectWorkflowRevision(harnessRunId, revision) }; }
@@ -460,6 +458,7 @@ export class DesktopExecutionEngine {
     try {
       const snapshot = await this.#harness.snapshot(harnessRunId);
       const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
+      if (snapshot.task) assertStartable(snapshot, revisionNumber);
       if (!revision || revision.acceptedAt === null) throw new Error("只能为已接受冻结的 revision 规划执行分配。 ");
       // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
       const compiled = compileRestrictedWorkflow(revision.source);
@@ -516,7 +515,9 @@ export class DesktopExecutionEngine {
     const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
     if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
     try {
-      return { execution, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+      const task=await this.#harness.snapshot(harnessRunId);
+      const revision=task.workflowRevisions.find(item=>item.revision===execution.revision);
+      return { execution, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -636,7 +637,8 @@ export class DesktopExecutionEngine {
       case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
       case "harnesses.abort": return this.abortHarness(requiredString(value, "harnessRunId"), {});
       case "harnesses.complete": return this.completeHarness(requiredString(value, "harnessRunId"), {});
-      case "harnesses.proposeRevision": return this.proposeWorkflowRevision(requiredString(value, "harnessRunId"), value);
+      case "harnesses.retryInitialization": return { harness: await this.#harness.retryInitialization(requiredString(value, "harnessRunId")) };
+      case "harnesses.abandonCard": return { harness: await this.#harness.abandonWorkflowCard(requiredString(value, "harnessRunId"), requiredString(value, "cardId")) };
       case "harnesses.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
       case "harnesses.rejectRevision": return this.rejectWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
       case "harnesses.answerDecision": return this.answerHarnessDecision(requiredString(value, "harnessRunId"), requiredString(value, "decisionId"), value);
@@ -646,6 +648,7 @@ export class DesktopExecutionEngine {
       case "executions.randomize": return this.randomizeExecutionAssignment(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
+      case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
       case "executions.phaseVisits": return this.executionPhaseVisits(value);
       case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
       case "executions.resume": return this.resumeExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), { authorized: true });
@@ -896,8 +899,7 @@ export class DesktopExecutionEngine {
     // 已遍历到的其他节点被部分修改，随后 resume 又整体被拒绝。
     for (const node of unverifiable) {
       const event: import("../journal/types").JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: runtime.snapshot().id, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "用户显式 resume 时不认领旧 ACP 会话。", status: "interrupted" };
-      await runtime.journal.append(event);
-      runtime.state.apply(event);
+      await runtime.commitConvergence(event);
     }
   }
 
