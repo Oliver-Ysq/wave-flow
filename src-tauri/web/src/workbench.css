@@ -271,7 +271,7 @@ body { min-height:100%; overscroll-behavior:none; }
   padding:12px 13px;
   border:1px solid var(--wf-line-soft);
   border-radius:11px;
-  background:transparent;
+  background:var(--wf-surface);
   color:var(--wf-muted);
 }
 .agent-workbench .conversation-action > span { color:var(--wf-ink); font-size:11px; font-weight:650; }
@@ -475,14 +475,14 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .wf-markdown blockquote { margin:12px 0; padding:2px 14px; border-left:3px solid var(--wf-border); color:var(--wf-text-dim); }
 .agent-workbench .wf-image-placeholder { display:inline-block; padding:2px 8px; border:1px dashed var(--wf-border); border-radius:6px; color:var(--wf-text-dim); font-size:12px; }
 
-/* 思考/工具折叠行：无边框透明行，靠图标与灰度分层；展开区用左侧发丝线引导。 */
-.agent-workbench .wf-entry { max-width:760px; border-radius:8px; }
+/* 思考/工具折叠行：无边框透明行，整行降为灰色（正文保持亮色形成层级）；展开区用左侧发丝线引导。 */
+.agent-workbench .wf-entry { max-width:760px; border-radius:8px; color:var(--wf-text-dim); }
 .agent-workbench .wf-entry:hover { background:color-mix(in srgb, var(--wf-raised) 55%, transparent); }
-.agent-workbench .wf-entry-row { display:flex; align-items:center; gap:8px; min-height:32px; padding:3px 8px; font-size:14px; }
-.agent-workbench .wf-entry-glyph { width:15px; height:15px; flex:0 0 auto; fill:none; stroke:var(--wf-text-dim); stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
+.agent-workbench .wf-entry-row { display:flex; align-items:center; gap:8px; min-height:32px; padding:3px 8px; font-size:14px; color:var(--wf-text-dim); }
+.agent-workbench .wf-entry-glyph { width:15px; height:15px; flex:0 0 auto; fill:none; stroke:var(--wf-faint); stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
 .agent-workbench .wf-entry-name { display:flex; align-items:center; gap:6px; flex:0 0 auto; font-weight:500; }
-.agent-workbench .wf-entry-summary { min-width:0; flex:1 1 auto; overflow:hidden; color:var(--wf-text-dim); font:12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; text-overflow:ellipsis; white-space:nowrap; }
-.agent-workbench .wf-entry-duration { flex:0 0 auto; color:var(--wf-text-dim); font-size:12px; }
+.agent-workbench .wf-entry-summary { min-width:0; flex:1 1 auto; overflow:hidden; color:var(--wf-faint); font:12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; text-overflow:ellipsis; white-space:nowrap; }
+.agent-workbench .wf-entry-duration { flex:0 0 auto; color:var(--wf-faint); font-size:12px; }
 .agent-workbench .wf-entry-badge { display:inline-flex; align-items:center; gap:5px; flex:0 0 auto; font-size:12px; }
 .agent-workbench .wf-entry-badge i { width:7px; height:7px; border-radius:50%; background:var(--wf-text-dim); }
 .agent-workbench .wf-entry-badge.running { color:var(--wf-accent-strong); } .agent-workbench .wf-entry-badge.running i { background:var(--wf-accent-strong); }
@@ -491,7 +491,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .wf-entry-badge.interrupted { color:var(--wf-wait); } .agent-workbench .wf-entry-badge.interrupted i { background:var(--wf-wait); }
 .agent-workbench .wf-entry-toggle { display:grid; place-items:center; width:24px; height:24px; flex:0 0 auto; padding:0; border:0; border-radius:6px; background:transparent; cursor:pointer; }
 .agent-workbench .wf-entry-toggle:hover { background:var(--wf-selected); }
-.agent-workbench .wf-entry-toggle svg { width:13px; height:13px; fill:none; stroke:var(--wf-text-dim); stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+.agent-workbench .wf-entry-toggle svg { width:13px; height:13px; fill:none; stroke:var(--wf-faint); stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .agent-workbench .wf-entry-detail { margin-left:15px; padding:2px 10px 10px 18px; border-left:1px solid var(--wf-border); }
 .agent-workbench .wf-entry-group-items { display:grid; gap:1px; }
 .agent-workbench .wf-entry-group-items .wf-entry:hover { background:transparent; }
@@ -499,7 +499,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .wf-tool-output { max-height:360px; margin:8px 0 2px; padding:10px 12px; overflow:auto; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); color:var(--wf-text); font:12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
 .agent-workbench .wf-tool-output.wf-terminal { background:var(--wf-terminal-bg); color:#e8e8ea; border-color:transparent; }
 .agent-workbench .wf-command-line { display:flex; align-items:center; gap:10px; margin-top:8px; }
-.agent-workbench .wf-command-line code { min-width:0; flex:1 1 auto; overflow-x:auto; padding:8px 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
+.agent-workbench .wf-command-line code { min-width:0; flex:1 1 auto; overflow-x:auto; padding:8px 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); color:var(--wf-text); font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
 .agent-workbench .wf-copy-button { flex:0 0 auto; padding:5px 10px; border:1px solid var(--wf-border); border-radius:7px; background:var(--wf-surface); color:var(--wf-text-dim); font-size:12px; cursor:pointer; }
 .agent-workbench .wf-copy-button:hover { background:var(--wf-selected); color:var(--wf-text); }
 .agent-workbench .wf-entry-params { margin:8px 0 2px; color:var(--wf-text-dim); font:12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; overflow-wrap:anywhere; }
@@ -528,7 +528,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .agent-workbench .wf-plan-status.accepted { background:var(--wf-success-wash); color:var(--wf-success); }
 .agent-workbench .wf-plan-status.rejected { background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
 .agent-workbench .wf-plan-goal { margin:8px 0 0; color:var(--wf-text); font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
-.agent-workbench .wf-plan-preview { margin-top:10px; padding:10px 12px; border:1px solid var(--wf-line-soft); border-radius:9px; }
+.agent-workbench .wf-plan-preview { margin-top:10px; padding:10px 12px; border:1px solid var(--wf-line-soft); border-radius:9px; background:var(--wf-page); }
 .agent-workbench .wf-plan-preview ul { display:grid; gap:5px; margin:6px 0 0; padding:0; list-style:none; }
 .agent-workbench .wf-plan-preview li { display:flex; align-items:center; gap:10px; font-size:12px; }
 .agent-workbench .wf-plan-preview li strong { color:var(--wf-text); }
