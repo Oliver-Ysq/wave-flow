@@ -25,6 +25,8 @@ export type WorkflowMeta = {
   readonly phases: readonly WorkflowPhase[];
   /** 可选的最小可运行 JSON 输入；仅作示例，不改变本次 Run 参数。 */
   readonly exampleArgs?: JsonObject;
+  /** Wave Flow 新增的静态业务输入对象 Schema；新本地 Task 必填，旧模块加载/恢复可省略；不自动填默认。 */
+  readonly inputSchema?: JsonObject;
 };
 
 /** Workflow 作者为一个 Agent 节点声明的请求参数。 */

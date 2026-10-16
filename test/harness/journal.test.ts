@@ -10,6 +10,24 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("HarnessJournal", () => {
+  test("初始回合重试成功清除当前错误，历史失败事件仍保留且重开一致",async()=>{
+    const cwd=await mkdtemp(join(tmpdir(),"wave-flow-retry-diagnostic-"));directories.push(cwd);
+    const root=join(cwd,"state"),id=crypto.randomUUID(),request=crypto.randomUUID(),at=new Date().toISOString();
+    const journal=await HarnessJournal.create({harnessRunId:id,version:8,cwd,modelFingerprint:"test",createdAt:at,task:{clientRequestId:request,payloadHash:"a".repeat(64),title:"重试",initialGoal:"目标"}},root);
+    await journal.append({type:"harness.initialization_failed",at,harnessRunId:id,diagnostic:"任务已创建，主控启动失败：测试"});
+    expect((await HarnessJournal.open(id,root)).snapshot.diagnostic).toContain("启动失败");
+    await journal.append({type:"harness.turn_started",at,harnessRunId:id,userMessageId:request});
+    const opened=await HarnessJournal.open(id,root);
+    expect(opened.snapshot.status).toBe("running");expect(opened.snapshot.diagnostic).toBeNull();
+    expect(opened.events.filter(event=>event.type==="harness.initialization_failed")).toHaveLength(1);
+  });
+  test("拒绝旧开发档案格式，不迁移或兼容v1至v7",async()=>{
+    for(const version of [1,2,3,4,5,6,7] as const){
+      const cwd=await mkdtemp(join(tmpdir(),"wave-flow-legacy-mode-"));directories.push(cwd);
+      const root=join(cwd,"state"),id=crypto.randomUUID();
+      await expect(HarnessJournal.create({harnessRunId:id,version,cwd,modelFingerprint:"legacy",createdAt:new Date().toISOString()},root)).rejects.toThrow("不支持旧版");
+    }
+  });
   test("预览补齐拒绝错误 hash、重复版本与未知 revision，合法升级保留审批身份", async () => {
     const value = await fixture();
     const source = 'test source', hash = createHash('sha256').update(source).digest('hex');
@@ -33,7 +51,7 @@ describe("HarnessJournal", () => {
   async function fixture() {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-")); directories.push(cwd);
     const root = harnessRunsRoot(cwd);
-    const manifest = { harnessRunId: crypto.randomUUID(), version: 1 as const, cwd, modelFingerprint: "a".repeat(64), createdAt: new Date().toISOString() };
+    const manifest = { harnessRunId: crypto.randomUUID(), version: 8 as const, cwd, modelFingerprint: "a".repeat(64), createdAt: new Date().toISOString() };
     return { cwd, root, journal: await HarnessJournal.create(manifest, root), manifest };
   }
   test("只耐久完整消息与绑定 assistant 的最小工具摘要，reasoning 不进入 Journal", async () => {

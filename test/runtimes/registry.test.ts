@@ -31,7 +31,7 @@ describe("CliRuntimeRegistry", () => {
   });
 
   test("可执行文件变化会标记 needs-revalidation 并拒绝启动", async () => {
-    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-drift-")); roots.push(root); const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await record(root)); await registry.select(saved.runtimeId);
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-drift-")); roots.push(root); const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await record(root)); await registry.select(saved.runtimeId);
     await Bun.sleep(5); await writeFile(saved.executablePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(saved.executablePath, 0o700);
     await expect(registry.resolveSelected("codex")).rejects.toThrow("已变化");
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
@@ -39,7 +39,7 @@ describe("CliRuntimeRegistry", () => {
 
   test("node 依赖变化同样持久化 needs-revalidation", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-node-drift-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await record(root));
+    const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await record(root));
     const nodePath = join(root, "node"); await writeFile(nodePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(nodePath, 0o700);
     const node = await verifyExecutable(nodePath);
     await registry.saveVerified({ ...saved, nodeExecutable: { path: node.executablePath, identity: node.identity } });
@@ -93,7 +93,7 @@ describe("CliRuntimeRegistry", () => {
 
   test("未声明 harnessTools 的 runtime 不能设为主控", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-no-harness-tools-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
+    const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
     await expect(registry.select(saved.runtimeId)).rejects.toThrow("主控窄工具");
     await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: null });
   });
@@ -149,7 +149,7 @@ describe("CliRuntimeRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-worker-drift-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
     await Bun.sleep(5); await writeFile(saved.executablePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(saved.executablePath, 0o700);
-    await expect(registry.resolveWorker("kimi")).rejects.toThrow("已变化");
+    await expect(registry.resolveWorker("kimi")).rejects.toThrow("自动检查失败");
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
     await expect(registry.hasWorkerCandidate()).resolves.toBe(false);
   });
@@ -178,9 +178,9 @@ describe("CliRuntimeRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-by-id-drift-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
     await Bun.sleep(5); await writeFile(saved.executablePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(saved.executablePath, 0o700);
-    await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("已变化");
+    await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
     // 漂移后再次按 id 解析仍拒绝，绝不静默换到另一候选。
-    await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("不存在或未验证");
+    await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
   });
 });

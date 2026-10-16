@@ -191,6 +191,13 @@ export type ExecutionHistoryItem={
 
 /** 主控会话中的不可变 workflow.ts 草案。 */
 export type WorkflowRevision = {
+  /** 受信任本地来源快照；缺省为受限源码；只由Engine安全预检写入，主控不能提交。 */
+  readonly localOrigin?: {
+    /** 已验证项目内原文件；恢复不再次读取它。 */ readonly path: string;
+    /** 原预检源码hash，须等于revision.sourceHash。 */ readonly sourceHash: string;
+    /** 静态元数据，不通过执行模块获取。 */ readonly meta: import("../shared/workflow-types").WorkflowMeta;
+    /** 冻结业务输入对象Schema。 */ readonly inputSchema: JsonObject;
+  };
   /** 参数待补齐的准备态；完整Schema验证前不能批准/执行，默认false。 */
   readonly parametersPending?:boolean;
   /** 保存请求 UUID；同请求同载荷重试返回原版本，异载荷拒绝。 */
@@ -275,6 +282,8 @@ export type ExecutionConfigSnapshot = {
 
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */
 export type WorkflowExecutionRecord = {
+  /** 来源控制路由；历史缺省restricted-execution；local-run使用独立Run Store，不变更源码信任。 */
+  readonly kind?: "restricted-execution" | "local-run";
   /** 模板确认请求 UUID；缺省为历史/自动编排执行，同请求重试不再次派发。 */
   readonly confirmationRequestId?: string;
   /** 确认版本/输入/配置规范指纹；只用于冲突检测，不构成授权。 */
@@ -299,7 +308,7 @@ export type WorkflowExecutionRecord = {
   readonly diagnostic: string | null;
   /** 脚本 run() 的 JSON 返回值摘要，供主控汇总；非对象结果或未结束时为 null。 */
   readonly summary: JsonObject | null;
-  /** 分配卡冻结的执行配置；本期起创建的 Harness Execution 必填，历史档案可缺失。 */
+  /** 受限来源冻结的分配配置；本地来源不保存也不使用，历史受限档案可缺失但不能恢复。 */
   readonly config?: ExecutionConfigSnapshot;
 };
 

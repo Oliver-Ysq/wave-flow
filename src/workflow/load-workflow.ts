@@ -38,8 +38,13 @@ export async function loadWorkflow<Args = unknown, Result = unknown>(workflowPat
   }
   if (!isPathWithin(projectRoot, actualPath)) throw new Error("Workflow 文件必须位于项目 cwd 内，且符号链接不得指向 cwd 外。");
   const source = await readFile(actualPath, "utf8");
-  validateWorkflowSource(source, actualPath);
-  const moduleSource = bindAuthorApiImport(source, actualPath);
+  return loadWorkflowSource<Args, Result>(source, actualPath);
+}
+
+/** 加载已安全读取/冻结的受信任源码；不重新读原路径，避免批准后再次读取产生字节漂移。 */
+export async function loadWorkflowSource<Args = unknown, Result = unknown>(source: string, fileName = "workflow.ts"): Promise<WorkflowModule<Args, Result>> {
+  validateWorkflowSource(source, fileName);
+  const moduleSource = bindAuthorApiImport(source, fileName);
   const moduleUrl = `data:text/typescript;base64,${Buffer.from(moduleSource, "utf8").toString("base64")}`;
   const loaded = await import(moduleUrl) as unknown;
   if (!loaded || typeof loaded !== "object") throw new Error("Workflow 模块必须导出对象。");

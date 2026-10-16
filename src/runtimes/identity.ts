@@ -17,9 +17,10 @@ export async function verifyExecutable(path: string): Promise<VerifiedExecutable
   return { executablePath, identity: { device: Number(info.dev), inode: Number(info.ino), size: info.size, modifiedAtMs: info.mtimeMs } };
 }
 
-/** 启动前按完整身份复核；任何差异都要求用户重新验证，不允许静默使用。 */
+/** 启动前完整身份检查；变化交由Registry同路径完整复验，路径目标改变仍需用户确认。 */
 export async function verifyExecutableIdentity(path: string, expected: ExecutableIdentity): Promise<VerifiedExecutable> {
   const current = await verifyExecutable(path);
+  if(current.executablePath!==path)throw new Error("CLI 路径目标已变化，需要用户确认。 ");
   const actual = current.identity;
   if (actual.device !== expected.device || actual.inode !== expected.inode || actual.size !== expected.size || actual.modifiedAtMs !== expected.modifiedAtMs) throw new Error("CLI 文件已变化，需要重新验证。 ");
   return current;

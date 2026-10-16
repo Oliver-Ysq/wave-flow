@@ -2,17 +2,27 @@ import { chmod, lstat, mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { waveFlowHome } from "../journal/paths";
 import { adapterById, adapterForCli } from "./adapter-catalog";
-import { verifyExecutableIdentity } from "./identity";
+import { verifyExecutable, verifyExecutableIdentity } from "./identity";
+import { validateCliRuntime } from "./cli-runtime-validator";
 import { resolveNodeRuntime, verifyNodeRuntime } from "./node-runtime";
 import type { CliRuntimeRecord, CliRuntimeRegistryFile, CliRuntimeView, RuntimeCli, VerifiedCliRuntime } from "./types";
 
 /** 用户级 CLI Runtime Registry；只保存确认后的 CLI metadata，绝不保存 shell env 或凭据。 */
 export class CliRuntimeRegistry {
-  constructor(private readonly root = waveFlowHome()) {}
+  #revalidations = new Map<string, Promise<VerifiedCliRuntime>>();
+  constructor(private readonly root = waveFlowHome(),
+    /** 完整复验器；生产使用版本/ACP/MCP探针，测试注入，无业务prompt。 */
+    private readonly revalidate: typeof validateCliRuntime = validateCliRuntime) {}
 
   async list(): Promise<{ readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>; readonly harnessRuntimeId: string | null; readonly runtimes: readonly CliRuntimeView[] }> {
     const state = await this.read();
     return { selectedByCli: { ...state.selectedByCli }, harnessRuntimeId: state.harnessRuntimeId ?? null, runtimes: state.runtimes.map(view) };
+  }
+
+  /** App启动后后台检查原主控；不创建任务、不投递业务Prompt，也不替换默认选择。失败留给用户动作显示。 */
+  async refreshSelectedHarness():Promise<void> {
+    const state=await this.read();
+    if(state.harnessRuntimeId)await this.resolveSelectedHarness();
   }
 
   /** 写入或按 canonical executable 去重更新一条已验证 runtime；默认选择仍需用户显式 select。 */
@@ -60,15 +70,14 @@ export class CliRuntimeRegistry {
    */
   async resolveWorker(cli: RuntimeCli): Promise<VerifiedCliRuntime> {
     const state = await this.read();
-    const candidates = state.runtimes.filter(item => item.cli === cli && item.status === "verified");
+    const candidates = state.runtimes.filter(item => item.cli === cli && item.status !== "invalid");
     if (candidates.length === 0) throw new Error(`没有已验证的本机 ${cli} CLI 可作为 Worker。请在设置页扫描并验证一个 Worker 执行底座。 `);
     const verified: VerifiedCliRuntime[] = [];
     for (const runtime of candidates) {
       try { verified.push(await this.verifyRuntimeDependencies(state, runtime)); }
       catch (error) {
-        const runtimes = state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item);
-        await this.write({ ...state, runtimes });
-        throw new Error(`已验证的本机 ${cli} CLI 或其运行依赖已变化，需要重新验证。 `);
+        await this.markRevalidationFailed(runtime,error);
+        throw error;
       }
     }
     const selected = state.selectedByCli[cli];
@@ -86,12 +95,11 @@ export class CliRuntimeRegistry {
   async resolveWorkerById(runtimeId: string): Promise<VerifiedCliRuntime> {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
-    if (!runtime || runtime.status !== "verified") throw new Error("分配快照指定的本机 CLI Runtime 不存在或未验证。 ");
+    if (!runtime || runtime.status === "invalid") throw new Error("分配快照指定的本机 CLI Runtime 不存在或未验证。 ");
     try { return await this.verifyRuntimeDependencies(state, runtime); }
     catch (error) {
-      const runtimes = state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item);
-      await this.write({ ...state, runtimes });
-      throw new Error("分配快照指定的本机 CLI 或其运行依赖已变化，需要重新验证。 ");
+      await this.markRevalidationFailed(runtime,error);
+      throw error;
     }
   }
 
@@ -106,13 +114,12 @@ export class CliRuntimeRegistry {
     const runtimeId = state.selectedByCli[cli];
     if (!runtimeId) throw new Error(`未选择已验证的本机 ${cli} CLI。请在“执行底座”中扫描、验证并设定。 `);
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
-    if (!runtime || runtime.status !== "verified") throw new Error(`当前本机 ${cli} CLI 不可用，请重新验证。 `);
+    if (!runtime || runtime.status === "invalid") throw new Error(`当前本机 ${cli} CLI 不可用，请重新验证。 `);
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(state, runtime); }
     catch (error) {
-      const runtimes = state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item);
-      await this.write({ ...state, runtimes });
-      throw new Error(`当前本机 ${cli} CLI 或其 node 依赖已变化，需要重新验证。 `);
+      await this.markRevalidationFailed(runtime,error);
+      throw error;
     }
     return verified;
   }
@@ -126,13 +133,12 @@ export class CliRuntimeRegistry {
     const runtimeId = state.harnessRuntimeId;
     if (!runtimeId) throw new Error("未选择已验证的主控 CLI。请在“执行底座”中扫描、验证并设为主控。 ");
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
-    if (!runtime || runtime.status !== "verified") throw new Error("当前主控 CLI 不可用，请重新验证。 ");
+    if (!runtime || runtime.status === "invalid") throw new Error("当前主控 CLI 不可用，请重新验证。 ");
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(state, runtime); }
     catch (error) {
-      const runtimes = state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item);
-      await this.write({ ...state, runtimes });
-      throw new Error("当前主控 CLI 或其 node 依赖已变化，需要重新验证。 ");
+      await this.markRevalidationFailed(runtime,error);
+      throw error;
     }
     if (!verified.verifiedAdapter.harnessTools) throw new Error("当前主控 CLI Adapter 不支持 Wave Flow 主控窄工具。 ");
     return verified;
@@ -142,13 +148,12 @@ export class CliRuntimeRegistry {
   async resolveByIdHarness(runtimeId: string): Promise<VerifiedCliRuntime> {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
-    if (!runtime || runtime.status !== "verified") throw new Error("该 Harness 创建时使用的本机 CLI 已不可用，请重新验证后新建会话。 ");
+    if (!runtime || runtime.status === "invalid") throw new Error("该 Harness 创建时使用的本机 CLI 已不可用，请重新验证。 ");
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(state, runtime); }
     catch (error) {
-      const runtimes = state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item);
-      await this.write({ ...state, runtimes });
-      throw new Error("该 Harness 创建时使用的 CLI 或其 node 依赖已变化，需要重新验证并新建会话。 ");
+      await this.markRevalidationFailed(runtime,error);
+      throw error;
     }
     if (!verified.verifiedAdapter.harnessTools) throw new Error("该 Harness 创建时使用的 CLI Adapter 不支持主控窄工具。 ");
     return verified;
@@ -156,6 +161,18 @@ export class CliRuntimeRegistry {
 
   /** 旧 Registry 首次使用时受控补齐 node 依赖；之后每次启动均按身份复核。kimi 等自包含 CLI 不解析 node。 */
   private async verifyRuntimeDependencies(state: CliRuntimeRegistryFile, runtime: CliRuntimeRecord): Promise<VerifiedCliRuntime> {
+    try { if(runtime.status!=="verified")throw new Error("需要完整检查");return await this.checkRuntimeDependencies(state,runtime); }
+    catch(error) {
+      const pending=this.#revalidations.get(runtime.runtimeId);
+      if(pending)return pending;
+      const task=this.revalidateSameRuntime(runtime).catch(cause=>{throw new Error(`CLI 或其 node 依赖已变化，自动检查失败：${safeDiagnostic(cause)} 请打开执行底座设置。`);}).finally(()=>this.#revalidations.delete(runtime.runtimeId));
+      this.#revalidations.set(runtime.runtimeId,task);
+      return task;
+    }
+  }
+
+  /** 快速身份检查不执行业务；变化时再完整复验同路径，不从候选池选替代CLI。 */
+  private async checkRuntimeDependencies(state: CliRuntimeRegistryFile, runtime: CliRuntimeRecord): Promise<VerifiedCliRuntime> {
     if (!adapterForCli(runtime.cli).requiresNodeRuntime) {
       await verifyExecutableIdentity(runtime.executablePath, runtime.executableIdentity);
       return { ...runtime, status: "verified" };
@@ -170,6 +187,30 @@ export class CliRuntimeRegistry {
     await verifyNodeRuntime(node.path, node.identity);
     await verifyExecutableIdentity(runtime.executablePath, runtime.executableIdentity);
     return { ...runtime, nodeExecutable: node, status: "verified" };
+  }
+
+  private async revalidateSameRuntime(runtime:CliRuntimeRecord):Promise<VerifiedCliRuntime> {
+    const current=await verifyExecutable(runtime.executablePath);
+    if(current.executablePath!==runtime.executablePath)throw new Error("CLI 路径目标已变化，需要用户确认。");
+    if(runtime.nodeExecutable){const node=await verifyExecutable(runtime.nodeExecutable.path);if(node.executablePath!==runtime.nodeExecutable.path)throw new Error("Node 路径目标已变化，需要用户确认。");}
+    const checked=await this.revalidate(runtime.cli,{executablePath:runtime.executablePath,discoveredFrom:runtime.discoveredFrom,discoveredShell:runtime.discoveredShell,nodeExecutablePath:runtime.nodeExecutable?.path});
+    if(checked.cli!==runtime.cli||checked.executablePath!==runtime.executablePath||checked.verifiedAdapter.adapterId!==runtime.verifiedAdapter.adapterId||runtime.verifiedAdapter.harnessTools&&!checked.verifiedAdapter.harnessTools||runtime.nodeExecutable&&checked.nodeExecutable?.path!==runtime.nodeExecutable.path)throw new Error("CLI 路径、类型或主控能力已变化，需要用户确认。");
+    await verifyExecutableIdentity(checked.executablePath,checked.executableIdentity);
+    if(checked.nodeExecutable)await verifyNodeRuntime(checked.nodeExecutable.path,checked.nodeExecutable.identity);
+    const latest=await this.read();
+    const original=latest.runtimes.find(item=>item.runtimeId===runtime.runtimeId);
+    if(!original||original.executablePath!==runtime.executablePath)throw new Error("CLI 已移除或修改，自动检查结果已失效。");
+    const verified={...checked,runtimeId:runtime.runtimeId,status:"verified" as const,diagnostic:null};
+    await this.write({...latest,runtimes:latest.runtimes.map(item=>item.runtimeId===runtime.runtimeId?verified:item)});
+    return verified;
+  }
+
+  /** 失败只更新原记录，不用探针开始前的旧快照覆盖后来默认选择或删除。 */
+  private async markRevalidationFailed(runtime:CliRuntimeRecord,error:unknown):Promise<void> {
+    const latest=await this.read();
+    const current=latest.runtimes.find(item=>item.runtimeId===runtime.runtimeId);
+    if(!current||current.executablePath!==runtime.executablePath||current.verifiedAt!==runtime.verifiedAt)return;
+    await this.write({...latest,runtimes:latest.runtimes.map(item=>item.runtimeId===runtime.runtimeId?{...item,status:"needs-revalidation" as const,diagnostic:safeDiagnostic(error)}:item)});
   }
 
   private path(): string { return join(this.root, "runtimes.json"); }

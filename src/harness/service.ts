@@ -16,6 +16,7 @@ import { REVISION_PREVIEW_VERSION, previewMatchesSource, type RevisionPreview } 
 import { TaskLifecycle } from "./task-lifecycle";
 import { assertStartable, candidateRevision, normalizeTaskCreation, taskIdForRequest, type TaskCreation, type TaskMetadata } from "./task-contract";
 import { canonicalJson, isTemplateSelection, resolveWorkflowTemplate, validateTemplateInput } from "./workflow-templates";
+import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 
 /** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
@@ -36,6 +37,8 @@ export class HarnessService {
     factoryOrResolve: ((harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>) | (() => Promise<ResolvedHarnessModelConfig | null>),
     legacyCreate?: (config: ResolvedHarnessModelConfig, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks) => HarnessPiSession,
     private readonly resolveSessionIdentity: () => Promise<{ readonly fingerprint: string; readonly runtime?: import("../runtimes/types").RuntimeProvenance }> = async () => ({ fingerprint: "injected-harness-session" }),
+    /** 专用验收构建启用单链基础；默认false，普通用户行为不切换，存量Task模式不改。 */
+    private readonly singleWorkflowForAcceptance = false,
   ) {
     // 仅测试夹具仍可使用旧构造器形状；生产 Engine 只传 ACP factory，且仓库不再
     // 提供任何 Base URL/API key 配置读写实现。
@@ -77,7 +80,7 @@ export class HarnessService {
         if (recovered.task?.payloadHash !== value.payloadHash || recovered.projectId !== value.projectId) throw new Error("任务请求载荷与耐久档案冲突。");
       } else {
         if(value.template){const template=resolveWorkflowTemplate(value.template.id,value.template.version,value.template.sourceHash);if(!value.template.needsGuidance)validateTemplateInput(template.inputSchema,value.template.input);}
-        await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text, ...(value.template ? {template:value.template} : {}) });
+        await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text, ...(value.template ? {template:value.template} : {}), ...(this.singleWorkflowForAcceptance ? { workflowContract: "single-workflow-v1" as const } : {}) });
       }
       const entry = await this.entry(id);
       if(entry.projection.snapshot().status==="completed")return entry.projection.snapshot();
@@ -98,6 +101,54 @@ export class HarnessService {
   }
 
   /** 用户显式准备模板；同一保存 UUID 绑定唯一引导消息，重试及重开不得重发已开始回合。cardId 缺省新建候选；baseRevision 为编辑时的正整数基础版本，失配拒绝且不落盘。 */
+  /** 专用验收本地Task创建；请求字节hash绑定，不初始化模型、不执行本地模块。 */
+  async startLocalTask(cwd:string, request:{projectId:string;clientRequestId:string;path:string;sourceHash:string;input:JsonObject;title?:string}):Promise<HarnessSnapshot>{
+    if(!this.singleWorkflowForAcceptance)throw new Error("本地任务来源尚未开放，仅专用验收构建可用。");
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(request.clientRequestId))throw new Error("本地任务请求必须是UUID。");
+    const checked=await preflightLocalWorkflow(request.path,cwd);
+    if(checked.sourceHash!==request.sourceHash)throw new Error("本地文件已变化，请重新检查后确认。");
+    validateLocalInput(checked.inputSchema,request.input);
+    const id=taskIdForRequest(request.clientRequestId);
+    const normalized=normalizeTaskCreation({projectId:request.projectId,clientRequestId:request.clientRequestId,text:checked.meta.description,title:request.title});
+    const hash=createHash("sha256").update(canonicalJson({projectId:request.projectId,path:checked.path,sourceHash:checked.sourceHash,input:request.input,title:normalized.title})).digest("hex");
+    return this.lifecycle.run(id,async()=>{
+      const recovered=await HarnessJournal.recoverCreation(id,this.root);
+      if(recovered){if(recovered.task?.payloadHash!==hash)throw new Error("本地任务请求载荷冲突。");}
+      else await this.create(cwd,request.projectId,{clientRequestId:request.clientRequestId,payloadHash:hash,title:normalized.title,initialGoal:checked.meta.description,workflowContract:"single-workflow-v1"});
+      const entry=await this.entry(id),snapshot=entry.projection.snapshot();
+      if(snapshot.workflowRevisions.length)return snapshot;
+      const extracted=extractAgentWorkers(checked.source);
+      const {source,...origin}=checked;
+      const revision:import("./types").WorkflowRevision={revision:1,cardId:crypto.randomUUID(),parentRevision:null,goal:checked.meta.description,scope:"受信任本地文件；只在确认后执行",turnId:request.clientRequestId,source,sourceHash:checked.sourceHash,localOrigin:{path:origin.path,sourceHash:origin.sourceHash,meta:origin.meta,inputSchema:origin.inputSchema},input:structuredClone(request.input),createdAt:new Date().toISOString(),acceptedAt:null,rejectedAt:null,abandonedAt:null,preview:{previewVersion:REVISION_PREVIEW_VERSION,sourceHash:checked.sourceHash,phaseTitles:checked.meta.phases.map(p=>p.title),previewAgents:extracted.previewAgents}};
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};
+      await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
+    });
+  }
+
+  /** 用户编辑本地文件后复核并追加同链版本；旧基础版本拒绝，不覆盖冻结源码或批准。 */
+  async reviseLocalTask(id:string,request:{clientRequestId:string;baseRevision:number;sourceHash:string;input:JsonObject;
+    /** 首次执行前显式放弃候选后选择的新文件；缺省重新读取原本地路径，已有执行禁止换路径。 */
+    path?:string}):Promise<HarnessSnapshot>{
+    if(!this.singleWorkflowForAcceptance)throw new Error("本地修订仅专用验收构建可用。");
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(request.clientRequestId))throw new Error("本地修订请求必须是UUID。");
+    if(!Number.isInteger(request.baseRevision)||request.baseRevision<1)throw new Error("本地修订基础版本无效。");
+    return this.lifecycle.run(id,async()=>{
+      const entry=await this.entry(id),snapshot=entry.projection.snapshot(),prior=snapshot.workflowRevisions.at(-1);
+      const retry=snapshot.workflowRevisions.find(item=>item.localOrigin&&item.turnId===request.clientRequestId);
+      if(retry){if(retry.parentRevision!==request.baseRevision||retry.sourceHash!==request.sourceHash||canonicalJson(retry.input??{})!==canonicalJson(request.input)||request.path!==undefined&&(await realpath(request.path))!==retry.localOrigin!.path)throw new Error("本地修订请求载荷冲突。");return snapshot;}
+      if(snapshot.task?.workflowContract!=="single-workflow-v1"||snapshot.status!=="idle"||entry.turn||snapshot.executions.some(item=>item.finishedAt===null)||prior?.revision!==request.baseRevision)throw new Error("本地修订只允许空闲当前版本，旧草稿保留但不能覆盖新版本。");
+      if(request.path && (snapshot.executions.length || !prior.abandonedAt))throw new Error("只有首次执行前放弃候选后才能重新选择本地来源。");
+      const path=request.path??prior.localOrigin?.path;
+      if(!path)throw new Error("当前非本地来源，请先放弃候选再选择本地文件。");
+      const checked=await preflightLocalWorkflow(path,snapshot.cwd);
+      if(checked.sourceHash!==request.sourceHash)throw new Error("本地文件已变化，请重新预检。");
+      validateLocalInput(checked.inputSchema,request.input);
+      const revision:import("./types").WorkflowRevision={revision:prior.revision+1,cardId:prior.cardId,parentRevision:prior.revision,goal:checked.meta.description,scope:"受信任本地文件；只在确认后执行",source:checked.source,sourceHash:checked.sourceHash,localOrigin:{path:checked.path,sourceHash:checked.sourceHash,meta:checked.meta,inputSchema:checked.inputSchema},input:structuredClone(request.input),acceptedAt:null,rejectedAt:null,abandonedAt:null,createdAt:new Date().toISOString(),turnId:request.clientRequestId,preview:{previewVersion:REVISION_PREVIEW_VERSION,sourceHash:checked.sourceHash,phaseTitles:checked.meta.phases.map(p=>p.title),previewAgents:extractAgentWorkers(checked.source).previewAgents}};
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
+    });
+  }
+
+  /** 用户显式准备模板；同一保存 UUID 绑定唯一引导消息。 */
   async prepareTemplate(id:string,requestId:string,selection:import("./task-contract").TemplateSelection,cardId?:string,baseRevision?:number):Promise<HarnessSnapshot>{
     return this.mutate(id,async()=>{
       const snapshot=await this.saveTemplate(id,requestId,selection,cardId,undefined,baseRevision);
@@ -150,6 +201,8 @@ export class HarnessService {
       const currentAction=actionToken!==undefined&&entry.turnToken===actionToken&&snapshot.status==="running"&&!!entry.turn;
       if (!snapshot.task || !currentAction&&(snapshot.status!=="idle"||entry.turn) || snapshot.executions.some(item=>item.finishedAt===null)) throw new Error("主控必须空闲、任务未归档且无未终结执行，才能保存模板。");
       const candidate = candidateRevision(snapshot);
+      const reset=snapshot.task.workflowContract === "single-workflow-v1"&&!snapshot.executions.length&&!!snapshot.workflowRevisions.at(-1)?.abandonedAt;
+      if (snapshot.task.workflowContract === "single-workflow-v1" && (!candidate || candidate.localOrigin) && snapshot.workflowRevisions.length&&!reset) throw new Error("单链任务不能选择另一份模板；请修订原方案。");
       if(baseRevision!==undefined&&candidate?.revision!==baseRevision)throw new Error("参数版本已更新；你的草稿保留，请查看当前版本后再保存。");
       // 已保存候选的参数编辑使用其冻结目录快照；升级后的进程目录可能已不再
       // 提供旧版本，但不能因此替换旧源码/Schema 或迫使用户丢弃已批准证据。
@@ -162,7 +215,7 @@ export class HarnessService {
       if (!candidate && cardId) throw new Error("候选已执行、放弃或被取代。");
       const {source, ...templateOrigin} = template;
       const revision: import("./types").WorkflowRevision = {
-        revision:snapshot.workflowRevisions.length+1, cardId:candidate?.cardId??crypto.randomUUID(), parentRevision:candidate?.revision??null,
+        revision:snapshot.workflowRevisions.length+1, cardId:candidate?.cardId??(reset?snapshot.workflowRevisions.at(-1)?.cardId:undefined)??crypto.randomUUID(), parentRevision:candidate?.revision??(reset?snapshot.workflowRevisions.at(-1)!.revision:null),
         goal:template.meta.description, scope:template.explanation, turnId:requestId, source, sourceHash:template.sourceHash,
         templateOrigin, input:structuredClone(selection.input), ...(selection.needsGuidance?{parametersPending:true}:{}), saveRequestId:requestId, savePayloadHash:payloadHash,
         preview:this.buildRevisionPreview(source), createdAt:new Date().toISOString(), acceptedAt:null, rejectedAt:null, abandonedAt:null,
@@ -423,8 +476,10 @@ export class HarnessService {
     if (snapshot.task && snapshot.executions.some(item=>item.finishedAt===null)) throw new Error("存在未终结执行，不能准备下一份流程。");
     if (snapshot.task && (!goal?.trim() || !scope?.trim() || goal.length > 20000 || scope.length > 20000)) throw new Error("方案必须明确提供本轮目标与范围。");
     const candidate = candidateRevision(snapshot);
-    const revision: import("./types").WorkflowRevision = { revision: snapshot.workflowRevisions.length + 1, ...(snapshot.task ? { cardId: candidate?.cardId ?? crypto.randomUUID(), parentRevision: candidate?.revision ?? null, goal: goal!.trim(), scope: scope!.trim(), abandonedAt: null, turnId: snapshot.messages.filter(item => item.role === "user").at(-1)!.id } : {}), source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
-    const derivedFrom=candidate?.templateOrigin??candidate?.derivedFrom;
+    if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.workflowRevisions.at(-1)?.localOrigin&&!(snapshot.executions.length===0&&snapshot.workflowRevisions.at(-1)?.abandonedAt))throw new Error("本地Workflow由用户编辑并重新预检；主控不能用生成源码替换本地来源。");
+    const prior = snapshot.task?.workflowContract === "single-workflow-v1" ? snapshot.workflowRevisions.at(-1) : candidate;
+    const revision: import("./types").WorkflowRevision = { revision: snapshot.workflowRevisions.length + 1, ...(snapshot.task ? { cardId: prior?.cardId ?? crypto.randomUUID(), parentRevision: prior?.revision ?? null, goal: goal!.trim(), scope: scope!.trim(), abandonedAt: null, turnId: snapshot.messages.filter(item => item.role === "user").at(-1)!.id } : {}), source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
+    const derivedFrom=prior?.templateOrigin??prior?.derivedFrom;
     const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision: {...revision,...(derivedFrom?{derivedFrom}:{})} };
     await entry.journal.append(event); entry.projection.apply(event);
     return entry.projection.snapshot();
@@ -636,7 +691,7 @@ export class HarnessService {
 
   private buildRevisionPreview(source: string): RevisionPreview {
     const compiled = compileRestrictedWorkflow(source);
-    return { previewVersion: REVISION_PREVIEW_VERSION, sourceHash: createHash("sha256").update(source).digest("hex"), phaseTitles: compiled.meta.phases.map(phase => phase.title), previewAgents: extractAgentWorkers(source).previewAgents };
+    return { description:compiled.meta.description,workflowName:compiled.meta.name,previewVersion: REVISION_PREVIEW_VERSION, sourceHash: createHash("sha256").update(source).digest("hex"), phaseTitles: compiled.meta.phases.map(phase => phase.title), previewAgents: extractAgentWorkers(source).previewAgents };
   }
 
   private async openEntry(harnessRunId: string): Promise<HarnessEntry> {
@@ -644,7 +699,7 @@ export class HarnessService {
     const projection = new HarnessProjection(opened.journal.manifest); for (const event of opened.events) projection.apply(event);
     const entry: HarnessEntry = { journal: opened.journal, projection, session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, recorder: null };
     for (const revision of projection.snapshot().workflowRevisions) {
-      if (revision.preview && revision.preview.previewVersion >= REVISION_PREVIEW_VERSION) continue;
+      if (revision.preview && revision.preview.previewVersion >= REVISION_PREVIEW_VERSION && revision.preview.description && revision.preview.workflowName) continue;
       try {
         const preview = this.buildRevisionPreview(revision.source);
         if (!previewMatchesSource(preview, revision.source, revision.sourceHash)) continue;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { harnessRunDirectory, harnessRunsRoot, validateRunId } from "../journal/paths";
+import { harnessRunDirectory, harnessRunsRoot, validateRunId, runsRoot } from "../journal/paths";
 import { RUNTIME_VERSION } from "../journal/types";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import { DEFAULT_RESTRICTED_WORKFLOW_POLICY } from "../runtime/policy-host";
@@ -15,6 +15,8 @@ import { assertStartable } from "./task-contract";
 import { RunJournal } from "../journal/run-journal";
 import { HarnessJournal } from "./journal";
 import { canonicalJson, validateTemplateInput } from "./workflow-templates";
+import {loadWorkflowSource} from "../workflow/load-workflow";
+import {preflightLocalWorkflow,validateLocalInput} from "../workflow/preflight-local";
 
 /** Engine 注入的执行器工厂产物；wiring 是 Engine 私有接线上下文，本服务不透明传递。 */
 export type HarnessExecutionExecutor = {
@@ -49,10 +51,12 @@ export class HarnessExecutionService {
 
   constructor(
     private readonly harness: HarnessService,
-    /** 执行器工厂；config 是分配卡冻结的快照（受信任路径不存在此服务，仅受限 Execution 有值）。 */
+    /** 执行器工厂；受限来源传冻结分配快照，本地来源传 null 并保留作者 CLI。 */
     private readonly createExecutor: (config: ExecutionConfigSnapshot | null) => HarnessExecutionExecutor,
     private readonly hooks: HarnessExecutionHooks = {},
     private readonly root = harnessRunsRoot(),
+    /** 独立本地Run Store；Engine显式传入，不复制节点状态。 */
+    private readonly localStoreRoot = runsRoot(),
   ) {}
 
   /** Execution 档案位于所属 Harness 档案内的嵌套 Run Store。 */
@@ -61,7 +65,14 @@ export class HarnessExecutionService {
     return join(harnessRunDirectory(this.root, harnessRunId), "executions");
   }
 
-  /** 创建并后台启动一次 Execution；只有已接受冻结的 revision 可以执行，且必须携带分配卡冻结的执行配置。 */
+  /** 先验证Task归属，再按来源路由原Store。 */
+  private async storeFor(harnessRunId:string,executionId:string):Promise<string>{
+    const record=(await this.harness.snapshot(harnessRunId)).executions.find(item=>item.executionId===executionId);
+    if(!record)throw new Error("执行不属于当前任务。");
+    return record.kind==="local-run"?this.localStoreRoot:this.executionsRoot(harnessRunId);
+  }
+
+  /** 创建并后台启动一次已确认的执行。 */
   async createExecution(harnessRunId: string, revisionNumber: number, input: JsonObject = {}, config?: ExecutionConfigSnapshot, confirmation?: Pick<WorkflowExecutionRecord,"confirmationRequestId"|"confirmationPayloadHash">): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
     return this.withLifecycleLock(harnessRunId, () => this.createExecutionOnce(harnessRunId, revisionNumber, input, config ?? null, confirmation));
   }
@@ -83,26 +94,41 @@ export class HarnessExecutionService {
     if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束的 WorkflowExecution；新 revision 必须等前一执行到达终态。 ");
     // 受限 Execution 的脚本字面量 cli/model 不直接生效；没有分配卡冻结的快照就没有
     // 任何诚实依据决定节点落到哪个 Runtime，必须在任何耐久事实之前拒绝。
-    if (!config) throw new Error("创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
+    if (!revision.localOrigin && !config) throw new Error("创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
+    if (revision.localOrigin && config) throw new Error("本地 Workflow 不接受 CLI 分配配置，请使用作者声明。 ");
     // 编译失败在任何耐久事实之前拒绝，不产生 Execution。
-    const module = compileRestrictedWorkflow(revision.source);
+    if(revision.localOrigin){
+      const checked=await preflightLocalWorkflow(revision.localOrigin.path,snapshot.cwd);
+      if(checked.sourceHash!==revision.sourceHash)throw new Error("本地来源启动前已变化，请重新预检。");
+      validateLocalInput(revision.localOrigin.inputSchema,input);
+      if(canonicalJson(input)!==canonicalJson(revision.input))throw new Error("本地输入与批准版本不匹配。");
+    }
+    const module = revision.localOrigin?await loadWorkflowSource(revision.source,revision.localOrigin.path):compileRestrictedWorkflow(revision.source);
     const policy = DEFAULT_RESTRICTED_WORKFLOW_POLICY;
     const executionId = crypto.randomUUID();
-    const root = this.executionsRoot(harnessRunId);
+    const root = revision.localOrigin?this.localStoreRoot:this.executionsRoot(harnessRunId);
     const directory = join(root, executionId);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const sourcePath = join(directory, "source.ts");
     await writeFile(sourcePath, revision.source, { encoding: "utf8", mode: 0o600 });
-    const created = this.createExecutor(config);
-    const runtime = await RunRuntime.create({
+    let created: HarnessExecutionExecutor;
+    let runtime: RunRuntime;
+    try {
+    created = this.createExecutor(revision.localOrigin?null:config);
+    runtime = await RunRuntime.create({
       workflow: module, input, workflowSource: revision.source, clientRequestId: crypto.randomUUID(),
       workflowProjectCwd: snapshot.cwd, workflowPath: sourcePath, storeRoot: root,
       executor: created.executor,
       harness: { harnessRunId, revision: revision.revision, sourceHash: revision.sourceHash },
       runId: executionId,
-      executionConfig: config,
+      executionConfig: revision.localOrigin?undefined:config??undefined,
     });
-    const record: WorkflowExecutionRecord = { ...confirmation, executionId, revision: revision.revision, sourceHash: revision.sourceHash, runtimeVersion: RUNTIME_VERSION, policy, createdAt: new Date().toISOString(), status: "running", finishedAt: null, diagnostic: null, summary: null, config };
+    } catch(error) {
+      // prepare 尚未取得Task关联；只清理本调用生成的UUID目录，不触碰用户工作区。
+      await rm(directory,{recursive:true,force:true}).catch(()=>{});
+      throw error;
+    }
+    const record: WorkflowExecutionRecord = { ...confirmation, kind:revision.localOrigin?"local-run":"restricted-execution", executionId, revision: revision.revision, sourceHash: revision.sourceHash, runtimeVersion: RUNTIME_VERSION, policy, createdAt: new Date().toISOString(), status: "running", finishedAt: null, diagnostic: null, summary: null, ...(config ? {config} : {}) };
     // Execution 登记事实先于首次调度落盘；Harness Journal 与 Execution Journal 相互可核对。
     // 若登记失败，刚由本调用创建的嵌套目录没有任何可达引用，立即清理，不能把它
     // 遗留成看似可 resume 的孤儿 Run。
@@ -121,7 +147,7 @@ export class HarnessExecutionService {
       await this.harness.recordExecutionFinished(harnessRunId,executionId,"interrupted",diagnostic,null,runtime.snapshot().currentExecutionAttemptId);
       throw error;
     }
-    this.startExecution(harnessRunId, executionId, runtime, module, policy, releaseControl);
+    this.startExecution(harnessRunId, executionId, runtime, module, policy, releaseControl,!!revision.localOrigin);
     return { execution: record, snapshot: runtime.snapshot() };
   }
 
@@ -148,7 +174,7 @@ export class HarnessExecutionService {
       // active Execution 也逃过重启收敛，重新在 Web 中伪装为工作中。
       let runtime: RunRuntime;
       try {
-        runtime = await RunRuntime.open(record.executionId, new DeterministicExecutor(), this.executionsRoot(harnessRunId));
+        runtime = await RunRuntime.open(record.executionId, new DeterministicExecutor(), await this.storeFor(harnessRunId,record.executionId));
       } catch {
         continue;
       }
@@ -244,7 +270,7 @@ export class HarnessExecutionService {
   /** 特定 attempt 的只读证据；新格式显式身份，旧格式按事件顺序绑定，不猜时间。 */
   async attemptResults(harnessRunId:string,executionId:string,attempt:number):Promise<import("../desktop/types").ExecutionAttemptResultsResponse> {
     await this.runtimeFor(harnessRunId,executionId); // 先校验所属 Task，不凭 id 读取其他任务。
-    const run=await RunJournal.open(executionId,this.executionsRoot(harnessRunId));
+    const run=await RunJournal.open(executionId,await this.storeFor(harnessRunId,executionId));
     const starts=run.events.filter(event=>event.type==="execution-attempt.started");
     const start=starts.find(event=>event.executionAttemptId===attempt);
     if(!start)throw new Error("指定执行尝试不存在。");
@@ -338,16 +364,17 @@ export class HarnessExecutionService {
     if (snapshot.task && snapshot.status !== "idle") throw new Error("主控空闲且任务未归档时才能恢复原执行。");
     const record = snapshot.executions.find((item) => item.executionId === executionId);
     if (!record) throw new Error("未知 WorkflowExecution。 ");
+    if (snapshot.task?.workflowContract === "single-workflow-v1" && snapshot.executions.at(-1)?.executionId !== executionId) throw new Error("已有较新执行，旧执行只能查看历史，不能恢复。");
     // 分配快照随登记事实耐久；缺失说明档案早于分配卡机制，没有诚实依据重建生效请求。
-    if (!record.config) throw new Error("该 Execution 缺少分配卡冻结的执行配置快照，不能 resume。 ");
+    if (record.kind !== "local-run" && !record.config) throw new Error("该 Execution 缺少分配卡冻结的执行配置快照，不能 resume。 ");
     const revision = snapshot.workflowRevisions.find((item) => item.revision === record.revision);
     if (!revision || revision.acceptedAt === null || revision.sourceHash !== record.sourceHash) throw new Error("Execution 绑定的 revision 不再是已接受冻结状态。 ");
-    const root = this.executionsRoot(harnessRunId);
+    const root = await this.storeFor(harnessRunId,executionId);
     const sourcePath = join(root, executionId, "source.ts");
     const source = await readFile(sourcePath, "utf8").catch(() => { throw new Error("Execution 冻结源码快照不可读取。 "); });
     if (createHash("sha256").update(source).digest("hex") !== record.sourceHash) throw new Error("Execution 冻结源码快照与登记 hash 不一致，fail closed。 ");
-    const module = compileRestrictedWorkflow(source);
-    const resumedExecutor = this.createExecutor(record.config);
+    const module = record.kind==="local-run"?await loadWorkflowSource(source,revision.localOrigin?.path):compileRestrictedWorkflow(source);
+    const resumedExecutor = this.createExecutor(record.kind==="local-run"?null:record.config??null);
     // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
     // waiter 和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
     // 尝试收敛为 interrupted，再由标准 Replay 路径创建新 attempt。
@@ -383,9 +410,9 @@ export class HarnessExecutionService {
     // interrupted/cancelled；用户授权 resume 后必须先耐久地重开外层登记，后续新 attempt
     // 才能写入新的 execution_finished，而不是被旧终态拒绝。
     if (record.status === "interrupted" || record.status === "cancelled") await this.harness.recordExecutionResumed(harnessRunId, executionId);
-    const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root, record.config);
+    const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root, record.kind==="local-run"?null:record.config);
     const releaseControl = await this.hooks.wireControl?.(runtime, resumedExecutor.wiring);
-    this.startExecution(harnessRunId, executionId, runtime, module, record.policy, releaseControl);
+    this.startExecution(harnessRunId, executionId, runtime, module, record.policy, releaseControl,record.kind==="local-run");
     return runtime.snapshot();
   }
 
@@ -395,7 +422,7 @@ export class HarnessExecutionService {
     if (!snapshot.executions.some((item) => item.executionId === executionId)) throw new Error("未知 WorkflowExecution。 ");
     const live = this.#instances.get(executionId)?.runtime;
     if (live) return live;
-    return RunRuntime.open(executionId, new DeterministicExecutor(), this.executionsRoot(harnessRunId));
+    return RunRuntime.open(executionId, new DeterministicExecutor(), await this.storeFor(harnessRunId,executionId));
   }
 
   private async control(harnessRunId: string, executionId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunSnapshot>): Promise<RunSnapshot> {
@@ -419,7 +446,7 @@ export class HarnessExecutionService {
   }
 
   /** 后台执行受限脚本；结束后登记终态事实并做展示通知。 */
-  private startExecution(harnessRunId: string, executionId: string, runtime: RunRuntime, module: ReturnType<typeof compileRestrictedWorkflow>, policy: WorkflowExecutionRecord["policy"], releaseControl: void | (() => void)): void {
+  private startExecution(harnessRunId: string, executionId: string, runtime: RunRuntime, module: ReturnType<typeof compileRestrictedWorkflow>, policy: WorkflowExecutionRecord["policy"], releaseControl: void | (() => void), local = false): void {
     const instance: ExecutionInstance = { runtime, releaseControl };
     this.#instances.set(executionId, instance);
     // run() 的返回值需要进入 summary，经闭包传递；整个 Execution 只调用一次 run()。
@@ -427,7 +454,7 @@ export class HarnessExecutionService {
     // run() 的 rejection 是本 attempt 失败的直接原因，必须保留到 settle 登记；
     // 否则 resume 重放被拒等场景下只能读到上一次 attempt 的旧诊断，真实错误永久丢失。
     let runtimeError: Error | null = null;
-    void this.harness.lifecycle.outside(()=>runtime.run(module, { policy }))
+    void this.harness.lifecycle.outside(()=>runtime.run(module, local ? {} : { policy }))
       .then((result) => { runtimeResult = result; }, (error: unknown) => { runtimeError = error instanceof Error ? error : new Error(String(error)); })
       .then(async () => {
         // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。

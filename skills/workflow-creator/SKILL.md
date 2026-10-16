@@ -30,6 +30,10 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 
 ## meta 契约
 
+meta.description 用简短任务名称式说明（建议20个中文字符以内），用于聊天方案标题；不要把完整目标、范围和风险塞进description。详细内容放在提案goal/scope，短标题不替代这些边界。
+
+Wave Flow新增本地Task输入契约（实施中）：受信任本地模块用于新Task时必须声明纯字面量`meta.inputSchema`，为JSON-safe对象Schema（`type: "object"`）；无参数用`{type:"object",properties:{},additionalProperties:false}`。它不等于节点结果schema，不以exampleArgs猜默认或必填。旧模块直接加载/恢复可缺省，主控受限草案不因此自动获得新入口。
+
 `meta` 必须是纯字面量（无变量、调用、展开、计算属性或模板字符串）：
 
 - `name`：kebab-case，如 `deep-research`。
@@ -83,6 +87,8 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 新信息，不发心跳式空消息，绝不记录密钥、完整 prompt 或大段 Agent 原文。
 
 ## 受限草案的额外硬约束
+
+先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task；修订只能保存草案，现场续作尚未开放，不能承诺立即运行。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
 
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。
 这是 Wave Flow 主控控制面，不是 Workflow 作者 API。同一未执行候选的修改追加同卡版本，

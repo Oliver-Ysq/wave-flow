@@ -18,6 +18,7 @@ export function validateWorkflowMeta(value: unknown): asserts value is WorkflowM
   const titles = meta.phases.map((phase) => (phase as { title: string }).title);
   if (new Set(titles).size !== titles.length) throw new Error("Workflow meta.phases 的 title 必须唯一。");
   if ("exampleArgs" in meta && !isJsonObject(meta.exampleArgs)) throw new Error("Workflow meta.exampleArgs 必须是 JSON-safe 对象。");
+  if ("inputSchema" in meta && (!isJsonObject(meta.inputSchema) || meta.inputSchema.type !== "object")) throw new Error("Workflow meta.inputSchema 必须是对象 Schema。");
 }
 
 function isPhase(value: unknown): value is { title: string } {

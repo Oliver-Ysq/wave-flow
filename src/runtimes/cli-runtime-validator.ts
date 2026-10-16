@@ -21,10 +21,13 @@ function mcpProbeServer(): acp.McpServer {
  * `--version` → ACP initialize → 注入内置 probe MCP server 的 session/new。
  * 接入新 CLI 只需要一条 Catalog 声明；任何一步失败都不写入 Registry。
  */
-export async function validateCliRuntime(cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: RuntimeDiscoverySource; readonly discoveredShell: string | null; readonly createTransport?: AcpTransportFactory }): Promise<CliRuntimeRecord> {
+export async function validateCliRuntime(cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: RuntimeDiscoverySource; readonly discoveredShell: string | null; readonly createTransport?: AcpTransportFactory;
+  /** 自动复验锁定原Node路径；缺省仅首次验证时从受控shell解析，不允许复验静默换解释器。 */
+  readonly nodeExecutablePath?: string }): Promise<CliRuntimeRecord> {
   const entry = adapterForCli(cli);
   const executable = await verifyExecutable(input.executablePath);
-  const node = entry.requiresNodeRuntime ? await resolveNodeRuntime(input.discoveredShell) : null;
+  const pinnedNode = input.nodeExecutablePath ? await verifyExecutable(input.nodeExecutablePath) : null;
+  const node = entry.requiresNodeRuntime ? pinnedNode ? {executablePath:pinnedNode.executablePath,executableIdentity:pinnedNode.identity} : await resolveNodeRuntime(input.discoveredShell) : null;
   const version = await readCliVersion(executable.executablePath, entry.displayName, node ? dirname(node.executablePath) : undefined);
   const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-validate-"));
   try {
@@ -39,8 +42,8 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
     const launched = entry.launcher(runtime as VerifiedCliRuntime);
     const launcher: AcpLauncher = { id: entry.adapterId, command: launched.command, args: launched.args, env: entry.environment(runtime as VerifiedCliRuntime) };
     const client = new AcpSessionClient(launcher, input.createTransport);
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15_000);
     try {
-      const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15_000);
       const initialized = await client.initialize(controller.signal);
       if (initialized.protocolVersion !== entry.acpProtocolVersion) throw new Error("ACP 协议版本不兼容。 ");
       // 探针 server 必须随 session/new 真实交付；10s 内未完成 stdio MCP 启动视为不支持。
@@ -54,6 +57,6 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
         }
       }
       return runtime;
-    } finally { client.close(); }
+    } finally { clearTimeout(timer);client.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 }

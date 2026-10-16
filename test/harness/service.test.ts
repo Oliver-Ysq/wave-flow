@@ -20,13 +20,13 @@ test("revision 预览提案时耐久，旧档案并发补齐一次，重开不�
   const service = new HarnessService(root, async () => new FakePi());
   const created = await service.create(cwd);
   const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
-  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 2, sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
+  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 3,description:"预览",workflowName:"durable-preview", sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
   const saved = await HarnessJournal.open(created.harnessRunId, root);
   expect(saved.snapshot.workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
   expect(saved.events.filter(event => event.type === 'workflow.revision_preview_saved')).toHaveLength(0);
 
   const legacyId = crypto.randomUUID();
-  const journal = await HarnessJournal.create({ harnessRunId: legacyId, cwd, version: 5, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
+  const journal = await HarnessJournal.create({ harnessRunId: legacyId, cwd, version: 8, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
   const revision = { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
   await journal.append({ type: 'workflow.revision_proposed', at: revision.createdAt, harnessRunId: legacyId, revision });
   await journal.append({ type: 'workflow.revision_accepted', at: revision.createdAt, harnessRunId: legacyId, revision: 1 });
@@ -48,7 +48,7 @@ test("revision 预览提案时耐久，旧档案并发补齐一次，重开不�
 test("旧源码不再满足编译规则时只降级预览，不阻断聊天重开", async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'wave-flow-preview-legacy-')); directories.push(cwd);
   const root = harnessRunsRoot(cwd), harnessRunId = crypto.randomUUID();
-  const journal = await HarnessJournal.create({ harnessRunId, cwd, version: 5, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
+  const journal = await HarnessJournal.create({ harnessRunId, cwd, version: 8, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
   const source = 'old invalid source';
   await journal.append({ type: 'workflow.revision_proposed', at: new Date().toISOString(), harnessRunId, revision: { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(), acceptedAt: null } });
   const opened = new HarnessService(root, async () => new FakePi());

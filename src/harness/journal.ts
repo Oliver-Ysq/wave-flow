@@ -8,11 +8,12 @@ import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, Harness
 import type { RuntimeProvenance } from "../runtimes/types";
 import { isRevisionPreview, previewMatchesSource, type RevisionPreview } from "./revision-preview";
 import { isTemplateOrigin, isTemplateSelection, validateTemplateInput } from "./workflow-templates";
+import {inspectLocalWorkflowSource,validateLocalInput} from "../workflow/preflight-local";
+import {createHash} from "node:crypto";
+import {canonicalJson} from "./workflow-templates";
 
-/** 独立 Harness 档案格式；v7 增加 Task 与卡生命周期；兼容读取 v1–v6。 */
-export const HARNESS_JOURNAL_VERSION = 7;
-/** 可读取的历史 Harness 档案版本。 */
-export const COMPATIBLE_HARNESS_JOURNAL_VERSIONS = [1, 2, 3, 4, 5, 6, HARNESS_JOURNAL_VERSION] as const;
+/** 当前Harness档案格式；只读取本格式，不迁移或兼容旧开发档案。 */
+export const HARNESS_JOURNAL_VERSION = 8;
 
 export type HarnessManifest = {
   /** v7 创建身份与固定标题；历史缺省。 */
@@ -185,12 +186,18 @@ export class HarnessProjection {
     if(event.type==="harness.runtime_initialized"){if(!this.manifest.task||this.#status==="running"||this.#initializedRuntime||this.manifest.runtime)throw new Error("主控来源只能在任务首回合前初始化一次。");this.#initializedRuntime=event.runtime;return;}
     if (event.type === "harness.initialization_failed") { if (this.#status === "running" || !this.manifest.task) throw new Error("初始化失败事实不合法。"); this.#diagnostic = event.diagnostic; return; }
     if (event.type === "workflow.card_abandoned") {
+      if (this.manifest.task?.workflowContract === "single-workflow-v1") {
+        const latest = this.#workflowRevisions.at(-1);
+        if (!latest || latest.cardId !== event.cardId || latest.abandonedAt || this.#executions.some(item => item.revision === latest.revision)) throw new Error("只能放弃当前未执行修订。");
+        this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...latest, abandonedAt: event.at };
+        return;
+      }
       const revisions = this.#workflowRevisions.filter(item => item.cardId === event.cardId);
       if (!revisions.length || revisions.some(item => item.abandonedAt || this.#executions.some(execution => execution.revision === item.revision))) throw new Error("只能放弃尚未执行的候选。");
       this.#workflowRevisions = this.#workflowRevisions.map(item => item.cardId === event.cardId ? { ...item, abandonedAt: event.at } : item); return;
     }
     if (event.type === "harness.user_message") { if (this.#status === "running" || this.#status === "completed") throw new Error("已完成或运行中的 Harness 不能追加用户消息。 "); this.#messages.push(event.message); this.#status = "idle"; this.#diagnostic = null; return; }
-    if (event.type === "harness.turn_started") { if (this.#status === "running" || this.#messages.at(-1)?.id !== event.userMessageId) throw new Error("Harness turn_started 不匹配最新用户消息。 "); this.#status = "running"; this.#turnUserMessageId = event.userMessageId; this.#turnEntrySeq = 0; return; }
+    if (event.type === "harness.turn_started") { if (this.#status === "running" || this.#messages.at(-1)?.id !== event.userMessageId) throw new Error("Harness turn_started 不匹配最新用户消息。 "); this.#status = "running"; this.#diagnostic = null; this.#turnUserMessageId = event.userMessageId; this.#turnEntrySeq = 0; return; }
     if (event.type === "harness.assistant_message") { if (this.#status !== "running" || event.message.role !== "assistant" || this.#assistantMessageId) throw new Error("Harness assistant_message 不合法。 "); this.#messages.push(event.message); this.#assistantMessageId = event.message.id; return; }
     if (event.type === "harness.tool_activity") {
       if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness tool_activity 必须绑定当前 assistant 消息。 ");
@@ -231,7 +238,7 @@ export class HarnessProjection {
     }
     if (event.type === "harness.turn_finished") { if (this.#status !== "running" || this.#assistantMessageId !== event.messageId) throw new Error("Harness turn_finished 缺少完整 assistant 消息。 "); this.assertNoOpenEntries("turn_finished"); this.#status = "idle"; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
     if (event.type === "harness.turn_interrupted") { if (this.#status !== "running") throw new Error("Harness turn_interrupted 必须来自运行中回合。 "); this.assertNoOpenEntries("turn_interrupted"); this.#status = "interrupted"; this.#diagnostic = event.diagnostic; this.#turnUserMessageId = null; this.#assistantMessageId = null; return; }
-    if (event.type === "harness.completed") { if (this.#status === "running" || this.#completedAt !== null) throw new Error("Harness 只能在空闲或中断后完成一次。 "); if (this.#executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution 时不能完成 Harness。 "); if(this.manifest.task&&[...this.#workflowRevisions].reverse().some(item=>item.cardId&&!item.abandonedAt&&!this.#executions.some(execution=>this.#workflowRevisions.find(revision=>revision.revision===execution.revision)?.cardId===item.cardId)))throw new Error("存在未处理候选时不能归档任务。"); this.#status = "completed"; this.#completedAt = event.at; this.#diagnostic = null; return; }
+    if (event.type === "harness.completed") { if (this.#status === "running" || this.#completedAt !== null) throw new Error("Harness 只能在空闲或中断后完成一次。 "); if (this.#executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution 时不能完成 Harness。 "); const pending = this.manifest.task?.workflowContract === "single-workflow-v1" ? this.#workflowRevisions.slice(-1).some(item=>!item.abandonedAt&&!this.#executions.some(execution=>execution.revision===item.revision)) : [...this.#workflowRevisions].reverse().some(item=>item.cardId&&!item.abandonedAt&&!this.#executions.some(execution=>this.#workflowRevisions.find(revision=>revision.revision===execution.revision)?.cardId===item.cardId)); if(this.manifest.task&&pending)throw new Error("存在未处理候选时不能归档任务。"); this.#status = "completed"; this.#completedAt = event.at; this.#diagnostic = null; return; }
     if (event.type === "workflow.revision_preview_saved") {
       const index = this.#workflowRevisions.findIndex(item => item.revision === event.revision);
       const revision = this.#workflowRevisions[index];
@@ -240,9 +247,16 @@ export class HarnessProjection {
     }
     if (event.type === "workflow.revision_proposed") {
       if (this.manifest.task) {
+        if (this.manifest.task.workflowContract === "single-workflow-v1") {
+          const prior = this.#workflowRevisions.at(-1);
+          if (!event.revision.cardId || this.#executions.some(item => item.finishedAt === null) || (prior ? event.revision.cardId !== prior.cardId || event.revision.parentRevision !== prior.revision : event.revision.parentRevision !== null)) throw new Error("单链修订身份或父版本不匹配。");
+          if(prior && !!prior.localOrigin!==!!event.revision.localOrigin && (this.#executions.length || !prior.abandonedAt))throw new Error("来源信任只能在首次执行前显式放弃候选后替换。");
+          if(prior?.localOrigin&&event.revision.localOrigin&&prior.localOrigin.path!==event.revision.localOrigin.path&&(this.#executions.length||!prior.abandonedAt))throw new Error("已有执行或未放弃候选不能更换本地来源路径。");
+        } else {
         const latest = [...this.#workflowRevisions].reverse().find(item=>item.cardId&&!item.abandonedAt);
         const candidate = latest && !this.#executions.some(execution=>this.#workflowRevisions.find(item=>item.revision===execution.revision)?.cardId===latest.cardId) ? latest : undefined;
         if (!event.revision.cardId || this.#executions.some(item=>item.finishedAt===null) || (candidate ? candidate.cardId!==event.revision.cardId||event.revision.parentRevision!==candidate.revision : event.revision.parentRevision!==null||this.#workflowRevisions.some(item=>item.cardId===event.revision.cardId))) throw new Error("候选卡或父版本不匹配。");
+        }
       }
       if(this.#workflowRevisions.length+1!==event.revision.revision||event.revision.acceptedAt!==null||(event.revision.rejectedAt??null)!==null) throw new Error("Workflow revision 序号或状态无效。");
       this.#workflowRevisions.push(event.revision);return;
@@ -252,6 +266,7 @@ export class HarnessProjection {
   if (event.type === "workflow.execution_created") {
       if(event.execution.confirmationRequestId&&this.#executions.some(item=>item.confirmationRequestId===event.execution.confirmationRequestId))throw new Error("模板确认请求已登记执行，不能重复追加。");
       const revision = this.#workflowRevisions.find((item) => item.revision === event.execution.revision);
+      if((event.execution.kind==="local-run")!==!!revision?.localOrigin)throw new Error("执行来源kind必须与冻结revision一致。");
       if (this.manifest.task && (this.#status !== "idle" || this.#executions.some(execution=>this.#workflowRevisions.find(item=>item.revision===execution.revision)?.cardId===revision?.cardId) || revision?.abandonedAt || this.#workflowRevisions.at(-1)?.revision !== revision?.revision)) throw new Error("当前任务方案已取代、放弃或已执行。");
       // Execution 只能绑定已接受冻结的 revision；草稿、已拒绝或序号不存在的草案永远不能执行。
       if (!revision || revision.acceptedAt === null || (revision.rejectedAt ?? null) !== null || revision.sourceHash !== event.execution.sourceHash) throw new Error("WorkflowExecution 必须绑定已接受冻结的 revision。 ");
@@ -319,7 +334,9 @@ function validateManifest(value: unknown): HarnessManifest {
   if (typeof item.harnessRunId !== "string") throw new Error("Harness manifest 缺少 id。 ");
   validateRunId(item.harnessRunId);
   if (item.task !== undefined && !isTaskMetadata(item.task)) throw new Error("Task manifest 无效。");
-  if (!COMPATIBLE_HARNESS_JOURNAL_VERSIONS.includes(item.version as never) || (item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt)) || (item.runtime !== undefined && !isRuntimeProvenance(item.runtime))) throw new Error("Harness manifest 无效。 ");
+  if (plain(item.task) && item.task.workflowContract !== undefined && item.version !== HARNESS_JOURNAL_VERSION) throw new Error("单链契约必须由当前档案版本显式保存，不能修改旧manifest迁移。");
+  if(item.version!==HARNESS_JOURNAL_VERSION)throw new Error("不支持旧版Harness档案；请清空旧开发记录后创建新任务。");
+  if ((item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt)) || (item.runtime !== undefined && !isRuntimeProvenance(item.runtime))) throw new Error("Harness manifest 无效。 ");
   return item as unknown as HarnessManifest;
 }
 
@@ -341,6 +358,14 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.completed") return item as unknown as HarnessEvent;
   if (item.type === "workflow.revision_proposed" && isWorkflowRevision(item.revision)) {
     const revision=item.revision;
+    if(revision.localOrigin!==undefined){
+      const origin=revision.localOrigin;
+      if(!origin||typeof origin.path!=="string"||!origin.path.startsWith("/")||origin.sourceHash!==revision.sourceHash||!isJsonObject(origin.inputSchema)||!isJsonObject(origin.meta)||!isJsonObject(revision.input))throw new Error("本地版本来源或输入无效。");
+      const checked=inspectLocalWorkflowSource(revision.source,origin.path);
+      if(revision.templateOrigin || revision.derivedFrom || canonicalJson(checked.meta)!==canonicalJson(origin.meta) || canonicalJson(checked.inputSchema)!==canonicalJson(origin.inputSchema) || createHash("sha256").update(revision.source).digest("hex")!==revision.sourceHash)throw new Error("本地冻结源码、来源或Schema不一致。");
+      validateLocalInput(origin.inputSchema,revision.input);
+      if(origin.inputSchema.type!=="object"||JSON.stringify(origin.meta.inputSchema)!==JSON.stringify(origin.inputSchema))throw new Error("本地Schema必须匹配来源meta。");
+    }
     if(revision.parametersPending!==undefined&&typeof revision.parametersPending!=="boolean")throw new Error("参数准备状态无效。");
     if(revision.templateOrigin!==undefined){
       if(!isTemplateOrigin(revision.templateOrigin)||revision.templateOrigin.sourceHash!==revision.sourceHash||!isJsonObject(revision.input)||typeof revision.saveRequestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(revision.saveRequestId)||!/^[a-f0-9]{64}$/.test(String(revision.savePayloadHash)))throw new Error("模板版本来源或输入无效。");
@@ -364,7 +389,7 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   throw new Error("Harness 事件类型或字段无效。 ");
 }
 
-function isTaskMetadata(value: unknown): boolean { return plain(value) && (value.template===undefined||isTemplateSelection(value.template)) && typeof value.clientRequestId === "string" && /^[a-f0-9-]{36}$/i.test(value.clientRequestId) && /^[a-f0-9]{64}$/.test(String(value.payloadHash)) && typeof value.title === "string" && !!value.title.trim() && !/[\r\n]/.test(value.title) && Array.from(value.title).length <= 120 && typeof value.initialGoal === "string" && !!value.initialGoal.trim() && value.initialGoal.length <= 20000; }
+function isTaskMetadata(value: unknown): boolean { return plain(value) && (value.workflowContract === undefined || value.workflowContract === "single-workflow-v1") && (value.template===undefined||isTemplateSelection(value.template)) && typeof value.clientRequestId === "string" && /^[a-f0-9-]{36}$/i.test(value.clientRequestId) && /^[a-f0-9]{64}$/.test(String(value.payloadHash)) && typeof value.title === "string" && !!value.title.trim() && !/[\r\n]/.test(value.title) && Array.from(value.title).length <= 120 && typeof value.initialGoal === "string" && !!value.initialGoal.trim() && value.initialGoal.length <= 20000; }
 function isMessage(value: unknown, role: HarnessMessage["role"]): value is HarnessMessage { return plain(value) && value.role === role && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)); }
 /** 对话条目形状校验；open 要求进行中形态，terminal 要求终态且身份字段齐全。 */
 function isConversationEntry(value: unknown, phase: "open" | "terminal"): value is HarnessConversationEntry {
@@ -388,6 +413,7 @@ function isExecutionStatus(value: unknown): value is WorkflowExecutionRecord["st
 function isPolicy(value: unknown): boolean { return plain(value) && Number.isInteger(value.maxNodes) && (value.maxNodes as number) >= 1 && Number.isInteger(value.maxPhaseVisits) && (value.maxPhaseVisits as number) >= 1 && Number.isInteger(value.maxGates) && (value.maxGates as number) >= 1; }
 function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
   if (!plain(value) || typeof value.executionId !== "string") return false;
+  if (value.kind !== undefined && value.kind !== "local-run" && value.kind !== "restricted-execution") return false;
   if(value.confirmationRequestId!==undefined||value.confirmationPayloadHash!==undefined){
     if(typeof value.confirmationRequestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.confirmationRequestId)||!/^[a-f0-9]{64}$/.test(String(value.confirmationPayloadHash)))return false;
   }

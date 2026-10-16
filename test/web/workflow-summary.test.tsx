@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { executionResultExcerpt, revisionSummaryState, WorkflowProposalSummary, WorkflowExecutionSummary } from "../../src-tauri/web/src/conversation/workflow-summary";
+import { executionResultExcerpt, proposalTitle, revisionSummaryState, WorkflowProposalSummary, WorkflowExecutionSummary } from "../../src-tauri/web/src/conversation/workflow-summary";
 import type { HarnessSnapshot, WorkflowRevision, WorkflowExecution } from "../../src-tauri/web/src/types";
 import { WorkflowRevisionCard } from "../../src-tauri/web/src/conversation/revision-card";
 
@@ -20,6 +20,35 @@ test("方案摘要含范围与声明阶段，只提供原版本导航；旧版�
   expect(latest).not.toContain("接受方案"); expect(latest).not.toContain("配置并运行");
   const old = renderToStaticMarkup(<WorkflowProposalSummary task={task} revision={revision(1)} onOpen={()=>{}} />);
   expect(old).toContain("<details>"); expect(old).not.toContain("<details open"); expect(old).toContain("查看原方案");
+});
+test("当前方案明确支持对话调整，旧版和本地来源不误导用户",()=>{
+  const ready={...task,status:"idle"} as HarnessSnapshot;
+  const html=renderToStaticMarkup(<WorkflowProposalSummary task={ready} revision={revision(2)} onOpen={()=>{}} onAdjust={()=>{}} />);
+  expect(html).toContain("通过对话调整");expect(html).toContain("可直接对话调整方案");
+  const old=renderToStaticMarkup(<WorkflowProposalSummary task={ready} revision={revision(1)} onOpen={()=>{}} onAdjust={()=>{}} />);
+  expect(old).not.toContain("通过对话调整");
+  const local=renderToStaticMarkup(<WorkflowProposalSummary task={ready} revision={{...revision(2),localOrigin:{} as never}} onOpen={()=>{}} onAdjust={()=>{}} />);
+  expect(local).not.toContain("通过对话调整");
+});
+test("紧凑标题不使用长目标，正文两行且展开操作可达",()=>{
+ const long={...revision(2),goal:"完整审查目标".repeat(30),scope:"完整范围说明".repeat(50),preview:{...revision(2).preview!,description:"全仓只读代码审查",workflowName:"repo-review"}};
+ expect(proposalTitle(long)).toBe("全仓只读代码审查");
+ expect(proposalTitle({...long,preview:{...long.preview,description:"长说明".repeat(40)}})).toBe("repo-review");
+ const html=renderToStaticMarkup(<WorkflowProposalSummary task={task} revision={long} onOpen={()=>{}}/>);
+ expect(html).toContain("<h3>全仓只读代码审查</h3>");expect(html).toContain('class="wf-summary-clamp"');
+ expect(html).toContain('aria-expanded="false"');expect(html).toContain('aria-controls=');expect(html).toContain(">展开</button>");
+ expect(html).toContain(long.scope);
+});
+test("放弃方案后折叠历史并提供重新设计，预置入口仅首次执行前显示",()=>{
+ const current={...revision(2),abandonedAt:"saved"};
+ const ready={...task,status:"idle",workflowRevisions:[revision(1),current]} as HarnessSnapshot;
+ const html=renderToStaticMarkup(<WorkflowProposalSummary task={ready} revision={current} onOpen={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}}/>);
+ expect(html).toContain("展开已放弃方案摘要");expect(html).not.toContain("<details open");
+ expect(html).toContain("此方案已放弃，任务和对话仍保留");expect(html).toContain("通过对话重新设计");expect(html).toContain("选择预置方案");expect(html).toContain("查看原方案");
+ const executed=renderToStaticMarkup(<WorkflowProposalSummary task={{...ready,executions:[{finishedAt:"saved"} as WorkflowExecution]}} revision={current} onOpen={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}}/>);
+ expect(executed).not.toContain("选择预置方案");expect(executed).not.toContain("归档任务");
+ const old=renderToStaticMarkup(<WorkflowProposalSummary task={{...ready,workflowRevisions:[current,revision(3)]}} revision={current} onOpen={()=>{}} onAdjust={()=>{}}/>);
+ expect(old).not.toContain("通过对话重新设计");
 });
 test("缺失预览不伪造步骤，结果有界且完成不等于验收",()=>{
   const html=renderToStaticMarkup(<WorkflowProposalSummary task={task} revision={{...revision(2),preview:undefined,scope:undefined}} onOpen={()=>{}} />);

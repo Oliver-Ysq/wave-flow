@@ -36,6 +36,7 @@ export function WorkflowRevisionCard({
   harness,
   onAssignmentCreated,
   onSaved,
+  onLocalRevision,
   hideGoal=false,
 }: {
   /** 不可变草案记录。 */
@@ -46,6 +47,8 @@ export function WorkflowRevisionCard({
   onAssignmentCreated: (detail: ExecutionResponse) => void;
   /** 保存返回原任务快照；父层按身份更新并展示新版本，不由响应切到其他任务。 */
   onSaved?: (task: HarnessSnapshot) => void;
+  /** 用户显式重新预检本地文件并编辑参数；只打开准备界面，不直接保存/执行。 */
+  onLocalRevision?:()=>void;
   /** 详情页页头已有目标时隐藏重复标题；对话内独立卡片缺省仍展示。 */
   hideGoal?:boolean;
 }) {
@@ -80,6 +83,7 @@ export function WorkflowRevisionCard({
       </div>
       {!hideGoal&&<p className="wf-plan-goal">{revision.goal ?? "历史方案未保存独立目标"}</p>}
       <p className="wf-plan-scope">{revision.scope ?? "历史方案未保存独立范围"}</p>
+      {revision.localOrigin&&<><p>本地来源：{revision.localOrigin.path}</p><p>参数与源码已冻结；编辑文件后须重新预检。</p><pre>{JSON.stringify(revision.input,null,2)}</pre>{harness.status==="idle"&&!harness.executions.some(item=>item.finishedAt===null)&&latest?.revision===revision.revision&&onLocalRevision&&<button type="button" disabled={saving} onClick={onLocalRevision}>重新预检并准备新版本</button>}{transferError&&<p role="alert">{transferError}</p>}</>}
       {revision.templateOrigin&&<><p>预置来源：{revision.templateOrigin.id} · v{revision.templateOrigin.version}</p>{(currentCandidate||unsaved&&!harness.executions.some(item=>item.revision===revision.revision))?<ParameterForm validationErrors={validationErrors} identity={`${visibilityKey}:input`} key={`${visibilityKey}:input`} schema={revision.templateOrigin.inputSchema} initialValue={inputDraft} onDraft={input=>{parameterDrafts.set(visibilityKey,input);setInputDraft(input);}} blockedReason={!currentCandidate?"主控已准备新版本。你的未保存修改仍保留在这里；请查看新版本后再决定如何修改，旧版不能提交。":!editable?"主控或执行正在处理；保留参数，空闲后可保存。":undefined} busy={saving} onSubmit={async input=>{
         await saveInput(input);
       }}/>:<pre>{JSON.stringify(revision.input,null,2)}</pre>}</>}

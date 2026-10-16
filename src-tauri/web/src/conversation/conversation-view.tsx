@@ -161,6 +161,7 @@ export function ConversationView({
   timelineEvents = [],
   onRead,
   visible=true,
+  draftContext,
 }: {
   /** 当前 Harness 会话权威快照。 */
   harness: HarnessSnapshot;
@@ -190,6 +191,7 @@ export function ConversationView({
   onRead?: (taskId:string,ids:string[])=>void;
   /** 隐藏页面不更新已读标记。 */
   visible?: boolean;
+  /** 当前草稿绑定的方案版本提示；不修改输入内容或自动发送。 */ draftContext?:string;
 }) {
   const running = harness.status === "running";
   const turns = composeConversationTurns(harness);
@@ -305,9 +307,9 @@ export function ConversationView({
           {timelineEvents.filter(event => event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt)).sort((a,b)=>a.at.localeCompare(b.at)).map(event => <div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
           </Fragment>
         ))}
-        {harness.status === "interrupted" && (
+        {(harness.status === "interrupted" || harness.diagnostic?.includes("主控启动失败")) && (
           <article className="conversation-interruption" role="alert">
-            <strong>主控回合已中断</strong>
+            <strong>{harness.diagnostic?.includes("主控启动失败")?"主控暂时无法启动":"主控回合已中断"}</strong>
             <p>{harness.diagnostic || "本回合未能产生完整回答。"}</p>
             <small>可直接发送下一条消息重试；不会自动重发或执行 Workflow。</small>
           </article>
@@ -332,6 +334,7 @@ export function ConversationView({
       )}
       {harness.status !== "completed" && (
         <div className="conversation-composer">
+          {draftContext&&<p className="composer-context" role="status">{draftContext}</p>}
           <textarea
             value={draft}
             disabled={running}

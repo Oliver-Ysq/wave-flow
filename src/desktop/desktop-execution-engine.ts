@@ -1,6 +1,7 @@
 import { readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
+import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
@@ -56,6 +57,8 @@ export type EngineEventFrame = {
 
 /** Desktop Execution Engine 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
 export type DesktopExecutionEngineOptions = {
+  /** 专用验收构建启用单链基础；生产默认false，不迁移存量Task。 */
+  readonly singleWorkflowForAcceptance?: boolean;
   /** 仅自动测试使用确定性执行器；不能用于用户 CLI。默认 false。 */
   readonly deterministicForTest?: boolean;
   /** 用户级 Run Store 根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/runs。 */
@@ -112,6 +115,8 @@ export class DesktopExecutionEngine {
   readonly instanceId = crypto.randomUUID();
 
   private readonly deterministicForTest: boolean;
+  /** 验收入口开关；默认关闭，存量档案仍按自身契约只读/恢复。 */
+  private readonly singleWorkflowForAcceptance: boolean;
   private readonly storeRoot: string;
   private readonly harnessRoot: string;
   private readonly maxActiveRuns: number;
@@ -127,6 +132,7 @@ export class DesktopExecutionEngine {
   constructor(options: DesktopExecutionEngineOptions | boolean = {}) {
     const normalized = typeof options === "boolean" ? { deterministicForTest: options } : options;
     this.deterministicForTest = normalized.deterministicForTest === true;
+    this.singleWorkflowForAcceptance = normalized.singleWorkflowForAcceptance === true;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
     this.harnessRoot = harnessRoot;
@@ -155,13 +161,13 @@ export class DesktopExecutionEngine {
       if (this.hasCustomHarnessSession) return { fingerprint: "injected-harness-session" };
       const runtime = await this.#cliRuntimes.resolveSelectedHarness();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
-    });
+    }, normalized.singleWorkflowForAcceptance ?? false);
     // 事件总线：只把耐久事实派生的事件推给订阅者；瞬时 reasoning/assistant delta 不上帧，
     // Web 实时展示与重开回放因此始终同源（Journal → 投影/事件帧）。
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
-    }, harnessRoot);
+    }, harnessRoot, this.storeRoot);
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
@@ -175,6 +181,9 @@ export class DesktopExecutionEngine {
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
   }
+
+  /** 有界后台主控检查；不影响启动ready或自动恢复任务，创建时仍做相同兜底检查。 */
+  refreshSelectedHarness():void { if(!this.deterministicForTest)void this.#cliRuntimes.refreshSelectedHarness().catch(()=>{}); }
 
   /** 订阅 Engine 事件帧；engine-main 在启动时注册，把帧写入私有 JSONL stdout。 */
   subscribeEvents(sink: (frame: EngineEventFrame) => void): () => void { this.#eventSinks.add(sink); return () => this.#eventSinks.delete(sink); }
@@ -431,7 +440,8 @@ export class DesktopExecutionEngine {
         if(canonicalJson(input??{})!==canonicalJson(selected.input))throw new Error("输入与已保存批准版本不一致，请保存新版本后确认。");
       }
       if (!this.deterministicForTest) await this.requireWorkerCandidate();
-      const config = await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
+      if(selected?.localOrigin && (value as CreateExecutionRequest).config !== undefined) throw new Error("本地 Workflow 不接受 CLI 分配配置。");
+      const config = selected?.localOrigin ? undefined : await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
       const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
       return { ...created, controllable: this.#executions.isControllable(created.execution.executionId) };
     } catch (error) { throw this.executionError(error); }
@@ -467,7 +477,7 @@ export class DesktopExecutionEngine {
       if (snapshot.task) assertStartable(snapshot, revisionNumber, true);
       if (!revision || !snapshot.task && revision.acceptedAt===null) throw new Error("只能为当前候选或已批准历史方案规划执行分配。 ");
       // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
-      const compiled = compileRestrictedWorkflow(revision.source);
+      const compiled = revision.localOrigin?{meta:revision.localOrigin.meta}:compileRestrictedWorkflow(revision.source);
       const extracted = extractAgentWorkers(revision.source);
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
@@ -629,6 +639,25 @@ export class DesktopExecutionEngine {
       case "executions.phaseVisits": return this.executionPhaseVisits(value);
       case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
       case "executions.resume": return this.resumeExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), { authorized: true });
+      case "workflows.preflightLocal": {
+        if(!this.singleWorkflowForAcceptance)throw new Error("本地预检仅专用验收构建可用。");
+        const project = await this.#projects.get(requiredString(value, "projectId"));
+        const result = await preflightLocalWorkflow(requiredString(value, "path"), project.cwd);
+        // 源码只保留在Engine，不向普通预检界面返回第二份可提交源码。
+        const { source, ...preview } = result;
+        return preview;
+      }
+      case "workflows.createLocalTask": {
+        const project=await this.#projects.get(requiredString(value,"projectId"));
+        const input=object(value).input;
+        if(!isJsonObject(input))throw new Error("本地参数必须是JSON对象。");
+        return {harness:await this.#harness.startLocalTask(project.cwd,{projectId:project.projectId,clientRequestId:requiredString(value,"clientRequestId"),path:requiredString(value,"path"),sourceHash:requiredString(value,"sourceHash"),input,title:typeof object(value).title==="string"?String(object(value).title):undefined})};
+      }
+      case "workflows.reviseLocalTask": {
+        if(!this.singleWorkflowForAcceptance)throw new Error("本地修订仅专用验收构建可用。");
+        const input=object(value).input;if(!isJsonObject(input))throw new Error("本地参数必须是JSON对象。");
+        return {harness:await this.#harness.reviseLocalTask(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")})})};
+      }
       case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
       default: throw new Error(`未知 Desktop action：${action}。`);
     }
@@ -643,11 +672,12 @@ export class DesktopExecutionEngine {
       const number=requiredInteger(value,"revision"),snapshot=await this.#harness.snapshot(id);
       const revision=snapshot.workflowRevisions.find(item=>item.revision===number);
       if(!revision||templateOnly&&!revision.templateOrigin)throw new Error("仅当前候选可确认并运行。");
+      if(revision.localOrigin)validateLocalInput(revision.localOrigin.inputSchema,object(value).input??revision.input??{});
       const input=object(value).input??revision.input??{};
       if(!isJsonObject(input))throw new Error("工作流参数必须是JSON-safe对象。");
       const rawConfig=object(value).config;
-      if(!isJsonObject(rawConfig))throw new Error("确认配置必须是 JSON-safe 对象。");
-      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig})).digest("hex");
+      if(revision.localOrigin ? rawConfig !== undefined : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 不接受 CLI 分配配置。" : "确认配置必须是 JSON-safe 对象。");
+      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null})).digest("hex");
       const previous=snapshot.executions.find(item=>item.confirmationRequestId===requestId);
       if(previous){
         if(previous.confirmationPayloadHash!==payloadHash)throw new Error("相同确认请求不能更换版本、输入或配置。");
@@ -661,7 +691,7 @@ export class DesktopExecutionEngine {
       if(revision.templateOrigin)validateTemplateInput(revision.templateOrigin.inputSchema,input);
       else if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("生成方案的输入须由主控明确准备，不能在启动时注入未知参数。");
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
-      const config=await this.validateExecutionConfigValue(id,number,object(value).config);
+      const config=revision.localOrigin ? undefined : await this.validateExecutionConfigValue(id,number,rawConfig);
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
         const origin=revision.templateOrigin;
@@ -798,6 +828,8 @@ export class DesktopExecutionEngine {
   /** 用户显式授权的调用级恢复；严格核验 Manifest 源码与项目边界后才重放。 */
   private async resume(runId: string, value: unknown): Promise<RunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || (value as ResumeRunRequest).authorized !== true) throw new EngineActionError(400, "resume 必须明确携带 authorized: true。 ");
+    const linked=await RunJournal.open(runId,this.storeRoot);
+    if(linked.journal.manifest.harness)throw new EngineActionError(409,"此Run归属Task，请通过所属工作流恢复，不能使用独立Run入口。");
     const inFlight = this.#resumeRequests.get(runId);
     if (inFlight) return inFlight;
     // 必须在任一 await 前登记：两个 POST 若都先读取到没有 runTask，就会各自启动

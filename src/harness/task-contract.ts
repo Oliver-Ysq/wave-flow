@@ -17,6 +17,8 @@ export type TaskCreation = {
 };
 /** 创建事实；hash 用于冲突检测，不作为授权。 */
 export type TaskMetadata = {
+  /** 创建时冻结的单链契约；缺省为已实现多卡模式，不能在重开时自动迁移。 */
+  readonly workflowContract?: "single-workflow-v1";
   /** 原始预置创建载荷，恢复部分创建时继续同一候选；历史缺省为自动编排。 */
   readonly template?: TemplateSelection;
   /** 重试身份。 */
@@ -61,6 +63,10 @@ export function normalizeTaskCreation(raw: TaskCreation): TaskCreation & { title
 }
 /** 最新未执行且未放弃的候选；拒绝版本仍允许同卡修改。 */
 export function candidateRevision(snapshot: HarnessSnapshot): WorkflowRevision | undefined {
+  if (snapshot.task?.workflowContract === "single-workflow-v1") {
+    const revision = snapshot.workflowRevisions.at(-1);
+    return revision && !revision.abandonedAt && !snapshot.executions.some(item => item.revision === revision.revision) ? revision : undefined;
+  }
   const revision = [...snapshot.workflowRevisions].reverse().find(item => item.cardId && !item.abandonedAt);
   if (!revision || snapshot.executions.some(item => snapshot.workflowRevisions.find(version=>version.revision===item.revision)?.cardId === revision.cardId)) return undefined;
   return revision;
@@ -69,6 +75,7 @@ export function candidateRevision(snapshot: HarnessSnapshot): WorkflowRevision |
 export function assertStartable(snapshot: HarnessSnapshot, revisionNumber: number, allowUnapprovedTemplate = false): WorkflowRevision {
   if (snapshot.status !== "idle") throw new Error("主控必须空闲且任务未归档，才能配置或启动工作流。");
   const revision = snapshot.workflowRevisions.find(item => item.revision === revisionNumber);
+  if (snapshot.task?.workflowContract === "single-workflow-v1" && snapshot.executions.length) throw new Error("修订现场续作尚未开放；可以保存同链草案，原冻结执行仍可恢复。");
   if (snapshot.task) {
     if (!revision?.cardId || candidateRevision(snapshot)?.revision !== revisionNumber || revision.abandonedAt) throw new Error("方案已被取代或放弃，不能启动。");
   }

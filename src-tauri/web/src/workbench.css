@@ -104,6 +104,23 @@
 .agent-workbench .wf-chat-summary button:hover { background:var(--wf-accent-wash); }
 .agent-workbench .wf-chat-summary button:focus-visible,.agent-workbench .wf-chat-summary summary:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; }
 .agent-workbench .wf-chat-summary.historical { background:transparent; }
+.agent-workbench .wf-chat-summary.proposal { padding:12px 14px; }
+.agent-workbench .wf-chat-summary.proposal h3 { margin-top:6px; font-size:16px; line-height:1.45; }
+.agent-workbench .wf-chat-summary.proposal p { margin-top:6px; line-height:1.55; }
+.agent-workbench .wf-summary-clamp { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+.agent-workbench .wf-chat-summary.proposal .wf-summary-phases { margin:8px 0 4px; gap:4px; }
+.agent-workbench .wf-chat-summary.proposal .wf-summary-phases span { padding:2px 6px; }
+.agent-workbench .wf-chat-summary.proposal footer { margin-top:8px; padding-top:8px; }
+.agent-workbench .wf-chat-summary .wf-summary-expand { padding:4px 0; min-height:28px; font-size:12px; }
+.agent-workbench .abandoned-plan { margin-top:14px; padding:14px 16px; border:1px solid var(--wf-line-soft); border-radius:10px; background:var(--wf-panel-raised); }
+.agent-workbench .abandoned-plan p { margin:0; color:var(--wf-ink); font-size:14px; line-height:1.6; }
+.agent-workbench .abandoned-plan small { display:block; margin-top:4px; color:var(--wf-muted); font-size:12px; line-height:1.6; }
+.agent-workbench .abandoned-plan > div { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
+.agent-workbench .abandoned-plan button { min-height:36px; padding:8px 12px; border:0; border-radius:7px; background:var(--wf-accent-strong); color:#fff; font-size:13px; cursor:pointer; }
+.agent-workbench .abandoned-plan button.abandoned-plan-secondary { background:transparent; color:var(--wf-muted); }
+.agent-workbench .abandoned-plan button:disabled { opacity:.5; cursor:default; }
+.agent-workbench .abandoned-plan button:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; }
+.agent-workbench .conversation-composer .composer-context { margin:0; padding:10px 16px 0; color:var(--wf-muted); font-size:12px; line-height:1.5; }
 .agent-workbench .wf-chat-summary details { margin-top:8px; }
 .agent-workbench .wf-chat-summary summary { color:var(--wf-muted); cursor:pointer; font-size:13px; line-height:1.6; }
 .agent-workbench .wf-summary-result { max-height:6.6em; overflow:auto; }

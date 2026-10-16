@@ -69,6 +69,8 @@ async function run(args: Args) {
 
 ## `meta`
 
+Wave Flow 新增（新本地 Task，实施中）：纯字面量 `inputSchema?: JsonObject`，新本地任务预检必填 `type: "object"`，旧模块直接加载和冻结恢复不追加强制要求。参数 Schema 使用 AJV 校验，不自动填默认，`exampleArgs`不作为校验或批准。
+
 ```ts
 type WorkflowMeta = {
   name: string;              // kebab-case：/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/

@@ -142,6 +142,8 @@ export type HarnessStreamEvent = (
 /** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
 export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
 export type WorkflowRevision = {
+  /** Engine预检保存的本地来源快照，不能由主控或表单提交源码伪造。 */
+  localOrigin?:import("../../../src/harness/types").WorkflowRevision["localOrigin"];
   /** 参数待补齐，不能直接批准运行。 */
   parametersPending?:boolean;
   /** 内置版本来源，保存后不跟随目录升级。 */
@@ -165,6 +167,8 @@ export type WorkflowRevision = {
   revision: number; source: string; sourceHash: string; createdAt: string; acceptedAt: string | null; rejectedAt?: string | null;
   /** 随 revision 耐久的展示预览；旧档案补齐失败时缺省，不代表执行失败。 */
   preview?: {
+    /** 校验后的meta说明，紧凑标题使用，完整目标仍保留。 */ description?:string;
+    /** 校验后的Workflow名称，说明过长时兜底。 */ workflowName?:string;
     /** 正整数解析规则版本。 */
     previewVersion: number;
     /** 预览绑定的冻结源码 hash。 */
@@ -222,7 +226,10 @@ export type HarnessSnapshot = {
   snapshotSequence?:number;
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
   executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
-  task?: { clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+  task?: {
+    /** 创建时冻结的模式；旧Task缺省多卡，不能由验收开关推断。 */
+    workflowContract?:"single-workflow-v1";
+    clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */

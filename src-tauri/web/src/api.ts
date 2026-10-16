@@ -9,8 +9,14 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 本地来源静态预检；只在专用验收页面调用，不创建Task或执行源码。 */
+  preflightLocal:(projectId:string,path:string)=>action<Omit<import("../../../src/workflow/preflight-local").LocalWorkflowPreflight,"source">>("workflows.preflightLocal",{projectId,path}),
+  /** 保存已预检本地来源与参数为未批准Task，不运行模块。 */
+  createLocalTask:(projectId:string,path:string,sourceHash:string,input:Record<string,unknown>,clientRequestId:string)=>action<HarnessRunResponse>("workflows.createLocalTask",{projectId,path,sourceHash,input,clientRequestId}),
+  /** 编辑本地文件/参数后追加未批准版本，不能启动修订执行。 */
+  reviseLocalTask:(harnessRunId:string,baseRevision:number,sourceHash:string,input:Record<string,unknown>,clientRequestId:string,path?:string)=>action<HarnessRunResponse>("workflows.reviseLocalTask",{harnessRunId,baseRevision,sourceHash,input,clientRequestId,...(path?{path}:{})}),
   /** 当前设计一次确认，不再要求单独接受/分配卡；批准与派发由Engine仲裁。 */
-  confirmWorkflow:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot,clientRequestId:string)=>action<ExecutionResponse>("executions.confirm",{harnessRunId,revision,config,clientRequestId}),
+  confirmWorkflow:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot|undefined,clientRequestId:string)=>action<ExecutionResponse>("executions.confirm",{harnessRunId,revision,...(config?{config}:{}),clientRequestId}),
   /** 获取内置版本化目录，不创建任何运行对象。 */
   templates:()=>action<{templates:import("../../../src/harness/workflow-templates").WorkflowTemplate[]}>("templates.list"),
   /** 保存未批准候选；needsGuidance 才安排主控。编辑必须携带 cardId 和正整数 baseRevision；同请求重试不新增版本或引导回合。 */

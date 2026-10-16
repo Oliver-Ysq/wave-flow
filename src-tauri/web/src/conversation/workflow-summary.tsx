@@ -1,5 +1,16 @@
 import type { HarnessSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
 import {PersistedDetails} from "../persisted-details";
+import {AbandonedPlan} from "./abandoned-plan";
+import {useId,useState} from "react";
+
+/** 不把完整业务目标当标题；不调用模型，也不截取片段冒充语义摘要。 */
+export function proposalTitle(revision:WorkflowRevision):string {
+  const description=revision.localOrigin?.meta?.description??revision.templateOrigin?.meta?.description??revision.preview?.description;
+  if(description&&Array.from(description).length<=40)return description;
+  const name=revision.localOrigin?.meta?.name??revision.templateOrigin?.meta?.name??revision.preview?.workflowName;
+  if(name&&Array.from(name).length<=40)return name;
+  return revision.goal&&Array.from(revision.goal).length<=40?revision.goal:"工作流方案";
+}
 
 /** 原版本的展示状态；只派生耐久证据，不提供启动授权。 */
 export function revisionSummaryState(task: HarnessSnapshot, revision: WorkflowRevision): { status: string; supersededBy?: number } {
@@ -12,28 +23,42 @@ export function revisionSummaryState(task: HarnessSnapshot, revision: WorkflowRe
 }
 
 /** 方案轻量摘要；只打开原版本，不接受、创建执行或读取重型详情。 */
-export function WorkflowProposalSummary({ task, revision, onOpen }: {
+export function WorkflowProposalSummary({ task, revision, onOpen, onAdjust, onTemplate }: {
   /** 所属任务的耐久投影。 */
   task: HarnessSnapshot;
   /** 事件绑定的原版本，不自动替换为最新版。 */
   revision: WorkflowRevision;
   /** 仅导航到原方案。 */
   onOpen: () => void;
+  /** 聚焦原Task对话并绑定当前版本；不发送、不批准或执行。 */
+  onAdjust?: () => void;
+  /** 首次执行前选择预置；仅最新已放弃方案展示。 */ onTemplate?:()=>void;
 }) {
   const state = revisionSummaryState(task, revision);
+  const abandoned=!!revision.abandonedAt;
+  const latest=task.workflowRevisions.at(-1)?.revision===revision.revision;
+  const [expanded,setExpanded]=useState(false);
+  const bodyId=useId();
+  const title=proposalTitle(revision);
   const content = <div className="wf-summary-body">
-    <p>{revision.scope || "历史方案未保存独立范围，可打开原方案查看。"}</p>
+    <div id={bodyId}>
+      {expanded&&revision.goal&&revision.goal!==title&&<p><strong>完整目标：</strong>{revision.goal}</p>}
+      <p className={expanded?undefined:"wf-summary-clamp"}>{revision.scope || "范围说明未提供，可打开方案查看。"}</p>
+    </div>
+    <button type="button" className="wf-summary-expand" aria-expanded={expanded} aria-controls={bodyId} onClick={()=>setExpanded(value=>!value)}>{expanded?"收起":"展开"}</button>
     {revision.preview ? <>
       <div className="wf-summary-phases" aria-label="声明阶段">{revision.preview.phaseTitles.map(title => <span key={title}>{title}</span>)}</div>
-      <small>{revision.preview.phaseTitles.length} 个声明阶段 · {revision.preview.previewAgents.length} 处 Worker 调用示意{revision.preview.previewAgents.some(agent => agent.loop) ? " · 含循环或批量调用" : ""}</small>
+      <small>{revision.preview.phaseTitles.length} 个阶段 · {revision.preview.previewAgents.length} 处调用示意{expanded&&revision.preview.previewAgents.some(agent => agent.loop) ? " · 含循环或批量调用" : ""}</small>
       <small>源码示意，实际执行以运行时为准</small>
     </> : <small>历史预览不可用</small>}
   </div>;
-  return <article className={`wf-chat-summary ${state.supersededBy ? "historical" : ""}`} aria-label={`工作流方案第 ${revision.revision} 版`}>
+  return <article className={`wf-chat-summary proposal ${state.supersededBy ? "historical" : ""}`} aria-label={`工作流方案第 ${revision.revision} 版`}>
     <header><span>{revision.parentRevision ? "方案已更新" : "方案已生成"}</span><span>第 {revision.revision} 版</span></header>
-    <h3>{revision.goal || "历史工作流方案"}</h3>
-    {state.supersededBy ? <PersistedDetails identity={`${task.harnessRunId}:${revision.cardId}:${revision.revision}:summary`}><summary>展开历史方案摘要</summary>{content}</PersistedDetails> : content}
-    <footer><span>{state.status}</span><button onClick={onOpen} aria-label={`查看第 ${revision.revision} 版方案`}>{state.supersededBy ? "查看原方案" : "查看方案"}<span aria-hidden="true"> ↗</span></button></footer>
+    <h3>{title}</h3>
+    {state.supersededBy||abandoned ? <PersistedDetails identity={`${task.harnessRunId}:${revision.cardId}:${revision.revision}:${abandoned?"abandoned":"summary"}`}><summary>{abandoned?"展开已放弃方案摘要":"展开历史方案摘要"}</summary>{content}</PersistedDetails> : content}
+    {!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<small>可直接对话调整方案</small>}
+    <footer><span>{state.status}</span>{!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<button type="button" onClick={onAdjust} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}>通过对话调整</button>}<button onClick={onOpen} aria-label={`查看第 ${revision.revision} 版方案`}>{state.supersededBy||abandoned ? "查看原方案" : "查看方案"}<span aria-hidden="true"> ↗</span></button></footer>
+    {abandoned&&latest&&onAdjust&&task.status!=="completed"&&<AbandonedPlan onRedesign={onAdjust} onTemplate={!task.executions.length?onTemplate:undefined} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}/>}
   </article>;
 }
 
