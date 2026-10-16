@@ -28,6 +28,30 @@ async function fixture() {
   return { cwd, manifest, journal, state, control: new ControlServer(journal, state), node: state.agent("node"), sessionId };
 }
 
+for (const stage of ["initialize", "createSession"] as const) test(`停止发生在${stage}等待时仍清理，迟到启动不投递任务`, async () => {
+ const value = await fixture(); let entered!: () => void, release!: () => void;
+ const started = new Promise<void>(resolve => { entered = resolve; });
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ let prompts = 0, closed = 0, pipeClosed = 0;
+ const session: AcpWorkerSession = {
+  binding:null,
+  async initialize(){ if(stage==="initialize"){entered();await gate;} },
+  async createSession(){ if(stage==="createSession"){entered();await gate;} return {launcherId:"test",sessionId:"native",capabilities:{}}; },
+  async prompt(){prompts++;return {stopReason:"end_turn"};},
+  async cancel(){throw new Error("尚未建立可取消会话");}, close(){closed++;}
+ };
+ const executor = new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,()=>({name:"private",command:"fake",args:[],env:[],close(){pipeClosed++;}} as acp.McpServer));
+ executor.bindControl(value.control);
+ const running = executor.execute(value.node).then(()=>"unexpected",error=>String(error));
+ await started;
+ await expect(executor.stop(value.node)).rejects.toThrow("尚未建立");
+ expect(await Promise.race([running,Bun.sleep(500).then(()=>"pending")])).toContain("停止未确认");
+ release(); await Bun.sleep(1);
+ expect(prompts).toBe(0); expect(closed).toBe(1);
+ expect(pipeClosed).toBe(stage==="createSession"?1:0);
+ expect((await RunJournal.open(value.manifest.runId,runsRoot(value.cwd))).events.some(e=>e.type==="agent.session")).toBe(false);
+});
+
 test("ACP Worker 只在 durable binding 与 capability complete 后完成", async () => {
   const value = await fixture();
   let capability = "";
@@ -49,6 +73,79 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
   expect(managed).toContain("工具搜索/发现");
   const opened = await RunJournal.open(value.manifest.runId, runsRoot(value.cwd));
   expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", delivery: "acp", acp: expect.objectContaining({ sessionId: "native-session" }) }));
+});
+
+for(const answered of [false,true])test(`收尾从Control补回原block，answered=${answered}，不新建请求或代替continue`,async()=>{
+ const value=await fixture();let identity:any;const blockRequestId=crypto.randomUUID();const prompts:string[]=[];
+ const needHelp="请选择数字",answerSchema={type:"object",properties:{x:{type:"integer"}},required:["x"],additionalProperties:false};
+ const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};},async prompt(text){
+  prompts.push(text);
+  if(prompts.length===1){void value.control.block({...identity,blockRequestId,needHelp,answerSchema}).catch(()=>{});while(value.state.agent("node").status!=="blocked")await Bun.sleep(1);if(answered)await value.control.answer({blockRequestId,answer:{x:41}});return {stopReason:"end_turn"};}
+  expect(text).toContain(blockRequestId);expect(text).toContain(needHelp);expect(text).toContain(JSON.stringify(answerSchema));
+  expect(text).toContain(answered?"原block已有耐久答案":"用户尚未回答");
+  if(!answered)expect(text).toContain("不是永久禁令");
+  expect(value.state.agent("node").status).toBe("blocked");
+  if(!answered)await value.control.answer({blockRequestId,answer:{x:41}});
+  const reordered={additionalProperties:false,required:["x"],properties:{x:{type:"integer"}},type:"object"};
+  const original=await value.control.block({...identity,blockRequestId,needHelp,answerSchema:reordered});expect(original.answer).toEqual({x:41});
+  await value.control.continue({...identity,blockRequestId});
+  await value.control.complete({...identity,summary:"done",result:{value:42}});return {stopReason:"end_turn"};
+ },async cancel(){},close(){}};
+ const executor=new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,i=>{identity=i;return {name:"private",command:"fake",args:[],env:[]};});executor.bindControl(value.control);
+ expect(await executor.execute(value.node)).toEqual({value:42});expect(prompts).toHaveLength(2);
+ const events=(await RunJournal.open(value.manifest.runId,runsRoot(value.cwd))).events;
+ expect(events.filter(e=>e.type==="block.created")).toHaveLength(1);expect(events.filter(e=>e.type==="agent.continued")).toHaveLength(1);
+});
+
+test("停止发生在收尾事实读取期间，不创建迟到收尾回合",async()=>{
+ const value=await fixture();let release!:()=>void,reading!:()=>void,prompts=0;
+ const entered=new Promise<void>(done=>reading=done),hold=new Promise<void>(done=>release=done);
+ const original=value.control.workerTurnContext.bind(value.control);
+ value.control.workerTurnContext=async identity=>{reading();await hold;return original(identity);};
+ const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};},async prompt(){prompts++;return {stopReason:"end_turn"};},async cancel(){},close(){}};
+ const executor=new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,()=>({name:"private",command:"fake",args:[],env:[]}));executor.bindControl(value.control);
+ const running=executor.execute(value.node);void running.catch(()=>{});await entered;await executor.stop(value.node);release();
+ await expect(running).rejects.toThrow("用户停止");expect(prompts).toBe(1);
+});
+
+test("stop的cancel忽略signal时仍在宿主预算内拒绝并清理会话", async () => {
+ const value = await fixture(); let started!: () => void; let closed = 0;
+ const entered = new Promise<void>(resolve => { started = resolve; });
+ const session: AcpWorkerSession = { binding:null, async initialize(){}, async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};}, async prompt(){started();return new Promise(()=>{});}, async cancel(){return new Promise(()=>{});}, close(){closed++;} };
+ const executor = new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session);
+ executor.bindControl(value.control);
+ const running = executor.execute(value.node).then(()=>"unexpected", error=>String(error));
+ await entered;
+ const before = Date.now();
+ await expect(executor.stop(value.node)).rejects.toThrow("控制等待已取消");
+ expect(Date.now()-before).toBeLessThan(18_000);
+ expect(await running).toContain("停止未确认");
+ expect(closed).toBe(1);
+}, 20_000);
+
+for(const lateTurn of [false,true])test(`cancel抛错也收敛执行并释放会话/MCP，迟到end_turn=${lateTurn}`,async()=>{
+ const value=await fixture();let finish!:(turn:{stopReason:string})=>void,prompts=0,closed=0,pipeClosed=0;
+ const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};},async prompt(){prompts++;return new Promise(done=>finish=done);},async cancel(){throw new Error("cancel transport failed");},close(){closed++;}};
+ const executor=new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,()=>({name:"private",command:"fake",args:[],env:[],close(){pipeClosed++;}} as acp.McpServer));executor.bindControl(value.control);
+ const running=executor.execute(value.node);
+ const outcome=running.then(()=>"unexpected success",error=>String(error));
+ while(!finish)await Bun.sleep(1);
+ await expect(executor.stop(value.node)).rejects.toThrow("cancel transport failed");
+ if(lateTurn)finish({stopReason:"end_turn"});
+ const result=await Promise.race([outcome,Bun.sleep(200).then(()=>"pending")]);
+ expect(result).toContain("停止未确认：cancel transport failed");
+ expect(closed).toBe(1);expect(pipeClosed).toBe(1);expect(prompts).toBe(1);
+ await expect(executor.stop(value.node)).rejects.toThrow("没有可控制");
+ const events=(await RunJournal.open(value.manifest.runId,runsRoot(value.cwd))).events;
+ expect(events.filter(event=>event.type==="agent.completed")).toHaveLength(0);
+});
+
+test("超大协议事实拒绝收尾而非截断身份或无限重试",async()=>{
+ const value=await fixture();let prompts=0;
+ value.control.workerTurnContext=async()=>({status:"running",block:null,resultSchema:{type:"object",description:"中".repeat(18000)}});
+ const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};},async prompt(){prompts++;return {stopReason:"end_turn"};},async cancel(){},close(){}};
+ const executor=new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,()=>({name:"private",command:"fake",args:[],env:[]}));executor.bindControl(value.control);
+ await expect(executor.execute(value.node)).rejects.toThrow("超过48KiB");expect(prompts).toBe(1);
 });
 
 test("ACP Worker cancel 确认后仅在同一 session recover", async () => {
@@ -78,6 +175,25 @@ test("ACP Worker cancel 确认后仅在同一 session recover", async () => {
   expect(prompts).toHaveLength(2);
   expect(prompts[1]).toContain("检查当前工作目录");
   expect(prompts[1]).toContain("工具搜索/发现");
+});
+
+for(const failure of ["end_turn","transport","abort","cancel_error","pending_cancel_transport"] as const)test(`暂停确认失败${failure}不悬挂、不续发且释放原会话`,async()=>{
+ const value=await fixture();let finish!:(turn:{stopReason:string})=>void,reject!:(error:Error)=>void,prompts=0,closed=0;
+ const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:"codex-acp",sessionId:"native",capabilities:{}};},async prompt(){prompts++;return new Promise((done,fail)=>{finish=done;reject=fail;});},async cancel(){if(failure==="cancel_error")throw new Error("cancel failed");if(failure==="pending_cancel_transport")await new Promise<void>(()=>{});},close(){closed++;}};
+ const executor=new AcpWorkerExecutor({id:"codex-acp",command:"fake",args:[]},()=>session,undefined,()=>({name:"private",command:"fake",args:[],env:[]}));executor.bindControl(value.control);
+ const running=executor.execute(value.node);const outcome=running.then(()=>"unexpected",error=>String(error));
+ while(!finish)await Bun.sleep(1);
+ const controller=new AbortController();const pausing=executor.pause(value.node,controller.signal);
+ const paused=pausing.then(()=>"unexpected",error=>String(error));
+ await Bun.sleep(1);
+ if(failure==="end_turn")finish({stopReason:"end_turn"});
+ if(failure==="transport"||failure==="pending_cancel_transport")reject(new Error("transport failed"));
+ if(failure==="abort")controller.abort();
+ expect(await Promise.race([paused,Bun.sleep(200).then(()=>"pending")])).not.toBe("pending");
+ expect(await Promise.race([outcome,Bun.sleep(200).then(()=>"pending")])).not.toBe("pending");
+ finish({stopReason:"end_turn"});await Bun.sleep(1);
+ expect(closed).toBe(1);expect(prompts).toBe(1);
+ await expect(executor.recover(value.node)).rejects.toThrow("没有可控制");
 });
 
 test("两个CLI使用相同通用完成协议，第二次end_turn仍漏报只拒绝、不重跑或代报",async()=>{

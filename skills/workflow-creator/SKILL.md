@@ -73,6 +73,8 @@ Wave Flow新增本地Task输入契约（实施中）：受信任本地模块用�
   注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
   Worker 需要人工输入时会自行 `block`，无需作者编排。
 
+Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt，不保证上下文压缩后业务判断无损；作者不新增重试/收尾API，也不把回合结束当作交付。
+
 ## 人工决策
 
 - 脚本级的业务决策（仅在受限草案可用）：`decisionGate(id, question, answerSchema?)`，

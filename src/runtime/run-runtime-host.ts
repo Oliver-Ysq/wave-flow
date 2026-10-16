@@ -23,6 +23,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #phaseVisitSequence = 0;
   #phaseOccurrences = new Map<string, number>();
   #replayAttemptStarted = false;
+  /** 并行replay分支共享同一次attempt初始化，避免重复落run/attempt/phase开始事实。 */
+  #replayAttemptStarting: Promise<PhaseVisit> | null = null;
   #replayPhaseTitle: string | null = null;
   /** 同一 Run 所有耐久事实的互斥尾链：核验、Journal 追加与内存 apply 原子完成。 */
   #mutationTail: Promise<unknown> = Promise.resolve();
@@ -132,11 +134,13 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
       if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) return existing.result;
       if ((existing.status === "running" || existing.status === "blocked") && this.#replayPrefix) throw new WorkflowContractError(`resume 遇到仍存活或未确认丢失的节点：${nodeId}；先恢复其 Control 或将其明确标记为 interrupted。`);
-      const replayVisit = await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!);
       const invalidatedByPriorRestart = !this.#replayPrefix || (existing.status === "completed" && !provenanceMatches);
+      // 复用资格按逻辑调用顺序撤销，必须先于任何await；否则并行后续调用
+      // 会在首个重跑节点等待Journal时把旧completed结果混入新attempt。
+      this.#replayPrefix = false;
+      const replayVisit = await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!);
       const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, executionAttemptId: replayVisit.executionAttemptId, phaseVisitId: replayVisit.phaseVisitId, request: effectiveRequest });
       await this.durableApply(restarted);
-      this.#replayPrefix = false;
     } else {
       const activeVisit = this.replay ? await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!) : phaseVisit;
       const created = this.event({ type: "agent.created", nodeId, sequence: ++this.#journalSequence, logicalSequence, phase: effectiveRequest.phase ?? null, executionAttemptId: activeVisit.executionAttemptId, phaseVisitId: activeVisit.phaseVisitId, executionBatch, request: effectiveRequest });
@@ -176,10 +180,15 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       const diagnostic = error instanceof Error ? error.message : String(error);
       // 执行器失败意味着节点不可能再继续（包括 Worker 在 blocked 等待答案时死亡）；
       // 任意非终态节点都必须诚实收敛为 interrupted，不得留下终态 Run 与非终态节点并存的投影。
-      const status = this.state.agent(nodeId).status;
-      if (status !== "completed" && status !== "cancelled" && status !== "interrupted" && !this.#stopping.has(nodeId)) {
-        await this.durableApply(this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic }));
-      }
+      // 与pause/recover失败收敛共享互斥区；锁外读取会在磁盘等待期间过期。
+      await this.mutationExclusive(async () => {
+        const status = this.state.agent(nodeId).status;
+        if (status === "completed" || status === "cancelled" || status === "interrupted" || this.#stopping.has(nodeId)) return;
+        const event = this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic });
+        this.state.assertApplicable(event);
+        await this.journal.append(event);
+        this.state.apply(event);
+      });
       throw error;
     }
   }
@@ -304,6 +313,11 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** resume 的已完成前缀不产生事实；首个重跑节点才开启新尝试与第一轮阶段访问。 */
   private async ensureReplayAttempt(title: string): Promise<PhaseVisit> {
     if (this.#replayAttemptStarted && this.#currentPhaseVisit) return this.#currentPhaseVisit;
+    return this.#replayAttemptStarting ??= this.startReplayAttempt(title);
+  }
+
+  /** 仅由单飞入口调用；初始化失败保留同一拒绝，不在同次执行内重试写事实。 */
+  private async startReplayAttempt(title: string): Promise<PhaseVisit> {
     if (this.resumeInterrupted && (this.state.snapshot().status === "interrupted" || this.state.snapshot().status === "cancelled")) {
       await this.durableApply(this.event({
         type: "run.status",

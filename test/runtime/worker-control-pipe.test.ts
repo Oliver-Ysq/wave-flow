@@ -39,7 +39,29 @@ test("Worker MCP 的 complete 工具通过私有 FIFO 交给 ControlServer", asy
   send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_complete", arguments: { summary: "done", result: { ok: true } } } });
   const response = await next();
   expect(response.id).toBe(2);
+  expect((response.result as { content: { text: string }[] }).content[0].text).toBe('{"ok":true}');
   expect(received).toEqual([{ runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: { ok: true } }]);
+  // 客户端stdin仍打开也必须退出，不能依赖ACP adapter会回收它。
+  expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
+});
+
+for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP自行退出，不依赖ACP关闭stdin，pendingBlock=${pending}`, async () => {
+  let entered!: () => void;
+  const blocked = new Promise<void>((resolve) => { entered = resolve; });
+  const control = { async complete() {}, async block() { entered(); return new Promise(() => {}); }, async continue() {} };
+  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_MCP_REQUEST_FIFO: pipe.endpoints.requestFifo, WF_WORKER_MCP_RESPONSE_FIFO: pipe.endpoints.responseFifo } }); children.push(child);
+  const reader = child.stdout.getReader();
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } })}\n`);
+  expect((await reader.read()).done).toBe(false);
+  if (pending) {
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "测试等待" } } })}\n`);
+    await blocked;
+  }
+  pipe.close();
+  expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
 });
 
 /** block/continue 是 HITL 的另两个入口，必须与 complete 一样经私有 FIFO 且携带绑定身份。 */

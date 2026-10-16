@@ -178,10 +178,8 @@ export class RunRuntime {
     } catch (error) {
       if (this.#stopping && control.signal.aborted) throw error;
       const diagnostic = `暂停未确认：${error instanceof Error ? error.message : String(error)}`;
-      for (const node of this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((item) => item.status === "pausing")) {
-        await this.applyAgentStatus(node.id, "interrupted", node.agentSessionId, diagnostic);
-      }
-      await this.transitionRun("interrupted", diagnostic);
+      await this.interruptControlWorkers(diagnostic);
+      await this.transitionRunIfLive("interrupted", diagnostic);
       throw error;
     } finally { this.endControl(control); }
   }
@@ -208,12 +206,20 @@ export class RunRuntime {
     } catch (error) {
       if (this.#stopping && control.signal.aborted) throw error;
       const diagnostic = `恢复未确认：${error instanceof Error ? error.message : String(error)}`;
-      for (const node of this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((item) => item.status === "recovering")) {
-        await this.applyAgentStatus(node.id, "interrupted", node.agentSessionId, diagnostic);
-      }
-      await this.transitionRun("interrupted", diagnostic);
+      await this.interruptControlWorkers(diagnostic);
+      await this.transitionRunIfLive("interrupted", diagnostic);
       throw error;
     } finally { this.endControl(control); }
+  }
+
+  /** 控制部分失败使整个Run无法继续；先耐久收敛全部活跃节点，再尽力释放原会话。 */
+  private async interruptControlWorkers(diagnostic: string): Promise<void> {
+    this.host.pauseScheduling();
+    for (const node of this.state.snapshot().phases.flatMap(phase => phase.agents)) {
+      if (!await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, diagnostic)) continue;
+      // 已成功暂停/恢复的其他会话也须释放；底层清理不响应不能阻塞本地终态落盘。
+      void this.host.stopNode(node).catch(() => undefined);
+    }
   }
 
   /** 用户停止是终态；不允许后续 recover 或隐式重跑。 */
@@ -230,15 +236,24 @@ export class RunRuntime {
     // 再执行 stop，避免两个控制操作并发写状态机。
     if (activeControl && this.#controlSettled) await this.#controlSettled;
     const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering");
+    let stopError: Error | undefined;
     try {
       for (const node of targets) {
         // 节点可能在停止期间自行 complete（Worker FIFO 与 IPC 是两条通道）；
         // 已终态的节点保持其已完成证据，不再落 cancelled。
         if (!canTransition(this.state.agent(node.id).status, "cancelled")) continue;
         this.host.beginStop(node.id);
-        await this.host.stopNode(node);
+        try { await this.host.stopNode(node); }
+        catch (error) {
+          stopError ??= error instanceof Error ? error : new Error(String(error));
+          const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
+          await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, diagnostic);
+          // 仍需尝试其他Worker，不能让首个取消失败留下整批活跃节点。
+          continue;
+        }
         await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
       }
+      if (stopError !== undefined) throw stopError;
       await this.transitionRunIfLive("cancelled", "用户停止 Run。 ");
       return this.snapshot();
     } catch (error) {
@@ -246,6 +261,7 @@ export class RunRuntime {
       await this.transitionRun("interrupted", diagnostic);
       throw error;
     } finally {
+      for (const node of targets) this.host.endStop(node.id);
       this.#stopping = false;
     }
   }
