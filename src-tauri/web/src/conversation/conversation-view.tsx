@@ -100,13 +100,13 @@ function ConversationTurnView({
 }) {
   return (
     <Fragment>
-      <article className="chat-message user">
-        <div className="chat-avatar">你</div>
+      {!turn.user.summaryKey&&<article className="chat-message user">
+        <div className="chat-avatar">{turn.user.summaryKey?"W":"你"}</div>
         <div>
-          <span>你</span>
+          <span>{turn.user.summaryKey?"系统 · 影响面总结":"你"}</span>
           <p>{turn.user.text}</p>
         </div>
-      </article>
+      </article>}
       {groupToolEntries(turn.entries).map((item) => {
         if (item.kind === "tool-group") {
           return (
@@ -186,7 +186,7 @@ export function ConversationView({
   /** 时间线之后的行动点（草案卡、Execution、决策卡）。 */
   children?: ReactNode;
   /** 耐久行动点，按保存时间插入对应回合；key 绑定原版本或执行。 */
-  timelineEvents?: Array<{ key: string; at: string; content: ReactNode }>;
+  timelineEvents?: Array<{ key: string; at: string; content: ReactNode; /** 绑定总结回合，结果卡在正文前与首片段一起呈现。 */ beforeTurnId?:string }>;
   /** 视口内耐久正文/原消息/版本阅读标记，不按 delta 计数。 */
   onRead?: (taskId:string,ids:string[])=>void;
   /** 隐藏页面不更新已读标记。 */
@@ -276,6 +276,7 @@ export function ConversationView({
                   harness.executions.some((item) => item.finishedAt === null)
                 }
                 onClick={onComplete}
+                data-archive-task={harness.harnessRunId}
               >
                 {busy === "complete-harness" ? "正在归档…" : "归档任务"}
               </button>
@@ -299,12 +300,13 @@ export function ConversationView({
         )}
         {turns.map((turn, index) => (
           <Fragment key={turn.turnId}>
+          {timelineEvents.filter(event=>event.beforeTurnId===turn.turnId).map(event=><div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
           <ConversationTurnView
             key={turn.turnId}
             turn={turn}
             harness={harness}
           />
-          {timelineEvents.filter(event => event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt)).sort((a,b)=>a.at.localeCompare(b.at)).map(event => <div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
+          {timelineEvents.filter(event => !event.beforeTurnId&&event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt)).sort((a,b)=>a.at.localeCompare(b.at)).map(event => <div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
           </Fragment>
         ))}
         {(harness.status === "interrupted" || harness.diagnostic?.includes("主控启动失败")) && (

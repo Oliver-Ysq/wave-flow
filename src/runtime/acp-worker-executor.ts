@@ -198,17 +198,29 @@ type ActiveAcpWorker = {
 
 function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.agentSessionId ?? ""}`; }
 
+/** 所有CLI共用的工具定位契约；不规定名称编码、编程函数别名或CLI专属调用方式。 */
+function workerControlToolGuide(): string {
+  return `本会话提供私有 MCP server：wave-flow-worker-control。
+工具名与参数：
+- wave_flow_complete：{ summary: string, result: object }，提交最终JSON对象及简短摘要。
+- wave_flow_block：{ needHelp: string, answerSchema?: object, blockRequestId?: string }，请求人工协助；重连时沿用原请求身份和参数。
+- wave_flow_continue：{ blockRequestId: string }，原block已获答案且可继续后调用。
+以当前会话提供的真实工具声明和调用方式为准，不要把工具名当成某种编程语言中的函数名。
+若工具延迟加载、未直接显示，使用当前会话提供且允许的工具搜索/发现机制，精确定位上述server和工具，读取声明后调用；不要调用同名但属于其他server的工具。
+若没有发现机制，或发现后工具仍不可用，如实报告工具不可用；不得用聊天JSON、自然语言、文件或回合结束代替受管完成上报。`;
+}
+
 function managedPrompt(node: AgentNodeSnapshot): string {
   const schema = node.request.schema ? `\n最终 JSON 必须符合此 resultSchema：${JSON.stringify(node.request.schema)}` : "";
-  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n本 session 注入了三个私有 MCP 工具：wave_flow_complete、wave_flow_block、wave_flow_continue。完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，直接调用 MCP 工具 wave_flow_block（不要用 exec/代码模式包装调用）。它单次最多等待约 25 秒：返回 { status: "answered", blockRequestId, answer } 表示用户已作答；返回 { status: "waiting", blockRequestId } 表示尚未作答，你必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用 wave_flow_block 继续等待，直到 answered 为止——不要结束回合、不要修改参数、不要新建 block、不要把 waiting 当作答案。收到答案并确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
+  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n${workerControlToolGuide()}\n完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block。它单次最多等待约 25 秒：返回 { status: "answered", blockRequestId, answer } 表示用户已作答；返回 { status: "waiting", blockRequestId } 表示尚未作答，你必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用 wave_flow_block 继续等待，直到 answered 为止——不要结束回合、不要修改参数、不要新建 block、不要把 waiting 当作答案。收到答案并确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
 }
 
 function recoveryPrompt(): string {
-  return "这是 Wave Flow 用户授权的恢复。上一回合已被取消，不能假设它未产生副作用。请先检查当前工作目录、Git 状态、已生成文件、测试和命令结果，再从已有现场继续；不要重发原始任务。完成仍须调用私有 MCP 的 wave_flow_complete；无法安全判断时调用 wave_flow_block。";
+  return `这是 Wave Flow 用户授权的恢复。上一回合已被取消，不能假设它未产生副作用。请先检查当前工作目录、Git 状态、已生成文件、测试和命令结果，再从已有现场继续；不要重发原始任务。完成仍须调用私有 MCP 的 wave_flow_complete；无法安全判断时调用 wave_flow_block。\n\n${workerControlToolGuide()}`;
 }
 
 function completionReminderPrompt(): string {
-  return "上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，调用私有 MCP 工具 wave_flow_complete 并提供最终 JSON 对象与简短摘要。若节点仍在等待人工答案，必须沿用原 blockRequestId 重连 wave_flow_block 继续等待，不要新建 block；其余无法安全构造结果的情况也改用 wave_flow_block。完成上报后才可结束本回合。";
+  return `上一回合已以 ACP end_turn 结束，但 Wave Flow 尚未收到 complete；该回合不构成成功。不要重做业务任务，也不要只回复文本。现在只做受管完成上报：基于刚才已经完成/确认的任务结果，调用私有 MCP 工具 wave_flow_complete 并提供最终 JSON 对象与简短摘要。若节点仍在等待人工答案，必须沿用原 blockRequestId 重连 wave_flow_block 继续等待，不要新建 block；其余无法安全构造结果的情况也改用 wave_flow_block。完成上报后才可结束本回合。\n\n${workerControlToolGuide()}`;
 }
 
 async function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

@@ -5,6 +5,8 @@ export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 
 /** 用户或完整主控消息；reasoning delta 永不进入此类型。 */
 export type HarnessMessage = {
+  /** 自动总结义务键；缺省为普通对话，不伪造用户消息。 */
+  readonly summaryKey?: string;
   /** 稳定消息标识，用于界面 key 与分页去重。 */
   readonly id: string;
   /** 消息来源；assistant 只在完整文本耐久后出现。 */
@@ -129,6 +131,8 @@ export type HarnessAcpToolCall = {
 
 /** 一个可恢复读取、但不认领原生 Pi session 的主控会话快照。 */
 export type HarnessSnapshot = {
+  /** 耐久影响面总结义务；旧档案缺省，不补造历史。 */
+  readonly impactSummaries?: readonly ImpactSummary[];
   /** 由原Journal派生的执行历史链接；只展示，不授权操作。 */
   readonly executionHistory?:readonly ExecutionHistoryItem[];
   /** 此档案已应用事件数；用于展示快照防倒退，不是业务授权。 */
@@ -187,6 +191,28 @@ export type ExecutionHistoryItem={
   readonly diagnostic:string|null;
   /** 原终态返回值，创建或无结果为null；不套最新结果。 */
   readonly summary:JsonObject|null;
+};
+
+/** 终态事件同时建立的总结义务；完整回答及回合终结耐久后才完成。 */
+export type ImpactSummary = {
+  /** 最新总结回合的唯一身份；旧记录缺省使用summary:key，重试不复用过程身份。 */
+  readonly turnId?: string;
+  /** Task/execution/attempt/终态事实确定性 SHA-256，不是授权秘密。 */
+  readonly key: string;
+  /** 所属 Execution；读取再校验 Task。 */
+  readonly executionId: string;
+  /** 原 Runtime 正整数 attempt。 */
+  readonly attempt: number;
+  /** pending 待安排、running 回合中、interrupted 须重试、completed 完整耐久、cancelled 仅明确放弃且同时归档。 */
+  readonly status: "pending" | "running" | "interrupted" | "completed" | "cancelled";
+  /** 原终态时间。 */
+  readonly createdAt: string;
+  /** 完整回答时间；未完成 null。 */
+  readonly completedAt: string | null;
+  /** 完整回答消息 ID；未完成 null。 */
+  readonly messageId: string | null;
+  /** 中断原因；无中断 null。 */
+  readonly diagnostic: string | null;
 };
 
 /** 主控会话中的不可变 workflow.ts 草案。 */

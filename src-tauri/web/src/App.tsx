@@ -11,6 +11,8 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
+import {summaryBodyStartedAt} from "./conversation/harness-event-merge";
+import { Markdown as MessageBody } from "./conversation/markdown";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
 import { WorkflowProposalSummary, WorkflowExecutionSummary } from "./conversation/workflow-summary";
@@ -87,6 +89,8 @@ export function App() {
     return ()=>{if(!release())return;setBusyOperations(current=>{const next={...current};delete next[owner];return next;});};
   };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
+  const [archiveConfirmation,setArchiveConfirmation]=useState<{harnessRunId:string;count:number}|null>(null);
+  useEffect(()=>setArchiveConfirmation(null),[harness?.harnessRunId]);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -670,6 +674,8 @@ export function App() {
         </footer>
       </aside>
       <section className="conversation-pane" hidden={workflowPanelOpen}>
+        {harness?.status==="interrupted"&&<button onClick={()=>void api.recoverController(harness.harnessRunId).catch(error=>setError(String(error)))}>恢复主控待命（不重发任务）</button>}
+        {harness?.impactSummaries?.filter(item=>item.status==="interrupted"||item.status==="cancelled").map(item=><ImpactSummaryPanel key={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/>)}
         {!harness ? (
           <DraftConversation
             project={
@@ -693,8 +699,9 @@ export function App() {
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
             onComplete={() => {
-              const finishBusy=beginBusy(`task:${harness.harnessRunId}`,"complete-harness");
-              const pageToken=navigationToken.current;
+              const unfinished=harness.impactSummaries?.filter(item=>item.status!=="completed")??[];
+              if(unfinished.length){setArchiveConfirmation({harnessRunId:harness.harnessRunId,count:unfinished.length});return;}
+              const finishBusy=beginBusy(`task:${harness.harnessRunId}`,"complete-harness"),pageToken=navigationToken.current;
               void taskMutation(harness.harnessRunId,()=>api.completeHarness(harness.harnessRunId))
                 .then((response) => {
                   if(pageToken!==navigationToken.current||harnessRef.current?.harnessRunId!==response.harness.harnessRunId)return;
@@ -765,6 +772,7 @@ export function App() {
             onRead={markRead}
           />
         )}
+        {archiveConfirmation&&harness?.harnessRunId===archiveConfirmation.harnessRunId&&<ArchiveImpactConfirmation count={archiveConfirmation.count} onClose={()=>setArchiveConfirmation(null)} onConfirm={()=>{const id=archiveConfirmation.harnessRunId,pageToken=navigationToken.current,finishBusy=beginBusy(`task:${id}`,"archive-abandon-summary");setArchiveConfirmation(null);void taskMutation(id,()=>api.archiveAbandoningSummaries(id)).then(()=>{if(pageToken!==navigationToken.current||harnessRef.current?.harnessRunId!==id)return;setHarnessView("active");setDraftProjectId(projects[0]?.projectId??null);setHarness(null);setHarnessText("");setWorkflowPanelOpen(false);setError(null);}).catch(error=>{if(pageToken===navigationToken.current&&harnessRef.current?.harnessRunId===id)setError(String(error));}).finally(finishBusy);}}/>}
         {templatePicker&&<TemplatePicker key={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} identity={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} blockedReason={harness&&(harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null))?"主控或执行仍在处理中；参数保留，结束后才能保存。":undefined} onClose={()=>setTemplatePicker(false)} onSave={async(selection,requestId)=>{
           const owner=harnessRef.current,token=navigationToken.current;
           const response=owner?await taskMutation(owner.harnessRunId,()=>api.saveTemplate(owner.harnessRunId,requestId,selection)):await api.createTemplateTask(draftProjectId??selectedProjectId!,"只读代码审查与独立复核",requestId,selection,taskTitle||undefined);
@@ -824,7 +832,7 @@ export function App() {
                   {editableRevision(harness,revision) && <>{!revision.localOrigin&&<button onClick={()=>prepareRevisionDraft(harness,revision,false)}>通过对话调整</button>}<button onClick={async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }}>放弃此方案</button></>}
                   {revision.abandonedAt&&harness.workflowRevisions.at(-1)?.revision===revision.revision&&harness.status!=="completed"&&<AbandonedPlan onRedesign={()=>prepareRevisionDraft(harness,revision,true)} onTemplate={!harness.executions.length?()=>setTemplatePicker(true):undefined} disabled={harness.status!=="idle"||harness.executions.some(item=>!item.finishedAt)}/>}</>;
               })()}
-              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} />}
+              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} harness={harness} />}
             </div>
           )}
           {executionDetail && harness && route.kind === "workflow" && routeMatchesTask(harness,route) && route.section === "execution" ? (
@@ -1903,7 +1911,7 @@ function HarnessConversation({
       draftContext={draftContext}
       timelineEvents={[
         ...harness.workflowRevisions.map(revision => ({ key: `revision:${revision.revision}`, at: revision.createdAt, content: <WorkflowProposalSummary task={harness} revision={revision} onOpen={()=>onSelectRevision(revision)} onAdjust={()=>onAdjustRevision(revision)} onTemplate={onTemplate} /> })),
-        ...(harness.executionHistory?.length?harness.executionHistory.map(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);return {key:item.key,at:item.at,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null};}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
+        ...(harness.executionHistory?.length?harness.executionHistory.flatMap(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);const obligation=item.kind==="finished"?harness.impactSummaries?.find(summary=>summary.executionId===item.executionId&&summary.attempt===item.attempt):undefined;const firstBody=obligation?summaryBodyStartedAt(harness,obligation.key):null;if(obligation&&!firstBody)return [];const body=obligation?harness.conversationEntries.find(entry=>entry.kind==="body"&&entry.text.trim()&&(entry.turnId===`summary:${obligation.key}`||entry.turnId.startsWith(`summary:${obligation.key}:`))):undefined;return [{key:item.key,at:firstBody??item.at,beforeTurnId:obligation?(body?.turnId??obligation.turnId??`summary:${obligation.key}`):undefined,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null}];}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
       ]}
     >
       <div className="conversation-actions">
@@ -1993,14 +2001,32 @@ function HarnessDecisionCard({
 }
 
 /** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
-function HistoricalResults({taskId,executionId,currentAttempt}:{taskId:string;executionId:string;currentAttempt:number}) {
+function ArchiveImpactConfirmation({count,onClose,onConfirm}:{count:number;onClose:()=>void;onConfirm:()=>void}) {
+  const dialog=useRef<HTMLElement|null>(null);
+  useEffect(()=>{const previous=document.querySelector<HTMLButtonElement>('[data-archive-task]')??document.activeElement as HTMLElement|null;dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();return()=>{if(previous?.isConnected)previous.focus();};},[]);
+  return <div className="connection-backdrop" onClick={event=>{if(event.target===event.currentTarget)onClose();}}><section ref={dialog} role="dialog" aria-modal="true" aria-labelledby="archive-impact-title" className="connection-panel" onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();onClose();}if(event.key==="Tab"){const buttons=dialog.current?.querySelectorAll<HTMLButtonElement>("button");if(!buttons?.length)return;const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}}}><div className="connection-panel-head"><h2 id="archive-impact-title">放弃总结并归档？</h2></div><div className="connection-form"><p>仍有 {count} 份影响面总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。</p></div><div className="modal-actions"><button onClick={onClose}>返回处理</button><button className="danger" onClick={onConfirm}>明确放弃并归档</button></div></section></div>;
+}
+
+/** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
+function HistoricalResults({taskId,executionId,currentAttempt,harness}:{taskId:string;executionId:string;currentAttempt:number;harness:HarnessSnapshot}) {
   const resultKey=`${taskId}:${executionId}`;
   const [attempt,setAttempt]=useState(()=>{const saved=resultAttempts.get(resultKey);return saved&&saved<=currentAttempt?saved:currentAttempt;});
   useEffect(()=>resultAttempts.set(resultKey,attempt),[resultKey,attempt]);
   const [value,setValue]=useState<Awaited<ReturnType<typeof api.attemptResults>>|null>(null);
   const [error,setError]=useState<string|null>(null);
-  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt]);
-  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据，不代表目标已验收；自动汇总尚未开放。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+  const terminalVersion=harness.executions.find(item=>item.executionId===executionId)?.finishedAt;
+  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt,terminalVersion]);
+  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据；工作流返回值与Schema通过不代表目标已验收。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label><ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt}/>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+}
+
+/** 义务与完整回答均来自原Task快照；重试不重跑业务执行。 */
+function ImpactSummaryPanel({harness,executionId,attempt}:{harness:HarnessSnapshot;executionId:string;attempt:number}) {
+  const obligation=harness.impactSummaries?.find(item=>item.executionId===executionId&&item.attempt===attempt);
+  const [busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
+  if(!obligation)return <p>此尝试未保存影响面总结义务；不补造历史结论。</p>;
+  const message=harness.messages.find(item=>item.id===obligation.messageId);
+  if(obligation.status==="cancelled")return <article aria-label="影响面总结"><h2>影响面总结</h2><p>用户已放弃总结并只读归档；影响面未完成，不再开放执行。</p></article>;
+  return <article aria-label="影响面总结"><h2>影响面总结</h2><p role="status">{{pending:"准备总结",running:"正在总结",interrupted:"总结中断，须重试",completed:"总结已完整保存"}[obligation.status]}</p>{obligation.status!=="completed"&&<p>完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。</p>}{obligation.diagnostic&&<p role="alert">{obligation.diagnostic}</p>}{error&&<p role="alert">{error}</p>}{obligation.status==="completed"&&message&&<MessageBody text={message.text}/>}<p>尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。</p>{harness.status!=="completed"&&obligation.status!=="completed"&&<button disabled={busy||(obligation.status==="running"&&!obligation.turnId)||(harness.status==="running"&&obligation.status!=="running")} onClick={async()=>{setBusy(true);setError(null);try{if(obligation.status==="running")await api.stopImpactSummary(harness.harnessRunId,obligation.key,obligation.turnId!);else await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在处理…":obligation.status==="running"?"停止影响面总结":"重试影响面总结"}</button>}</article>;
 }
 
 function ExecutionDetail({

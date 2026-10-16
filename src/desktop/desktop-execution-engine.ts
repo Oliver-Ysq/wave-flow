@@ -168,6 +168,7 @@ export class DesktopExecutionEngine {
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
     }, harnessRoot, this.storeRoot);
+    this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
@@ -202,6 +203,7 @@ export class DesktopExecutionEngine {
   async cancelForDesktopExit(): Promise<void> {
     if (this.#exitRequested) return;
     this.#exitRequested = true;
+    this.#harness.beginExit();
     for (const runtime of this.#runs.values()) await runtime.cancelForDesktopExit(this.instanceId);
     await this.#executions.cancelForDesktopExit(this.instanceId);
     await this.#harness.interruptForDesktopExit();
@@ -414,7 +416,7 @@ export class DesktopExecutionEngine {
   }
 
   private taskPresentation(task:import("../harness/types").HarnessSnapshot):import("../harness/types").HarnessSnapshot { return {...task,executionAttention:Object.fromEntries(task.executions.filter(execution=>execution.finishedAt===null).map(execution=>[execution.executionId,this.#executions.attention(execution.executionId)]))}; }
-  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { return { harness:this.taskPresentation(await this.#harness.snapshot(harnessRunId)) }; }
+  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { const harness=this.taskPresentation(await this.#harness.snapshot(harnessRunId));this.#harness.scheduleImpactSummary(harnessRunId);return {harness}; }
   private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: (await this.#harness.list()).map(task=>this.taskPresentation(task)) }; }
   private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as HarnessMessageRequest).text !== "string") throw new EngineActionError(400, "Harness 消息请求无效。 ");
@@ -624,8 +626,12 @@ export class DesktopExecutionEngine {
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
       case "harnesses.get": return this.harnessSnapshot(requiredString(value, "harnessRunId"));
       case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
+      case "harnesses.retryImpactSummary": return {harness:await this.#harness.retryImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"))};
+      case "harnesses.stopImpactSummary": return {harness:await this.#harness.stopImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"),requiredString(value,"turnId"))};
+      case "harnesses.recoverController": return {harness:await this.#harness.recoverController(requiredString(value,"harnessRunId"))};
+      case "executions.capsule": return this.#harness.executionCapsule(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
       case "harnesses.abort": return this.abortHarness(requiredString(value, "harnessRunId"), {});
-      case "harnesses.complete": return this.completeHarness(requiredString(value, "harnessRunId"), {});
+      case "harnesses.complete": {const request=value as Record<string,unknown>;if(request.abandonImpactSummaries!==undefined&&typeof request.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return {harness:await this.#harness.complete(requiredString(value,"harnessRunId"),request.abandonImpactSummaries===true)};}
       case "harnesses.retryInitialization": return { harness: await this.#harness.retryInitialization(requiredString(value, "harnessRunId")) };
       case "harnesses.abandonCard": return { harness: await this.#harness.abandonWorkflowCard(requiredString(value, "harnessRunId"), requiredString(value, "cardId")) };
       case "harnesses.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});

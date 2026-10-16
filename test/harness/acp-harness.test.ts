@@ -37,6 +37,24 @@ test("cancel 正常 resolve 的 ACP CLI 不得把 partial 文本当完整回答"
   await expect(session.prompt("写一篇长文")).rejects.toThrow("取消");
 });
 
+for (const stopReason of ["max_tokens", "max_turn_requests", "refusal", "unknown_reason", undefined]) {
+  test(`ACP 非正常结束 ${String(stopReason)} 不能接纳非空部分回答`, async () => {
+    let listener: ((event: { update: acp.SessionUpdate }) => void) | null = null;
+    const client = {
+      subscribe(value: typeof listener) { listener = value; return () => {}; },
+      async initialize() {}, async createSession() {},
+      async prompt() {
+        listener?.({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "尚未写完的回答" } } });
+        return { stopReason };
+      },
+      close() {},
+    } as unknown as AcpSessionClient;
+    const session = new AcpHarnessSession({ id: "codex-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "test", command: "fake", args: [], env: [] }, client);
+    await expect(session.prompt("总结")).rejects.toThrow("未正常结束");
+    expect(session.isRunning).toBe(false);
+  });
+}
+
 test("ACP tool_call / tool_call_update 归一化为结构化流事件，think 类调用被过滤", async () => {
   let listener: ((event: { update: acp.SessionUpdate }) => void) | null = null;
   const client = {

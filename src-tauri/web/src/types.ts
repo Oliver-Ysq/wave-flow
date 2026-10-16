@@ -103,7 +103,7 @@ export type DesktopStatusResponse = { protocolVersion: number; activeRuns: numbe
 /** 独立主控会话状态；不等同于 Workflow Run 状态。 */
 export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 /** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
-export type HarnessMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
+export type HarnessMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string };
 /** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
 export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 /** 工具动作分类；与来源分开，经 MCP 执行的文件读取仍保留 MCP 徽标。 */
@@ -220,6 +220,8 @@ export type ExecutionPlanResponse = {
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
 export type HarnessSnapshot = {
+  /** 原终态影响面义务；缺省为旧档案，不补造。 */
+  impactSummaries?: import("../../../src/harness/types").ImpactSummary[];
   /** 原执行创建/终态的历史链接；attempt未知不猜测。 */
   executionHistory?:Array<{key:string;at:string;executionId:string;revision:number;attempt?:number;kind:"created"|"finished";status:RunStatus;diagnostic:string|null;summary:Record<string,unknown>|null}>;
   /** 此档案已应用事件数；仅用于迟到响应防倒退。历史兼容缺省。 */

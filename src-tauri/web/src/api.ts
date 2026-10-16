@@ -9,6 +9,14 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 只重试原义务的主控总结，不能派发或恢复Worker。 */
+  retryImpactSummary:(harnessRunId:string,key:string)=>action<HarnessRunResponse>("harnesses.retryImpactSummary",{harnessRunId,key}),
+  /** 仅停止指定总结的本次回合；key与turnId均必填，过期或缺失身份不能停止重试/其他回合。 */
+  stopImpactSummary:(harnessRunId:string,key:string,turnId:string)=>action<HarnessRunResponse>("harnesses.stopImpactSummary",{harnessRunId,key,turnId}),
+  /** 明确放弃总结且同时封存；归档后不能执行或恢复。 */
+  archiveAbandoningSummaries:(harnessRunId:string)=>action<HarnessRunResponse>("harnesses.complete",{harnessRunId,abandonImpactSummaries:true}),
+  /** 主控只回idle，不重发prompt、不解除总结门禁。 */
+  recoverController:(harnessRunId:string)=>action<HarnessRunResponse>("harnesses.recoverController",{harnessRunId}),
   /** 本地来源静态预检；只在专用验收页面调用，不创建Task或执行源码。 */
   preflightLocal:(projectId:string,path:string)=>action<Omit<import("../../../src/workflow/preflight-local").LocalWorkflowPreflight,"source">>("workflows.preflightLocal",{projectId,path}),
   /** 保存已预检本地来源与参数为未批准Task，不运行模块。 */

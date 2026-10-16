@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertImpactSummariesComplete } from "./impact-summary";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, runsRoot } from "../journal/paths";
@@ -59,6 +60,26 @@ export class HarnessExecutionService {
     private readonly localStoreRoot = runsRoot(),
   ) {}
 
+  /** 从原 Run Journal 提取特定 attempt 证据；不读取其他尝试、不回放调度。 */
+  async capsuleEvidence(taskId: string, executionId: string, attempt: number): Promise<unknown> {
+    const results = await this.attemptResults(taskId, executionId, attempt);
+    const run = await RunJournal.open(executionId, await this.storeFor(taskId, executionId));
+    let activeAttempt = 0;
+    const evidence = [];
+    for (const event of run.events) {
+      if (event.type === "execution-attempt.started") {
+        activeAttempt = event.executionAttemptId ?? 0;
+        if(activeAttempt===attempt)evidence.push({type:event.type,at:event.at,attempt,origin:attempt===1?"首次执行":"用户显式resume创建的新尝试；不是自动重跑或旧session重连"});
+      }
+      if (activeAttempt !== attempt) continue;
+      if(event.type==="agent.completed")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,agentSessionId:event.agentSessionId,diagnostic:event.diagnostic,resultPath:event.resultPath,validationPath:event.validationPath,validation:event.validationPath?"原Journal重开已校验独立validation记录；不等于业务验收":"未保存独立validation记录，不补造验证证据"});
+      if(event.type==="agent.status"||event.type==="run.status")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,agentSessionId:event.agentSessionId,status:event.status,diagnostic:event.diagnostic});
+      if(event.type==="block.created"||event.type==="block.answered"||event.type==="gate.created"||event.type==="gate.answered")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,diagnostic:event.diagnostic,decision:event.type.endsWith("answered")?"已交付原请求答案，不授权新动作":"原请求待处理"});
+    }
+    const page = (await this.runtimeFor(taskId, executionId)).state.listPhaseVisits(attempt, null, 1000, true);
+    return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence:{cwd:run.journal.manifest.workflowProjectCwd,status:"没有起止Git基线；不能证明文件归因或外部副作用"},nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
+  }
+
   /** Execution 档案位于所属 Harness 档案内的嵌套 Run Store。 */
   private executionsRoot(harnessRunId: string): string {
     validateRunId(harnessRunId);
@@ -83,6 +104,7 @@ export class HarnessExecutionService {
    */
   private async createExecutionOnce(harnessRunId: string, revisionNumber: number, input: JsonObject, config: ExecutionConfigSnapshot | null, confirmation?: Pick<WorkflowExecutionRecord,"confirmationRequestId"|"confirmationPayloadHash">): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
     const snapshot = await this.harness.snapshot(harnessRunId);
+    assertImpactSummariesComplete(snapshot);
     if (snapshot.task) assertStartable(snapshot, revisionNumber);
     const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
     if (!revision) throw new Error(`Workflow revision 不存在：${revisionNumber}`);
@@ -361,6 +383,7 @@ export class HarnessExecutionService {
   private async resumeOnce(harnessRunId: string, executionId: string): Promise<RunSnapshot> {
     if (this.#instances.has(executionId)) throw new Error("该 Execution 已在当前 Engine 运行，不能重复 resume。 ");
     const snapshot = await this.harness.snapshot(harnessRunId);
+    assertImpactSummariesComplete(snapshot);
     if (snapshot.task && snapshot.status !== "idle") throw new Error("主控空闲且任务未归档时才能恢复原执行。");
     const record = snapshot.executions.find((item) => item.executionId === executionId);
     if (!record) throw new Error("未知 WorkflowExecution。 ");
