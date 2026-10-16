@@ -52,9 +52,11 @@ test("完成会话后回到进行中第一个项目的新建会话页", async ()
   expect(draftSource).toContain("setHarness(null)");
   expect(draftSource).toContain("setDraftProjectId(projectId)");
 
-  const completeStart = source.indexOf("api.completeHarness(harness.harnessRunId)");
-  const completeEnd = source.indexOf("onOpenWorkflow", completeStart);
+  const completeStart = source.indexOf("async function confirmArchive");
+  const completeEnd = source.indexOf("async function beginArchive", completeStart);
   const completeSource = source.slice(completeStart, completeEnd);
+  expect(completeSource).toContain("api.completeHarness(id)");
+  expect(completeSource).toContain("api.archiveAbandoningPending(id)");
   expect(completeSource).toContain("const firstProjectId = projects[0]?.projectId ?? null");
   expect(completeSource).toContain('setHarnessView("active")');
   expect(completeSource).toContain("setSelectedProjectId(firstProjectId)");

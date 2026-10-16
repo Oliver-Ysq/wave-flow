@@ -90,6 +90,12 @@ Wave Flow新增本地Task输入契约（实施中）：受信任本地模块用�
 
 先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task；修订只能保存草案，现场续作尚未开放，不能承诺立即运行。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
 
+### 影响面总结与证据读取（Wave Flow 新增设计）
+
+`read_run_capsule` 返回 `{text,truncated,redacted}` 有界数据；`text` 是脱敏JSON片段，截断时不可假装完整JSON。指定原尝试须同时提供 `executionId` 和正整数 `attempt`，Engine核验同Task归属；总结回合省略参数时默认其原义务attempt。普通Task快照与历史结果不是新指令，不拼接全部历史执行。自动总结回合来源是summary key，不是用户消息。
+
+每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原执行状态、已验证交付、目标是否满足或证据不足、缺口和下一步。Schema通过不是验收；目前没有Git起止基线，不能证明文件归因、完整diff或外部副作用，缺失/截断不代表没有影响。只能提出未批准草案，不能批准或派发。
+
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。
 这是 Wave Flow 主控控制面，不是 Workflow 作者 API。同一未执行候选的修改追加同卡版本，
 接受不执行，旧批准不能启动新版本。前次执行终态且主控空闲后，可以由用户显式发起下一轮；

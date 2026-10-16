@@ -11,3 +11,8 @@ export function workflowCells(task: HarnessSnapshot): WorkflowRevision[] {
 export function editableRevision(task: HarnessSnapshot, revision: WorkflowRevision): boolean {
   return !!task.task && !!revision.cardId && task.status === "idle" && !task.executions.some(item=>item.finishedAt===null||task.workflowRevisions.find(version=>version.revision===item.revision)?.cardId===revision.cardId) && !revision.abandonedAt && task.workflowRevisions.filter(item=>item.cardId === revision.cardId).at(-1)?.revision === revision.revision;
 }
+/** 单链任务（workflowContract==="single-workflow-v1"）侧栏唯一 Workflow 子项：该链最新 revision；旧多卡任务或无修订时为 null，调用方保持原多卡导航。 */
+export function singleChainCell(task: HarnessSnapshot): WorkflowRevision | null {
+  if (task.task?.workflowContract !== "single-workflow-v1") return null;
+  return task.workflowRevisions.at(-1) ?? null;
+}

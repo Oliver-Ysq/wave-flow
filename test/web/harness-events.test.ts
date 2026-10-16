@@ -5,6 +5,7 @@ import {
   composeConversationTurns,
   createStreamTracker,
   turnNeedsAssistantFallback,
+  summaryBodyStartedAt,
 } from "../../src-tauri/web/src/conversation/harness-event-merge";
 import type {
   EngineEventEnvelope,
@@ -363,4 +364,26 @@ test("composeConversationTurns：assistant 归属最近的用户消息，多回�
   expect(turns[1].assistant).toBeNull();
   expect(turns[1].entries.map((entry) => entry.entryId)).toEqual(["th1"]);
   expect(turns[0].entries).toHaveLength(0);
+});
+
+test("composeConversationTurns：影响面总结独立成系统回合，不覆盖最近用户回答",()=>{
+ const key="a".repeat(64),message={id:"summary-answer",role:"assistant" as const,text:"总结",createdAt:"2026-10-15T08:01:00Z",summaryKey:key};
+ const turns=composeConversationTurns(makeSnapshot({status:"idle",messages:[{id:"u1",role:"user",text:"反馈",createdAt:"2026-10-15T08:00:00Z"},message],impactSummaries:[{key,executionId:"e1",attempt:1,status:"completed",createdAt:"2026-10-15T08:00:30Z",completedAt:message.createdAt,messageId:message.id,diagnostic:null}]}));
+ expect(turns).toHaveLength(2);expect(turns[0].assistant).toBeNull();expect(turns[1].user.summaryKey).toBe(key);expect(turns[1].assistant?.id).toBe(message.id);
+});
+
+test("总结重试的过程回合分离，并按时间穿插用户反馈，不按重置seq混排",()=>{
+ const key="a".repeat(64),old=`summary:${key}:old`,current=`summary:${key}:new`;
+ const body=(turnId:string,id:string,at:string)=>({kind:"body" as const,entryId:id,turnId,seq:1,legacy:false,startedAt:at,finishedAt:at,text:id,completed:true,truncated:false});
+ const snapshot=makeSnapshot({messages:[{id:"feedback",role:"user",text:"反馈",createdAt:"2026-10-15T08:01:00Z"}],conversationEntries:[body(old,"old-body","2026-10-15T08:00:00Z"),body(current,"new-body","2026-10-15T08:02:00Z")],impactSummaries:[{key,turnId:current,executionId:"e",attempt:1,status:"running",createdAt:"2026-10-15T08:00:00Z",completedAt:null,messageId:null,diagnostic:null}]});
+ const turns=composeConversationTurns(snapshot);expect(turns.map(item=>item.turnId)).toEqual([old,"feedback",current]);expect(turns[0].entries.map(item=>item.entryId)).toEqual(["old-body"]);expect(turns[2].entries.map(item=>item.entryId)).toEqual(["new-body"]);
+});
+
+test("结果卡显示门只由总结首个非空正文打开，pending/思考/工具不能提前",()=>{
+ const key="b".repeat(64),turnId=`summary:${key}:turn`,at="2026-10-15T08:02:00Z";
+ const snapshot=makeSnapshot({impactSummaries:[{key,turnId,executionId:"e",attempt:1,status:"running",createdAt:"2026-10-15T08:00:00Z",completedAt:null,messageId:null,diagnostic:null}]});
+ expect(summaryBodyStartedAt(snapshot,key)).toBeNull();
+ const body={kind:"body" as const,entryId:"body",turnId,seq:1,legacy:false,startedAt:at,finishedAt:null,text:"",completed:false,truncated:false};
+ expect(summaryBodyStartedAt({...snapshot,conversationEntries:[body]},key)).toBeNull();
+ expect(summaryBodyStartedAt({...snapshot,conversationEntries:[{...body,text:"执"}]},key)).toBe(at);
 });

@@ -103,7 +103,7 @@ export type DesktopStatusResponse = { protocolVersion: number; activeRuns: numbe
 /** 独立主控会话状态；不等同于 Workflow Run 状态。 */
 export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 /** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
-export type HarnessMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
+export type HarnessMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string };
 /** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
 export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 /** 工具动作分类；与来源分开，经 MCP 执行的文件读取仍保留 MCP 徽标。 */
@@ -220,6 +220,8 @@ export type ExecutionPlanResponse = {
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
 export type HarnessSnapshot = {
+  /** 原终态影响面义务；缺省为旧档案，不补造。 */
+  impactSummaries?: import("../../../src/harness/types").ImpactSummary[];
   /** 原执行创建/终态的历史链接；attempt未知不猜测。 */
   executionHistory?:Array<{key:string;at:string;executionId:string;revision:number;attempt?:number;kind:"created"|"finished";status:RunStatus;diagnostic:string|null;summary:Record<string,unknown>|null}>;
   /** 此档案已应用事件数；仅用于迟到响应防倒退。历史兼容缺省。 */
@@ -230,6 +232,58 @@ export type HarnessSnapshot = {
     /** 创建时冻结的模式；旧Task缺省多卡，不能由验收开关推断。 */
     workflowContract?:"single-workflow-v1";
     clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+/** 归档确认页中的未处理候选修订草案摘要；不携带源码全文。 */
+export type ArchivePreviewCandidate = {
+  /** 候选最新版本号。 */
+  revision: number;
+  /** 所属修订卡稳定 id；历史版本缺省为 null。 */
+  cardId: string | null;
+  /** 版本目标；缺省时为 null，不补造。 */
+  goal: string | null;
+  /** 人类可读工作范围；缺省时为 null。 */
+  scope: string | null;
+  /** 冻结源码 SHA-256；仅作身份核对，不是授权凭据。 */
+  sourceHash: string;
+  /** 草案创建时间。 */
+  createdAt: string;
+  /** 来源分类：内置模板 / 受信任本地文件 / 主控生成；历史缺省按 generated。 */
+  origin: "template" | "local" | "generated";
+};
+/** 归档确认页中的未完成影响面总结义务明细。 */
+export type ArchivePreviewSummary = {
+  /** 总结义务稳定键；绑定 Task/execution/attempt/终态事实。 */
+  key: string;
+  /** 所属 Execution。 */
+  executionId: string;
+  /** 原 Runtime 正整数 attempt。 */
+  attempt: number;
+  /** 未完成状态：pending 准备中、running 进行中、interrupted 已中断须重试；completed/cancelled 不进入预览。 */
+  status: "pending" | "running" | "interrupted";
+};
+/** 归档确认页中的未回答且未失效主控决策摘要。 */
+export type ArchivePreviewDecision = {
+  /** 稳定决策 id。 */
+  decisionId: string;
+  /** 面向用户的问题说明。 */
+  question: string;
+  /** 请求耐久时间。 */
+  createdAt: string;
+};
+/** 归档预览：归档确认页所需的全部待定项；只读派生，不授权任何写动作。 */
+export type ArchivePreview = {
+  /** 目标任务身份。 */
+  harnessRunId: string;
+  /** true 表示存在待定项，归档必须由用户明确放弃并确认；false 可直接归档。 */
+  requiresAbandon: boolean;
+  /** 未处理的候选修订草案；无候选为 null。 */
+  candidate: ArchivePreviewCandidate | null;
+  /** 未完成影响面总结明细（pending/running/interrupted）。 */
+  pendingSummaries: ArchivePreviewSummary[];
+  /** 未回答且未失效的决策。 */
+  pendingDecisions: ArchivePreviewDecision[];
+};
+/** harnesses.archivePreview 的响应；preview 为归档确认页全部待定项。 */
+export type ArchivePreviewResponse = { preview: ArchivePreview };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertImpactSummariesComplete } from "./impact-summary";
 import type { HarnessSnapshot, WorkflowRevision } from "./types";
 import { canonicalJson, isTemplateSelection } from "./workflow-templates";
 
@@ -73,6 +74,7 @@ export function candidateRevision(snapshot: HarnessSnapshot): WorkflowRevision |
 }
 /** 新启动资格；resume 不调用此门。 */
 export function assertStartable(snapshot: HarnessSnapshot, revisionNumber: number, allowUnapprovedTemplate = false): WorkflowRevision {
+  assertImpactSummariesComplete(snapshot);
   if (snapshot.status !== "idle") throw new Error("主控必须空闲且任务未归档，才能配置或启动工作流。");
   const revision = snapshot.workflowRevisions.find(item => item.revision === revisionNumber);
   if (snapshot.task?.workflowContract === "single-workflow-v1" && snapshot.executions.length) throw new Error("修订现场续作尚未开放；可以保存同链草案，原冻结执行仍可恢复。");

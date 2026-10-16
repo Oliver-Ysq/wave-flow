@@ -45,6 +45,7 @@ describe("新架构目录与历史实现边界", () => {
     const engine = await Bun.file(join(projectRoot, "src", "desktop", "engine-main.ts")).text();
     expect(cargo).toContain('name = "wave-flow-desktop"');
     expect(JSON.parse(tauriConfig).bundle.externalBin).toEqual(["binaries/wave-flow-desktop-engine"]);
+    expect(JSON.parse(tauriConfig).identifier).toBe("com.wave-flow.desktop");
     expect(desktop).toContain('sidecar("wave-flow-desktop-engine")');
     expect(desktop).toContain("generation.fetch_add(1, Ordering::AcqRel)");
     expect(desktop).toContain("generation.load(Ordering::Acquire) != generation");

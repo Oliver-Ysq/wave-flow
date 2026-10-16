@@ -5,6 +5,8 @@ export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 
 /** 用户或完整主控消息；reasoning delta 永不进入此类型。 */
 export type HarnessMessage = {
+  /** 自动总结义务键；缺省为普通对话，不伪造用户消息。 */
+  readonly summaryKey?: string;
   /** 稳定消息标识，用于界面 key 与分页去重。 */
   readonly id: string;
   /** 消息来源；assistant 只在完整文本耐久后出现。 */
@@ -129,6 +131,8 @@ export type HarnessAcpToolCall = {
 
 /** 一个可恢复读取、但不认领原生 Pi session 的主控会话快照。 */
 export type HarnessSnapshot = {
+  /** 耐久影响面总结义务；旧档案缺省，不补造历史。 */
+  readonly impactSummaries?: readonly ImpactSummary[];
   /** 由原Journal派生的执行历史链接；只展示，不授权操作。 */
   readonly executionHistory?:readonly ExecutionHistoryItem[];
   /** 此档案已应用事件数；用于展示快照防倒退，不是业务授权。 */
@@ -187,6 +191,28 @@ export type ExecutionHistoryItem={
   readonly diagnostic:string|null;
   /** 原终态返回值，创建或无结果为null；不套最新结果。 */
   readonly summary:JsonObject|null;
+};
+
+/** 终态事件同时建立的总结义务；完整回答及回合终结耐久后才完成。 */
+export type ImpactSummary = {
+  /** 最新总结回合的唯一身份；旧记录缺省使用summary:key，重试不复用过程身份。 */
+  readonly turnId?: string;
+  /** Task/execution/attempt/终态事实确定性 SHA-256，不是授权秘密。 */
+  readonly key: string;
+  /** 所属 Execution；读取再校验 Task。 */
+  readonly executionId: string;
+  /** 原 Runtime 正整数 attempt。 */
+  readonly attempt: number;
+  /** pending 待安排、running 回合中、interrupted 须重试、completed 完整耐久、cancelled 仅明确放弃且同时归档。 */
+  readonly status: "pending" | "running" | "interrupted" | "completed" | "cancelled";
+  /** 原终态时间。 */
+  readonly createdAt: string;
+  /** 完整回答时间；未完成 null。 */
+  readonly completedAt: string | null;
+  /** 完整回答消息 ID；未完成 null。 */
+  readonly messageId: string | null;
+  /** 中断原因；无中断 null。 */
+  readonly diagnostic: string | null;
 };
 
 /** 主控会话中的不可变 workflow.ts 草案。 */
@@ -326,6 +352,62 @@ export type HarnessDecision = {
   readonly answer: JsonObject | null;
   /** 答案耐久时间。 */
   readonly answeredAt: string | null;
+  /** 归档协调时耐久失效的时间；未失效为 null/缺省。失效决策永远不能再回答，历史档案无此字段按未失效读取。 */
+  readonly invalidatedAt?: string | null;
+};
+
+/** 归档确认页中的未处理候选修订草案摘要；不携带源码全文。 */
+export type ArchivePreviewCandidate = {
+  /** 候选最新版本号。 */
+  readonly revision: number;
+  /** 所属修订卡稳定 id；历史版本缺省为 null。 */
+  readonly cardId: string | null;
+  /** 版本目标；缺省时为 null，不补造。 */
+  readonly goal: string | null;
+  /** 人类可读工作范围；缺省时为 null。 */
+  readonly scope: string | null;
+  /** 冻结源码 SHA-256；仅作身份核对，不是授权凭据。 */
+  readonly sourceHash: string;
+  /** 草案创建时间。 */
+  readonly createdAt: string;
+  /** 来源分类：内置模板 / 受信任本地文件 / 主控生成；历史缺省按 generated。 */
+  readonly origin: "template" | "local" | "generated";
+};
+
+/** 归档确认页中的未完成影响面总结义务明细。 */
+export type ArchivePreviewSummary = {
+  /** 总结义务稳定键；绑定 Task/execution/attempt/终态事实。 */
+  readonly key: string;
+  /** 所属 Execution。 */
+  readonly executionId: string;
+  /** 原 Runtime 正整数 attempt。 */
+  readonly attempt: number;
+  /** 未完成状态：pending 待安排、running 回合中、interrupted 须重试；completed/cancelled 不进入预览。 */
+  readonly status: "pending" | "running" | "interrupted";
+};
+
+/** 归档确认页中的未回答且未失效主控决策摘要。 */
+export type ArchivePreviewDecision = {
+  /** 稳定决策 id。 */
+  readonly decisionId: string;
+  /** 面向用户的问题说明。 */
+  readonly question: string;
+  /** 请求耐久时间。 */
+  readonly createdAt: string;
+};
+
+/** 归档预览：归档确认页所需的全部待定项；只读派生，不授权任何写动作。 */
+export type ArchivePreview = {
+  /** 目标任务身份。 */
+  readonly harnessRunId: string;
+  /** true 表示存在待定项，归档必须由用户明确放弃并确认；false 可直接归档。 */
+  readonly requiresAbandon: boolean;
+  /** 未处理的候选修订草案；无候选为 null。 */
+  readonly candidate: ArchivePreviewCandidate | null;
+  /** 未完成影响面总结明细（pending/running/interrupted）。 */
+  readonly pendingSummaries: readonly ArchivePreviewSummary[];
+  /** 未回答且未失效的决策。 */
+  readonly pendingDecisions: readonly ArchivePreviewDecision[];
 };
 
 /** Pi adapter 向 HarnessService 公开的最小流事件；不暴露 Pi 原始对象。 */

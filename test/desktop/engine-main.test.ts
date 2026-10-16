@@ -16,6 +16,18 @@ const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 afterEach(async () => { for (const child of children.splice(0)) child.kill(); await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
+test("Engine 停止总结必须携带本次turnId，缺失或非法身份在读档前拒绝",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-stop-summary-"));roots.push(root);
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true});
+ try{
+  for(const turnId of [undefined,null,""," ",42]){
+   await expect(engine.handleDesktopAction("harnesses.stopImpactSummary",{harnessRunId:crypto.randomUUID(),key:"a".repeat(64),turnId})).rejects.toThrow("turnId");
+  }
+  expect(await engine.handleDesktopAction("harnesses.list",{})).toMatchObject({harnesses:[]});
+  expect(await engine.handleDesktopAction("status",{})).toMatchObject({activeRuns:0,activeHarnesses:0});
+ }finally{engine.shutdown();}
+});
+
 test("Engine 参数编辑 IPC 缺失或非法基础版本在读取任务前拒绝", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-template-version-")); roots.push(root);
   const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true });

@@ -110,7 +110,7 @@ describe("Engine executions.plan / randomize / create 校验", () => {
     const options=fixtureOptions.get(harnessRunId) as Exclude<ConstructorParameters<typeof DesktopExecutionEngine>[0],boolean|undefined>;
     const root=await mkdtemp(join(tmpdir(),"wave-flow-task-ipc-"));roots.push(root);
     const registry=new CliRuntimeRegistry(root);await registry.saveVerified(kimi);await registry.saveVerified(codex);await registry.select(kimi.runtimeId);
-    const optionsTask={...options,harnessRoot:join(root,"tasks"),createHarnessSession:async(_id:string,_cwd:string,_prior:readonly import("../../src/harness/types").HarnessMessage[],actions:import("../../src/harness/action-tools").HarnessActionCallbacks)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async()=>{await actions.proposeWorkflowRevision(SOURCE,"目标","只读范围");return "方案已提交";}})};
+    const optionsTask={...options,harnessRoot:join(root,"tasks"),createHarnessSession:async(_id:string,_cwd:string,_prior:readonly import("../../src/harness/types").HarnessMessage[],actions:import("../../src/harness/action-tools").HarnessActionCallbacks)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text:string)=>{if(text.startsWith("请总结"))return "执行完成，影响证据不足。";await actions.proposeWorkflowRevision(SOURCE,"目标","只读范围");return "方案已提交";}})};
     const engine=new DesktopExecutionEngine(optionsTask);
     try{
       const project=await engine.handleDesktopAction("projects.create",{cwd:root}) as {project:{projectId:string}};
@@ -135,6 +135,10 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       await engine.handleDesktopAction("harnesses.acceptRevision",{harnessRunId:id,revision:3});
       const createdExecution=await engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)}) as {execution:{executionId:string}};
       for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("executions.get",{harnessRunId:id,executionId:createdExecution.execution.executionId}) as {snapshot:{status:string}};if(snapshot.snapshot.status==="completed")break;await Bun.sleep(5);}
+      for(let n=0;n<300;n++){const response=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};if(response.harness.impactSummaries?.[0]?.status==="completed")break;await Bun.sleep(5);}
+      const summarized=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      expect(summarized.harness.task?.workflowContract).toBeUndefined();
+      expect(summarized.harness.impactSummaries?.[0]?.status).toBe("completed");
       await expect(engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:3})).rejects.toThrow("取代");
       await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)})).rejects.toThrow("取代");
       expect((await engine.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]}).executions).toHaveLength(1);

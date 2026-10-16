@@ -50,6 +50,9 @@ export class AcpHarnessSession implements HarnessSession {
       // 某些 ACP CLI 的 cancel 会正常 resolve（stopReason: "cancelled"）而不是 reject；
       // 被取消回合累积的 partial 文本绝不能作为完整回答耐久化。
       if (turn.stopReason === "cancelled") throw new Error("ACP 主控回合已被取消。 ");
+      // 仅 end_turn 表示正常结束；限额、拒绝或未知原因下的非空正文仍是部分回答。
+      // 此检查只是完整回答的必要条件，不代表业务验收或总结已经耐久。
+      if (turn.stopReason !== "end_turn") throw new Error(`ACP 主控回合未正常结束（${turn.stopReason ?? "unknown"}），不能保存为完整回答。`);
       this.#primed = true;
       const answer = this.#assistantText.trim();
       if (!answer) throw new Error("ACP 主控未产生可耐久的完整回答。 ");

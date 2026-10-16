@@ -137,18 +137,37 @@ export function composeConversationTurns(
   }
   const turns: ConversationTurn[] = [];
   for (const message of harness.messages) {
+    if(message.summaryKey)continue; // 总结在独立回合显示，不覆盖最近用户回答。
     if (message.role === "user") {
       turns.push({ turnId: message.id, user: message, entries: [], assistant: null });
     } else if (turns.length > 0) {
       turns[turns.length - 1].assistant = message;
     }
   }
+  for(const obligation of harness.impactSummaries??[]){
+    const turnId=obligation.turnId??`summary:${obligation.key}`;
+    const assistant=obligation.status==="completed"?harness.messages.find(item=>item.id===obligation.messageId)??null:null;
+    const summaryTurnIds=[...entriesByTurn.keys()].filter(id=>id===`summary:${obligation.key}`||id.startsWith(`summary:${obligation.key}:`));
+    if(!summaryTurnIds.includes(turnId))summaryTurnIds.push(turnId);
+    for(const id of summaryTurnIds){const startedAt=entriesByTurn.get(id)?.[0]?.startedAt??obligation.createdAt;turns.push({turnId:id,user:{id,role:"user",summaryKey:obligation.key,text:id===turnId?"自动影响面总结":"影响面总结（原中断回合）",createdAt:startedAt},entries:[],assistant:id===turnId?assistant:null});}
+  }
   for (const turn of turns) {
     turn.entries = (entriesByTurn.get(turn.turnId) ?? [])
       .slice()
       .sort((a, b) => a.seq - b.seq);
   }
-  return turns;
+  return turns.sort((a,b)=>a.user.createdAt.localeCompare(b.user.createdAt));
+}
+
+/** 总结首次非空耐久正文的显示时间；思考/工具/义务建立都不能提前显示结果卡。 */
+export function summaryBodyStartedAt(harness:HarnessSnapshot,key:string):string|null {
+  const obligation=harness.impactSummaries?.find(item=>item.key===key);
+  if(!obligation)return null;
+  const prefix=`summary:${key}`;
+  const body=harness.conversationEntries.find(entry=>entry.kind==="body"&&entry.text.trim()&&(entry.turnId===prefix||entry.turnId.startsWith(`${prefix}:`)));
+  if(body)return body.startedAt;
+  const message=obligation.status==="completed"?harness.messages.find(item=>item.id===obligation.messageId):undefined;
+  return message?.text.trim()?message.createdAt:null;
 }
 
 /**

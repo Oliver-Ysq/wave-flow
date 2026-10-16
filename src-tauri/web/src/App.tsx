@@ -11,11 +11,14 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
+import {summaryBodyStartedAt} from "./conversation/harness-event-merge";
+import { Markdown as MessageBody } from "./conversation/markdown";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
 import { WorkflowProposalSummary, WorkflowExecutionSummary } from "./conversation/workflow-summary";
 import {AbandonedPlan} from "./conversation/abandoned-plan";
-import { workflowCells, editableRevision, type WorkbenchRoute } from "./workbench-navigation";
+import { ArchiveImpactConfirmation } from "./conversation/archive-confirmation";
+import { workflowCells, editableRevision, singleChainCell, type WorkbenchRoute } from "./workbench-navigation";
 import { routeMatchesTask, newerTaskSnapshot, OperationTracker, RequestFence, UnreadTracker } from "./workbench-state";
 import { ViewCache } from "./workbench-state";
 const taskExpansions=new ViewCache<boolean>();
@@ -33,6 +36,7 @@ import {
   createStreamTracker,
 } from "./conversation/harness-event-merge";
 import type {
+  ArchivePreview,
   CliRuntime,
   CliRuntimeListResponse,
   CurrentAttemptResponse,
@@ -87,6 +91,8 @@ export function App() {
     return ()=>{if(!release())return;setBusyOperations(current=>{const next={...current};delete next[owner];return next;});};
   };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
+  const [archiveConfirmation,setArchiveConfirmation]=useState<{harnessRunId:string;preview:ArchivePreview}|null>(null);
+  useEffect(()=>setArchiveConfirmation(null),[harness?.harnessRunId]);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -527,10 +533,45 @@ export function App() {
     if(valid()&&harnessRef.current?.harnessRunId===owner)setHarness(current=>current?newerTaskSnapshot(current,response.harness):current);
     return response;
   }
+  /**
+   * 归档成功后回到进行中视图的第一项目草稿页；失败向上抛错，绝不把界面标为已归档。
+   * abandonPending=true 走协调归档（放弃全部待定项），false 要求零待定项。
+   */
+  async function confirmArchive(id: string, abandonPending: boolean) {
+    const pageToken = navigationToken.current;
+    const response = await taskMutation(id, () => abandonPending ? api.archiveAbandoningPending(id) : api.completeHarness(id));
+    if (pageToken !== navigationToken.current || harnessRef.current?.harnessRunId !== response.harness.harnessRunId) return;
+    const firstProjectId = projects[0]?.projectId ?? null;
+    setArchiveConfirmation(null);
+    setHarnessView("active");
+    setSelectedProjectId(firstProjectId);
+    setDraftProjectId(firstProjectId);
+    setHarness(null);
+    setHarnessText("");
+    setWorkflowPanelOpen(false);
+    setError(null);
+  }
+  /** 归档入口：先拉取只读预览；有待定项打开确认页由用户决定，零待定项直接归档。 */
+  async function beginArchive(task: HarnessSnapshot) {
+    const id = task.harnessRunId;
+    const finishBusy = beginBusy(`task:${id}`, "complete-harness");
+    try {
+      const { preview } = await api.archivePreview(id);
+      if (harnessRef.current?.harnessRunId !== id) return;
+      if (preview.requiresAbandon) {
+        setArchiveConfirmation({ harnessRunId: id, preview });
+        return;
+      }
+      await confirmArchive(id, false);
+    } catch (cause) {
+      if (harnessRef.current?.harnessRunId === id) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      finishBusy();
+    }
+  }
   async function controlExecution(
     action: "pause" | "recover" | "stop" | "resume",
-  ) {
-    if (!harness || !executionDetail) return;
+  ) {    if (!harness || !executionDetail) return;
     const valid=requestFence.current.begin(`execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`);
     const finishBusy=beginBusy(`execution:${executionDetail.execution.executionId}`,`execution:${action}`);
     try {
@@ -670,6 +711,8 @@ export function App() {
         </footer>
       </aside>
       <section className="conversation-pane" hidden={workflowPanelOpen}>
+        {harness?.status==="interrupted"&&<button onClick={()=>void api.recoverController(harness.harnessRunId).catch(error=>setError(String(error)))}>恢复主控待命（不重发任务）</button>}
+        {harness?.impactSummaries?.filter(item=>item.status==="interrupted"||item.status==="cancelled").map(item=><ImpactSummaryPanel key={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/>)}
         {!harness ? (
           <DraftConversation
             project={
@@ -692,26 +735,7 @@ export function App() {
             onText={updateHarnessText}
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
-            onComplete={() => {
-              const finishBusy=beginBusy(`task:${harness.harnessRunId}`,"complete-harness");
-              const pageToken=navigationToken.current;
-              void taskMutation(harness.harnessRunId,()=>api.completeHarness(harness.harnessRunId))
-                .then((response) => {
-                  if(pageToken!==navigationToken.current||harnessRef.current?.harnessRunId!==response.harness.harnessRunId)return;
-                  // 会话归档成功后，明确回到进行中视图的第一项目草稿页；不能依赖
-                  // beginHarnessDraft 的早退或当前已完成会话的渲染状态。
-                  const firstProjectId = projects[0]?.projectId ?? null;
-                  setHarnessView("active");
-                  setSelectedProjectId(firstProjectId);
-                  setDraftProjectId(firstProjectId);
-                  setHarness(null);
-                  setHarnessText("");
-                  setWorkflowPanelOpen(false);
-                  setError(null);
-                })
-                .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-                .finally(finishBusy);
-            }}
+            onComplete={() => void beginArchive(harness)}
             onOpenWorkflow={() => { const revision = workflowCells(harness).at(-1); if (revision) openWorkflow(harness,revision); }}
             hasWorkflow={harness.workflowRevisions.length > 0}
             onDraft={() => {}}
@@ -765,6 +789,7 @@ export function App() {
             onRead={markRead}
           />
         )}
+        {archiveConfirmation&&harness?.harnessRunId===archiveConfirmation.harnessRunId&&<ArchiveImpactConfirmation preview={archiveConfirmation.preview} onClose={()=>setArchiveConfirmation(null)} onConfirm={async()=>{const id=archiveConfirmation.harnessRunId,finishBusy=beginBusy(`task:${id}`,"complete-harness");try{await confirmArchive(id,true);}finally{finishBusy();}}}/>}
         {templatePicker&&<TemplatePicker key={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} identity={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} blockedReason={harness&&(harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null))?"主控或执行仍在处理中；参数保留，结束后才能保存。":undefined} onClose={()=>setTemplatePicker(false)} onSave={async(selection,requestId)=>{
           const owner=harnessRef.current,token=navigationToken.current;
           const response=owner?await taskMutation(owner.harnessRunId,()=>api.saveTemplate(owner.harnessRunId,requestId,selection)):await api.createTemplateTask(draftProjectId??selectedProjectId!,"只读代码审查与独立复核",requestId,selection,taskTitle||undefined);
@@ -824,7 +849,7 @@ export function App() {
                   {editableRevision(harness,revision) && <>{!revision.localOrigin&&<button onClick={()=>prepareRevisionDraft(harness,revision,false)}>通过对话调整</button>}<button onClick={async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }}>放弃此方案</button></>}
                   {revision.abandonedAt&&harness.workflowRevisions.at(-1)?.revision===revision.revision&&harness.status!=="completed"&&<AbandonedPlan onRedesign={()=>prepareRevisionDraft(harness,revision,true)} onTemplate={!harness.executions.length?()=>setTemplatePicker(true):undefined} disabled={harness.status!=="idle"||harness.executions.some(item=>!item.finishedAt)}/>}</>;
               })()}
-              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} />}
+              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} harness={harness} />}
             </div>
           )}
           {executionDetail && harness && route.kind === "workflow" && routeMatchesTask(harness,route) && route.section === "execution" ? (
@@ -836,6 +861,7 @@ export function App() {
               busy={executionBusy}
               dynamicCount={executionDynamicCount}
               harnessRunId={harness.harnessRunId}
+              archived={harness.status==="completed"}
               onControl={controlExecution}
               onAnswerBlock={async (blockId, answer) => {
                 const valid=requestFence.current.begin(`execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`);
@@ -1608,10 +1634,13 @@ function HarnessListItem({
     </button>
   );
 }
-function TaskTreeItem({item,active,route,unread,onClick,onWorkflow}:{item:HarnessSnapshot;unread:number;active:boolean;route:WorkbenchRoute;onClick:()=>void;onWorkflow:(revision:import("./types").WorkflowRevision)=>void}) {
+function TaskTreeItem({item,active,route,unread,onClick,onWorkflow}:{item:HarnessSnapshot;unread:number;active:boolean;route:WorkbenchRoute;onClick:()=>void;onWorkflow:(revision:import("./types").WorkflowRevision,section?:"plan"|"execution"|"results")=>void}) {
   const [expanded,setExpanded]=useState(()=>taskExpansions.get(item.harnessRunId)??false);
   useEffect(()=>{if(route.kind==="workflow" && route.taskId===item.harnessRunId)setExpanded(true);},[route.kind==="workflow" ? route.cardId : null]);
-  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>}</div>;
+  // 单链任务（single-workflow-v1）只展示一条 Workflow 子项，进入该链最新 revision 的中央“方案”视图；
+  // 版本历史/Execution/attempt 留在中央区域选择。旧多卡任务保持每卡一条子项的原逻辑。
+  const singleCell=singleChainCell(item);
+  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && (singleCell ? <ul><li><button aria-current={active && route.kind==="workflow" && route.taskId===item.harnessRunId ? "page":undefined} onClick={()=>onWorkflow(singleCell,"plan")}><strong>{singleCell.goal ?? `工作流方案 ${singleCell.revision}`}</strong><small>{item.executions.some(ex=>ex.revision===singleCell.revision)?"执行记录":singleCell.acceptedAt?"待运行":singleCell.rejectedAt?"需修改":singleCell.abandonedAt?"已放弃":"待确认"}</small></button></li></ul> : <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>)}</div>;
 }
 function ProjectGroup({
   project,
@@ -1660,7 +1689,7 @@ function ProjectGroup({
       {harnesses.length > 0 ? (
         <div className="project-conversations">
           {harnesses.map((item) => (
-            <TaskTreeItem key={item.harnessRunId} item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={revision=>onSelectWorkflow(item,revision)} />
+            <TaskTreeItem key={item.harnessRunId} item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={(revision,section)=>onSelectWorkflow(item,revision,section)} />
           ))}
         </div>
       ) : null}
@@ -1903,7 +1932,7 @@ function HarnessConversation({
       draftContext={draftContext}
       timelineEvents={[
         ...harness.workflowRevisions.map(revision => ({ key: `revision:${revision.revision}`, at: revision.createdAt, content: <WorkflowProposalSummary task={harness} revision={revision} onOpen={()=>onSelectRevision(revision)} onAdjust={()=>onAdjustRevision(revision)} onTemplate={onTemplate} /> })),
-        ...(harness.executionHistory?.length?harness.executionHistory.map(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);return {key:item.key,at:item.at,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null};}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
+        ...(harness.executionHistory?.length?harness.executionHistory.flatMap(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);const obligation=item.kind==="finished"?harness.impactSummaries?.find(summary=>summary.executionId===item.executionId&&summary.attempt===item.attempt):undefined;const firstBody=obligation?summaryBodyStartedAt(harness,obligation.key):null;if(obligation&&!firstBody)return [];const body=obligation?harness.conversationEntries.find(entry=>entry.kind==="body"&&entry.text.trim()&&(entry.turnId===`summary:${obligation.key}`||entry.turnId.startsWith(`summary:${obligation.key}:`))):undefined;return [{key:item.key,at:firstBody??item.at,beforeTurnId:obligation?(body?.turnId??obligation.turnId??`summary:${obligation.key}`):undefined,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null}];}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
       ]}
     >
       <div className="conversation-actions">
@@ -1993,14 +2022,25 @@ function HarnessDecisionCard({
 }
 
 /** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
-function HistoricalResults({taskId,executionId,currentAttempt}:{taskId:string;executionId:string;currentAttempt:number}) {
+function HistoricalResults({taskId,executionId,currentAttempt,harness}:{taskId:string;executionId:string;currentAttempt:number;harness:HarnessSnapshot}) {
   const resultKey=`${taskId}:${executionId}`;
   const [attempt,setAttempt]=useState(()=>{const saved=resultAttempts.get(resultKey);return saved&&saved<=currentAttempt?saved:currentAttempt;});
   useEffect(()=>resultAttempts.set(resultKey,attempt),[resultKey,attempt]);
   const [value,setValue]=useState<Awaited<ReturnType<typeof api.attemptResults>>|null>(null);
   const [error,setError]=useState<string|null>(null);
-  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt]);
-  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据，不代表目标已验收；自动汇总尚未开放。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+  const terminalVersion=harness.executions.find(item=>item.executionId===executionId)?.finishedAt;
+  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt,terminalVersion]);
+  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据；工作流返回值与Schema通过不代表目标已验收。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label><ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt}/>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+}
+
+/** 义务与完整回答均来自原Task快照；重试不重跑业务执行。 */
+function ImpactSummaryPanel({harness,executionId,attempt}:{harness:HarnessSnapshot;executionId:string;attempt:number}) {
+  const obligation=harness.impactSummaries?.find(item=>item.executionId===executionId&&item.attempt===attempt);
+  const [busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
+  if(!obligation)return <p>此尝试未保存影响面总结义务；不补造历史结论。</p>;
+  const message=harness.messages.find(item=>item.id===obligation.messageId);
+  if(obligation.status==="cancelled")return <article aria-label="影响面总结"><h2>影响面总结</h2><p>用户已放弃总结并只读归档；影响面未完成，不再开放执行。</p></article>;
+  return <article aria-label="影响面总结"><h2>影响面总结</h2><p role="status">{{pending:"准备总结",running:"正在总结",interrupted:"总结中断，须重试",completed:"总结已完整保存"}[obligation.status]}</p>{obligation.status!=="completed"&&<p>完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。</p>}{obligation.diagnostic&&<p role="alert">{obligation.diagnostic}</p>}{error&&<p role="alert">{error}</p>}{obligation.status==="completed"&&message&&<MessageBody text={message.text}/>}<p>尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。</p>{harness.status!=="completed"&&obligation.status!=="completed"&&<button disabled={busy||(obligation.status==="running"&&!obligation.turnId)||(harness.status==="running"&&obligation.status!=="running")} onClick={async()=>{setBusy(true);setError(null);try{if(obligation.status==="running")await api.stopImpactSummary(harness.harnessRunId,obligation.key,obligation.turnId!);else await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在处理…":obligation.status==="running"?"停止影响面总结":"重试影响面总结"}</button>}</article>;
 }
 
 function ExecutionDetail({
@@ -2010,6 +2050,7 @@ function ExecutionDetail({
   busy,
   dynamicCount,
   harnessRunId,
+  archived=false,
   onControl,
   onAnswer,
   onAnswerBlock,
@@ -2020,6 +2061,8 @@ function ExecutionDetail({
   dynamicCount: number;
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
+  /** 所属任务已归档：全部执行控制与答题入口隐藏，历史内容保持只读可读。 */
+  archived?: boolean;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
@@ -2085,7 +2128,8 @@ function ExecutionDetail({
         )}
       </div>
       <div className="actions">
-        {detail.controllable && detail.snapshot.status === "running" && (
+        {archived && <p role="status">任务已归档；执行记录只读，不能恢复或控制。</p>}
+        {!archived && detail.controllable && detail.snapshot.status === "running" && (
           <Action
             label="暂停"
             icon="Ⅱ"
@@ -2094,7 +2138,7 @@ function ExecutionDetail({
             onClick={() => void onControl("pause")}
           />
         )}
-        {detail.controllable && detail.snapshot.status === "paused" && (
+        {!archived && detail.controllable && detail.snapshot.status === "paused" && (
           <Action
             label="恢复执行"
             icon="▶"
@@ -2103,7 +2147,7 @@ function ExecutionDetail({
             onClick={() => void onControl("recover")}
           />
         )}
-        {(detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled" || (!detail.controllable && detail.snapshot.status !== "completed")) && (
+        {!archived && (detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled" || (!detail.controllable && detail.snapshot.status !== "completed")) && (
           <Action
             label={detail.snapshot.status === "cancelled" ? "恢复已停止 Execution" : "恢复中断 Execution"}
             icon="↻"
@@ -2112,7 +2156,7 @@ function ExecutionDetail({
             onClick={() => void onControl("resume")}
           />
         )}
-        {detail.controllable && ["running", "pausing", "recovering", "paused"].includes(
+        {!archived && detail.controllable && ["running", "pausing", "recovering", "paused"].includes(
           detail.snapshot.status,
         ) && (
           <Action
@@ -2134,7 +2178,7 @@ function ExecutionDetail({
         <div className="diagnostic">{detail.snapshot.diagnostic}</div>
       )}
       {detail.snapshot.gates
-        .filter((gate) => gate.answer === null && detail.controllable && detail.snapshot.status === "running")
+        .filter((gate) => gate.answer === null && !archived && detail.controllable && detail.snapshot.status === "running")
         .map((gate) => (
           <GateCard
             key={gate.gateId}

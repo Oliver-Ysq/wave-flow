@@ -14,7 +14,7 @@
     "web:preview": "vite preview --config src-tauri/web/vite.config.ts",
     "desktop:prepare": "bun run web:build && bun build src/desktop/engine-main.ts --compile --outfile src-tauri/binaries/wave-flow-desktop-engine-aarch64-apple-darwin",
     "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
-    "desktop:build": "tauri build"
+    "desktop:build": "tauri build && bun run scripts/sign-macos-app.ts"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.2",

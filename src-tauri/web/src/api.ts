@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CliRuntime, CliRuntimeListResponse, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionAttemptsResponse, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, ScanCliRuntimesResponse } from "./types";
+import type { ArchivePreviewResponse, CliRuntime, CliRuntimeListResponse, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionAttemptsResponse, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, ScanCliRuntimesResponse } from "./types";
 
 /** WebView 只能调用当前 Tauri 持有的 Engine；没有浏览器 HTTP fallback。 */
 async function action<T>(name: string, args: Record<string, unknown> = {}, timeoutSecs?: number): Promise<T> {
@@ -9,6 +9,16 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 只重试原义务的主控总结，不能派发或恢复Worker。 */
+  retryImpactSummary:(harnessRunId:string,key:string)=>action<HarnessRunResponse>("harnesses.retryImpactSummary",{harnessRunId,key}),
+  /** 仅停止指定总结的本次回合；key与turnId均必填，过期或缺失身份不能停止重试/其他回合。 */
+  stopImpactSummary:(harnessRunId:string,key:string,turnId:string)=>action<HarnessRunResponse>("harnesses.stopImpactSummary",{harnessRunId,key,turnId}),
+  /** 归档确认页的只读预览：列出候选草案、未完成总结与未答决策；不产生任何写入。 */
+  archivePreview:(harnessRunId:string)=>action<ArchivePreviewResponse>("harnesses.archivePreview",{harnessRunId}),
+  /** 明确放弃全部待定项（候选草案/未完成总结/未答决策）并封存；归档后不能执行或恢复。 */
+  archiveAbandoningPending:(harnessRunId:string)=>action<HarnessRunResponse>("harnesses.complete",{harnessRunId,abandonPending:true}),
+  /** 主控只回idle，不重发prompt、不解除总结门禁。 */
+  recoverController:(harnessRunId:string)=>action<HarnessRunResponse>("harnesses.recoverController",{harnessRunId}),
   /** 本地来源静态预检；只在专用验收页面调用，不创建Task或执行源码。 */
   preflightLocal:(projectId:string,path:string)=>action<Omit<import("../../../src/workflow/preflight-local").LocalWorkflowPreflight,"source">>("workflows.preflightLocal",{projectId,path}),
   /** 保存已预检本地来源与参数为未批准Task，不运行模块。 */

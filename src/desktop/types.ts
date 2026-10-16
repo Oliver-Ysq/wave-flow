@@ -118,8 +118,18 @@ export type ResumeRunRequest = {
   readonly authorized: true;
 };
 
-/** 完成 Harness 会话请求；空对象表示无额外参数。 */
-export type CompleteHarnessRequest = Record<string, never>;
+/**
+ * 归档 Harness 会话请求（harnesses.complete）。
+ * 缺省/false 为严格归档：存在候选草案、未完成总结或未答决策时拒绝。
+ * true 为协调归档：逐项耐久放弃/失效全部待定项后封存；可恢复、幂等。
+ */
+export type CompleteHarnessRequest = {
+  /** 用户已在归档确认页明确放弃全部待定项并归档。 */
+  readonly abandonPending?: boolean;
+};
+
+/** 归档预览响应（harnesses.archivePreview）；preview 为归档确认页全部待定项。 */
+export type ArchivePreviewResponse = { readonly preview: import("../harness/types").ArchivePreview };
 
 /** 创建只读 Harness 主控会话的 Desktop action 参数；不创建 Workflow Run 或 Worker。 */
 export type CreateHarnessRunRequest = {

@@ -45,6 +45,8 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
   expect(managed).toContain("高优先级、不可省略");
   expect(managed).toContain("即使业务任务要求“只回复”“只输出 JSON”");
   expect(managed).toContain("wave_flow_complete");
+  expect(managed).toContain("延迟加载");
+  expect(managed).toContain("工具搜索/发现");
   const opened = await RunJournal.open(value.manifest.runId, runsRoot(value.cwd));
   expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", delivery: "acp", acp: expect.objectContaining({ sessionId: "native-session" }) }));
 });
@@ -75,6 +77,31 @@ test("ACP Worker cancel 确认后仅在同一 session recover", async () => {
   await expect(running).resolves.toEqual({ ok: true });
   expect(prompts).toHaveLength(2);
   expect(prompts[1]).toContain("检查当前工作目录");
+  expect(prompts[1]).toContain("工具搜索/发现");
+});
+
+test("两个CLI使用相同通用完成协议，第二次end_turn仍漏报只拒绝、不重跑或代报",async()=>{
+ const guides:string[]=[];
+ for(const cli of ["codex","kimi"] as const){
+  const value=await fixture(),prompts:string[]=[];
+  const session:AcpWorkerSession={binding:null,async initialize(){},async createSession(){return {launcherId:`${cli}-acp`,sessionId:"native",capabilities:{}};},async prompt(text){prompts.push(text);return {stopReason:"end_turn"};},async cancel(){},close(){}};
+  const executor=new AcpWorkerExecutor({id:`${cli}-acp`,command:"fake",args:[]},()=>session,undefined,()=>({name:"wave-flow-worker-control",command:"fake",args:[],env:[]}));
+  executor.bindControl(value.control);
+  await expect(executor.execute({...value.node,cli,request:{...value.node.request,cli}})).rejects.toThrow("未收到 wave-flow complete");
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toContain("不要重做业务任务");
+  for(const text of prompts){
+   expect(text).toContain("server：wave-flow-worker-control");
+   expect(text).toContain("summary: string, result: object");
+   expect(text).toContain("属于其他server");
+   expect(text).not.toMatch(/Codex|Kimi|ALL_TOOLS|mcp__|tools\.|exec\/代码/);
+  }
+  guides.push(prompts[0]);
+  const opened=await RunJournal.open(value.manifest.runId,runsRoot(value.cwd));
+  expect(opened.events.filter(event=>event.type==="agent.completed")).toHaveLength(0);
+  expect(opened.events.filter(event=>event.type==="agent.session")).toHaveLength(1);
+ }
+ expect(guides[0]).toBe(guides[1]);
 });
 
 test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", async () => {
@@ -86,6 +113,7 @@ test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", 
   const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; }); executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
   expect(prompts).toHaveLength(2); expect(prompts[1]).toContain("不要重做业务任务");
+  expect(prompts[1]).toContain("工具搜索/发现");
 });
 
 test("真实 Worker session 仅注入节点私有的 Control MCP", async () => {

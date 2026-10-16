@@ -9,6 +9,7 @@ import { RunJournal } from "../../src/journal/run-journal";
 import { HarnessJournal } from "../../src/harness/journal";
 import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 import { taskIdForRequest } from "../../src/harness/task-contract";
+import {DeterministicHarnessSession} from "../../src/harness/deterministic-session";
 const roots:string[]=[];
 afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
 
@@ -18,12 +19,18 @@ test("关联耐久后派发前进程崩溃：重开零Worker，显式恢复仅�
  const child=Bun.spawn([process.execPath,join(import.meta.dir,"../fixtures/local-execution-crash.ts"),root],{stdout:"pipe",stderr:"pipe"});
  const diagnostic=await new Response(child.stderr).text();expect(diagnostic).toBe("");expect(await child.exited).toBe(73);
  const state=join(root,"harness"),store=join(root,"runs"),id=taskIdForRequest("b6b5a241-5881-4ef7-811a-e4dcb89c9432");let calls=0;
- const harness=new HarnessService(state,async()=>{throw Error("不创建模型");},undefined,async()=>({fingerprint:"injected-harness-session"}),true);
+ const harness=new HarnessService(state,async()=>new DeterministicHarnessSession(),undefined,async()=>({fingerprint:"injected-harness-session"}),true);
  const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {ok:true};}}}),{},state,store);
+ harness.setExecutionCapsuleReader((task,ex,attempt)=>executions.capsuleEvidence(task,ex,attempt));
  const before=await harness.snapshot(id);expect(before.executions).toHaveLength(1);
  const executionId=before.executions[0]!.executionId;
  expect((await executions.snapshotExecution(id,executionId)).phases.flatMap(p=>p.agents)).toHaveLength(0);
+ const firstCapsule=JSON.parse((await harness.executionCapsule(id,executionId,1)).text);
+ expect(firstCapsule.authorization.confirmationRequestId).toBeNull();
+ expect(firstCapsule.authorization.limitation).toContain("不补造");
+ expect(firstCapsule.authorization.acceptedAt).toBeString();
  await executions.convergeStaleExecutions(id);expect(calls).toBe(0);expect((await harness.snapshot(id)).executions[0]!.status).toBe("interrupted");
+ await completeSummaries(harness,id);
  const original=(await harness.snapshot(id)).workflowRevisions[0]!;
  await writeFile(join(root,"workflow.ts"),original.source.replace('description:"派发前崩溃"','description:"新修订"'));
  const revised=await preflightLocalWorkflow(join(root,"workflow.ts"),root);
@@ -32,22 +39,27 @@ test("关联耐久后派发前进程崩溃：重开零Worker，显式恢复仅�
  await harness.abandonWorkflowCard(id,original.cardId!);
  // 新草案被拒绝/放弃，不影响原已批准Execution恢复；原文件甚至可变为不可加载。
  await writeFile(join(root,"workflow.ts"),"损坏的新源码");
+ await completeSummaries(harness,id);
  await Promise.all([executions.resume(id,executionId),executions.resume(id,executionId)]);
  for(let i=0;i<100&&(await harness.snapshot(id)).executions[0]!.finishedAt===null;i++)await Bun.sleep(5);
  const after=await executions.snapshotExecution(id,executionId);expect(after.status).toBe("completed");expect(after.currentExecutionAttemptId).toBe(2);expect(calls).toBe(1);
  expect((await harness.snapshot(id)).executions).toHaveLength(1);
+ const resumedCapsule=JSON.parse((await harness.executionCapsule(id,executionId,2)).text);
+ expect(resumedCapsule.authorization).toEqual(firstCapsule.authorization);
+ expect(resumedCapsule.evidence.journalEvidence).toContainEqual(expect.objectContaining({type:"execution-attempt.started",attempt:2,origin:expect.stringContaining("显式resume")}));
 });
 test("本地Task保存不执行，确认在原Run Store运行，旧源编辑后恢复冻结字节",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-local-task-"));roots.push(root);
  const file=join(root,"workflow.ts");
  await writeFile(file,`import {agent,phase} from "wave-flow";export const meta={name:"local",description:"本地",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{x:{type:"number"}},required:["x"],additionalProperties:false}};export default async function run(args:{x:number}){phase("检查");return agent("任务",{id:"a",cli:"codex",input:args});}`);
  const preflight=await preflightLocalWorkflow(file,root),state=join(root,"harness"),store=join(root,"runs");let calls=0,fail=true;
- const harness=new HarnessService(state,async()=>{throw Error("不得初始化模型");},undefined,async()=>({fingerprint:"injected-harness-session"}),true);
+ const harness=new HarnessService(state,async()=>new DeterministicHarnessSession(),undefined,async()=>({fingerprint:"injected-harness-session"}),true);
  const request={projectId:"p",clientRequestId:crypto.randomUUID(),path:file,sourceHash:preflight.sourceHash,input:{x:42}};
  const task=await harness.startLocalTask(root,request);expect(task.executions).toHaveLength(0);expect(calls).toBe(0);
  expect((await harness.startLocalTask(root,request)).harnessRunId).toBe(task.harnessRunId);
  await harness.acceptWorkflowRevision(task.harnessRunId,1);
  const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;if(fail)throw Error("中断");return {x:42};}}}),{},state,store);
+ harness.setExecutionCapsuleReader((task,ex,attempt)=>executions.capsuleEvidence(task,ex,attempt));
  const assignment=(agentId:string)=>({agentId,cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test",adapterId:"codex-acp" as const,adapterVersion:"test"});
  const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test",ruleText:null,ruleDegraded:false,defaultAssignment:assignment("*"),assignments:[assignment("a")]};
  await expect(executions.createExecution(task.harnessRunId,1,{x:42},config)).rejects.toThrow("不接受");
@@ -57,9 +69,11 @@ test("本地Task保存不执行，确认在原Run Store运行，旧源编辑后�
  expect(created.execution.kind).toBe("local-run");expect(calls).toBe(1);
  expect((await RunJournal.open(created.execution.executionId,store)).journal.manifest.workflowHash).toBe(preflight.sourceHash);
  await writeFile(file,"损坏的新源码");fail=false;
+ await completeSummaries(harness,task.harnessRunId);
  await executions.resume(task.harnessRunId,created.execution.executionId);
  for(let i=0;i<100&&(await executions.listExecutions(task.harnessRunId))[0]!.finishedAt===null;i++)await Bun.sleep(5);
  expect((await executions.snapshotExecution(task.harnessRunId,created.execution.executionId)).status).toBe("completed");expect(calls).toBe(2);
+ await completeSummaries(harness,task.harnessRunId);
  await writeFile(file,preflight.source.replace('description:"本地"','description:"本地修订"'));
  const revised=await preflightLocalWorkflow(file,root);
  const revisionRequest={clientRequestId:crypto.randomUUID(),baseRevision:1,sourceHash:revised.sourceHash,input:{x:42}};
@@ -71,6 +85,16 @@ test("本地Task保存不执行，确认在原Run Store运行，旧源编辑后�
  await expect(harness.reviseLocalTask(task.harnessRunId,{clientRequestId:crypto.randomUUID(),baseRevision:1,sourceHash:revised.sourceHash,input:{x:42}})).rejects.toThrow("当前版本");
  await expect(executions.snapshotExecution(crypto.randomUUID(),created.execution.executionId)).rejects.toThrow();
 });
+
+async function completeSummaries(harness:HarnessService,id:string){
+ for(let n=0;n<200;n++){
+   const snapshot=await harness.snapshot(id),pending=snapshot.impactSummaries?.find(item=>item.status!=="completed");
+   if(!pending&&snapshot.status!=="running")return;
+   if(pending&&snapshot.status!=="running")await harness.retryImpactSummary(id,pending.key).catch(()=>{});
+   await Bun.sleep(5);
+ }
+ throw Error("总结未完成");
+}
 
 test("首次执行前必须先放弃才能重选来源，换文件或预置仍保持唯一card",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-local-reset-"));roots.push(root);
