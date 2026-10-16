@@ -34,6 +34,18 @@ async function fixture(schema?: JsonSchema) {
 }
 
 describe("ControlServer complete", () => {
+  test("收尾快照验证原身份、返回副本，终态拒绝且不写入",async()=>{
+    const value=await fixture({type:"object",properties:{ok:{type:"boolean"}}});
+    const identity={runId:value.runId,nodeId:"node",agentSessionId:value.agentSessionId,capability:value.capability};
+    const before=(await RunJournal.open(value.runId,runsRoot(value.cwd))).events.length;
+    await expect(value.control.workerTurnContext({...identity,capability:"wrong"})).rejects.toThrow("capability");
+    const snapshot=await value.control.workerTurnContext(identity);expect(snapshot.status).toBe("running");expect(snapshot.block).toBeNull();
+    (snapshot.resultSchema as any).properties.ok.type="string";
+    expect((await value.control.workerTurnContext(identity)).resultSchema).toEqual({type:"object",properties:{ok:{type:"boolean"}}});
+    expect((await RunJournal.open(value.runId,runsRoot(value.cwd))).events.length).toBe(before);
+    await value.control.complete({...identity,summary:"done",result:{ok:true}});
+    await expect(value.control.workerTurnContext(identity)).rejects.toThrow();
+  });
   test("校验身份后以结果、校验记录、Journal 的顺序完成节点", async () => {
     const value = await fixture({ type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } });
     await value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
@@ -120,6 +132,13 @@ describe("ControlServer complete", () => {
 });
 
 describe("ControlServer block / answer / continue", () => {
+  test("显式非对象answerSchema在任何block事实写入前拒绝", async () => {
+    const value = await fixture();
+    const before = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.length;
+    await expect(value.control.block({ blockRequestId: crypto.randomUUID(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "请输入数字", answerSchema: { type: "integer", const: 6 } })).rejects.toThrow("根类型必须是 object");
+    expect(value.state.agent("node").status).toBe("running");
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events).toHaveLength(before);
+  });
   test("答案先耐久落盘并只唤醒原 block；continue 才恢复 running", async () => {
     const value = await fixture({ type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } });
     const blockRequestId = crypto.randomUUID();

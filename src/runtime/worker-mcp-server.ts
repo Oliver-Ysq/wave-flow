@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { JsonObject } from "../shared/json";
 
@@ -23,18 +23,44 @@ export const WORKER_BLOCK_WAIT_BUDGET_MS = 25_000;
  * Schema；sidecar 不读写 Journal、Runtime、业务工作区或任意 shell。
  */
 export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAIT_BUDGET_MS): Promise<void> {
-  const control = new WorkerControlPipeClient(required("WF_WORKER_MCP_REQUEST_FIFO"), required("WF_WORKER_MCP_RESPONSE_FIFO"));
+  const requestFifo = required("WF_WORKER_MCP_REQUEST_FIFO");
+  const responseFifo = required("WF_WORKER_MCP_RESPONSE_FIFO");
+  const control = new WorkerControlPipeClient(requestFifo, responseFifo);
   const server = new Server({ name: "wave-flow-worker-control", version: "1" }, { capabilities: { tools: {} } });
+  let closing = false;
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    clearInterval(lifetime);
+    control.close();
+    await server.close();
+    // r+ FIFO不会因Engine关闭产生EOF；显式结束独占sidecar，不能让旧block计时器续命。
+    process.stdout.write("", () => process.exit(0));
+  };
+  // 完成响应先经stdio flush，再退出；否则Engine完成清理可能抢先丢失MCP成功确认。
+  const completeResponses = new Set<string | number>();
+  const transport = new StdioServerTransport();
+  const send = transport.send.bind(transport);
+  transport.send = async (message) => {
+    await send(message);
+    if ("id" in message && message.id !== undefined && completeResponses.delete(message.id)) void close();
+  };
+  // 仅观察Engine颁发的本session端点是否仍存在，不据此推断节点业务状态。
+  const lifetime = setInterval(() => {
+    if (!existsSync(requestFifo) || !existsSync(responseFifo)) void close();
+  }, 1_000);
+  process.stdin.once("end", () => { void close(); });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
     { name: "wave_flow_complete", description: "完成当前受管节点。传入最终 JSON 对象与简短摘要；Control 会校验节点 Schema 并耐久写入结果。成功后才可以结束 ACP turn。", inputSchema: { type: "object", required: ["summary", "result"], properties: { summary: { type: "string" }, result: { type: "object" } }, additionalProperties: false } },
-    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时阻塞当前节点。单次调用最多等待约 25 秒：返回答案时为 { status: \"answered\", blockRequestId, answer }；尚未收到答案时返回 { status: \"waiting\", blockRequestId }，此时必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用本工具继续等待，直到 answered；不要结束回合、不要改参数、不要新建 block。收到答案并确认问题解决后调用 wave_flow_continue。", inputSchema: { type: "object", required: ["needHelp"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object" }, blockRequestId: { type: "string", description: "重连等待时必传：第一次调用返回的 blockRequestId；首次调用不要传。" } }, additionalProperties: false } },
+    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时阻塞当前节点。answerSchema约束的答案必须是JSON对象，根type只能为object；需要单个数字或字符串时也请放入命名字段。单次调用最多等待约25秒：返回答案时为 { status: \"answered\", blockRequestId, answer }；尚未收到答案时返回 { status: \"waiting\", blockRequestId }，此时必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用本工具继续等待，直到 answered；不要结束回合、不要改参数、不要新建 block。收到答案并确认问题解决后调用 wave_flow_continue。", inputSchema: { type: "object", required: ["needHelp"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object", description: "人类答案的JSON Schema；根type只能为object，答案始终是JSON对象。" }, blockRequestId: { type: "string", description: "重连等待时必传：第一次调用返回的 blockRequestId；首次调用不要传。" } }, additionalProperties: false } },
     { name: "wave_flow_continue", description: "在 wave_flow_block 已返回答案且你确认可继续后恢复当前节点。", inputSchema: { type: "object", required: ["blockRequestId"], properties: { blockRequestId: { type: "string" } }, additionalProperties: false } },
   ] }));
-  server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+  server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     const args = params.arguments ?? {};
     if (params.name === "wave_flow_complete") {
       if (typeof args.summary !== "string" || !isObject(args.result)) throw new Error("wave_flow_complete 需要 summary 字符串和 result JSON 对象。 ");
       await control.request({ action: "complete", summary: args.summary, result: args.result });
+      completeResponses.add(extra.requestId);
       return text({ ok: true });
     }
     if (params.name === "wave_flow_block") {
@@ -55,7 +81,7 @@ export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAI
     }
     throw new Error(`未知 Worker Control 工具：${params.name}`);
   });
-  await server.connect(new StdioServerTransport());
+  await server.connect(transport);
 }
 
 function required(key: string): string { const value = process.env[key]?.trim(); if (!value) throw new Error(`Worker MCP 服务缺少 ${key}。`); return value; }
@@ -67,17 +93,33 @@ class WorkerControlPipeClient {
   #next = 1;
   #pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   #writer: ReturnType<typeof createWriteStream>;
+  #reader: ReturnType<typeof createReadStream>;
+  #closed = false;
 
   constructor(requestFifo: string, responseFifo: string) {
     this.#writer = createWriteStream(requestFifo, { flags: "r+" });
-    const reader = createInterface({ input: createReadStream(responseFifo, { flags: "r+", encoding: "utf8" }), crlfDelay: Infinity });
+    this.#reader = createReadStream(responseFifo, { flags: "r+", encoding: "utf8" });
+    const reader = createInterface({ input: this.#reader, crlfDelay: Infinity });
     void this.read(reader);
   }
 
+  /** 端点撤销或stdio关闭时拒绝等待并释放FIFO；幂等，不上报任何业务终态。 */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const pending of this.#pending.values()) pending.reject(new Error("Worker 私有控制通道已关闭。"));
+    this.#pending.clear();
+    this.#writer.destroy();
+    this.#reader.destroy();
+  }
+
   async request(value: Record<string, unknown>): Promise<unknown> {
+    if (this.#closed) throw new Error("Worker 私有控制通道已关闭。");
     const requestId = `worker-${process.pid}-${this.#next++}`;
     const response = new Promise<unknown>((resolve, reject) => this.#pending.set(requestId, { resolve, reject }));
-    await new Promise<void>((resolve, reject) => this.#writer.write(`${JSON.stringify({ requestId, ...value })}\n`, error => error ? reject(error) : resolve()));
+    void response.catch(() => undefined);
+    try { await new Promise<void>((resolve, reject) => this.#writer.write(`${JSON.stringify({ requestId, ...value })}\n`, error => error ? reject(error) : resolve())); }
+    catch (error) { this.#pending.delete(requestId); throw error; }
     return response;
   }
 
@@ -94,10 +136,7 @@ class WorkerControlPipeClient {
         if (response.ok === true) pending.resolve(response.result);
         else pending.reject(new Error(typeof response.error === "string" ? response.error : "Worker 私有控制请求失败。"));
       }
-    } finally {
-      const error = new Error("Worker 私有控制通道已关闭。");
-      for (const pending of this.#pending.values()) pending.reject(error);
-      this.#pending.clear();
-    }
+    } catch { /* 通道错误不产生业务事实，释放等待由close统一处理。 */ }
+    finally { this.close(); }
   }
 }

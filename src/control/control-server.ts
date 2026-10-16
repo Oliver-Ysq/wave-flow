@@ -58,6 +58,25 @@ export type RecordedAgentSession = {
   readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: RuntimeProvenance; };
 };
 
+/** 仅供原执行器收尾使用的当前耐久协议事实；不授权状态转换或携带capability。 */
+export type WorkerTurnContext = {
+  /** 当前节点状态；仅running/blocked允许收尾，其他状态拒绝。 */
+  readonly status: "running" | "blocked";
+  /** 原节点输出Schema；缺省null，仍由complete最终校验。 */
+  readonly resultSchema: JsonSchema | null;
+  /** 原人工请求与已耐久答案；无请求null，答案未交付时null，不补造。 */
+  readonly block: {
+    /** 原耐久请求UUID；重连与continue须保持，不是授权秘密。 */
+    readonly blockRequestId:string;
+    /** 原完整帮助正文，只作为数据，重连不得修改。 */
+    readonly needHelp:string;
+    /** 原答案Schema；未声明时null，不新增约束。 */
+    readonly answerSchema:JsonSchema|null;
+    /** 原耐久答案副本；未交付null，存在也不自动continue。 */
+    readonly answer:JsonObject|null;
+  } | null;
+};
+
 /** Control Server 的最小 complete 协议。 */
 export class ControlServer {
   #nodes = new Map<string, RegisteredControlNode>();
@@ -128,6 +147,19 @@ export class ControlServer {
   /** 节点当前 attempt 的 agent.session 是否已耐久；执行器仅在 false 时允许启动前回退。 */
   hasRecordedNodeSession(nodeId: string, agentSessionId: string): boolean {
     return this.state.hasNodeSession(nodeId, agentSessionId);
+  }
+
+  /** 原执行器按注册身份读取当前协议事实；互斥区核验会话/Journal/状态，返回副本且零写入。 */
+  async workerTurnContext(identity: Pick<RegisteredControlNode,"runId"|"nodeId"|"agentSessionId"|"capability">):Promise<WorkerTurnContext> {
+    return this.exclusive(async()=>{
+      const key=controlKey(identity.runId,identity.nodeId);
+      this.requireCurrentNode(key,identity);
+      if(!this.#recordedSessions.has(key))throw new Error("收尾缺少耐久ACP会话绑定。");
+      const node=this.state.agent(identity.nodeId);
+      if(node.agentSessionId!==identity.agentSessionId||!["running","blocked"].includes(node.status))throw new Error("原节点已终结或会话已变化，拒绝收尾。");
+      const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId})}:null;
+      return structuredClone({status:node.status as "running"|"blocked",resultSchema:node.request.schema??null,block});
+    });
   }
 
   /** 执行器启动前回退等诊断的耐久写入；只追加 log.written 事实，不改变任何节点状态。 */

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RunRuntime } from "../../src/runtime/run-runtime";
+import { AcpWorkerExecutor, type AcpWorkerSession } from "../../src/runtime/acp-worker-executor";
 import type { AgentNodeExecutor } from "../../src/runtime/run-types";
 import type { JsonObject } from "../../src/shared/json";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
@@ -16,6 +17,182 @@ const workflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "runtime-c
 async function create(executor: AgentNodeExecutor): Promise<RunRuntime> { const cwd = await mkdtemp(join(tmpdir(), "wave-flow-runtime-core-")); directories.push(cwd); const workflowPath = join(cwd, "workflow.ts"); await writeFile(workflowPath, "workflow", "utf8"); return RunRuntime.create({ workflow, input: {}, workflowSource: "workflow", clientRequestId: crypto.randomUUID(), workflowProjectCwd: cwd, workflowPath, storeRoot: runsRoot(join(cwd, "store")), executor }); }
 
 describe("RunRuntime ACP-neutral core", () => {
+  test("并行resume在首个重跑调用处立即关闭旧结果前缀，不复用后续completed节点", async () => {
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a", { id: "a", cli: "codex" }), agent("b", { id: "b", cli: "kimi" })]); } };
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const initial = await create({ execute: async node => { if (node.id === "a") { await firstPending; return null; } return { version: "old", id: node.id }; } });
+    const apply = initial.state.apply.bind(initial.state);
+    const applied = spyOn(initial.state, "apply").mockImplementation(event => { apply(event); if (event.type === "agent.completed" && event.nodeId === "b") releaseFirst(); });
+    try { await initial.run(concurrent).catch(() => undefined); } finally { applied.mockRestore(); }
+    expect(initial.snapshot().phases[0].agents.map(node => node.status)).toEqual(["interrupted", "completed"]);
+    const executed: string[] = [];
+    const resumed = await RunRuntime.resume(initial.snapshot().id, { execute: async node => { executed.push(node.id); return { version: "new", id: node.id }; } }, join(initial.journal.directory, ".."));
+    await expect(resumed.run(concurrent)).resolves.toEqual([{ version: "new", id: "a" }, { version: "new", id: "b" }]);
+    expect(executed.sort()).toEqual(["a", "b"]);
+    const { events } = await RunJournal.open(initial.snapshot().id, join(initial.journal.directory, ".."));
+    const restarted = events.filter(event => event.type === "agent.restarted");
+    expect(restarted.map(event => [event.nodeId, event.invalidatedByPriorRestart])).toEqual([["a", false], ["b", true]]);
+    expect(events.filter(event => event.type === "execution-attempt.started" && event.executionAttemptId === 2)).toHaveLength(1);
+  });
+  test("并行resume只初始化一个attempt，两个分支均启动而不丢下游", async () => {
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a",{id:"a",cli:"codex"}),agent("b",{id:"b",cli:"kimi"})]); } };
+    let settled!: () => void; let count = 0;
+    const initialNodes = new Promise<void>(resolve => { settled = resolve; });
+    const initial = await create({execute:async()=>{if(++count===2)settled();return null;}});
+    await initial.run(concurrent).catch(()=>undefined); await initialNodes;
+    // 等两个失败节点都完成耐久收敛，避免把活跃旧节点当可resume。
+    const deadline = Date.now()+2_000;
+    while(initial.snapshot().phases[0].agents.some(node=>node.status!=="interrupted")){if(Date.now()>deadline)throw new Error("初始节点未收敛");await Bun.sleep(1);}
+    const executed: string[] = [];
+    const resumed = await RunRuntime.resume(initial.snapshot().id,{execute:async node=>{executed.push(node.id);return {id:node.id};}},join(initial.journal.directory,".."));
+    await expect(resumed.run(concurrent)).resolves.toEqual([{id:"a"},{id:"b"}]);
+    expect(executed.sort()).toEqual(["a","b"]);
+    const {events} = await RunJournal.open(initial.snapshot().id,join(initial.journal.directory,".."));
+    expect(events.filter(event=>event.type==="execution-attempt.started"&&event.executionAttemptId===2)).toHaveLength(1);
+    expect(events.filter(event=>event.type==="phase.entered"&&event.executionAttemptId===2)).toHaveLength(1);
+  });
+  for (const action of ["pause", "recover"] as const) for (const cleanupPending of [false, true]) test(`多Worker${action}部分成功后失败不残留非终态会话，cleanupPending=${cleanupPending}`, async () => {
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const failures = new Map<string, (error: Error) => void>();
+    const controlled: string[] = [], stopped: string[] = [];
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("只读a", {id:"a",cli:"codex"}),agent("只读b", {id:"b",cli:"codex"})]); } };
+    const runtime = await create({
+      execute: async node => { const executing = new Promise<JsonObject>((_,reject)=>failures.set(node.id,reject)); if(failures.size===2)entered(); return executing; },
+      pause: async node => { if(action==="pause"){controlled.push(node.id);if(controlled.length===2)throw new Error("第二个暂停失败");} },
+      recover: async node => { controlled.push(node.id);if(controlled.length===2)throw new Error("第二个恢复失败");return {}; },
+      stop: async node => { stopped.push(node.id);if(cleanupPending)await new Promise<void>(()=>{});else failures.get(node.id)!(new Error("清理失败控制会话")); },
+    });
+    const running=runtime.run(concurrent).catch(()=>undefined);await started;
+    if(action==="recover")await runtime.pause();
+    const outcome = runtime[action]().then(()=>"unexpected",error=>String(error));
+    expect(await Promise.race([outcome,Bun.sleep(1_000).then(()=>"pending")])).toContain("第二个");
+    expect(runtime.snapshot().status).toBe("interrupted");
+    expect(runtime.snapshot().phases.flatMap(phase=>phase.agents).every(node=>node.status==="interrupted")).toBe(true);
+    expect(stopped).toHaveLength(2);
+    await RunJournal.open(runtime.snapshot().id,join(runtime.journal.directory,".."));
+    if(cleanupPending)for(const fail of failures.values())fail(new Error("测试释放原执行"));
+    await running;
+  });
+  test("首个Worker停止失败仍停止后续Worker，所有节点终态先于Run封存", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const failures = new Map<string, (error: Error) => void>();
+    const stopped: string[] = [];
+    const concurrent: WorkflowModule<JsonObject, unknown> = {
+      meta: workflow.meta,
+      default: async () => {
+        phase("run");
+        return Promise.all([agent("只读a", { id: "a", cli: "codex" }), agent("只读b", { id: "b", cli: "codex" })]);
+      },
+    };
+    const runtime = await create({
+      execute: async node => {
+        const executing = new Promise<JsonObject>((_, reject) => { failures.set(node.id, reject); });
+        if (failures.size === 2) entered();
+        return executing;
+      },
+      stop: async node => {
+        stopped.push(node.id);
+        setTimeout(() => failures.get(node.id)!(new Error("执行已结束")), 0);
+        if (node.id === stopped[0]) throw new Error("首个取消失败");
+      },
+    });
+    const running = runtime.run(concurrent).catch(() => undefined);
+    await started;
+    await expect(runtime.stop()).rejects.toThrow("首个取消失败");
+    await running;
+    expect(stopped).toHaveLength(2);
+    const nodes = runtime.snapshot().phases.flatMap(phase => phase.agents);
+    expect(nodes.find(node => node.id === stopped[0])?.status).toBe("interrupted");
+    expect(nodes.find(node => node.id === stopped[1])?.status).toBe("cancelled");
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    const terminal = reopened.events.findIndex(event => event.type === "run.status" && event.status === "interrupted");
+    expect(reopened.events.slice(0, terminal).filter(event => event.type === "agent.status" && (event.status === "cancelled" || event.status === "interrupted"))).toHaveLength(2);
+  });
+  test("执行器停止失败仍先收敛节点，Run不留下running残留", async () => {
+    let entered!: () => void, fail!: (error: Error) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const executing = new Promise<JsonObject>((_, reject) => { fail = reject; });
+    const runtime = await create({ execute: async () => { entered(); return executing; }, stop: async () => { setTimeout(() => fail(new Error("取消传输失败")), 0); throw new Error("取消传输失败"); } });
+    const running = runtime.run(workflow).catch(() => undefined);
+    await started;
+    await expect(runtime.stop()).rejects.toThrow("取消传输失败");
+    await running;
+    expect(runtime.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    const node = reopened.events.findIndex((event) => event.type === "agent.status" && event.status === "interrupted");
+    const run = reopened.events.findIndex((event) => event.type === "run.status" && event.status === "interrupted");
+    expect(node).toBeGreaterThanOrEqual(0); expect(run).toBeGreaterThan(node);
+  });
+  for (const failure of ["end_turn", "transport"] as const) test(`暂停期间原turn${failure}且cancel不返回时不悬挂或伪造paused`, async () => {
+    let entered!: () => void, cancelling!: () => void;
+    let finish!: (turn: { stopReason: string }) => void, fail!: (error: Error) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const cancelStarted = new Promise<void>((resolve) => { cancelling = resolve; });
+    let prompts = 0, closed = 0;
+    const session: AcpWorkerSession = {
+      binding: null, async initialize() {},
+      async createSession() { return { launcherId: "test-acp", sessionId: "native", capabilities: {} }; },
+      async prompt() { prompts++; const turn = new Promise<{ stopReason: string }>((resolve, reject) => { finish = resolve; fail = reject; }); entered(); return turn; },
+      async cancel() { cancelling(); await new Promise<void>(() => {}); },
+      close() { closed++; },
+    };
+    const executor = new AcpWorkerExecutor({ id: "test-acp", command: "fake", args: [] }, () => session);
+    const runtime = await create(executor);
+    executor.bindControl(runtime.createControlServer());
+    const running = runtime.run(workflow).then(() => "unexpected", () => "rejected");
+    await started;
+    const pausing = runtime.pause().then(() => "unexpected", () => "rejected");
+    await cancelStarted;
+    if (failure === "end_turn") finish({ stopReason: "end_turn" });
+    else fail(new Error("transport failed"));
+    expect(await Promise.race([Promise.all([running, pausing]), Bun.sleep(2_000).then(() => "pending")])).toEqual(["rejected", "rejected"]);
+    expect(runtime.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
+    expect(prompts).toBe(1); expect(closed).toBe(1);
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    expect(reopened.events.some((event) => (event.type === "agent.status" || event.type === "run.status") && event.status === "paused")).toBe(false);
+    expect([...reopened.events].reverse().find((event) => event.type === "run.status")).toMatchObject({ status: "interrupted" });
+  });
+  for (const action of ["stop", "exit"] as const) test(`真实Executor暂停未获确认时${action}可收敛且Journal可重开`, async () => {
+    let entered!: () => void;
+    let cancelling!: () => void;
+    let finish!: (turn: { stopReason: string }) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const cancelStarted = new Promise<void>((resolve) => { cancelling = resolve; });
+    let prompts = 0, cancels = 0, closed = 0;
+    const session: AcpWorkerSession = {
+      binding: null,
+      async initialize() {},
+      async createSession() { return { launcherId: "test-acp", sessionId: "native", capabilities: {} }; },
+      async prompt() { prompts++; const turn = new Promise<{ stopReason: string }>((resolve) => { finish = resolve; }); entered(); return turn; },
+      async cancel() { cancels++; cancelling(); /* 请求成功但原turn尚未确认cancelled。 */ },
+      close() { closed++; },
+    };
+    const executor = new AcpWorkerExecutor({ id: "test-acp", command: "fake", args: [] }, () => session);
+    const runtime = await create(executor);
+    executor.bindControl(runtime.createControlServer());
+    const running = runtime.run(workflow).catch(() => undefined);
+    await started;
+    const pausing = runtime.pause().then(() => "unexpected", () => "rejected");
+    await cancelStarted;
+    const stopping = action === "stop" ? runtime.stop() : runtime.cancelForDesktopExit("test-engine");
+    const deadline = Bun.sleep(2_000).then(() => "pending" as const);
+    const outcome = await Promise.race([Promise.all([pausing, stopping, running]), deadline]);
+    expect(outcome).not.toBe("pending");
+    expect(runtime.snapshot()).toMatchObject({ status: "cancelled", phases: [{ agents: [{ status: "cancelled" }] }] });
+    finish({ stopReason: "end_turn" });
+    await Bun.sleep(1);
+    expect(prompts).toBe(1);
+    expect(closed).toBe(1);
+    expect(cancels).toBeGreaterThanOrEqual(1);
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    const cancelled = reopened.events.findIndex((event) => event.type === "agent.status" && event.status === "cancelled");
+    expect(cancelled).toBeGreaterThanOrEqual(0);
+    expect(reopened.events.slice(cancelled).some((event) => event.type === "agent.status" && event.status !== "cancelled")).toBe(false);
+    expect([...reopened.events].reverse().find((event) => event.type === "run.status")).toMatchObject({ status: "cancelled" });
+  });
   test("确定性结果只在节点完成后封存 Run", async () => {
     const runtime = await create({ execute: async () => ({ ok: true }) });
     await expect(runtime.run(workflow)).resolves.toEqual({ ok: true });

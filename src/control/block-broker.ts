@@ -1,4 +1,5 @@
 import Ajv from "ajv";
+import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
 
@@ -58,7 +59,7 @@ export class BlockBroker {
   create(submission: BlockSubmission): PendingBlock {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已在等待中。");
-    if (submission.answerSchema) new Ajv({ allErrors: true, strict: false }).compile(submission.answerSchema);
+    validateAnswerSchema(submission.answerSchema);
     const pending: PendingBlock = { ...submission, answer: null, waiters: [] };
     this.#pending.set(submission.blockRequestId, pending);
     return pending;
@@ -72,7 +73,7 @@ export class BlockBroker {
   restore(submission: BlockSubmission, answer: JsonObject | null): void {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已恢复。");
-    if (submission.answerSchema) new Ajv({ allErrors: true, strict: false }).compile(submission.answerSchema);
+    validateAnswerSchema(submission.answerSchema);
     if (answer) validateAnswer(submission.answerSchema, answer);
     this.#pending.set(submission.blockRequestId, { ...submission, answer, waiters: [] });
   }
@@ -80,7 +81,8 @@ export class BlockBroker {
   /** 验证重连请求恰好对应 Journal 中的同一个 block，而非创建第二个 block。 */
   assertSameSubmission(submission: BlockSubmission): PendingBlock {
     const pending = this.require(submission.blockRequestId);
-    if (pending.runId !== submission.runId || pending.nodeId !== submission.nodeId || pending.agentSessionId !== submission.agentSessionId || pending.capability !== submission.capability || pending.needHelp !== submission.needHelp || JSON.stringify(pending.answerSchema ?? null) !== JSON.stringify(submission.answerSchema ?? null)) throw new Error("重连 block 与 Journal 中原请求不一致。");
+    // JSON对象键序不是请求内容；模型/CLI序列化重排键不应变成另一个请求，数组顺序与值仍严格一致。
+    if (pending.runId !== submission.runId || pending.nodeId !== submission.nodeId || pending.agentSessionId !== submission.agentSessionId || pending.capability !== submission.capability || pending.needHelp !== submission.needHelp || !isDeepStrictEqual(pending.answerSchema ?? null, submission.answerSchema ?? null)) throw new Error("重连 block 与 Journal 中原请求不一致。");
     return pending;
   }
 
@@ -136,6 +138,12 @@ export class BlockBroker {
   }
 
   has(blockRequestId: string): boolean { return this.#pending.has(blockRequestId); }
+  /** 已绑定原会话的只读收尾读取；不交付答案或唤醒等待者，返回副本。 */
+  answerSnapshot(identity: ContinueSubmission): JsonObject|null {
+    const pending=this.require(identity.blockRequestId);
+    if(pending.runId!==identity.runId||pending.nodeId!==identity.nodeId||pending.agentSessionId!==identity.agentSessionId||pending.capability!==identity.capability)throw new Error("收尾人工请求不属于原会话。");
+    return pending.answer ? structuredClone(pending.answer) : null;
+  }
   /** Journal 写入失败时撤销尚未对 Agent 可见的 pending block。 */
   discard(blockRequestId: string): void { this.#pending.delete(blockRequestId); }
   private require(blockRequestId: string): PendingBlock {
@@ -155,4 +163,11 @@ function validateAnswer(schema: JsonSchema | undefined, answer: JsonObject): voi
   if (!schema) return;
   const validator = new Ajv({ allErrors: true, strict: false }).compile(schema);
   if (!validator(answer)) throw new Error(`block 答案不符合 answer-schema：${new Ajv({ allErrors: true, strict: false }).errorsText(validator.errors)}`);
+}
+
+/** 用户答案通道只传JSON对象；明确声明其他根类型会形成UI永远无法提交的block。 */
+function validateAnswerSchema(schema: JsonSchema | undefined): void {
+  if (!schema) return;
+  if (schema.type !== undefined && schema.type !== "object") throw new Error("block answerSchema 根类型必须是 object。");
+  new Ajv({ allErrors: true, strict: false }).compile(schema);
 }
