@@ -23,6 +23,7 @@ const resultAttempts=new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
 import { SchemaForm } from "./forms/schema-form";
+import {TemplatePicker} from "./template-picker";
 import {PersistedDetails} from "./persisted-details";
 import {
   acceptEnvelope,
@@ -108,6 +109,7 @@ export function App() {
   },[navOpen]);
   const [search, setSearch] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
+  const [templatePicker,setTemplatePicker]=useState(false);
   const createRequest = useRef<string | null>(null);
   const sending = useRef(false);
   const routeRef = useRef(route); routeRef.current = route;
@@ -144,6 +146,7 @@ export function App() {
   },[pageKey]);
   function setWorkflowPanelOpen(open: boolean) { if (!open) setRoute({ kind: "conversation" }); }
   function openWorkflow(task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) {
+    setTemplatePicker(false);
     setHarness(task); setSelectedId(null); setDraftProjectId(null);
     const cardId = revision.cardId ?? `legacy:${revision.revision}`;
     const saved = harnessRef.current?.harnessRunId === task.harnessRunId ? workflowLocations.current.get(`${task.harnessRunId}:${cardId}`) : undefined;
@@ -152,7 +155,7 @@ export function App() {
       ? saved : { kind: "workflow", taskId: task.harnessRunId, cardId, revision: revision.revision, section: section ?? (linked ? "execution" : "plan"), executionId: executionId ?? linked?.executionId };
     setRoute(next);
     setNavOpen(false);
-    setSelectedExecutionId(next.executionId ?? null); setExecutionDetail(null); setAssignmentRevision(null);
+    setSelectedExecutionId(next.executionId ?? null); setExecutionDetail(null);
   }
   const [projectCwd, setProjectCwd] = useState("");
   const [projectTitle, setProjectTitle] = useState("");
@@ -193,9 +196,6 @@ export function App() {
     setExecutionDynamicCount(executionDetail.dynamicCount??0);
   }, [harness?.harnessRunId, executionDetail?.execution.revision]);
   /** 分配卡当前服务的已接受 revision；非 null 时展示两卡横滑流程。 */
-  const [assignmentRevision, setAssignmentRevision] = useState<number | null>(
-    null,
-  );
   const [theme, setTheme] = useState<ColorTheme>(readColorTheme);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
   const [harnessView, setHarnessView] = useState<"active" | "completed">("active");
@@ -429,7 +429,6 @@ export function App() {
     setHarnessText("");
     createRequest.current = null; setTaskTitle(""); setSelectedId(null);
     setWorkflowPanelOpen(false);
-    setAssignmentRevision(null);
     setError(null);
   }
   async function sendHarness() {
@@ -494,20 +493,15 @@ export function App() {
       window.clearInterval(fallback);
     };
   }, [harness?.harnessRunId, selectedExecutionId, route.kind]);
-  async function createExecution(revision: number) {
-    if (!harness) return;
-    // 创建 Execution 必须经过分配卡：脚本字面量 cli/model 在受限 Execution 中不直接生效。
-    setAssignmentRevision(revision);
-  }
   async function finishAssignment(detail: ExecutionResponse) {
     if (!harness) return;
-    if (harnessRef.current?.harnessRunId !== harness.harnessRunId || routeRef.current.kind !== "workflow" || routeRef.current.revision !== detail.execution.revision) return;
-    setAssignmentRevision(null);
-    setExecutionDetail(detail);
-    setSelectedExecutionId(detail.execution.executionId);
     const owner = harness.harnessRunId;
     const next = (await api.harness(owner)).harness;
-    if (harnessRef.current?.harnessRunId === owner) setHarness(current=>current?newerTaskSnapshot(current,next):current);
+    const executionRevision=next.workflowRevisions.find(item=>item.revision===detail.execution.revision);
+    if(harnessRef.current?.harnessRunId!==owner||routeRef.current.kind!=="workflow"||executionRevision?.cardId!==routeRef.current.cardId)return;
+    setHarness(current=>current?newerTaskSnapshot(current,next):current);
+    setExecutionDetail(detail);setSelectedExecutionId(detail.execution.executionId);
+    setRoute({...routeRef.current,revision:detail.execution.revision,section:"execution",executionId:detail.execution.executionId,attempt:undefined});
     setError(null);
   }
   /** 所有 Task mutation 回包共享同资源门禁；后台动作完成不改变当前导航。 */
@@ -648,7 +642,6 @@ export function App() {
                 setSelectedProjectId(project.projectId);
                 setHarness(item); setSelectedId(null); setRoute({kind:"conversation"}); setNavOpen(false);
                 setDraftProjectId(null);
-                setAssignmentRevision(null);
               }}
             />
           ))}
@@ -674,6 +667,7 @@ export function App() {
             onText={updateHarnessText}
             onSend={() => void sendHarness()}
             title={taskTitle} onTitle={setTaskTitle}
+            onTemplate={()=>setTemplatePicker(true)}
           />
         ) : (
           <HarnessConversation
@@ -705,6 +699,7 @@ export function App() {
             onOpenWorkflow={() => { const revision = workflowCells(harness).at(-1); if (revision) openWorkflow(harness,revision); }}
             hasWorkflow={harness.workflowRevisions.length > 0}
             onDraft={() => {}}
+            onTemplate={()=>setTemplatePicker(true)}
             onAccept={async (revision) => {
               try {
                 await taskMutation(harness.harnessRunId,()=>api.acceptWorkflowRevision(
@@ -723,9 +718,6 @@ export function App() {
                 revision,
               ));
             }}
-            onCreateExecution={(revision) => void createExecution(revision)}
-            assignmentRevision={assignmentRevision}
-            onAssignmentCancel={() => setAssignmentRevision(null)}
             onAssignmentCreated={(detail) => void finishAssignment(detail)}
             onSelectRevision={(revision) => openWorkflow(harness, revision, "plan")}
             onSelectExecution={(executionId,attempt) =>
@@ -753,6 +745,16 @@ export function App() {
             onRead={markRead}
           />
         )}
+        {templatePicker&&<TemplatePicker key={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} identity={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} blockedReason={harness&&(harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null))?"主控或执行仍在处理中；参数保留，结束后才能保存。":undefined} onClose={()=>setTemplatePicker(false)} onSave={async(selection,requestId)=>{
+          const owner=harnessRef.current,token=navigationToken.current;
+          const response=owner?await taskMutation(owner.harnessRunId,()=>api.saveTemplate(owner.harnessRunId,requestId,selection)):await api.createTemplateTask(draftProjectId??selectedProjectId!,"只读代码审查与独立复核",requestId,selection,taskTitle||undefined);
+          setHarnesses(current=>[response.harness,...current.filter(item=>item.harnessRunId!==response.harness.harnessRunId)]);
+          if(token===navigationToken.current&&(owner?harnessRef.current?.harnessRunId===owner.harnessRunId:!harnessRef.current)){
+            if(selection.needsGuidance){
+              setTemplatePicker(false);setHarness(response.harness);setDraftProjectId(null);setRoute({kind:"conversation"});
+            }else openWorkflow(response.harness,response.harness.workflowRevisions.at(-1)!);
+          }
+        }}/>}
       </section>
       <aside
         ref={centralScroll}
@@ -793,11 +795,10 @@ export function App() {
                 const revisions=harness.workflowRevisions.filter(item=>(item.cardId ?? `legacy:${item.revision}`) === route.cardId);
                 const revision=revisions.find(item=>item.revision === route.revision);
                 if(!revision) return <p>方案不存在，请返回对话。</p>;
-                return <><div className="workflow-version-toolbar"><label>方案版本<select value={revision.revision} onChange={event=>{setSelectedExecutionId(null);setExecutionDetail(null);setAssignmentRevision(null);setRoute({...route,revision:Number(event.target.value),executionId:undefined,attempt:undefined});}}>{revisions.map(item=><option key={item.revision} value={item.revision}>第 {item.revision} 版</option>)}</select></label><small>每次修改保留原方案，批准仅对当时的版本生效</small></div>
-                  <WorkflowRevisionCard key={`${route.taskId}:${revision.revision}`} revision={revision} harness={harness}
-                    onAccept={async number=>{ await taskMutation(harness.harnessRunId,()=>api.acceptWorkflowRevision(harness.harnessRunId,number)); }}
-                    onReject={async number=>{ await taskMutation(harness.harnessRunId,()=>api.rejectWorkflowRevision(harness.harnessRunId,number)); }}
-                    onCreateExecution={number=>void createExecution(number)} assignmentRevision={assignmentRevision} onAssignmentCancel={()=>setAssignmentRevision(null)} onAssignmentCreated={detail=>void finishAssignment(detail)} />
+                return <><div className="workflow-version-toolbar"><label>方案版本<select value={revision.revision} onChange={event=>{setSelectedExecutionId(null);setExecutionDetail(null);setRoute({...route,revision:Number(event.target.value),executionId:undefined,attempt:undefined});}}>{revisions.map(item=><option key={item.revision} value={item.revision}>第 {item.revision} 版</option>)}</select></label><small>每次修改保留原方案，批准仅对当时的版本生效</small></div>
+                  <WorkflowRevisionCard key={`${route.taskId}:${revision.revision}`} revision={revision} harness={harness} hideGoal
+                    onSaved={next=>{setHarnesses(current=>current.map(item=>item.harnessRunId===next.harnessRunId?newerTaskSnapshot(item,next):item));if(harnessRef.current?.harnessRunId===next.harnessRunId&&routeRef.current.kind==="workflow"&&routeRef.current.cardId===revision.cardId&&routeRef.current.revision===revision.revision)openWorkflow(next,next.workflowRevisions.at(-1)!,"plan");}}
+                    onAssignmentCreated={detail=>void finishAssignment(detail)} />
                   {editableRevision(harness,revision) && <><button onClick={()=>{ const request=`请修改工作流版本 ${revision.revision}（${revision.goal}）：\n`; if(!harnessText)updateHarnessText(request); else setError("已有对话草稿，请在原草稿中补充修改要求。"); setRoute({kind:"conversation"}); }}>请主控修改</button><button onClick={async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }}>放弃候选</button></>}
                   {revision.abandonedAt && <p>候选已放弃，仅供查看。</p>}</>;
               })()}
@@ -1728,12 +1729,14 @@ function DraftConversation({
   onText,
   onSend,
   title, onTitle,
+  onTemplate,
 }: {
   project: HarnessProject | null;
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
   title: string; onTitle: (value: string) => void;
+  /** 打开预置来源；不创建任务。 */ onTemplate:()=>void;
 }) {
   const ready = project !== null;
   return (
@@ -1752,7 +1755,7 @@ function DraftConversation({
       <div className="conversation-scroll">
         <div className="conversation-intro">
           <span>自动编排</span>
-          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button disabled>预置工作流 · 尚未开放</button><button disabled>本地工作流 · 尚未开放</button></div>
+          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button onClick={onTemplate} disabled={!ready}>预置工作流</button><button disabled>本地工作流 · 尚未开放</button></div>
           <label>任务标题（可选）<input value={title} maxLength={120} onChange={event=>onTitle(event.target.value)} /></label>
           <h2>你想完成什么任务？</h2>
           <p>
@@ -1805,11 +1808,9 @@ function HarnessConversation({
   onOpenWorkflow,
   hasWorkflow,
   onDraft,
+  onTemplate,
   onAccept,
   onReject,
-  onCreateExecution,
-  assignmentRevision,
-  onAssignmentCancel,
   onAssignmentCreated,
   onSelectExecution,
   onSelectRevision,
@@ -1828,13 +1829,10 @@ function HarnessConversation({
   onOpenWorkflow: () => void;
   hasWorkflow: boolean;
   onDraft: () => void;
+  /** 用户显式选择预置工作流，不自动执行。 */ onTemplate:()=>void;
   onAccept: (revision: number) => void;
   /** 拒绝草案；最新会话快照由调用方写回 state。 */
   onReject: (revision: number) => Promise<void>;
-  onCreateExecution: (revision: number) => void;
-  /** 分配卡当前展开的 revision；非 null 时内嵌在对应草案卡片下方。 */
-  assignmentRevision: number | null;
-  onAssignmentCancel: () => void;
   onAssignmentCreated: (detail: ExecutionResponse) => void;
   onSelectExecution: (executionId: string,attempt?:number) => void;
   onSelectRevision: (revision: import("./types").WorkflowRevision) => void;
@@ -1871,7 +1869,7 @@ function HarnessConversation({
         ...(harness.executionHistory?.length?harness.executionHistory.map(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);return {key:item.key,at:item.at,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null};}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
       ]}
     >
-      {harness.task && harness.executions.length > 0 && <p className="workflow-event">多轮工作流尚未开放；可查看或恢复原执行，聊天仍可讨论结果。</p>}
+      {harness.task&&<button onClick={()=>{const latest=harness.workflowRevisions.at(-1);if(latest&&editableRevision(harness,latest))onSelectRevision(latest);else onTemplate();}} disabled={harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null)}>{harness.workflowRevisions.at(-1)&&editableRevision(harness,harness.workflowRevisions.at(-1)!)?"继续准备工作流":"运行工作流 → 选择工作流"}</button>}
       {harness.task && harness.diagnostic?.includes("主控启动失败") && <button onClick={()=>void api.retryInitialization(harness.harnessRunId)}>重试启动主控（不重复创建任务）</button>}
         {harness.decisions
           .filter((decision) => decision.answer === null && harness.status === "running")

@@ -185,24 +185,6 @@ export type ExecutionPlanResponse = {
   readonly harnessRuntime: import("../runtimes/types").CliRuntimeView | null;
 };
 
-/** executions.randomize 的响应；每次调用重新生成，仅首次进入或显式重新随机时调用。 */
-export type ExecutionRandomizeResponse = {
-  /** 随机轮换生成的逐 Worker 指派与兜底分配。 */
-  readonly assignments: readonly import("../harness/types").WorkerAssignment[];
-  /** 兜底分配（动态 id Worker 使用）。 */
-  readonly defaultAssignment: import("../harness/types").WorkerAssignment;
-};
-
-/** executions.parseRule 的响应；degraded 为 true 时 UI 必须显式展示已退化为随机分配。 */
-export type ExecutionParseRuleResponse = {
-  /** 规则是否解析失败并退化；true 时 assignments 为 null。 */
-  readonly degraded: boolean;
-  /** 退化原因的安全摘要；未退化为 null。 */
-  readonly diagnostic: string | null;
-  /** 解析成功的逐 Worker 指派（仅规则覆盖的条目）；degraded 时为 null。 */
-  readonly assignments: readonly import("../harness/types").WorkerAssignment[] | null;
-};
-
 /** Execution 创建、控制或答题后的权威响应。 */
 export type ExecutionResponse = {
   /** 原冻结源码静态无法枚举的调用数；只作进度分母提示，不代表实际节点数。 */

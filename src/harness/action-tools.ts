@@ -8,13 +8,18 @@ import type { JsonObject } from "../shared/json";
  */
 export type HarnessActionCallbacks = {
   /** 提交新的 workflow.ts 草案；只产生耐久 revision，不创建执行。 */
-  readonly proposeWorkflowRevision: (source: string, goal?: string, scope?: string) => Promise<{ readonly revision: number; readonly sourceHash: string }>;
+  readonly proposeWorkflowRevision: (source: string, goal?: string, scope?: string, parameters?: TemplateParameterProposal) => Promise<{ readonly revision: number; readonly sourceHash: string }>;
   /** 查看本 Harness 的 Execution 登记或单个 Execution 的权威快照；省略 id 时返回列表。 */
   readonly inspectExecution: (executionId?: string) => Promise<unknown>;
   /** 读取本任务的耐久 capsule：消息摘要、revision 与 Execution 状态。 */
   readonly readRunCapsule: () => Promise<unknown>;
   /** 没有用户决定就不能安全继续时发起决策请求；阻塞等待已校验的 JSON 答案。 */
   readonly requestUserDecision: (question: string, answerSchema?: JsonObject) => Promise<JsonObject>;
+};
+/** 现有提案工具的模板参数模式；不赋予主控执行权或源码写权限。 */
+export type TemplateParameterProposal = {
+  /** 整理依据的当前候选版本；过期时拒绝，不覆盖新修改。 */ readonly baseRevision:number;
+  /** 按冻结模板Schema完整校验的参数，不从exampleArgs推导契约。 */ readonly input:JsonObject;
 };
 
 /** 行动类窄工具名称全集；Pi beforeToolCall 硬门只放行已注册工具名。 */
@@ -27,10 +32,10 @@ export function createHarnessActionTools(actions: HarnessActionCallbacks): Agent
       name: "propose_workflow_revision",
       label: "提议 Workflow 草案",
       description: "提交一份新的受限 workflow TypeScript 草案，返回 revision 序号与源码 hash。草案只在用户于界面明确接受后才可能创建 Execution；本工具不会执行任何代码、不会创建 Worker。",
-      parameters: Type.Object({ source: Type.String({ description: "受限 workflow.ts 源码" }), goal: Type.String({ description: "本轮工作流目标，不能沿用整个任务初始目标代替" }), scope: Type.String({ description: "本轮工作范围与边界" }) }),
+      parameters: Type.Object({ source: Type.String({ description: "受限 workflow.ts 源码；参数模式传空字符串，不改源码" }), goal: Type.String({ description: "本轮工作流目标" }), scope: Type.String({ description: "本轮工作范围与边界" }), parameters:Type.Optional(Type.Object({baseRevision:Type.Integer({minimum:1}),input:Type.Record(Type.String(),Type.Any())})) }),
       execute: async (_id, params) => {
-        const { source, goal, scope } = params as { source: string; goal: string; scope: string };
-        const result = await actions.proposeWorkflowRevision(source, goal, scope);
+        const { source, goal, scope, parameters } = params as { source: string; goal: string; scope: string;parameters?:TemplateParameterProposal };
+        const result = await actions.proposeWorkflowRevision(source, goal, scope,parameters);
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: { operation: "propose_workflow_revision", ...result } };
       },
       executionMode: "sequential",

@@ -86,7 +86,20 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。
 这是 Wave Flow 主控控制面，不是 Workflow 作者 API。同一未执行候选的修改追加同卡版本，
-接受不执行，旧批准不能启动新版本。首份执行后多轮暂未开放，不提案下一份流程。
+接受不执行，旧批准不能启动新版本。前次执行终态且主控空闲后，可以由用户显式发起下一轮；
+不得自动批准、启动或注入旧结果。修改模板控制流时同卡追加 generated 版本，Engine 留存
+原始模板 derivedFrom；不要把生成源码冒充原模板。模板业务输入 Schema 来自内置目录，
+不是 meta 或 exampleArgs 的作者 API 扩展。
+
+### 预置参数辅助整理（Wave Flow 新增设计）
+
+用户选择预置模板后，只询问缺失且影响执行的内容，复用用户已说过的信息；不要逐字段
+要求重复确认，不用 request_user_decision 表单收集普通业务参数。用户可直接编辑紧凑参数区。
+先以 read_run_capsule 读取当前候选 templateOrigin.inputSchema、input 和 revision。
+参数齐全时用现有 propose_workflow_revision 的 parameters 模式：source 传空字符串，
+goal/scope 说明目标与范围，parameters={baseRevision:当前版本,input:完整参数}。
+Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码；版本已变化时重新读取，
+不得覆盖用户修改。此模式只准备未批准候选，不执行、不选择 CLI、不自动注入旧结果。
 
 除"不是模块"外，受限脚本还遵守：
 

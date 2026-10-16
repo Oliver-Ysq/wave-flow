@@ -21,6 +21,8 @@ export type ExtractedAgentWorker = {
 
 /** 单个 agent() 调用的展示示意；不要求固定 id，不用于执行分配或节点定位。 */
 export type PreviewAgent = {
+  /** 字面量节点id；动态为null，历史预览缺省。仅用于匹配配置，不作为授权。 */
+  readonly nodeId?: string | null;
   /** 是否位于循环重复区域或常见批量遍历回调中；默认 false，仅源码提示，不证明次数或无限执行。 */
   readonly loop: boolean;
   /** 源码调用位置生成的稳定展示 key；只用于同一 revision 的列表，不是运行时 id。 */
@@ -64,7 +66,7 @@ export function extractAgentWorkers(source: string, fileName = "workflow.generat
         currentPhase = first && ts.isStringLiteral(first) ? first.text : null;
       } else if (node.expression.text === "agent") {
         const display = extractDisplayOptions(node.arguments[1]);
-        previewAgents.push({ key: `call:${node.getStart(file)}`, name: display.label?.trim() || display.id?.trim() || "Agent", cli: display.cli, phaseTitle: currentPhase, loop: isRepeatedCall(node) });
+        previewAgents.push({ key: `call:${node.getStart(file)}`, nodeId:display.id, name: display.label?.trim() || display.id?.trim() || "Agent", cli: display.cli, phaseTitle: currentPhase, loop: isRepeatedCall(node) });
         const extracted = extractOptions(node.arguments[1]);
         if (extracted === null) dynamicCount += 1;
         else if (!seen.has(extracted.id)) {

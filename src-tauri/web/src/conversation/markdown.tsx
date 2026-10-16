@@ -1,46 +1,13 @@
-import { memo } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
+import { memo,useEffect,useState,type ComponentType } from "react";
+import {createSharedRendererLoader,rendererRequestUrl} from "./renderer-loader";
+import rendererUrl from "virtual:markdown-renderer-url";
+const loadRenderer=createSharedRendererLoader(attempt=>import(/* @vite-ignore */ rendererRequestUrl(rendererUrl,attempt)).then(module=>module.MarkdownRenderer));
 
-/**
- * 链接协议白名单：只允许 http/https/mailto，其余协议（javascript: 等）清空 href，
- * 交由下方的 a 渲染器退化为纯文本。
- */
-function safeUrlTransform(url: string): string {
-  if (/^(https?:|mailto:)/i.test(url)) return defaultUrlTransform(url);
-  return "";
-}
-
-/**
- * 工作台唯一 Markdown 渲染入口：GFM（表格/列表/删除线）+ 代码块高亮。
- * 不启用 rehype-raw，原始 HTML 一律按文本处理；图片不加载远端资源，只显示 alt 占位。
- */
+/** 按需加载完整Markdown能力；等待/失败保留正文，失败仅显式重试，不影响Engine或草稿。 */
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
-  return (
-    <div className="wf-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        urlTransform={safeUrlTransform}
-        components={{
-          img: ({ alt }) => (
-            <span className="wf-image-placeholder">
-              [图片{alt ? `：${alt}` : ""}]
-            </span>
-          ),
-          a: ({ href, children }) =>
-            href ? (
-              <a href={href} rel="noreferrer" target="_blank">
-                {children}
-              </a>
-            ) : (
-              <span>{children}</span>
-            ),
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
+  const [Renderer,setRenderer]=useState<ComponentType<{text:string}>|null>(null);
+  const [failed,setFailed]=useState(false),[attempt,setAttempt]=useState(0);
+  useEffect(()=>{let live=true;setFailed(false);void loadRenderer().then(renderer=>{if(live)setRenderer(()=>renderer);}).catch(()=>{if(live)setFailed(true);});return()=>{live=false;};},[attempt]);
+  if(Renderer)return <Renderer text={text}/>;
+  return <div className="wf-markdown"><div style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{text}</div>{failed?<><small role="status">正文格式加载失败，内容已保留。</small><button type="button" onClick={()=>setAttempt(value=>value+1)}>重新加载正文格式</button></>:<small role="status">正在加载正文格式…</small>}</div>;
 });

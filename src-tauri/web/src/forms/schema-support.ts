@@ -4,6 +4,8 @@ import Ajv from "ajv";
 export type SchemaFieldError = {
   /** 点分字段路径；无法定位到具体字段时为空串。 */
   path: string;
+  /** 原始 JSON Pointer；字段名含点号/斜线时用于无歧义定位，历史调用方可忽略。 */
+  pointer?: string;
   /** 面向用户的中文错误文案。 */
   message: string;
 };
@@ -20,7 +22,6 @@ export function isSupportedSchema(schema: unknown): SchemaSupport {
   }
   return checkNode(schema as Record<string, unknown>, "顶层");
 }
-
 /** 递归校验单个 Schema 节点；path 只用于错误文案定位。 */
 function checkNode(node: Record<string, unknown>, path: string): SchemaSupport {
   const unsupported = (keyword: string): SchemaSupport => ({
@@ -136,18 +137,26 @@ export function validateAnswer(
       const missing = (error.params as { missingProperty?: string }).missingProperty ?? "";
       return {
         path: basePath ? `${basePath}.${missing}` : missing,
+        pointer: `${error.instancePath}/${missing.replace(/~/g,"~0").replace(/\//g,"~1")}`,
         message: "必填字段未填写",
       };
     }
     if (error.keyword === "type" || error.keyword === "enum") {
       return {
         path: basePath,
+        pointer: error.instancePath,
         message:
           error.keyword === "enum"
             ? "取值不在允许范围内"
-            : `类型应为 ${String((error.params as { type?: unknown }).type)}`,
+            : `请填写${({string:"文字",number:"数字",integer:"整数",boolean:"是或否",array:"列表",object:"有效参数",null:"空值"} as Record<string,string>)[String((error.params as {type?:unknown}).type)]??"有效值"}`,
       };
     }
-    return { path: basePath, message: error.message ?? "取值不合法" };
+    const limit=(error.params as {limit?:unknown}).limit;
+    const messages:Record<string,string>={
+      minLength:limit===1?"请填写内容":`至少填写 ${limit} 个字符`,maxLength:`最多填写 ${limit} 个字符`,
+      minimum:`不能小于 ${limit}`,maximum:`不能大于 ${limit}`,exclusiveMinimum:`必须大于 ${limit}`,exclusiveMaximum:`必须小于 ${limit}`,
+      minItems:`至少填写 ${limit} 项`,maxItems:`最多填写 ${limit} 项`,uniqueItems:"列表中不能有重复项",pattern:"内容格式不符合要求",additionalProperties:"包含未支持的参数",multipleOf:"数字步长不符合要求",
+    };
+    return { path: basePath, pointer:error.instancePath, message: messages[error.keyword]??"取值不符合参数要求" };
   });
 }

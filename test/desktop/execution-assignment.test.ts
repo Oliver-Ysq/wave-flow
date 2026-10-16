@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +60,51 @@ function configOf(kimi: CliRuntimeRecord, codex: CliRuntimeRecord, overrides: Pa
 }
 
 describe("Engine executions.plan / randomize / create 校验", () => {
+  test("预置保存未批准且无执行，最终确认复核配置；并发确认不重复启动",async()=>{
+    const {engine,kimi,codex,harnessRunId:fixtureId}=await fixture();
+    try{
+      const projects=await engine.handleDesktopAction("projects.list") as {projects:Array<{projectId:string}>};
+      const templates=await engine.handleDesktopAction("templates.list") as {templates:import("../../src/harness/workflow-templates").WorkflowTemplate[]};
+      const template=templates.templates[0]!;
+      const selection={id:template.id,version:template.version,sourceHash:template.sourceHash,input:{target:"src/",focus:["正确性"],maxFindings:3,context:""},needsGuidance:true};
+      const created=await engine.handleDesktopAction("harnesses.startConversation",{projectId:projects.projects[0]!.projectId,text:template.meta.description,clientRequestId:crypto.randomUUID(),template:selection}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      const id=created.harness.harnessRunId;
+      expect(created.harness.workflowRevisions[0]!.acceptedAt).toBeNull();expect(created.harness.executions).toHaveLength(0);
+      expect(created.harness.workflowRevisions[0]!.parametersPending).toBe(true);
+      // 引导按钮现在由 Engine 原子安排普通主控回合，计划/确认须等待真实回合结束。
+      for(let attempt=0;attempt<200;attempt++){
+        const current=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+        if(current.harness.status!=="running")break;
+        await Bun.sleep(5);
+      }
+      const plan=await engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:1}) as ExecutionPlanResponse;
+      expect(plan.workers.map(item=>item.id)).toEqual(["reviewer","verifier"]);
+      await expect(engine.handleDesktopAction("templates.confirm",{harnessRunId:id,revision:1,config:{},clientRequestId:crypto.randomUUID()})).rejects.toThrow();
+      const before=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      expect(before.harness.workflowRevisions[0]!.acceptedAt).toBeNull();expect(before.harness.executions).toHaveLength(0);
+      const base=configOf(kimi,codex),config={...base,assignments:plan.workers.map(worker=>({...base.defaultAssignment!,agentId:worker.id}))};
+      const request={harnessRunId:id,revision:1,config,clientRequestId:crypto.randomUUID(),input:{...selection.input,maxFindings:4}};
+      const results=await Promise.all([engine.handleDesktopAction("templates.confirm",request),engine.handleDesktopAction("templates.confirm",request)]) as Array<{execution:{executionId:string}}>;
+      expect(results[0]!.execution.executionId).toBe(results[1]!.execution.executionId);
+      const retry=await engine.handleDesktopAction("templates.confirm",request) as {execution:{executionId:string}};
+      expect(retry.execution.executionId).toBe(results[0]!.execution.executionId);
+      await expect(engine.handleDesktopAction("templates.confirm",{...request,config:{...config,ruleText:"changed"}})).rejects.toThrow("不能更换");
+      const after=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      expect(after.harness.executions).toHaveLength(1);
+      expect(after.harness.workflowRevisions[0]!.acceptedAt).toBeNull();
+      expect(after.harness.workflowRevisions[0]!.input?.maxFindings).toBe(3);
+      expect(after.harness.workflowRevisions[1]!.acceptedAt).not.toBeNull();
+      expect(after.harness.workflowRevisions[1]!.input?.maxFindings).toBe(4);
+      expect(after.harness.executions[0]!.revision).toBe(2);
+      engine.shutdown();
+      const reopened=new DesktopExecutionEngine(fixtureOptions.get(fixtureId));
+      try{
+        const durable=await reopened.handleDesktopAction("templates.confirm",request) as {execution:{executionId:string}};
+        expect(durable.execution.executionId).toBe(results[0]!.execution.executionId);
+        expect((await reopened.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]}).executions).toHaveLength(1);
+      }finally{reopened.shutdown();}
+    }finally{engine.shutdown();}
+  });
   test("自动编排Task的旧版/放弃版本在直接IPC均拒绝，不创建Execution",async()=>{
     const {engine:harnessEngine,harnessRunId,kimi,codex}=await fixture();
     const options=fixtureOptions.get(harnessRunId) as Exclude<ConstructorParameters<typeof DesktopExecutionEngine>[0],boolean|undefined>;
@@ -90,8 +135,8 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       await engine.handleDesktopAction("harnesses.acceptRevision",{harnessRunId:id,revision:3});
       const createdExecution=await engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)}) as {execution:{executionId:string}};
       for(let n=0;n<100;n++){const snapshot=await engine.handleDesktopAction("executions.get",{harnessRunId:id,executionId:createdExecution.execution.executionId}) as {snapshot:{status:string}};if(snapshot.snapshot.status==="completed")break;await Bun.sleep(5);}
-      await expect(engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:3})).rejects.toThrow("多轮");
-      await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)})).rejects.toThrow("多轮");
+      await expect(engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:3})).rejects.toThrow("取代");
+      await expect(engine.handleDesktopAction("executions.create",{harnessRunId:id,revision:3,config:configOf(kimi,codex)})).rejects.toThrow("取代");
       expect((await engine.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]}).executions).toHaveLength(1);
     }finally{engine.shutdown();harnessEngine.shutdown();}
   });
@@ -137,13 +182,10 @@ async function run(args) {
     } finally { engine.shutdown(); }
   });
 
-  test("randomize 覆盖全部枚举 Worker 且来源为 random，兜底落主控 Runtime", async () => {
+  test("已删除随机分配入口拒绝，不改变已有配置", async () => {
     const { engine, harnessRunId, kimi } = await fixture();
     try {
-      const result = await engine.handleDesktopAction("executions.randomize", { harnessRunId, revision: 1 }) as { assignments: WorkerAssignment[]; defaultAssignment: WorkerAssignment };
-      expect(result.assignments.map((item) => item.agentId).sort()).toEqual(["w1", "w2"]);
-      expect(result.assignments.every((item) => item.source === "random" && item.model === "cli-default")).toBe(true);
-      expect(result.defaultAssignment.runtimeId).toBe(kimi.runtimeId);
+      await expect(engine.handleDesktopAction("executions.randomize",{harnessRunId,revision:1})).rejects.toThrow("未知 Desktop action");
     } finally { engine.shutdown(); }
   });
 
@@ -191,56 +233,4 @@ async function run(args) {
   });
 });
 
-describe("Engine executions.parseRule 主控普通回合解析", () => {
-  test("合法 ```json 回复解析为指派；噪声回复显式 degraded", async () => {
-    const session: HarnessSession = {
-      isRunning: false,
-      subscribe: () => () => {},
-      abort: () => {},
-      prompt: async () => "好的，分配如下：\n```json\n{ \"assignments\": [{ \"agentId\": \"w1\", \"cli\": \"codex\" }] }\n```",
-    };
-    const { engine, harnessRunId, codex } = await fixture(session);
-    try {
-      const parsed = await engine.handleDesktopAction("executions.parseRule", { harnessRunId, revision: 1, ruleText: "甲用 codex" }) as { degraded: boolean; assignments: WorkerAssignment[] | null };
-      expect(parsed.degraded).toBe(false);
-      expect(parsed.assignments).toEqual([{ agentId: "w1", cli: "codex", model: "cli-default", source: "rule", runtimeId: codex.runtimeId, adapterId: "codex-acp", adapterVersion: "1.0" }]);
-    } finally { engine.shutdown(); }
-
-    // 确定性回声会话不产出 ```json 围栏：必须 degraded，绝不静默猜测。
-    const noisy = await fixture();
-    try {
-      const degraded = await noisy.engine.handleDesktopAction("executions.parseRule", { harnessRunId: noisy.harnessRunId, revision: 1, ruleText: "随便" }) as { degraded: boolean; assignments: unknown };
-      expect(degraded.degraded).toBe(true);
-      expect(degraded.assignments).toBeNull();
-    } finally { noisy.engine.shutdown(); }
-  });
-
-  test("规则引用未枚举 id 或池外 CLI 时 degraded", async () => {
-    const session: HarnessSession = {
-      isRunning: false,
-      subscribe: () => () => {},
-      abort: () => {},
-      prompt: async () => "```json\n{ \"assignments\": [{ \"agentId\": \"ghost\", \"cli\": \"codex\" }] }\n```",
-    };
-    const { engine, harnessRunId } = await fixture(session);
-    try {
-      const parsed = await engine.handleDesktopAction("executions.parseRule", { harnessRunId, revision: 1, ruleText: "ghost 用 codex" }) as { degraded: boolean; diagnostic: string | null };
-      expect(parsed.degraded).toBe(true);
-      expect(parsed.diagnostic).toContain("未枚举");
-    } finally { engine.shutdown(); }
-  });
-
-  test("主控回合运行中 parseRule 返回 409", async () => {
-    const session: HarnessSession = {
-      isRunning: true,
-      subscribe: () => () => {},
-      abort: () => {},
-      prompt: () => new Promise<string>(() => {}),
-    };
-    const { engine, harnessRunId } = await fixture(session);
-    try {
-      await engine.handleDesktopAction("harnesses.send", { harnessRunId, text: "占用回合" });
-      await expect(engine.handleDesktopAction("executions.parseRule", { harnessRunId, revision: 1, ruleText: "甲用 codex" })).rejects.toMatchObject({ status: 409 });
-    } finally { engine.shutdown(); }
-  });
-});
+test("已删除的规则解析入口拒绝，不启动主控回合",async()=>{const {engine,harnessRunId}=await fixture();try{await expect(engine.handleDesktopAction("executions.parseRule",{harnessRunId,revision:1,ruleText:"全部Codex"})).rejects.toThrow("未知 Desktop action");}finally{engine.shutdown();}});

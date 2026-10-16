@@ -31,8 +31,9 @@ test("缺失预览不伪造步骤，结果有界且完成不等于验收",()=>{
 });
 
 test("中央旧版显示取代而不是冻结，禁止审批与启动且保留声明阶段",()=>{
-  const html=renderToStaticMarkup(<WorkflowRevisionCard revision={{...revision(1),acceptedAt:"2026-10-15T08:00:00Z"}} harness={task} onAccept={()=>{}} onReject={async()=>{}} onCreateExecution={()=>{}} assignmentRevision={null} onAssignmentCancel={()=>{}} onAssignmentCreated={()=>{}} />);
+  const html=renderToStaticMarkup(<WorkflowRevisionCard revision={{...revision(1),acceptedAt:"2026-10-15T08:00:00Z"}} harness={task} onAssignmentCreated={()=>{}} />);
   expect(html).toContain("历史方案"); expect(html).toContain("已被第 2 版替代");
   expect(html).not.toContain("已冻结"); expect(html).not.toContain("配置并运行");
-  expect(html).toContain("声明阶段"); expect(html).toContain("只读核验算术结果");
+  expect(html).toContain("Workflow 设计"); expect(html).toContain("只读核验算术结果");
+  expect(html).not.toContain("确认并运行");
 });

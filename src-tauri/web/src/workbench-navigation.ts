@@ -9,5 +9,5 @@ export function workflowCells(task: HarnessSnapshot): WorkflowRevision[] {
 }
 /** 展示资格，最终仍由 Engine 拒绝非法动作。 */
 export function editableRevision(task: HarnessSnapshot, revision: WorkflowRevision): boolean {
-  return !!task.task && !!revision.cardId && task.status === "idle" && !task.executions.length && !revision.abandonedAt && task.workflowRevisions.filter(item=>item.cardId === revision.cardId).at(-1)?.revision === revision.revision;
+  return !!task.task && !!revision.cardId && task.status === "idle" && !task.executions.some(item=>item.finishedAt===null||task.workflowRevisions.find(version=>version.revision===item.revision)?.cardId===revision.cardId) && !revision.abandonedAt && task.workflowRevisions.filter(item=>item.cardId === revision.cardId).at(-1)?.revision === revision.revision;
 }

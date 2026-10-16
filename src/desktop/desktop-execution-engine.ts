@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionParseRuleResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionRandomizeResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
@@ -14,6 +14,7 @@ import { RUNTIME_VERSION } from "../journal/types";
 import { AgentStartLimiter, LimitedAgentExecutor } from "../runtime/agent-start-limiter";
 import { HarnessService } from "../harness/service";
 import { assertStartable, type TaskCreation } from "../harness/task-contract";
+import { canonicalJson, isTemplateSelection, listWorkflowTemplates, validateTemplateInput } from "../harness/workflow-templates";
 import { HarnessProjectStore } from "../harness/projects";
 import { HarnessExecutionService } from "../harness/executions";
 import { repairHarnessHomePermissions } from "../harness/journal";
@@ -30,7 +31,7 @@ import { WorkerControlPipe } from "../runtime/worker-control-pipe";
 import { HarnessControlPipe } from "../harness/harness-control-pipe";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
-import { buildRandomAssignments, buildRulePrompt, parseRuleReply, validateExecutionConfig } from "./execution-assignment";
+import { validateExecutionConfig } from "./execution-assignment";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
@@ -424,6 +425,11 @@ export class DesktopExecutionEngine {
     if (!Number.isInteger(revision) || revision < 1) throw new EngineActionError(400, "创建 Execution 必须提供有效 revision 序号。 ");
     if (input !== undefined && !isJsonObject(input)) throw new EngineActionError(400, "Execution input 必须是 JSON-safe 对象。 ");
     try {
+      const selected=(await this.#harness.snapshot(harnessRunId)).workflowRevisions.find(item=>item.revision===revision);
+      if(selected?.templateOrigin){
+        validateTemplateInput(selected.templateOrigin.inputSchema,input??{});
+        if(canonicalJson(input??{})!==canonicalJson(selected.input))throw new Error("输入与已保存批准版本不一致，请保存新版本后确认。");
+      }
       if (!this.deterministicForTest) await this.requireWorkerCandidate();
       const config = await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
       const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
@@ -440,7 +446,7 @@ export class DesktopExecutionEngine {
     if (!raw) throw new EngineActionError(400, "创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
     const snapshot = await this.#harness.snapshot(harnessRunId);
     const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
-    if (!revision || revision.acceptedAt === null) throw new EngineActionError(400, "创建 Execution 必须绑定已接受冻结的 revision。 ");
+    if (!revision) throw new EngineActionError(400, "创建 Execution 必须绑定当前 revision。 ");
     const extracted = extractAgentWorkers(revision.source);
     const list = await this.#cliRuntimes.list();
     const verified = list.runtimes.filter((runtime) => runtime.status === "verified");
@@ -458,52 +464,16 @@ export class DesktopExecutionEngine {
     try {
       const snapshot = await this.#harness.snapshot(harnessRunId);
       const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
-      if (snapshot.task) assertStartable(snapshot, revisionNumber);
-      if (!revision || revision.acceptedAt === null) throw new Error("只能为已接受冻结的 revision 规划执行分配。 ");
+      if (snapshot.task) assertStartable(snapshot, revisionNumber, true);
+      if (!revision || !snapshot.task && revision.acceptedAt===null) throw new Error("只能为当前候选或已批准历史方案规划执行分配。 ");
       // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
       const compiled = compileRestrictedWorkflow(revision.source);
       const extracted = extractAgentWorkers(revision.source);
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
-      return { harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: list.harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === list.harnessRuntimeId) ?? null : null };
+      const harnessRuntimeId=snapshot.runtime?.runtimeId??list.harnessRuntimeId;
+      return { harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
-  }
-
-  /** executions.randomize：Engine 侧相邻轮换随机分配；仅首次进入分配卡或显式重新随机时调用。 */
-  private async randomizeExecutionAssignment(harnessRunId: string, value: unknown): Promise<ExecutionRandomizeResponse> {
-    try {
-      const plan = await this.planExecution(harnessRunId, value);
-      if (!plan.harnessRuntime) throw new EngineActionError(400, "未设置已验证的主控 CLI，无法生成随机分配。 ");
-      return buildRandomAssignments(plan.workers, plan.pool, plan.selectedByCli, plan.harnessRuntime);
-    } catch (error) { throw this.executionError(error); }
-  }
-
-  /**
-   * executions.parseRule：把自然语言规则作为主控普通回合解析（不新增工具）。
-   * 解析失败、超时或回复不合规一律返回 degraded，UI 据此显式展示已退化为随机分配。
-   */
-  private async parseExecutionRule(harnessRunId: string, value: unknown): Promise<ExecutionParseRuleResponse> {
-    const ruleText = requiredString(value, "ruleText");
-    try {
-      const plan = await this.planExecution(harnessRunId, value);
-      if ((await this.#harness.snapshot(harnessRunId)).status === "running") throw new EngineActionError(409, "主控回合运行中不能解析分配规则。 ");
-      const parsed = await this.runRuleParseTurn(harnessRunId, ruleText, plan);
-      return { degraded: false, diagnostic: null, assignments: parsed };
-    } catch (error) {
-      if (error instanceof EngineActionError) throw error;
-      return { degraded: true, diagnostic: (error instanceof Error ? error.message : String(error)).slice(0, 300), assignments: null };
-    }
-  }
-
-  /** 规则解析回合本体；任何失败都向上抛，由 parseExecutionRule 统一收敛为 degraded。 */
-  private async runRuleParseTurn(harnessRunId: string, ruleText: string, plan: ExecutionPlanResponse): Promise<readonly import("../harness/types").WorkerAssignment[]> {
-    // 超时只放弃等待并退化；回合本身已耐久，仍会在后台正常收尾，不产生状态歧义。
-    const timeout = new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("主控规则解析回合超时。 ")), 120_000); timer.unref?.(); });
-    const snapshot = await Promise.race([this.#harness.sendAndAwait(harnessRunId, buildRulePrompt(ruleText, plan.workers, plan.pool)), timeout]);
-    if (snapshot.status !== "idle") throw new Error("主控规则解析回合未完成。 ");
-    const reply = [...snapshot.messages].reverse().find((message) => message.role === "assistant");
-    if (!reply) throw new Error("主控规则解析回合没有 assistant 回复。 ");
-    return parseRuleReply(reply.text, plan.workers, plan.pool, plan.selectedByCli);
   }
 
   private async listExecutions(harnessRunId: string): Promise<ExecutionListResponse> {
@@ -630,6 +600,15 @@ export class DesktopExecutionEngine {
       case "runtimes.delete": return this.deleteCliRuntime(requiredString(value, "runtimeId"));
       case "projects.list": return this.listProjects();
       case "projects.create": return this.createProject(value);
+      case "templates.list": return {templates:listWorkflowTemplates()};
+      case "templates.save": {
+        const request=object(value);
+        if(!isTemplateSelection(request.template))throw new Error("模板选择字段无效。");
+        if(request.cardId!==undefined&&(!Number.isInteger(request.baseRevision)||Number(request.baseRevision)<1))throw new Error("编辑参数必须绑定基础版本。");
+        return {harness:await this.#harness.prepareTemplate(requiredString(value,"harnessRunId"),requiredString(value,"clientRequestId"),request.template,typeof request.cardId==="string"?request.cardId:undefined,request.baseRevision as number|undefined)};
+      }
+      case "templates.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value);
+      case "executions.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value,false);
       case "harnesses.list": return this.listHarnesses();
       case "harnesses.create": return this.createHarness(value);
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
@@ -644,8 +623,6 @@ export class DesktopExecutionEngine {
       case "harnesses.answerDecision": return this.answerHarnessDecision(requiredString(value, "harnessRunId"), requiredString(value, "decisionId"), value);
       case "executions.create": return this.createExecution(requiredString(value, "harnessRunId"), value);
       case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
-      case "executions.parseRule": return this.parseExecutionRule(requiredString(value, "harnessRunId"), value);
-      case "executions.randomize": return this.randomizeExecutionAssignment(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
       case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
@@ -655,6 +632,46 @@ export class DesktopExecutionEngine {
       case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
       default: throw new Error(`未知 Desktop action：${action}。`);
     }
+  }
+
+  /** 模板最终确认：同一生命周期短事务复核资格/输入/配置，再批准、登记和派发。 */
+  private async confirmTemplate(id:string,value:unknown,templateOnly=true):Promise<ExecutionResponse>{
+    if(Object.keys(object(value)).some(key=>!["harnessRunId","revision","config","clientRequestId","input"].includes(key)))throw new Error("模板确认不接受额外字段。");
+    const requestId=requiredString(value,"clientRequestId");
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw new Error("确认请求必须是 UUID。");
+    return this.#harness.lifecycle.run(id,async()=>{
+      const number=requiredInteger(value,"revision"),snapshot=await this.#harness.snapshot(id);
+      const revision=snapshot.workflowRevisions.find(item=>item.revision===number);
+      if(!revision||templateOnly&&!revision.templateOrigin)throw new Error("仅当前候选可确认并运行。");
+      const input=object(value).input??revision.input??{};
+      if(!isJsonObject(input))throw new Error("工作流参数必须是JSON-safe对象。");
+      const rawConfig=object(value).config;
+      if(!isJsonObject(rawConfig))throw new Error("确认配置必须是 JSON-safe 对象。");
+      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig})).digest("hex");
+      const previous=snapshot.executions.find(item=>item.confirmationRequestId===requestId);
+      if(previous){
+        if(previous.confirmationPayloadHash!==payloadHash)throw new Error("相同确认请求不能更换版本、输入或配置。");
+        return this.executionSnapshot(id,previous.executionId);
+      }
+      // 若上次确认已耐久参数新版本、却在登记执行前失败，同请求只能继续那个
+      // 已保存版本；不能把任意旧revision重新变为可启动。
+      const preparedRetry=snapshot.workflowRevisions.find(item=>item.saveRequestId===requestId);
+      const candidateNumber=preparedRetry?.parentRevision===number?preparedRetry.revision:number;
+      assertStartable(snapshot,candidateNumber,true);
+      if(revision.templateOrigin)validateTemplateInput(revision.templateOrigin.inputSchema,input);
+      else if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("生成方案的输入须由主控明确准备，不能在启动时注入未知参数。");
+      if(!this.deterministicForTest)await this.requireWorkerCandidate();
+      const config=await this.validateExecutionConfigValue(id,number,object(value).config);
+      let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
+      if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
+        const origin=revision.templateOrigin;
+        const prepared=await this.#harness.saveTemplate(id,requestId,{id:origin.id,version:origin.version,sourceHash:origin.sourceHash,input},revision.cardId);
+        selected=prepared.workflowRevisions.find(item=>item.saveRequestId===requestId)!;
+      }
+      if(selected.acceptedAt===null)await this.#harness.acceptWorkflowRevision(id,selected.revision);
+      const created=await this.#executions.createExecution(id,selected.revision,input,config,{confirmationRequestId:requestId,confirmationPayloadHash:payloadHash});
+      return {...created,controllable:this.#executions.isControllable(created.execution.executionId)};
+    });
   }
 
   private async desktopPhaseVisits(value: unknown): Promise<PhaseVisitPageResponse> {

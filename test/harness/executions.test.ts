@@ -64,7 +64,7 @@ describe("HarnessExecutionService", () => {
     const records=await executions.listExecutions(harnessRunId);expect(records).toHaveLength(1);expect(records[0].status).toBe("interrupted");expect(workers).toBe(0);
     expect((await executions.snapshotExecution(harnessRunId,records[0].executionId)).status).toBe("interrupted");
   });
-  test("新任务首份执行后拒绝第二份创建，拒绝不新增嵌套 Run", async () => {
+  test("已执行候选拒绝重复创建；新候选须显式准备且历史结果保持原身份", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-task-execution-")); directories.push(root);
     const harness = new HarnessService(root, async (_id,_cwd,_prior,actions) => ({ isRunning:false, subscribe:()=>()=>{}, abort:()=>{}, prompt:async()=> { await actions.proposeWorkflowRevision(SIMPLE_SOURCE,"检查目标","只读"); return "方案已提出"; } }));
     const executions = new HarnessExecutionService(harness, () => ({ executor: new DeterministicExecutor() }), {}, root);
@@ -74,7 +74,7 @@ describe("HarnessExecutionService", () => {
     const { execution: first } = await executions.createExecution(task.harnessRunId, 1, {}, testConfig());
     await waitFor(async()=> (await executions.snapshotExecution(task.harnessRunId,first.executionId)).status === "completed");
     const before = await readdir(join(root,task.harnessRunId,"executions"));
-    await expect(executions.createExecution(task.harnessRunId,1,{},testConfig())).rejects.toThrow("多轮");
+    await expect(executions.createExecution(task.harnessRunId,1,{},testConfig())).rejects.toThrow("取代");
     expect(await readdir(join(root,task.harnessRunId,"executions"))).toEqual(before);
     expect((await harness.snapshot(task.harnessRunId)).executions).toHaveLength(1);
     const evidence=await executions.attemptResults(task.harnessRunId,first.executionId,1);

@@ -1,40 +1,23 @@
 # Wave Flow
 
-> 面向 AI Coding Agent 的动态工作流：让不同 Agent 在同一条可复用工作流中持续接力，
-> 从 CLI 到本地受管会话保持长任务可控、可见、可恢复。
->
-> A dynamic workflow for AI coding agents.
-
-*受 Claude Code Dynamic Workflows 启发。*
+面向本机单用户的 AI Coding Agent 工作流桌面应用。
 
 中文 | [English](./README.en.md)
 
 ## 当前可用能力
 
-- 使用 TypeScript 编排可复用的动态工作流；Agent 节点由 Workflow 在运行时的实际调用推进。
-- 默认通过独立、长期存活的本机 CLI ACP Worker session（Codex 或 Kimi）执行 Agent 节点。
-- 通过 `wave-flow run` 创建 Run，安全投递首条任务后返回 Run ID，并在当前终端订阅状态变化。
-- 通过 `wave-flow inspect <run-id>` 再次读取 Run 状态。
-- Agent 通过 `wave-flow complete` 上报经校验的结构化完成结果；可通过 `block / answer / continue` 请求并处理人工协助；ACP 流与自然结束不是完成依据。
-- daemon 重启将使当前 `running / blocked` ACP 节点耐久收敛为 `interrupted`；不会自动重发任务、交付旧 block 或认领旧 session。
-- `wave-flow resume <run-id>` 由用户授权后重放调用轨迹：严格复用连续匹配的 completed 前缀，从第一个 interrupted 或不匹配节点开始创建新 attempt。
-- `wave-flow pause / recover / stop <run-id>` 管理当前 daemon 内 ACP Run：暂停经 cancel 确认，恢复在同一 ACP session 新开检查现场后的继续回合，停止使 Run 进入终态。
-- daemon 同源提供 Local Web 总览，展示 Run、Phase、Agent、结果和待处理的人工协助。
-- 提供 Tauri 桌面端（当前 macOS Apple Silicon 构建），桌面端通过随包 bridge 安全发现或启动 loopback daemon；用户可直接查看和创建 Run。
-- 本地 daemon 持久化 Run、事件、ACP 会话绑定与结果。
-
-## 当前边界
-
-- `agent()` 的 `cli` 支持 `"codex"` 与 `"kimi"`；对应 CLI 必须已在桌面“执行底座”中完成验证（已验证即 Worker 候选）。
-- 当前面向本机单用户；daemon 仅在本机运行。
-- TraeX 与 Retry 尚未实现。
-- 默认 ACP Worker 使用用户在桌面“执行底座”中明确验证的本机 CLI（Codex 或 Kimi）；不随包或静默 fallback 到固定 CLI。ACP 流、turn 结束和终端文字均不作为完成依据，仍只信任 `wave-flow complete` 的 Schema 与 Journal 证据。
+- 以项目组织持续任务，主控通过普通对话理解目标、提出工作流方案。
+- 支持自动编排，以及内置的只读代码审查与独立复核预置工作流。
+- 主控辅助补齐缺失参数；用户也可直接修改紧凑参数区，可选项折叠。
+- 方案以 Phase → Worker 展示，Worker 行内选择已验证的 Codex 或 Kimi CLI，使用 CLI 自身默认模型。
+- 一次“确认并运行”采用当前参数草稿；“保存待运行”只保存未批准方案，不启动 Worker。
+- 修改保留不可变版本；旧版本、旧回合和迟到请求不能覆盖当前方案。同一确认请求重试不会重复创建执行。
+- 查看执行进度、结构化结果与历史尝试；支持人工协助、暂停、恢复、停止及中断后的显式恢复。
+- 每个 Worker 绑定独立真实 ACP 会话；只有私有控制 MCP 经 Schema 校验与 Journal 耐久记录后，才能改变业务状态。
 
 ## 快速开始
 
-CLI 开发要求：已安装 [Bun](https://bun.sh/)，以及 Codex CLI 或 Kimi CLI（至少其一）。
-
-桌面端使用者无需手动启动 daemon 或运行 `wave-flow start`。当前可在 macOS Apple Silicon 开发环境构建应用：
+开发环境需要 [Bun](https://bun.sh/)、Rust/Tauri 构建工具，以及 Codex CLI 或 Kimi CLI（至少其一）。
 
 ```bash
 bun install
@@ -42,114 +25,29 @@ bun run desktop:build
 # 打开 src-tauri/target/release/bundle/macos/Wave Flow.app
 ```
 
-桌面端会安全发现已有 daemon，或使用随包 Bun sidecar 启动新的 loopback daemon。关闭桌面窗口不会停止 daemon 或已运行的 Run；再次打开会重新展示用户级 Run 档案。
+在应用中添加本地项目，进入“主控与执行底座设置”验证 CLI 并选择主控，然后新建任务。预置来源可选择让主控准备参数，或直接填写并保存；在 Workflow 设计中确认参数与 CLI 后运行。
 
-先将当前包注册到本机：
-
-```bash
-bun link
-```
-
-构建同源 Local Web 静态资源：
-
-```bash
-bun run web:build
-```
-
-创建一个 Workflow。`meta.phases` 声明阶段，调用 `agent()` 前必须先用 `phase()` 选择其中一个阶段：
-
-```ts
-import { agent, phase } from "wave-flow";
-
-export const meta = {
-  name: "local-check",
-  description: "验证本地 CLI 路径。",
-  phases: [{ title: "检查" }],
-};
-
-export default async function run(args: { target: string }) {
-  phase("检查");
-  return agent("检查目标。", {
-    id: "check-target",
-    cli: "codex",
-    input: { target: args.target },
-  });
-}
-```
-
-运行 Workflow：
-
-```bash
-# 可选：只确保后台 daemon 已启动，不创建 Run
-wave-flow start
-
-# 输出 Local Web 地址
-wave-flow web
-
-# 优雅关闭已验证的当前用户 daemon
-wave-flow close
-
-wave-flow run ./.wave-flow/workflows/local-check.ts --input '{"target":"src"}'
-
-# 使用 run 输出的 Run ID 重新查看状态
-wave-flow inspect <run-id>
-
-# 用户明确授权同一 Run 的调用级恢复
-wave-flow resume <run-id>
-
-# 暂停、恢复或停止当前 daemon 持有的 Run
-wave-flow pause <run-id>
-wave-flow recover <run-id>
-wave-flow stop <run-id>
-
-# 查看本机能力探测结果
-wave-flow capabilities --json
-```
-
-当 Agent 需要人工协助时，任务 Prompt 会提供下列稳定身份参数。Agent 必须原样带上它们：
-
-```bash
-wave-flow block --need-help "说明阻塞原因和需要的帮助" \
-  --run-id <run-id> --node-id <node-id> --agent-session-id <agent-session-id>
-
-# 人类答复不会自动恢复节点
-wave-flow answer <block-request-id> --value '{"approved":true}'
-
-# 原 Agent 校验答案后自行恢复
-wave-flow continue --block-request-id <block-request-id> \
-  --run-id <run-id> --node-id <node-id> --agent-session-id <agent-session-id>
-```
+Desktop 启动本次应用专属的 Execution Engine，通过私有 IPC 通信，不启动全局 daemon、不开放 HTTP 端口。关闭窗口只隐藏工作台，任务继续；从应用菜单明确退出会耐久取消活动执行并回收会话。重开不会自动重跑，恢复必须由用户明确发起。
 
 ## 运行语义与限制
 
-`run` 会输出唯一的 Run ID，并将 Run、事件、会话坐标与结果写入 `~/.wave-flow/runs/<run-id>/`。在创建 Run 与首条任务安全投递完成后，命令不会等待 Agent 完成，而是订阅 daemon 的状态流；节点开始、阻塞、完成或 Run 被中断都会显示在当前终端。
-
-按 `Ctrl-C` 只停止观看，不会停止后台 daemon 或 Agent。之后可使用 `inspect` 再次查看同一个 Run。`start` 只确保当前用户的全局 daemon 已启动、健康并输出地址；`run` 会在需要时自动启动 daemon，因此 `start` 是可选入口。
-
-运行 `wave-flow web` 可输出 Local Web 地址，例如 `http://127.0.0.1:<port>/`。页面仅连接本机 daemon，展示当前用户 Run 档案，并可交付 block 答案、暂停、恢复、停止或对 interrupted Run 发起显式 replay。
-
-`web` 会输出 descriptor、heartbeat、PID 启动身份和 `/health` 的实际验证过程；`close` 只请求已验证 daemon 自己优雅退出并清理 descriptor / lock，不会直接猜测或终止任意 PID。
-
-开发 React 页面时可运行 `bun run web:dev`；Vite 只负责前端开发预览，生产页面始终由 daemon 同源提供构建产物。
-
-默认 ACP `pause` 不是操作系统级冻结：它请求当前 ACP Worker cancel，并在取消得到确认后才进入 `paused`。`recover` 不重发原 Prompt，而是在同一 ACP session 创建“检查现场后继续”的新回合。Agent 主动使用远端服务或其他方式脱离 Codex 管理的副作用，不在暂停确认的覆盖范围内。
-
-暂停依赖当前 daemon 保留的 Workflow 调用栈；如果 daemon 在 `pausing`、`paused` 或 `recovering` 时重启，Wave Flow 会将该 Run 如实标记为 `interrupted`，不会伪造 recover。之后可由用户使用 `resume` 创建新的受控 attempt。
-
-默认 ACP Worker 使用内置 adapter（`codex-acp` 或 `kimi-acp`）加用户明确验证的本机 runtime（已验证即 Worker 候选）；Worker 具有 Workflow 指派的完整读写权限。没有已验证 runtime、CLI 文件身份变化或版本重新验证前，Wave Flow 会在创建真实 Worker 前 fail closed，不会回退到随包 CLI。所有路径都只以 Agent 的 `wave-flow complete` 作为完成依据。无法确认投递时，Run 会标记为 `interrupted`，而不会把任务当作已投递。ACP Worker 支持同一 daemon 内 `pause → cancel → recover`。
-
-`resume` 是单独的用户授权操作。它严格核对 Workflow 源码 hash、输入、项目目录和每次 `agent()` 调用的节点 id、顺序、cwd、CLI、sandbox、model、schema、input 与 prompt。连续匹配的 completed 节点直接返回 Journal 结果；第一个 interrupted 或不匹配节点创建新 attempt，之后的节点不再复用旧结果。
-
-`capabilities --json` 输出当前机器的三态能力快照：命令存在只表示可被探测；`unknown` 表示尚未形成环境结论；`unavailable` 表示已确认不能使用。默认 ACP 路径在启动与投递阶段继续验证 Codex ACP 与会话状态，不会将二进制存在或 ACP turn 结束误判为任务成功投递。
+- 当前提供 macOS Apple Silicon 开发构建。本地工作流文件的任务关联入口尚未开放；没有独立控制 CLI 或浏览器 HTTP 工作台。
+- 预置目录当前只有只读审查模板；不能下载 URL 工作流。复杂对象参数保留原值，通过主控对话调整。
+- Workflow 设计是源码声明示意，不是可视化编辑器，也不承诺动态调用次数。真实阶段访问和结果以执行记录为准。
+- 主控不能批准、执行工作流或直接控制 Worker；用户确认才授权运行。普通参数通过对话收集，业务型人工决策仍使用显式等待与答案表单。
+- 人类答复只交付信息，原 Worker 确认继续后才恢复运行；ACP 回合结束、自然语言“完成”和进程退出都不是完成证据。
+- Engine 重启不认领旧 ACP 会话，不自动重发任务；恢复仅复用同一执行中严格匹配的 completed 前缀。Journal 不回滚业务文件或外部副作用。
+- 默认共享项目目录；并行写入需要证明路径不重叠，冲突任务必须顺序执行。支持 read-only / workspace-write，不提供全权限模式。
+- 前次执行终态、主控空闲后，可显式准备下一份工作流；不自动注入旧结果。自动汇总、TraeX、Retry 与 worktree 隔离尚未实现。
+- 模型提问质量不保证确定性；无已验证 CLI 或身份漂移时拒绝启动。真实中文输入法候选提交与完整App启动/输入延迟仍需专项验证。正文格式按需加载，等待或失败保留可读原文并提供重试。
 
 ## 开发与验证
 
-项目使用 Bun 与 TypeScript：
-
 ```bash
 bun run check
-bun test
+bun test --timeout 30000
+cargo test --manifest-path src-tauri/Cargo.toml
 git diff --check
 ```
 
-README 仅记录当前可运行能力、命令和限制。
+前端开发可运行 `bun run desktop:dev`。Vite 仅用于开发；发布应用使用内置页面与私有 Engine，不提供浏览器 fallback。

@@ -142,6 +142,14 @@ export type HarnessStreamEvent = (
 /** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
 export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
 export type WorkflowRevision = {
+  /** 参数待补齐，不能直接批准运行。 */
+  parametersPending?:boolean;
+  /** 内置版本来源，保存后不跟随目录升级。 */
+  templateOrigin?: import("../../../src/harness/workflow-templates").TemplateOrigin;
+  /** 主控控制流修改后的原模板来源。 */
+  derivedFrom?: import("../../../src/harness/workflow-templates").TemplateOrigin;
+  /** 已保存并按目录 Schema 校验的业务参数。 */
+  input?: Record<string,unknown>;
   /** 稳定候选卡身份；旧档案缺省，仅生成只读导航。 */
   cardId?: string;
   /** 同卡上一版本；首版为 null，历史未知时缺省。 */
@@ -171,7 +179,7 @@ export type WorkflowRevision = {
 export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
-export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
+export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[] };
 /** executions.plan 的分配卡数据。 */
@@ -182,6 +190,8 @@ export type ExecutionPlanResponse = {
   phaseTitles: string[];
   /** 每个源码 agent() 调用一个示意；含动态 id，不用作执行分配或定位。 */
   previewAgents: Array<{
+    /** 字面量id匹配执行配置，动态为null；旧预览缺省。 */
+    nodeId?:string|null;
     /** 循环／常见批量回调中的调用提示；false 为未识别，不能推断必定只运行一次。 */
     loop: boolean;
     /** 调用位置生成的列表 key，不是运行节点 id。 */
@@ -202,10 +212,6 @@ export type ExecutionPlanResponse = {
   selectedByCli: Partial<Record<"codex" | "kimi", string>>;
   harnessRuntime: CliRuntime | null;
 };
-/** executions.randomize 的随机指派结果。 */
-export type ExecutionRandomizeResponse = { assignments: WorkerAssignment[]; defaultAssignment: WorkerAssignment };
-/** executions.parseRule 的规则解析结果；degraded 时必须显式展示已退化。 */
-export type ExecutionParseRuleResponse = { degraded: boolean; diagnostic: string | null; assignments: WorkerAssignment[] | null };
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */

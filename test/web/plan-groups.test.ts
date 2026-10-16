@@ -24,15 +24,12 @@ test("同名 Agent 保留为独立调用示意，不按名称去重", () => {
   expect(groups[0]?.workers.map((item) => item.loop)).toEqual([true, false]);
 });
 
-test("草案卡消费展示示意而非分配名单，不展示动态数量提示", () => {
-  const source = readFileSync(new URL('../../src-tauri/web/src/conversation/revision-card.tsx', import.meta.url), 'utf8');
-  expect(source).toContain('groupWorkersByPhase(phaseTitles, plan.previewAgents)');
-  expect(source).toContain('const plan = revision.preview');
-  expect(source).not.toContain('.planExecution(');
-  expect(source).not.toContain('正在解析计划预览');
-  expect(source).toContain('<strong>{worker.name}</strong>');
-  expect(source).toContain('worker.loop &&');
-  expect(source).toContain('loop：循环／批量调用，实际次数由执行路径决定');
-  expect(source).not.toContain('另有动态节点');
-  expect(source).not.toContain('plan.dynamicCount');
+test("Workflow设计始终使用调用示意，动态默认CLI明确且不恢复分配卡", () => {
+  const source = readFileSync(new URL('../../src-tauri/web/src/workflow-design.tsx', import.meta.url), 'utf8');
+  expect(source).toContain('plan?.previewAgents??revision.preview?.previewAgents');
+  expect(source).toContain('worker.nodeId??"*"');
+  expect(source).toContain('循环/批量调用，数量由实际路径决定');
+  expect(source).toContain('其余动态 Worker 默认使用');
+  expect(source).not.toContain('ExecutionAssignmentFlow');
+  expect(source).not.toContain('parseExecutionRule');
 });

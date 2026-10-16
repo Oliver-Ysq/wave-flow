@@ -10,10 +10,25 @@ import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
 import type { HarnessSession } from "../../src/harness/session";
+import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 afterEach(async () => { for (const child of children.splice(0)) child.kill(); await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+
+test("Engine 参数编辑 IPC 缺失或非法基础版本在读取任务前拒绝", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-template-version-")); roots.push(root);
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true });
+  const template = listWorkflowTemplates()[0]!;
+  const args = { harnessRunId: crypto.randomUUID(), cardId: crypto.randomUUID(), clientRequestId: crypto.randomUUID(), template: { id: template.id, version: template.version, sourceHash: template.sourceHash, input: {} } };
+  try {
+    for (const baseRevision of [undefined, 0, -1, 1.5, "1", null]) {
+      await expect(engine.handleDesktopAction("templates.save", { ...args, baseRevision })).rejects.toThrow("编辑参数必须绑定基础版本");
+    }
+    expect(await engine.handleDesktopAction("harnesses.list", {})).toMatchObject({ harnesses: [] });
+    expect(await engine.handleDesktopAction("status", {})).toMatchObject({ activeRuns: 0, activeHarnesses: 0 });
+  } finally { engine.shutdown(); }
+});
 
 /** 私有 Engine 进程必须无需 HTTP/端口完成 ready、状态与受控退出。 */
 test("Desktop Engine 通过 stdin/stdout JSONL 提供状态并在 shutdown 后退出", async () => {
@@ -47,7 +62,7 @@ test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async (
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
   const child = Bun.spawn([process.execPath, entry], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WAVE_FLOW_HOME: root, WF_ENGINE_DETERMINISTIC: "1" } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffer = "";
-  const next = async (): Promise<unknown> => { while (true) { const index = buffer.indexOf("\n"); if (index >= 0) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Engine 在响应前关闭。 "); buffer += decoder.decode(value.value, { stream: true }); } };
+  const next = async (): Promise<unknown> => { while (true) { const index = buffer.indexOf("\n"); if (index >= 0) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); const frame=JSON.parse(line);if(frame.type==="event")continue;return frame; } const value = await reader.read(); if (value.done) throw new Error("Engine 在响应前关闭。 "); buffer += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
   expect(await next()).toEqual({ type: "ready", protocolVersion: 1 });
   // 构造远超单个 pipe 读取块（通常 64KB）的真实大响应：项目 + 多条接近上限的大消息。

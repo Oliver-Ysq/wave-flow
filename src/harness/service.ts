@@ -5,7 +5,7 @@ import { TurnConversationRecorder, type EngineToolStart } from "./conversation-r
 import type { HarnessSession } from "./session";
 import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
 import { harnessRunsRoot, validateRunId } from "../journal/paths";
-import type { JsonObject } from "../shared/json";
+import {isJsonObject,type JsonObject} from "../shared/json";
 import type { HarnessActionCallbacks } from "./action-tools";
 import { executeReadOnlyProjectQuery, readProjectFile } from "./shell-policy";
 import { type HarnessPiSession } from "./pi-harness";
@@ -15,6 +15,7 @@ import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
 import { REVISION_PREVIEW_VERSION, previewMatchesSource, type RevisionPreview } from "./revision-preview";
 import { TaskLifecycle } from "./task-lifecycle";
 import { assertStartable, candidateRevision, normalizeTaskCreation, taskIdForRequest, type TaskCreation, type TaskMetadata } from "./task-contract";
+import { canonicalJson, isTemplateSelection, resolveWorkflowTemplate, validateTemplateInput } from "./workflow-templates";
 
 /** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
@@ -74,9 +75,13 @@ export class HarnessService {
       const recovered = await HarnessJournal.recoverCreation(id, this.root);
       if (recovered) {
         if (recovered.task?.payloadHash !== value.payloadHash || recovered.projectId !== value.projectId) throw new Error("任务请求载荷与耐久档案冲突。");
-      } else await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text });
+      } else {
+        if(value.template){const template=resolveWorkflowTemplate(value.template.id,value.template.version,value.template.sourceHash);if(!value.template.needsGuidance)validateTemplateInput(template.inputSchema,value.template.input);}
+        await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text, ...(value.template ? {template:value.template} : {}) });
+      }
       const entry = await this.entry(id);
       if(entry.projection.snapshot().status==="completed")return entry.projection.snapshot();
+      if (value.template) return this.prepareTemplate(id, value.clientRequestId, value.template);
       const opened = await HarnessJournal.open(id, this.root);
       if (!opened.events.some(event => event.type === "harness.turn_started")) {
         try { await this.send(id, value.text, true); }
@@ -92,11 +97,80 @@ export class HarnessService {
     return promise;
   }
 
+  /** 用户显式准备模板；同一保存 UUID 绑定唯一引导消息，重试及重开不得重发已开始回合。cardId 缺省新建候选；baseRevision 为编辑时的正整数基础版本，失配拒绝且不落盘。 */
+  async prepareTemplate(id:string,requestId:string,selection:import("./task-contract").TemplateSelection,cardId?:string,baseRevision?:number):Promise<HarnessSnapshot>{
+    return this.mutate(id,async()=>{
+      const snapshot=await this.saveTemplate(id,requestId,selection,cardId,undefined,baseRevision);
+      if(!selection.needsGuidance)return snapshot;
+      return this.startSavedTemplateGuidance(id,requestId,snapshot);
+    });
+  }
+
+  /** 仅从已保存候选安排引导，不重建保存载荷；调用方必须持有该 Task 的短事务。 */
+  private async startSavedTemplateGuidance(id:string,requestId:string,snapshot:HarnessSnapshot):Promise<HarnessSnapshot>{
+      const opened=await HarnessJournal.open(id,this.root);
+      const messageId=`template-guidance:${requestId}`;
+      if(opened.events.some(event=>event.type==="harness.turn_started"&&event.userMessageId===messageId))return snapshot;
+      const saved=snapshot.workflowRevisions.find(item=>item.saveRequestId===requestId);
+      if(!saved||candidateRevision(snapshot)?.revision!==saved.revision||!saved.parametersPending)return snapshot;
+      try{
+        await this.send(id,"请帮我准备当前预置工作流参数。先读取read_run_capsule，复用已提供的信息和模板建议，只询问缺失且影响执行的内容，普通参数通过对话收集，不用决策表单。齐全后用propose_workflow_revision的parameters模式，source为空，baseRevision绑定当前候选，input为完整参数；保持模板源码不变，不执行。",false,messageId);
+      }catch(error){
+        const entry=await this.entry(id);
+        const event={type:"harness.initialization_failed" as const,at:new Date().toISOString(),harnessRunId:id,diagnostic:`任务及参数已保存，主控启动失败：${error instanceof Error?error.message:String(error)}`};
+        await entry.journal.append(event);entry.projection.apply(event);
+      }
+      return this.snapshot(id);
+  }
+
   /** 只重试尚未启动的初始回合，不能重发已开始的 prompt。 */
   async retryInitialization(id: string): Promise<HarnessSnapshot> {
     const snapshot = await this.snapshot(id);
     if (!snapshot.task || !snapshot.projectId) throw new Error("历史会话没有可重试的初始任务。");
-    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title });
+    const pending=candidateRevision(snapshot);
+    if(pending?.parametersPending&&pending.templateOrigin&&pending.saveRequestId){
+      return this.mutate(id,async()=>this.startSavedTemplateGuidance(id,pending.saveRequestId!,await this.snapshot(id)));
+    }
+    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title, ...(snapshot.task.template ? {template:snapshot.task.template} : {}) });
+  }
+
+  /** 目录来源的唯一保存入口；不接受客户端源码，不批准或创建执行。baseRevision 缺省兼容内部旧请求，有值时必须为当前候选正整数版本，并参与重试载荷指纹。 */
+  async saveTemplate(id: string, requestId: string, selection: import("./task-contract").TemplateSelection, cardId?: string, actionToken?:string,baseRevision?:number): Promise<HarnessSnapshot> {
+    if(!isTemplateSelection(selection))throw new Error("模板选择字段无效。");
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId)) throw new Error("模板保存请求必须是 UUID。");
+    if(baseRevision!==undefined&&(!Number.isInteger(baseRevision)||baseRevision<1))throw new Error("参数编辑基础版本无效。");
+    const payloadHash = createHash("sha256").update(canonicalJson({selection,cardId:cardId??null,...(baseRevision===undefined?{}:{baseRevision})})).digest("hex");
+    return this.mutate(id, async()=>{
+      const entry = await this.entry(id), snapshot = entry.projection.snapshot();
+      const previous = snapshot.workflowRevisions.find(item=>item.saveRequestId===requestId);
+      if (previous) {
+        if(previous.savePayloadHash!==payloadHash) throw new Error("模板保存请求载荷冲突。");
+        return snapshot;
+      }
+      const currentAction=actionToken!==undefined&&entry.turnToken===actionToken&&snapshot.status==="running"&&!!entry.turn;
+      if (!snapshot.task || !currentAction&&(snapshot.status!=="idle"||entry.turn) || snapshot.executions.some(item=>item.finishedAt===null)) throw new Error("主控必须空闲、任务未归档且无未终结执行，才能保存模板。");
+      const candidate = candidateRevision(snapshot);
+      if(baseRevision!==undefined&&candidate?.revision!==baseRevision)throw new Error("参数版本已更新；你的草稿保留，请查看当前版本后再保存。");
+      // 已保存候选的参数编辑使用其冻结目录快照；升级后的进程目录可能已不再
+      // 提供旧版本，但不能因此替换旧源码/Schema 或迫使用户丢弃已批准证据。
+      const origin=candidate?.templateOrigin;
+      const template = cardId && candidate?.cardId===cardId && origin?.id===selection.id && origin.version===selection.version && origin.sourceHash===selection.sourceHash
+        ? {...origin,source:candidate.source}
+        : resolveWorkflowTemplate(selection.id,selection.version,selection.sourceHash);
+      if(!selection.needsGuidance)validateTemplateInput(template.inputSchema,selection.input);
+      if (candidate && (!cardId || candidate.cardId!==cardId || !candidate.templateOrigin || candidate.templateOrigin.id!==template.id || candidate.templateOrigin.sourceHash!==template.sourceHash)) throw new Error("已有候选；请继续准备原候选或明确放弃后再选择。");
+      if (!candidate && cardId) throw new Error("候选已执行、放弃或被取代。");
+      const {source, ...templateOrigin} = template;
+      const revision: import("./types").WorkflowRevision = {
+        revision:snapshot.workflowRevisions.length+1, cardId:candidate?.cardId??crypto.randomUUID(), parentRevision:candidate?.revision??null,
+        goal:template.meta.description, scope:template.explanation, turnId:requestId, source, sourceHash:template.sourceHash,
+        templateOrigin, input:structuredClone(selection.input), ...(selection.needsGuidance?{parametersPending:true}:{}), saveRequestId:requestId, savePayloadHash:payloadHash,
+        preview:this.buildRevisionPreview(source), createdAt:new Date().toISOString(), acceptedAt:null, rejectedAt:null, abandonedAt:null,
+      };
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};
+      await entry.journal.append(event);entry.projection.apply(event);
+      return entry.projection.snapshot();
+    });
   }
 
   /**
@@ -154,27 +228,29 @@ export class HarnessService {
     }
   }
 
-  async send(harnessRunId: string, text: string, reuseInitial = false): Promise<void> {
+  async send(harnessRunId: string, text: string, reuseInitial = false, userMessageId?:string): Promise<void> {
     if (!text.trim() || text.length > 20_000) throw new Error("Harness 消息必须为 1-20000 个字符。 ");
     const entry = await this.entry(harnessRunId);
     await this.mutate(harnessRunId, async () => {
     if (entry.projection.snapshot().status === "completed") throw new Error("该会话已完成归档；请创建新会话继续。 ");
     if (entry.projection.snapshot().status === "running" || entry.turn) throw new Error("Harness 当前回合仍在运行。 ");
-    if (entry.projection.snapshot().task && !reuseInitial && entry.projection.snapshot().messages.length === 1 && entry.projection.snapshot().diagnostic?.includes("主控启动失败")) throw new Error("请先重试启动主控，不能跳过尚未开始的初始目标。");
+    if (entry.projection.snapshot().task && !reuseInitial && !userMessageId && entry.projection.snapshot().messages.length === 1 && entry.projection.snapshot().diagnostic?.includes("主控启动失败")) throw new Error("请先重试启动主控，不能跳过尚未开始的初始目标。");
     // 摘要只属于这一轮 prompt；发生中断时没有可安全绑定的完整 assistant 消息，
     // 因而会在 finally 丢弃，绝不把过程遗留给下一轮。
     const turnToken = crypto.randomUUID();
     const actions = this.actionCallbacks(harnessRunId);
     const prior = reuseInitial ? [] : entry.projection.snapshot().messages;
-    if(reuseInitial&&entry.projection.snapshot().task&&!entry.projection.snapshot().runtime){
+    if(entry.projection.snapshot().task&&!entry.projection.snapshot().runtime){
       const identity=await this.resolveSessionIdentity();
       if(identity.runtime){const event={type:"harness.runtime_initialized" as const,at:new Date().toISOString(),harnessRunId,runtime:identity.runtime};await entry.journal.append(event);entry.projection.apply(event);}
     }
     const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
     entry.session = session;
-    const user: HarnessMessage = reuseInitial ? entry.projection.snapshot().messages[0] : { id: crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString() };
+    const recorded=userMessageId?entry.projection.snapshot().messages.find(message=>message.id===userMessageId):undefined;
+    if(recorded&&(recorded.role!=="user"||recorded.text!==text))throw new Error("引导消息请求载荷冲突。");
+    const user: HarnessMessage = reuseInitial ? entry.projection.snapshot().messages[0] : recorded??{ id: userMessageId??crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString() };
     const userEvent = { type: "harness.user_message" as const, at: user.createdAt, harnessRunId, message: user };
-    if (!reuseInitial) { await entry.journal.append(userEvent); entry.projection.apply(userEvent); }
+    if (!reuseInitial&&!recorded) { await entry.journal.append(userEvent); entry.projection.apply(userEvent); }
     const started = { type: "harness.turn_started" as const, at: new Date().toISOString(), harnessRunId, userMessageId: user.id };
     await entry.journal.append(started); entry.projection.apply(started);
     entry.turnToken = turnToken;
@@ -275,7 +351,7 @@ export class HarnessService {
     if (request.operation === "list") return { tools: [
       { name: "read_project_file", description: "读取当前项目内常规文件片段", inputSchema: { type: "object", required: ["path"], properties: { path: { type: "string" }, startLine: { type: "integer" }, endLine: { type: "integer" } } } },
       { name: "query_project", description: "执行受限只读项目查询", inputSchema: { type: "object", required: ["command", "args"], properties: { command: { type: "string", enum: ["pwd", "git", "rg", "ls"] }, args: { type: "array", items: { type: "string" } } } } },
-      { name: "propose_workflow_revision", description: "提交 workflow 方案及本轮目标/范围，不执行", inputSchema: { type: "object", required: ["source", "goal", "scope"], properties: { source: { type: "string" }, goal: { type: "string" }, scope: { type: "string" } } } },
+      { name: "propose_workflow_revision", description: "提交workflow方案，或用parameters整理原模板参数，不执行", inputSchema: { type: "object", required: ["source", "goal", "scope"], properties: { source: { type: "string" }, goal: { type: "string" }, scope: { type: "string" },parameters:{type:"object",required:["baseRevision","input"],additionalProperties:false,properties:{baseRevision:{type:"integer",minimum:1},input:{type:"object"}}} } } },
       { name: "inspect_execution", description: "读取 Execution 登记", inputSchema: { type: "object", properties: { executionId: { type: "string" } } } },
       { name: "read_run_capsule", description: "读取耐久 Harness capsule", inputSchema: { type: "object" } },
       { name: "request_user_decision", description: "请求用户决策", inputSchema: { type: "object", required: ["question"], properties: { question: { type: "string" }, answerSchema: { type: "object" } } } },
@@ -306,7 +382,7 @@ export class HarnessService {
     };
     if (name === "read_project_file") { const path = String(value.path ?? ""); const range = { path, ...(typeof value.startLine === "number" ? { startLine: value.startLine } : {}), ...(typeof value.endLine === "number" ? { endLine: value.endLine } : {}) }; return runTool({ name: "读取项目文件", toolKind: "file-read", target: path, paramsSummary: JSON.stringify(range) }, async () => ({ text: await readProjectFile(entry.projection.snapshot().cwd, range) }), (result) => result.text); }
     if (name === "query_project") { const query = { command: value.command as "pwd" | "git" | "rg" | "ls", args: Array.isArray(value.args) ? value.args.map(String) : [] }; return runTool({ name: "查询项目状态", toolKind: query.command === "rg" ? "search" : "command", target: [query.command, ...query.args].join(" "), paramsSummary: JSON.stringify(query) }, async () => ({ text: await executeReadOnlyProjectQuery(entry.projection.snapshot().cwd, query) }), (result) => result.text); }
-    if (name === "propose_workflow_revision") { const source = String(value.source ?? ""); return runTool({ name: "提交 Workflow 草案", toolKind: "mcp", target: null, paramsSummary: JSON.stringify({ sourceLength: source.length }) }, () => actions.proposeWorkflowRevision(source, String(value.goal ?? ""), String(value.scope ?? "")), (result) => JSON.stringify(result)); }
+    if (name === "propose_workflow_revision") { const source = String(value.source ?? ""); return runTool({ name: "提交 Workflow 草案", toolKind: "mcp", target: null, paramsSummary: JSON.stringify({ sourceLength: source.length }) }, () => actions.proposeWorkflowRevision(source, String(value.goal ?? ""), String(value.scope ?? ""),value.parameters as import("./action-tools").TemplateParameterProposal|undefined), (result) => JSON.stringify(result)); }
     if (name === "inspect_execution") { const executionId = typeof value.executionId === "string" ? value.executionId : undefined; return runTool({ name: "读取执行状态", toolKind: "mcp", target: executionId ?? null, paramsSummary: JSON.stringify({ executionId: executionId ?? null }) }, () => actions.inspectExecution(executionId), (result) => JSON.stringify(result)); }
     if (name === "read_run_capsule") return runTool({ name: "读取会话摘要", toolKind: "mcp", target: null, paramsSummary: null }, () => actions.readRunCapsule(), (result) => JSON.stringify(result));
     if (name === "request_user_decision") { const question = String(value.question ?? ""); const schema = value.answerSchema && typeof value.answerSchema === "object" && !Array.isArray(value.answerSchema) ? value.answerSchema as JsonObject : undefined; return runTool({ name: "等待用户决定", toolKind: "mcp", target: question, paramsSummary: JSON.stringify({ question, hasSchema: !!schema }) }, async () => ({ answer: await actions.requestUserDecision(question, schema) }), (result) => JSON.stringify(result.answer)); }
@@ -344,11 +420,12 @@ export class HarnessService {
     // 用户绝不会在"创建执行"时才发现草案不可运行。编译只建 vm realm，不执行 run()。
     const preview = this.buildRevisionPreview(source);
     const snapshot = entry.projection.snapshot();
-    if (snapshot.task && snapshot.executions.length) throw new Error("多轮工作流尚未开放；不能提案下一份流程，可以查看或恢复原执行。");
+    if (snapshot.task && snapshot.executions.some(item=>item.finishedAt===null)) throw new Error("存在未终结执行，不能准备下一份流程。");
     if (snapshot.task && (!goal?.trim() || !scope?.trim() || goal.length > 20000 || scope.length > 20000)) throw new Error("方案必须明确提供本轮目标与范围。");
     const candidate = candidateRevision(snapshot);
     const revision: import("./types").WorkflowRevision = { revision: snapshot.workflowRevisions.length + 1, ...(snapshot.task ? { cardId: candidate?.cardId ?? crypto.randomUUID(), parentRevision: candidate?.revision ?? null, goal: goal!.trim(), scope: scope!.trim(), abandonedAt: null, turnId: snapshot.messages.filter(item => item.role === "user").at(-1)!.id } : {}), source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
-    const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision };
+    const derivedFrom=candidate?.templateOrigin??candidate?.derivedFrom;
+    const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision: {...revision,...(derivedFrom?{derivedFrom}:{})} };
     await entry.journal.append(event); entry.projection.apply(event);
     return entry.projection.snapshot();
   }
@@ -361,6 +438,7 @@ export class HarnessService {
       // 先校验再追加：projection 在 append 之后才 apply，缺失前置检查会把非法事件
       // 写进 Journal 并让档案永远无法重开。
       const latest = entry.projection.snapshot().workflowRevisions.at(-1);
+      if(latest?.parametersPending)throw new Error("参数尚未补齐，请完成参数准备后确认运行。");
       if (latest?.abandonedAt) throw new Error("候选已放弃，不能接受或拒绝。");
       if (!latest || latest.revision !== revision || latest.acceptedAt !== null || (latest.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能按最新未接受且未拒绝草案冻结。 ");
       const event = { type: "workflow.revision_accepted" as const, at: new Date().toISOString(), harnessRunId, revision };
@@ -508,8 +586,20 @@ export class HarnessService {
   /** 为当前 Harness 绑定最小行动面；每项仍回到本服务做耐久校验。 */
   private actionCallbacks(harnessRunId: string, token?: string): HarnessActionCallbacks {
     return {
-      proposeWorkflowRevision: async (source, goal, scope) => {
+      proposeWorkflowRevision: async (source, goal, scope,parameters) => {
         const lease = token ?? (await this.entry(harnessRunId)).turnToken;
+        if(parameters!==undefined){
+          if(!parameters||!Number.isInteger(parameters.baseRevision)||!isJsonObject(parameters.input)||source.trim())throw new Error("模板参数模式必须绑定baseRevision、完整input并且source为空。");
+          return this.mutate(harnessRunId,async()=>{
+            const entry=await this.entry(harnessRunId),snapshot=entry.projection.snapshot(),candidate=candidateRevision(snapshot);
+            if(!lease||entry.turnToken!==lease||snapshot.status!=="running"||!entry.turn)throw new Error("参数整理不属于当前主控回合。");
+            if(!candidate?.templateOrigin||candidate.revision!==parameters.baseRevision)throw new Error("参数依据版本已变化，请重新读取当前候选，不能覆盖用户修改。");
+            const origin=candidate.templateOrigin;
+            const next=await this.saveTemplate(harnessRunId,crypto.randomUUID(),{id:origin.id,version:origin.version,sourceHash:origin.sourceHash,input:parameters.input},candidate.cardId,lease);
+            const revision=next.workflowRevisions.at(-1)!;
+            return {revision:revision.revision,sourceHash:revision.sourceHash};
+          });
+        }
         const snapshot = await this.proposeWorkflowRevisionFromAction(harnessRunId, source, goal, scope, lease);
         const revision = snapshot.workflowRevisions.at(-1);
         if (!revision) throw new Error("Workflow 草案未能耐久。 ");

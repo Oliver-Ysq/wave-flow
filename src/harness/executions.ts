@@ -14,6 +14,7 @@ import type { ExecutionConfigSnapshot, WorkflowExecutionRecord } from "./types";
 import { assertStartable } from "./task-contract";
 import { RunJournal } from "../journal/run-journal";
 import { HarnessJournal } from "./journal";
+import { canonicalJson, validateTemplateInput } from "./workflow-templates";
 
 /** Engine 注入的执行器工厂产物；wiring 是 Engine 私有接线上下文，本服务不透明传递。 */
 export type HarnessExecutionExecutor = {
@@ -61,20 +62,24 @@ export class HarnessExecutionService {
   }
 
   /** 创建并后台启动一次 Execution；只有已接受冻结的 revision 可以执行，且必须携带分配卡冻结的执行配置。 */
-  async createExecution(harnessRunId: string, revisionNumber: number, input: JsonObject = {}, config?: ExecutionConfigSnapshot): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
-    return this.withLifecycleLock(harnessRunId, () => this.createExecutionOnce(harnessRunId, revisionNumber, input, config ?? null));
+  async createExecution(harnessRunId: string, revisionNumber: number, input: JsonObject = {}, config?: ExecutionConfigSnapshot, confirmation?: Pick<WorkflowExecutionRecord,"confirmationRequestId"|"confirmationPayloadHash">): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
+    return this.withLifecycleLock(harnessRunId, () => this.createExecutionOnce(harnessRunId, revisionNumber, input, config ?? null, confirmation));
   }
 
   /**
    * 已取得 Harness 创建锁后的事务正文。这里才允许创建嵌套 Run Journal，避免两个
    * 并发请求都在 `recordExecutionCreated()` 的最终拒绝前留下未登记的孤儿档案。
    */
-  private async createExecutionOnce(harnessRunId: string, revisionNumber: number, input: JsonObject, config: ExecutionConfigSnapshot | null): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
+  private async createExecutionOnce(harnessRunId: string, revisionNumber: number, input: JsonObject, config: ExecutionConfigSnapshot | null, confirmation?: Pick<WorkflowExecutionRecord,"confirmationRequestId"|"confirmationPayloadHash">): Promise<{ readonly execution: WorkflowExecutionRecord; readonly snapshot: RunSnapshot }> {
     const snapshot = await this.harness.snapshot(harnessRunId);
     if (snapshot.task) assertStartable(snapshot, revisionNumber);
     const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
     if (!revision) throw new Error(`Workflow revision 不存在：${revisionNumber}`);
     if (revision.acceptedAt === null) throw new Error("只有已接受冻结的 revision 才能创建 Execution；草稿永远不能执行。 ");
+    if(revision.templateOrigin){
+      validateTemplateInput(revision.templateOrigin.inputSchema,input);
+      if(canonicalJson(input)!==canonicalJson(revision.input))throw new Error("输入与已批准模板版本不一致。");
+    }
     if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束的 WorkflowExecution；新 revision 必须等前一执行到达终态。 ");
     // 受限 Execution 的脚本字面量 cli/model 不直接生效；没有分配卡冻结的快照就没有
     // 任何诚实依据决定节点落到哪个 Runtime，必须在任何耐久事实之前拒绝。
@@ -97,7 +102,7 @@ export class HarnessExecutionService {
       runId: executionId,
       executionConfig: config,
     });
-    const record: WorkflowExecutionRecord = { executionId, revision: revision.revision, sourceHash: revision.sourceHash, runtimeVersion: RUNTIME_VERSION, policy, createdAt: new Date().toISOString(), status: "running", finishedAt: null, diagnostic: null, summary: null, config };
+    const record: WorkflowExecutionRecord = { ...confirmation, executionId, revision: revision.revision, sourceHash: revision.sourceHash, runtimeVersion: RUNTIME_VERSION, policy, createdAt: new Date().toISOString(), status: "running", finishedAt: null, diagnostic: null, summary: null, config };
     // Execution 登记事实先于首次调度落盘；Harness Journal 与 Execution Journal 相互可核对。
     // 若登记失败，刚由本调用创建的嵌套目录没有任何可达引用，立即清理，不能把它
     // 遗留成看似可 resume 的孤儿 Run。

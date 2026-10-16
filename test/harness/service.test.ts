@@ -20,7 +20,7 @@ test("revision 预览提案时耐久，旧档案并发补齐一次，重开不�
   const service = new HarnessService(root, async () => new FakePi());
   const created = await service.create(cwd);
   const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
-  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 1, sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
+  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 2, sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
   const saved = await HarnessJournal.open(created.harnessRunId, root);
   expect(saved.snapshot.workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
   expect(saved.events.filter(event => event.type === 'workflow.revision_preview_saved')).toHaveLength(0);

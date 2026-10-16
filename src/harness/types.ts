@@ -191,6 +191,18 @@ export type ExecutionHistoryItem={
 
 /** 主控会话中的不可变 workflow.ts 草案。 */
 export type WorkflowRevision = {
+  /** 参数待补齐的准备态；完整Schema验证前不能批准/执行，默认false。 */
+  readonly parametersPending?:boolean;
+  /** 保存请求 UUID；同请求同载荷重试返回原版本，异载荷拒绝。 */
+  readonly saveRequestId?: string;
+  /** 保存请求的规范载荷指纹，用于重试冲突检测，不是权限凭据。 */
+  readonly savePayloadHash?: string;
+  /** 内置模板的不可变目录快照；缺省为主控生成源码，不从 meta 推断来源。 */
+  readonly templateOrigin?: import("./workflow-templates").TemplateOrigin;
+  /** 模板派生 generated 版本的原始来源；不赋予原模板启动资格。 */
+  readonly derivedFrom?: import("./workflow-templates").TemplateOrigin;
+  /** 此版本已校验的业务参数；模板保存后重开恢复，变更须追加版本并重新批准。 */
+  readonly input?: JsonObject;
   /** 准备过程的稳定 UUID；历史版本缺省。 */
   readonly cardId?: string;
   /** 同卡前一版本；首版为 null。 */
@@ -230,8 +242,8 @@ export type WorkerAssignment = {
   readonly cli: import("../runtimes/types").RuntimeCli;
   /** 模型分配；本期恒为 "cli-default"（跟随 CLI 默认），模型覆盖尚未验证，不伪造模型目录。 */
   readonly model: "cli-default";
-  /** 分配来源：harness-cli=全部用主控 CLI，random=Engine 随机轮换，rule=自然语言规则解析，literal-cli=保留脚本字面量。 */
-  readonly source: "harness-cli" | "random" | "rule" | "literal-cli";
+  /** 分配来源：harness-cli=跟随主控，user=用户在Workflow设计内选择；历史值兼容读取。 */
+  readonly source: "harness-cli" | "user" | "random" | "rule" | "literal-cli";
   /** 分配目标；必须是 Registry 中已验证的 Runtime。 */
   readonly runtimeId: string;
   /** 分配目标已验证 adapter 标识；创建时与 Registry 核对一致。 */
@@ -263,6 +275,10 @@ export type ExecutionConfigSnapshot = {
 
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */
 export type WorkflowExecutionRecord = {
+  /** 模板确认请求 UUID；缺省为历史/自动编排执行，同请求重试不再次派发。 */
+  readonly confirmationRequestId?: string;
+  /** 确认版本/输入/配置规范指纹；只用于冲突检测，不构成授权。 */
+  readonly confirmationPayloadHash?: string;
   /** Execution 的 UUID，同时是其内嵌 Run Journal 的 runId。 */
   readonly executionId: string;
   /** 绑定的已接受冻结 revision 序号；运行期间不得热修改。 */

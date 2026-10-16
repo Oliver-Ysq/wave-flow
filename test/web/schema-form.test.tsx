@@ -82,7 +82,7 @@ test("validateAnswer：必填/类型/枚举错误定位到字段路径", () => {
   const errors = validateAnswer(schema, { count: "x", level: "中", addr: {} });
   const byPath = new Map(errors.map((error) => [error.path, error.message]));
   expect(byPath.get("name")).toBe("必填字段未填写");
-  expect(byPath.get("count")).toBe("类型应为 integer");
+  expect(byPath.get("count")).toBe("请填写整数");
   expect(byPath.get("level")).toBe("取值不在允许范围内");
   expect(byPath.get("addr.city")).toBe("必填字段未填写");
 });
