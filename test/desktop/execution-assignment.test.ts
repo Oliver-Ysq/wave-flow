@@ -84,6 +84,16 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       expect(before.harness.workflowRevisions[0]!.acceptedAt).toBeNull();expect(before.harness.executions).toHaveLength(0);
       const base=configOf(kimi,codex),config={...base,assignments:plan.workers.map(worker=>({...base.defaultAssignment!,agentId:worker.id}))};
       const request={harnessRunId:id,revision:1,config,clientRequestId:crypto.randomUUID(),input:{...selection.input,maxFindings:4}};
+      const acceptFailure=spyOn(HarnessService.prototype,"acceptWorkflowRevision").mockRejectedValueOnce(new Error("模拟版本已准备但批准前磁盘失败"));
+      await expect(engine.handleDesktopAction("templates.confirm",request)).rejects.toThrow("磁盘失败");
+      acceptFailure.mockRestore();
+      const prepared=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      expect(prepared.harness.executions).toHaveLength(0);
+      expect(prepared.harness.workflowRevisions).toHaveLength(2);
+      expect(prepared.harness.executionConfirmations).toHaveLength(1);
+      const preparedJournal=await (await import("../../src/harness/journal")).HarnessJournal.open(id,(fixtureOptions.get(fixtureId) as {harnessRoot:string}).harnessRoot);
+      expect(preparedJournal.snapshot.executionConfirmations).toEqual(prepared.harness.executionConfirmations);
+      await expect(engine.handleDesktopAction("templates.confirm",{...request,config:{...config,ruleText:"changed before execution"}})).rejects.toThrow("不能更换");
       const results=await Promise.all([engine.handleDesktopAction("templates.confirm",request),engine.handleDesktopAction("templates.confirm",request)]) as Array<{execution:{executionId:string}}>;
       expect(results[0]!.execution.executionId).toBe(results[1]!.execution.executionId);
       const retry=await engine.handleDesktopAction("templates.confirm",request) as {execution:{executionId:string}};
@@ -101,6 +111,7 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       try{
         const durable=await reopened.handleDesktopAction("templates.confirm",request) as {execution:{executionId:string}};
         expect(durable.execution.executionId).toBe(results[0]!.execution.executionId);
+        await expect(reopened.handleDesktopAction("templates.confirm",{...request,input:{...request.input,maxFindings:5}})).rejects.toThrow("不能更换");
         expect((await reopened.handleDesktopAction("executions.list",{harnessRunId:id}) as {executions:unknown[]}).executions).toHaveLength(1);
       }finally{reopened.shutdown();}
     }finally{engine.shutdown();}
@@ -110,7 +121,8 @@ describe("Engine executions.plan / randomize / create 校验", () => {
     const options=fixtureOptions.get(harnessRunId) as Exclude<ConstructorParameters<typeof DesktopExecutionEngine>[0],boolean|undefined>;
     const root=await mkdtemp(join(tmpdir(),"wave-flow-task-ipc-"));roots.push(root);
     const registry=new CliRuntimeRegistry(root);await registry.saveVerified(kimi);await registry.saveVerified(codex);await registry.select(kimi.runtimeId);
-    const optionsTask={...options,harnessRoot:join(root,"tasks"),createHarnessSession:async(_id:string,_cwd:string,_prior:readonly import("../../src/harness/types").HarnessMessage[],actions:import("../../src/harness/action-tools").HarnessActionCallbacks)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text:string)=>{if(text.startsWith("请总结"))return "执行完成，影响证据不足。";await actions.proposeWorkflowRevision(SOURCE,"目标","只读范围");return "方案已提交";}})};
+    let basis=0;
+    const optionsTask={...options,singleWorkflowForAcceptance:false,harnessRoot:join(root,"tasks"),createHarnessSession:async(_id:string,_cwd:string,_prior:readonly import("../../src/harness/types").HarnessMessage[],actions:import("../../src/harness/action-tools").HarnessActionCallbacks)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text:string)=>{if(text.startsWith("请总结"))return "执行完成，影响证据不足。";await actions.proposeWorkflowRevision(SOURCE,"目标","只读范围",undefined,basis++);return "方案已提交";}})};
     const engine=new DesktopExecutionEngine(optionsTask);
     try{
       const project=await engine.handleDesktopAction("projects.create",{cwd:root}) as {project:{projectId:string}};

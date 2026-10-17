@@ -18,6 +18,8 @@ export interface AcpWorkerSession {
   close(): void;
   /** 受管写session在close后独立核验进程组已退出；普通测试session省略。 */
   verifyClosed?(): Promise<void>;
+  /** 原生会话事件订阅；缺省不启用停滞检测，不能用终端文本替代事件。 */
+  subscribe?(listener: (event: import("../adapters/acp-session").AcpSessionEvent) => void): () => void;
 }
 
 /**
@@ -45,7 +47,11 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly isSupportedWorkerCli: (cli: string) => boolean = (cli) => workerAdapterForCli(cli) !== null,
     /** 受管写要求真实退出证明；默认false保持现有只读/测试路径，生产workspace工厂必须true。 */
     private readonly requireWriterExit = false,
-  ) {}
+    /** Engine停滞窗口，默认五分钟；正整数毫秒，不扩展作者API或触发业务重试。 */
+    private readonly stallWindowMs = 300_000,
+  ) {
+    if (!Number.isSafeInteger(stallWindowMs) || stallWindowMs < 1) throw new Error("ACP停滞窗口必须为正整数毫秒。");
+  }
 
   /** Runtime 创建当前 Run 的 Control 后调用；缺失时绝不启动真实 Agent。 */
   bindControl(control: ControlServer): void {
@@ -71,9 +77,16 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     // capability 只保留在 Engine 与私有 MCP server 的绑定中，绝不注入 ACP adapter
     // 或 Coding Worker 的环境。稳定三元组只用于定位，不能单独授权上报。
     const session = this.createSession(this.launcher);
+    let lastActivity = performance.now();
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
+    let checkingStall = false;
+    const unsubscribe = session.subscribe?.(event => {
+      if (event.sessionId === session.binding?.sessionId) lastActivity = performance.now();
+    });
     let mcpServers: acp.McpServer[] = [];
     const key = nodeKey(node);
     const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
+    active.onTurnStarted = () => { lastActivity = performance.now(); };
     this.#active.set(key, active);
     try {
       const signal = new AbortController();
@@ -91,6 +104,32 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       });
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝投递任务。");
       active.readTurnContext=()=>control.workerTurnContext({runId:control.runId,nodeId:node.id,agentSessionId:node.agentSessionId!,capability});
+      // 不重发业务任务：可信Worker可能已产生任意外部副作用，read-only标签也不
+      // 构成安全证明。缺少显式现场安全证明时，诊断后由用户总结并显式恢复。
+      if (unsubscribe) stallTimer = setInterval(() => {
+        if (checkingStall || active.stopped || settled) return;
+        if (!active.turn || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
+        checkingStall = true;
+        void (async () => {
+          const context = await active.readTurnContext!();
+          if (settled || active.stopped) return;
+          if (context.status === "blocked" || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
+          if (performance.now() - lastActivity < this.stallWindowMs) return;
+          await control.recordExecutorDiagnostic("ACP会话停滞；现场副作用无法核验，不自动重发。请完成影响面总结后显式恢复。", node.id, node.agentSessionId!);
+          if (settled || active.stopped || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) return;
+          // 诊断落盘期间可能收到事件或进入block，不能用旧读取结果中断合法等待。
+          const current = await active.readTurnContext!();
+          if (current.status === "blocked" || performance.now() - lastActivity < this.stallWindowMs) { lastActivity = performance.now(); return; }
+          if (settled || active.stopped || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) return;
+          active.stopped = true;
+          active.reject(new Error("ACP会话停滞，现场安全续作证据不足；中断并保留现场，不自动重试。"));
+        })().catch(error => {
+          // Runtime先写pausing/recovering再操作Executor；只读事实恰好跨该转换时
+          // 不把合法控制等待当会话异常，下一个采样重新读取权威状态。
+          if (!settled && !active.stopped && !active.pauseRequested && !active.paused && !control.isWorkerWaiting(node.id, node.agentSessionId!)) active.reject(error instanceof Error ? error : new Error(String(error)));
+        })
+          .finally(() => { checkingStall = false; });
+      }, Math.min(1_000, this.stallWindowMs));
       const turn = this.runTurn(active, managedPrompt(node), signal.signal);
       // Control complete 是 Worker 的业务完成边界。某些 ACP Agent 在工具调用后会继续
       // 保持原 prompt turn；不能因此阻塞 Runtime 的 run.completed。turn 的拒绝仍被
@@ -100,6 +139,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       control.unregister(control.runId, node.id, node.agentSessionId);
       throw error;
     } finally {
+      if (stallTimer) clearInterval(stallTimer);
+      unsubscribe?.();
       active.rejectCancelAck?.(new Error("原Worker执行已收尾，暂停未取得cancelled确认。"));
       active.releaseResume?.();
       this.#active.delete(key);
@@ -196,6 +237,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
   }
 
   private async runTurn(active: ActiveAcpWorker, prompt: string, signal: AbortSignal, onStarted?: () => void): Promise<void> {
+    active.onTurnStarted?.();
     active.turn = active.session.prompt(prompt, signal);
     // `session.prompt()` 已向 ACP transport 建立该恢复请求；后续 promise 只会在 turn
     // 结束时 resolve，不能拿结束事件当作“已开始”的唯一信号。
@@ -259,6 +301,8 @@ type ActiveAcpWorker = {
   /** 非cancelled、会话异常或执行收尾时拒绝原暂停确认，不伪造paused。 */
   rejectCancelAck?: (error: Error) => void;
   completionReminderSent: boolean;
+  /** 每个真实新回合重置诊断窗口；不延用用户暂停时间。 */
+  onTurnStarted?: () => void;
   /** 当前原Control会话的只读事实读取；初始化后设置，不重建会话或操作节点。 */
   readTurnContext?:()=>Promise<WorkerTurnContext>;
 };

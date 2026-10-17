@@ -58,7 +58,7 @@ export async function resolveIntegrationSources(options: {
     if (workspace.lease || workspace.commonDirectory !== options.targetCommonDirectory) fail(`集成来源 ${id} 仍有writer锁或仓库身份不匹配。`);
     const result = workspace.results.findLast(result => result.runId === options.runId && result.nodeId === id && result.attempt === node.executionAttemptId);
     if (!result?.ready) fail(`集成来源 ${id} 成果未ready，不能用业务completed代替Git交付。`);
-    const allowed = workspace.authorization.nodes.find(item => item.nodeId === id);
+    const allowed = options.manager.authorizationFor(workspace,options.runId).nodes.find(item => item.nodeId === id);
     if (!allowed) fail(`集成来源 ${id} 超出原提交授权。`);
     const repo = await GitRepository.open(workspace.cleanedAt?workspace.authorization.repository:workspace.cwd);
     if (repo.commonDirectory !== workspace.commonDirectory) fail("集成来源Git仓库身份漂移。");

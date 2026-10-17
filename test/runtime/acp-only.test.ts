@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +27,174 @@ async function fixture() {
   await journal.append(running); state.apply(running);
   return { cwd, manifest, journal, state, control: new ControlServer(journal, state), node: state.agent("node"), sessionId };
 }
+
+test("原生ACP静默停滞只中断一次，保留节点身份且不重发业务", async () => {
+  const value = await fixture(); let prompts = 0, closed = 0, unsubscribed = 0;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    prompt() { prompts++; return new Promise(() => {}); },
+    async cancel() { throw new Error("不可确认取消"); }, close() { closed++; },
+    subscribe() { return () => { unsubscribed++; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, undefined, undefined, false, 20);
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).rejects.toThrow("现场安全续作证据不足");
+  await Bun.sleep(45);
+  expect(prompts).toBe(1); expect(closed).toBe(1); expect(unsubscribed).toBe(1);
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  const diagnostics = events.filter(event => event.type === "log.written");
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
+  expect(events.filter(event => event.type === "agent.session")).toHaveLength(1);
+  expect(events.some(event => event.type === "agent.completed")).toBe(false);
+});
+
+test("真实会话事件持续刷新停滞窗口，complete仍只由Control决定", async () => {
+  const value = await fixture(); let capability = "";
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() {
+      for (let i = 0; i < 6; i++) {
+        await Bun.sleep(10);
+        listener?.({ sessionId: "native", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "活动" } } });
+      }
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: {} });
+      return { stopReason: "end_turn" };
+    }, async cancel() {}, close() {}, subscribe(value) { listener = value; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 35);
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({});
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+});
+
+test("等待原block答案跨越停滞窗口不重发、不制造中断", async () => {
+  const value = await fixture(); let capability = "", prompts = 0;
+  const blockRequestId = crypto.randomUUID();
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return this.binding!; },
+    async prompt() {
+      prompts++;
+      const identity = { runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability };
+      const answer = await value.control.block({ ...identity, blockRequestId, needHelp: "等待确认" });
+      expect(answer.answer).toEqual({ ok: true });
+      await value.control.continue({ ...identity, blockRequestId });
+      await value.control.complete({ ...identity, summary: "done", result: {} });
+      return { stopReason: "end_turn" };
+    }, async cancel() {}, close() {}, subscribe() { return () => {}; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 25);
+  executor.bindControl(value.control);
+  const pending = executor.execute(value.node);
+  while (value.state.agent("node").status !== "blocked") await Bun.sleep(1);
+  await Bun.sleep(100);
+  expect(value.state.agent("node").status).toBe("blocked");
+  await value.control.answer({ blockRequestId, answer: { ok: true } });
+  await expect(pending).resolves.toEqual({});
+  expect(prompts).toBe(1);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+});
+
+for (const operation of ["block", "complete"] as const) test(`Control ${operation}落盘跨停滞窗口属于控制等待，不制造诊断`, async () => {
+  const value = await fixture(); let capability = "";
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const append = value.journal.append.bind(value.journal);
+  const appendSpy = spyOn(value.journal, "append").mockImplementation(async event => {
+    if (operation === "block" && event.type === "block.created") { entered(); await gate; }
+    return append(event);
+  });
+  const writeResult = value.journal.writeResult.bind(value.journal);
+  const resultSpy = spyOn(value.journal, "writeResult").mockImplementation(async (...args) => {
+    if (operation === "complete") { entered(); await gate; }
+    return writeResult(...args);
+  });
+  const blockRequestId = crypto.randomUUID();
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return this.binding!; },
+    async prompt() {
+      const identity = { runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability };
+      if (operation === "block") {
+        await value.control.block({ ...identity, blockRequestId, needHelp: "确认" });
+        await value.control.continue({ ...identity, blockRequestId });
+      }
+      await value.control.complete({ ...identity, summary: "done", result: {} });
+      return { stopReason: "end_turn" };
+    }, async cancel() {}, close() {}, subscribe() { return () => {}; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined,
+    identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 25);
+  executor.bindControl(value.control);
+  const pending = executor.execute(value.node);
+  try {
+    await started;
+    await Bun.sleep(100);
+    expect(value.control.isWorkerWaiting("node", value.sessionId)).toBe(true);
+    expect(value.state.agent("node").status).toBe("running");
+    release();
+    if (operation === "block") {
+      while (value.state.agent("node").status !== "blocked") await Bun.sleep(1);
+      await value.control.answer({ blockRequestId, answer: {} });
+    }
+    await expect(pending).resolves.toEqual({});
+    expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+  } finally { release(); appendSpy.mockRestore(); resultSpy.mockRestore(); }
+});
+
+test("原session暂停跨窗口后recover重置计时且只发送现场检查回合", async () => {
+  const value = await fixture(); let capability = "", finish!: (turn: { stopReason: string }) => void;
+  const prompts: string[] = [];
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return this.binding!; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) return new Promise(resolve => { finish = resolve; });
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: {} });
+      return { stopReason: "end_turn" };
+    }, async cancel() { finish({ stopReason: "cancelled" }); }, close() {}, subscribe() { return () => {}; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 30);
+  executor.bindControl(value.control);
+  const pending = executor.execute(value.node);
+  while (!prompts.length) await Bun.sleep(1);
+  await executor.pause(value.node);
+  await Bun.sleep(120);
+  expect(prompts).toHaveLength(1);
+  await executor.recover(value.node);
+  await expect(pending).resolves.toEqual({});
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toContain("不要重发原始任务");
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+});
+
+test("其他session事件不能掩盖当前Worker停滞", async () => {
+  const value = await fixture(); let timer: ReturnType<typeof setInterval> | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return this.binding!; }, prompt() { return new Promise(() => {}); },
+    async cancel() {}, close() {},
+    subscribe(listener) {
+      timer = setInterval(() => listener({ sessionId: "unrelated", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "其他会话" } } }), 5);
+      return () => clearInterval(timer);
+    },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, undefined, undefined, false, 25);
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).rejects.toThrow("停滞");
+});
+
+test("非法停滞窗口在启动前拒绝", () => {
+  for (const window of [0, -1, NaN, Infinity, 1.5]) {
+    expect(() => new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, undefined, undefined, undefined, undefined, false, window)).toThrow("正整数");
+  }
+});
 
 for (const stage of ["initialize", "createSession"] as const) test(`停止发生在${stage}等待时仍清理，迟到启动不投递任务`, async () => {
  const value = await fixture(); let entered!: () => void, release!: () => void;

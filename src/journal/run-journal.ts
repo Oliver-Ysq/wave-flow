@@ -189,7 +189,7 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (event.nodeId !== null || typeof event.title !== "string" || !event.title.trim()) throw new Error("phase.changed payload 无效。");
       break;
     case "log.written":
-      if (event.nodeId !== null || typeof event.message !== "string") throw new Error("log.written payload 无效。");
+      if (typeof event.message !== "string" || (event.nodeId === null) !== (event.agentSessionId === null)) throw new Error("log.written payload 无效。");
       break;
     case "agent.created":
       if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");

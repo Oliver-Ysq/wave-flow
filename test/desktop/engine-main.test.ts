@@ -53,7 +53,8 @@ test("Engine重启仅补completed来源证据，diff与显式合入不重跑业�
   expect(await manager.canRetrySource(execution.executionId)).toBe(true);
   expect(await manager.inspectSourceDiagnostic(execution.executionId)).toContain("fixture disk unavailable");
   const savedRef=await git("rev-parse",`refs/heads/codex/wf-${workspaceId}`);
-  await engine.convergeStaleAcpWorkers();
+  // 用户在同Engine内显式resume只补成果来源，不重跑Workflow/Worker。
+  await engine.handleDesktopAction("executions.resume", {harnessRunId:task.harnessRunId,executionId:execution.executionId});
   const detail=await engine.handleDesktopAction("executions.get",{harnessRunId:task.harnessRunId,executionId:execution.executionId}) as import("../../src/desktop/types").ExecutionResponse;
   expect(detail.sourceEvidence?.branch).toBe(`codex/wf-${workspaceId}`);
   expect(detail.sourceEvidence?.commit).toBe(savedRef);

@@ -4,6 +4,12 @@ export const meta = {
   name: "planned-workflow",
   description: "把目标拆解为独立任务，并行执行后汇总结论并落盘报告。",
   phases: [{ title: "计划" }, { title: "执行" }, { title: "汇总" }],
+  inputSchema: {
+    type: "object",
+    properties: { objective: { type: "string", minLength: 1 }, reportPath: { type: "string", minLength: 1 } },
+    required: ["objective"],
+    additionalProperties: false,
+  },
   exampleArgs: { objective: "比较三种方案并给出推荐", reportPath: "./report.md" },
 };
 

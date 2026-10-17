@@ -45,7 +45,7 @@ export function TemplatePicker({identity,blockedReason,onSave,onClose}:{
  const key=template?`${identity}:${template.id}:${template.version}:${template.sourceHash}`:identity;
  return <section ref={panel} role="dialog" aria-modal="true" className="connection-panel template-picker" aria-label="选择工作流">
    <header><h2>选择工作流</h2><button type="button" onClick={onClose}>返回</button></header>
-   <div className="task-source-options"><button aria-pressed="true">预置工作流</button><button disabled>本地工作流 · 尚未开放</button></div>
+   <div className="task-source-options"><button aria-pressed="true">预置工作流</button><button type="button" onClick={onClose}>本地工作流请从新建任务页选择</button></div>
    <label>预置模板<select value={selected} onChange={event=>setSelected(event.target.value)}>{templates.map(item=><option key={item.id} value={item.id}>{item.meta.name} · v{item.version}</option>)}</select></label>
    {template&&<><h3>{template.meta.description}</h3><p>{template.explanation}</p><p>选择和填写不会执行。准备后在 Workflow 设计中确认参数与 CLI，再运行。</p>
      <button type="button" disabled={busy||!!blockedReason} onClick={async()=>{

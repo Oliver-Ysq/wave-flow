@@ -4,6 +4,14 @@ import { WorkflowContractError } from "../workflow/errors";
 
 /** 用户冻结的Git成果配置；同一Execution不可热修改，read-only默认不提供。 */
 export type ExecutionWorkspaceConfig = {
+  /** 显式续作的原Execution和冻结工作区HEAD；缺省首次分配，不复制旧节点完成状态。 */
+  readonly continuation?: {
+    /** 同Task前一终态Execution，Engine核验归属；不是授权秘密。 */ readonly executionId:string;
+    /** 本轮复用的持续worktree及当前commit；变化拒绝，不回滚。 */ readonly heads:readonly {
+      /** 原受管目录UUID；未绑定时必须已被本轮选定完整来源父链覆盖，partial仍须直接接续。 */ readonly workspaceId:string;
+      /** 原执行已保存现场完整commit；不是模型预测值。 */ readonly commit:string;
+    }[];
+  };
   /** 独立契约版本，当前固定2；旧精确文件授权不自动升级。 */
   readonly version: 2;
   /** 明确保存整个受管worktree的授权，绑定项目基准与节点。 */
@@ -16,6 +24,12 @@ export type ExecutionWorkspaceConfig = {
 export function validateExecutionWorkspaces(value: unknown): ExecutionWorkspaceConfig {
   if (!plain(value) || value.version !== 2 || !plain(value.authorization) || !Array.isArray(value.bindings)) fail("Git成果配置格式无效；需要整工作区授权v2。");
   const authorization = value.authorization;
+  if(value.continuation!==undefined){
+    const prior=value.continuation;
+    if(!plain(prior)||Object.keys(prior).some(key=>!["executionId","heads"].includes(key))||!Array.isArray(prior.heads)||!prior.heads.length)fail("续作来源字段无效。");
+    uuid(prior.executionId);const ids=new Set<string>();
+    for(const head of prior.heads){if(!plain(head)||Object.keys(head).some(key=>!["workspaceId","commit"].includes(key)))fail("续作HEAD字段无效。");uuid(head.workspaceId);if(ids.has(String(head.workspaceId))||typeof head.commit!=="string"||!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head.commit))fail("续作HEAD无效或重复。");ids.add(String(head.workspaceId));}
+  }
   if ("autoSquashDelivery" in authorization) fail("旧自动交付授权不支持；请重新确认整工作区授权。");
   uuid(authorization.authorizationId);
   if (typeof authorization.approvedAt !== "string" || !Number.isFinite(Date.parse(authorization.approvedAt)) || typeof authorization.repository !== "string" || !authorization.repository.startsWith("/") || typeof authorization.baseCommit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(authorization.baseCommit) || typeof authorization.excludeExistingDirty !== "boolean" || !Array.isArray(authorization.nodes) || !authorization.nodes.length) fail("Git成果授权字段无效。");

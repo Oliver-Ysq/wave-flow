@@ -27,3 +27,8 @@ test("集成固定来源循环静态拒绝；动态批次只验证形状不假�
   expect(validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { batchSequence: 3 } }] }).bindings[1].integrationSources).toEqual({ batchSequence: 3 });
   expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { batchSequence: 0 } }] })).toThrow("批次");
 });
+test("续作来源UUID和冻结HEAD严格核验，仅允许本轮实际绑定工作区",()=>{
+ const input=config(),head={workspaceId:input.bindings[0].workspaceId,commit:"b".repeat(40)},continuation={executionId:crypto.randomUUID(),heads:[head]};
+ expect(validateExecutionWorkspaces({...input,continuation}).continuation).toEqual(continuation);
+ for(const prior of [{...continuation,executionId:"bad"},{...continuation,heads:[]},{...continuation,heads:[head,head]},{...continuation,heads:[{...head,commit:"bad"}]}])expect(()=>validateExecutionWorkspaces({...input,continuation:prior})).toThrow();
+});

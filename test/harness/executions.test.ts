@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessExecutionService } from "../../src/harness/executions";
@@ -24,6 +24,26 @@ async function fixture(): Promise<{ harness: HarnessService; executions: Harness
   const created = await harness.create(root);
   return { harness, executions, harnessRunId: created.harnessRunId, root };
 }
+
+test("只读Execution现场仍检测Git文件内容变化；非Git明确缺基线而非伪造Git证据", async () => {
+  const { harness, executions, harnessRunId, root } = await fixture();
+  await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+  await harness.acceptWorkflowRevision(harnessRunId, 1);
+  const created = await executions.createExecution(harnessRunId, 1, {}, testConfig());
+  await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+  expect(await executions.sceneEvidence(harnessRunId, created.execution.executionId)).toMatchObject({ kind: "no-git-baseline" });
+  for (const args of [["init", "-b", "main"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "Initial fixture"]]) {
+    const process = Bun.spawn(["/usr/bin/git", ...args], { cwd: root, stdout: "ignore", stderr: "pipe" });
+    expect(await process.exited).toBe(0);
+  }
+  const before = await executions.sceneEvidence(harnessRunId, created.execution.executionId) as { project: { hash: string } };
+  await (await import("node:fs/promises")).writeFile(join(root, "new.txt"), "one");
+  const changed = await executions.sceneEvidence(harnessRunId, created.execution.executionId) as { project: { hash: string } };
+  await (await import("node:fs/promises")).writeFile(join(root, "new.txt"), "two");
+  const again = await executions.sceneEvidence(harnessRunId, created.execution.executionId) as { project: { hash: string } };
+  expect(changed.project.hash).not.toBe(before.project.hash);
+  expect(again.project.hash).not.toBe(changed.project.hash);
+}, 15_000);
 
 /** 测试冻结配置；服务层不核对 runtimeId 真实性（那是 Engine action 的职责）。 */
 function testConfig(): import("../../src/harness/types").ExecutionConfigSnapshot {
@@ -56,6 +76,90 @@ async function waitFor(condition: () => Promise<boolean> | boolean): Promise<voi
 }
 
 describe("HarnessExecutionService", () => {
+  test("写现场跨只读轮次仍保留证据，下次写入不能退回历史基准另起",async()=>{
+    const root=await mkdtemp(join(tmpdir(),"wave-flow-inherited-scene-"));directories.push(root);let basis=0;
+    const writeSource=SIMPLE_SOURCE.replace('cli: "codex"','cli: "codex", sandbox: "workspace-write"');
+    const harness=new HarnessService(root,async(_id,_cwd,_prior,actions)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text)=>{
+      if(text.startsWith("请总结"))return "完整总结，测试不证明外部副作用。";
+      await actions.proposeWorkflowRevision(basis===1?SIMPLE_SOURCE:writeSource,"同目标继续","现场保留",undefined,basis++);return "方案";
+    }}),undefined,async()=>({fingerprint:"injected-harness-session"}),true);
+    const service=new HarnessExecutionService(harness,()=>({executor:new DeterministicExecutor()}),{},root);
+    harness.setExecutionCapsuleReader((task,execution,attempt)=>service.capsuleEvidence(task,execution,attempt));harness.setExecutionSceneReader(async()=>({stable:true}));
+    try{
+      const task=await harness.startTask(root,{clientRequestId:crypto.randomUUID(),projectId:"p",text:"写任务"});
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,1);
+      const config={...testConfig(),workspaces:{version:2 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},bindings:[{nodeId:"w1",workspaceId:crypto.randomUUID()}]}};
+      await service.createExecution(task.harnessRunId,1,{},config);
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).impactSummaries?.[0]?.status==="completed");
+      await harness.send(task.harnessRunId,"先只读复核");await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,2);
+      const read=await service.createExecution(task.harnessRunId,2,{},testConfig(),{confirmationRequestId:crypto.randomUUID(),confirmationPayloadHash:"b".repeat(64),sceneEvidenceHash:(await harness.currentImpactEvidence(task.harnessRunId))!});
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).impactSummaries?.some(item=>item.executionId===read.execution.executionId&&item.status==="completed")===true);
+      // 引用受管现场丢失时必须拒绝证据读取，不能回退只读轮次的项目根固定证据。
+      await expect(service.sceneEvidence(task.harnessRunId,read.execution.executionId)).rejects.toThrow();
+      await harness.send(task.harnessRunId,"再次修正");await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,3);
+      await expect(service.createExecution(task.harnessRunId,3,{},config,{confirmationRequestId:crypto.randomUUID(),confirmationPayloadHash:"c".repeat(64),sceneEvidenceHash:(await harness.currentImpactEvidence(task.harnessRunId))!})).rejects.toThrow("明确接续原受管现场");
+      expect((await service.listExecutions(task.harnessRunId))).toHaveLength(2);
+    }finally{harness.close();}
+  });
+  test("resume控制接线再次失败耐久中断，零业务投递且仍可显式恢复",async()=>{
+    const {harness,harnessRunId,root}=await fixture();let broken=true,calls=0;
+    const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {nodeId:"w1"};}}}),{wireControl:()=>{if(broken)throw Error("control unavailable");}},root);
+    await harness.proposeWorkflowRevision(harnessRunId,SIMPLE_SOURCE);await harness.acceptWorkflowRevision(harnessRunId,1);
+    await expect(executions.createExecution(harnessRunId,1,{},testConfig())).rejects.toThrow("control unavailable");
+    const id=(await executions.listExecutions(harnessRunId))[0].executionId;
+    await expect(executions.resume(harnessRunId,id)).rejects.toThrow("control unavailable");
+    expect((await executions.listExecutions(harnessRunId))[0]).toMatchObject({status:"interrupted",diagnostic:expect.stringContaining("恢复控制初始化失败")});
+    expect(calls).toBe(0);expect(executions.isControllable(id)).toBe(false);
+    broken=false;await executions.resume(harnessRunId,id);await waitFor(async()=>(await executions.listExecutions(harnessRunId))[0].status==="completed");expect(calls).toBe(1);
+  });
+  test("单链新版Execution零跨执行Replay，冻结确认现场且旧版只读恢复",async()=>{
+    const root=await mkdtemp(join(tmpdir(),"wave-flow-revision-execution-"));directories.push(root);let basis=0,calls=0;
+    const harness=new HarnessService(root,async(_id,_cwd,_prior,actions)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text)=>{
+      if(text.startsWith("请总结"))return "完整说明，仅证明测试执行结果，不证明文件或外部副作用。";
+      await actions.proposeWorkflowRevision(SIMPLE_SOURCE,"原目标修正","只读",undefined,basis++);return "修改方案保留现场";
+    }}),undefined,async()=>({fingerprint:"injected-harness-session"}),true);
+    const service=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {nodeId:"w1"};}}}),{},root);
+    harness.setExecutionCapsuleReader((task,execution,attempt)=>service.capsuleEvidence(task,execution,attempt));
+    harness.setExecutionSceneReader(async()=>({scene:"stable"}));
+    try{
+      const task=await harness.startTask(root,{clientRequestId:crypto.randomUUID(),projectId:"p",text:"首次只读"});
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,1);
+      const first=await service.createExecution(task.harnessRunId,1,{},testConfig());
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).impactSummaries?.[0]?.status==="completed");
+      const original=(await service.listExecutions(task.harnessRunId))[0];
+      const exposed=await harness.snapshot(task.harnessRunId);
+      (exposed.workflowRevisions[0] as {source:string}).source="tampered";
+      (exposed.executions[0].config!.assignments[0] as {cli:string}).cli="kimi";
+      expect((await harness.snapshot(task.harnessRunId)).workflowRevisions[0].source).toBe(SIMPLE_SOURCE);
+      expect((await harness.snapshot(task.harnessRunId)).executions[0].config!.assignments[0].cli).toBe("codex");
+      await harness.send(task.harnessRunId,"不满意，请按原目标重新检查");await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");
+      await harness.acceptWorkflowRevision(task.harnessRunId,2);
+      await expect(service.createExecution(task.harnessRunId,2,{},testConfig())).rejects.toThrow("明确确认");
+      const hash=await harness.currentImpactEvidence(task.harnessRunId);
+      const second=await service.createExecution(task.harnessRunId,2,{},testConfig(),{confirmationRequestId:crypto.randomUUID(),confirmationPayloadHash:"a".repeat(64),sceneEvidenceHash:hash!});
+      await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).impactSummaries?.some(item=>item.executionId===second.execution.executionId&&!item.supplementOf&&item.status==="completed")===true);
+      expect(calls).toBe(2);expect(second.execution.executionId).not.toBe(first.execution.executionId);expect(second.execution.sourceHash).toBe(first.execution.sourceHash);
+      expect((await service.snapshotExecution(task.harnessRunId,second.execution.executionId)).currentExecutionAttemptId).toBe(1);
+      expect((await service.listExecutions(task.harnessRunId))[0]).toEqual(original);
+      await expect(service.resume(task.harnessRunId,first.execution.executionId)).rejects.toThrow("旧执行只能查看历史");
+      const reopened=await HarnessJournal.open(task.harnessRunId,root);expect(reopened.snapshot.executions).toHaveLength(2);expect(reopened.snapshot.executions[1].sceneEvidenceHash).toBe(hash!);
+    }finally{harness.close();}
+  });
+  test("原completed成果补收尾失败不重开Execution、不派发第二Worker，错误可诊断", async () => {
+    const {harness,harnessRunId,root}=await fixture();let calls=0,prepares=0;
+    const config={...testConfig(),workspaces:{version:2 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},bindings:[{nodeId:"w1",workspaceId:crypto.randomUUID()}]}};
+    const service=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {ok:true};}}}),{prepareResume:async()=>{prepares++;throw Error("writer退出仍未知");}},root);
+    await harness.proposeWorkflowRevision(harnessRunId,SIMPLE_SOURCE.replace('cli: "codex"','cli: "codex", sandbox: "workspace-write"'));await harness.acceptWorkflowRevision(harnessRunId,1);
+    const {execution}=await service.createExecution(harnessRunId,1,{},config);
+    await waitFor(async()=>(await service.listExecutions(harnessRunId))[0].finishedAt!==null);
+    const prior=(await service.listExecutions(harnessRunId))[0];
+    await expect(service.resume(harnessRunId,execution.executionId)).rejects.toThrow("writer退出仍未知");
+    expect(calls).toBe(1);expect(prepares).toBe(1);expect((await service.listExecutions(harnessRunId))[0]).toEqual(prior);
+    expect((await service.snapshotExecution(harnessRunId,execution.executionId)).currentExecutionAttemptId).toBe(1);
+    await writeFile(join(root,harnessRunId,"executions",execution.executionId,"source.ts"),"changed source");
+    await expect(service.resume(harnessRunId,execution.executionId)).rejects.toThrow("冻结源码快照与登记 hash 不一致");
+    expect(prepares).toBe(1);expect(calls).toBe(1);
+  });
   test("来源收尾在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
     const { harness, harnessRunId, root } = await fixture();
     let finalized = false, called = 0;

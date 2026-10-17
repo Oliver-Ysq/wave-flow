@@ -7,7 +7,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri_plugin_shell::{ShellExt, process::{CommandChild, CommandEvent}};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-const ENGINE_ENV_KEYS: &[&str] = &["WAVE_FLOW_HOME", "WF_SINGLE_WORKFLOW_ACCEPTANCE"];
+const ENGINE_ENV_KEYS: &[&str] = &["WAVE_FLOW_HOME"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

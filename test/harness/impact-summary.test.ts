@@ -1,4 +1,4 @@
-import {afterEach,expect,test} from "bun:test";
+import {afterEach,expect,spyOn,test} from "bun:test";
 import {mkdtemp,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
@@ -73,6 +73,93 @@ test("空end_turn不完成，用户停止保留义务，迟到答案不能完成
 test("证据整体限长且遮蔽凭据，多字节不损坏，截断明确",()=>{
  const evidence=boundedEvidence({token:"secret-token",apiKey:"private-key",text:"中".repeat(1000)},100);
  expect(evidence.text).not.toContain("secret-token");expect(evidence.text).not.toContain("private-key");expect(evidence.truncated).toBe(true);expect(evidence.text).not.toContain("\uFFFD");expect(Buffer.byteLength(evidence.text)).toBeLessThanOrEqual(100);
+});
+test("确认现场证据读取前后漂移拒绝，不返回未经完整说明覆盖的新hash",async()=>{
+ const {service,id}=await fixture(async()=>"完整说明");let scene="A";
+ service.setExecutionSceneReader(async()=>({scene}));await summaryStarted(service,id);await settled(service,id);
+ let reads=0;
+ service.setExecutionSceneReader(async()=>({scene:++reads===3?"B":"A"}));
+ await expect(service.currentImpactEvidence(id)).rejects.toThrow("读取期间现场变化");
+ expect((await service.snapshot(id)).impactSummaries).toHaveLength(1);
+});
+
+test("现场变化追加独立补充，重复检查幂等，完整耐久后才允许原版恢复", async () => {
+  const { service, id, executionId, root } = await fixture(async () => "完整影响面说明");
+  let scene = "first";
+  service.setExecutionSceneReader(async () => ({ scene }));
+  await summaryStarted(service, id); await settled(service, id);
+  const first = (await service.snapshot(id)).impactSummaries![0];
+  await service.ensureCurrentImpact(id, executionId);
+  expect(await service.currentImpactEvidence(id)).toBe(first.evidenceHash!);
+  scene = "second";
+  // 不让自动调度抢在第二次检查前完成，用beginExit只停止调度、不改档案。
+  service.beginExit();
+  await expect(service.ensureCurrentImpact(id, executionId)).rejects.toThrow("现场已变化");
+  await expect(service.ensureCurrentImpact(id, executionId)).rejects.toThrow("现场已变化");
+  const pending = (await service.snapshot(id)).impactSummaries!;
+  expect(pending).toHaveLength(2); expect(pending[0]).toEqual(first);
+  expect(pending[1]).toMatchObject({ supplementOf: first.key, status: "pending" });
+  const blockedSnapshot = await service.snapshot(id);
+  expect(() => assertImpactSummariesComplete(blockedSnapshot)).toThrow("影响面");
+  const next = new HarnessService(root, async () => ({ isRunning: false, prompt: async () => "现场补充完整保存", subscribe: () => () => {}, abort: () => {}, close: () => {} }), undefined, async () => ({ fingerprint: "injected-harness-session" }), true);
+  services.push(next);
+  next.setExecutionCapsuleReader(async () => ({ evidence: "current" }));
+  next.setExecutionSceneReader(async () => ({ scene }));
+  await next.retryImpactSummary(id, pending[1].key); await settled(next, id);
+  await next.ensureCurrentImpact(id, executionId);
+  const reopened = (await HarnessJournal.open(id, root)).snapshot;
+  expect(reopened.impactSummaries![0]).toEqual(first);
+  expect(reopened.impactSummaries![1].status).toBe("completed");
+});
+
+test("连续现场变化原子替代过时待办；ABA复活原证据义务而非生成重复记录", async () => {
+  const { service, id, executionId, root } = await fixture(async () => "原总结完整");
+  let scene = "base";
+  service.setExecutionSceneReader(async () => ({ scene }));
+  await summaryStarted(service, id); await settled(service, id); service.beginExit();
+  scene = "A"; await expect(service.ensureCurrentImpact(id, executionId)).rejects.toThrow("现场已变化");
+  const a = (await service.snapshot(id)).impactSummaries!.at(-1)!;
+  scene = "B"; await expect(service.ensureCurrentImpact(id, executionId)).rejects.toThrow("现场已变化");
+  const b = (await service.snapshot(id)).impactSummaries!.at(-1)!;
+  expect((await service.snapshot(id)).impactSummaries!.find(item => item.key === a.key)?.supersededBy).toBe(b.key);
+  await expect(service.retryImpactSummary(id, a.key)).rejects.toThrow("替代");
+  scene = "A"; await expect(service.ensureCurrentImpact(id, executionId)).rejects.toThrow("现场已变化");
+  const state = (await HarnessJournal.open(id, root)).snapshot;
+  expect(state.impactSummaries).toHaveLength(3);
+  expect(state.impactSummaries!.find(item => item.key === a.key)?.supersededBy).toBeUndefined();
+  expect(state.impactSummaries!.find(item => item.key === b.key)?.supersededBy).toBe(a.key);
+  expect(() => assertImpactSummariesComplete(state)).toThrow("影响面");
+});
+
+test("已完成补充的ABA返回替代新待办，保留原完整正文而不永久卡住恢复", async () => {
+ const {service,id,executionId}=await fixture(async()=>"完整说明");let scene="base";
+ service.setExecutionSceneReader(async()=>({scene}));await summaryStarted(service,id);await settled(service,id);
+ scene="A";await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ for(let n=0;n<200;n++){if((await service.snapshot(id)).impactSummaries!.at(-1)?.status==="completed")break;await Bun.sleep(5);}
+ const a=(await service.snapshot(id)).impactSummaries!.at(-1)!;expect(a.status).toBe("completed");
+ service.beginExit();scene="B";await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ scene="A";await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ await service.ensureCurrentImpact(id,executionId);
+ const state=await service.snapshot(id);expect(state.impactSummaries).toHaveLength(3);
+ expect(state.impactSummaries!.find(item=>item.key===a.key)?.messageId).toBe(a.messageId);
+ expect(()=>assertImpactSummariesComplete(state)).not.toThrow();
+});
+
+test("替代事件落盘失败不解除旧义务，重试只建立一个当前补充", async () => {
+ const { service,id,executionId,root }=await fixture(async()=>"原总结");let scene="base";
+ service.setExecutionSceneReader(async()=>({scene}));await summaryStarted(service,id);await settled(service,id);service.beginExit();
+ scene="old";await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ const old=(await service.snapshot(id)).impactSummaries!.at(-1)!;
+ scene="new";
+ const append=spyOn(HarnessJournal.prototype,"append").mockRejectedValueOnce(new Error("disk failure"));
+ try{await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("disk failure");}finally{append.mockRestore();}
+ const failed=(await HarnessJournal.open(id,root)).snapshot;
+ expect(failed.impactSummaries).toHaveLength(2);expect(failed.impactSummaries!.at(-1)?.supersededBy).toBeUndefined();
+ expect(()=>assertImpactSummariesComplete(failed)).toThrow("影响面");
+ await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ await expect(service.ensureCurrentImpact(id,executionId)).rejects.toThrow("现场已变化");
+ const repaired=(await HarnessJournal.open(id,root)).snapshot;
+ expect(repaired.impactSummaries).toHaveLength(3);expect(repaired.impactSummaries!.find(item=>item.key===old.key)?.supersededBy).toBe(repaired.impactSummaries!.at(-1)?.key);
 });
 
 test("Capsule携带原批准与确认事实，不将草案阶段约束当永久执行禁令",async()=>{

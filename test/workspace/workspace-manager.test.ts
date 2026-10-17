@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test as bunTest } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitRepository } from "../../src/workspace/git-repository";
@@ -36,6 +36,135 @@ async function fixture() {
   const workspaceId = crypto.randomUUID(), identity = { runId: crypto.randomUUID(), nodeId: "a", attempt: 1 };
   return { root, cwd, manager, workspaceId, authorization, identity };
 }
+test("原版恢复先核验writer与保存现场；漂移拒绝且不回滚，completed仅允许补收尾", async () => {
+  const { manager, workspaceId, authorization, identity } = await fixture();
+  const auth = { ...authorization, nodes: [authorization.nodes[0]] };
+  const config = { version: 2 as const, authorization: auth, bindings: [{ nodeId: "a", workspaceId }] };
+  const workspace = await manager.create(workspaceId, auth);
+  await manager.assertResumeReady(config, identity.runId, []);
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, identity), "original-writer");
+  await expect(manager.assertResumeReady(config, identity.runId, [])).rejects.toThrow("writer尚未交接");
+  await expect(manager.assertResumeReady(config, crypto.randomUUID(), ["a"])).rejects.toThrow("writer尚未交接");
+  await manager.assertResumeReady(config, identity.runId, ["a"]);
+  expect((await manager.inspect(workspaceId)).lease).toEqual(lease);
+  await writeFile(join(workspace.cwd, "a.txt"), "partial\n");
+  await manager.finish(lease, false, async () => true);
+  await manager.assertResumeReady(config, identity.runId, []);
+  await writeFile(join(workspace.cwd, "a.txt"), "external-change\n");
+  await expect(manager.assertResumeReady(config, identity.runId, [])).rejects.toThrow("请修订");
+  expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("external-change\n");
+  expect((await manager.inspect(workspaceId)).lease).toBeNull();
+});
+test("跨Execution明确交接partial持续worktree，新授权不覆盖旧版且新节点重新工作",async()=>{
+ const {manager,workspaceId,authorization,identity,root}=await fixture();
+ const original={...authorization,nodes:[authorization.nodes[0]]},workspace=await manager.create(workspaceId,original);
+ const lease=await manager.bindWriter(await manager.acquire(workspaceId,identity),"original");
+ await writeFile(join(workspace.cwd,"a.txt"),"partial\n");await manager.finish(lease,false,async()=>true);
+ const prior=(await manager.inspect(workspaceId)).results[0],executionId=crypto.randomUUID();
+ const renewed={...original,authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),nodes:[{nodeId:"repair"}]};
+ const config={version:2 as const,authorization:renewed,bindings:[{nodeId:"repair",workspaceId}],continuation:{executionId:identity.runId,heads:[{workspaceId,commit:prior.commit}]}};
+ await manager.prepareExecution(executionId,config);await manager.prepareExecution(executionId,config);
+ await expect(manager.prepareExecution(executionId,{...config,continuation:{...config.continuation,executionId:crypto.randomUUID()}})).rejects.toThrow("来源已冻结");
+ await expect(manager.prepareExecution(executionId,{...config,continuation:{...config.continuation,heads:[{workspaceId,commit:original.baseCommit}]}})).rejects.toThrow("来源已冻结");
+ const handed=await manager.inspect(workspaceId);expect(handed.authorization).toEqual(original);expect(handed.results).toEqual([prior]);expect(handed.executionAuthorizations).toHaveLength(1);
+ expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("partial\n");
+ await expect(manager.acquire(workspaceId,identity)).rejects.toThrow("旧执行");
+ await manager.assertResumeReady(config,executionId,[]);
+ await expect(manager.acquire(workspaceId,{runId:executionId,nodeId:"a",attempt:1})).rejects.toThrow("未获");
+ const next=await manager.bindWriter(await manager.acquire(workspaceId,{runId:executionId,nodeId:"repair",attempt:1}),"next");
+ await writeFile(join(workspace.cwd,"a.txt"),"repaired\n");await manager.finish(next,true,async()=>true);
+ const ready=await manager.finalizeSource(executionId,config,["repair"]);expect(ready.baseCommit).toBe(original.baseCommit);
+ expect((await manager.inspect(workspaceId)).results).toHaveLength(2);expect(ready.commit).not.toBe(prior.commit);
+ await expect(manager.assertResumeReady({version:2,authorization:original,bindings:[{nodeId:"a",workspaceId}]},identity.runId,[])).rejects.toThrow("旧版恢复只读");
+ const reopened=await WorkspaceManager.open(join(root,"state"),crypto.randomUUID());expect(reopened.authorizationFor(await reopened.inspect(workspaceId),executionId)).toEqual(renewed);
+},25_000);
+test("续作拒绝旧批准、未知writer、来源漂移；拒绝时原授权和partial不变",async()=>{
+ const {manager,workspaceId,authorization,identity}=await fixture(),original={...authorization,nodes:[authorization.nodes[0]]};
+ const workspace=await manager.create(workspaceId,original),lease=await manager.bindWriter(await manager.acquire(workspaceId,identity),"original");
+ const renewed={...original,authorizationId:crypto.randomUUID(),nodes:[{nodeId:"repair"}]},executionId=crypto.randomUUID();
+ let config={version:2 as const,authorization:renewed,bindings:[{nodeId:"repair",workspaceId}],continuation:{executionId:identity.runId,heads:[{workspaceId,commit:original.baseCommit}]}};
+ await expect(manager.prepareExecution(executionId,config)).rejects.toThrow("writer未交接");
+ await writeFile(join(workspace.cwd,"a.txt"),"partial\n");await manager.finish(lease,false,async()=>true);
+ const before=await manager.inspect(workspaceId);config={...config,continuation:{executionId:identity.runId,heads:[{workspaceId,commit:before.results[0].commit}]}};
+ await expect(manager.prepareExecution(executionId,{...config,authorization:{...renewed,authorizationId:original.authorizationId}})).rejects.toThrow("独立新授权");
+ await writeFile(join(workspace.cwd,"a.txt"),"external\n");await expect(manager.prepareExecution(executionId,config)).rejects.toThrow("现场变化");
+ expect(await manager.inspect(workspaceId)).toEqual(before);expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("external\n");
+},20_000);
+test("接管后的干净外部commit不等于批准现场，writer拒绝且保留新HEAD",async()=>{
+ const {manager,workspaceId,authorization,identity}=await fixture(),original={...authorization,nodes:[authorization.nodes[0]]};
+ const workspace=await manager.create(workspaceId,original),lease=await manager.bindWriter(await manager.acquire(workspaceId,identity),"original");
+ await writeFile(join(workspace.cwd,"a.txt"),"saved\n");await manager.finish(lease,true,async()=>true);
+ const commit=(await manager.inspect(workspaceId)).results[0].commit,executionId=crypto.randomUUID();
+ const renewed={...original,authorizationId:crypto.randomUUID(),nodes:[{nodeId:"repair"}]};
+ await manager.prepareExecution(executionId,{version:2,authorization:renewed,bindings:[{nodeId:"repair",workspaceId}],continuation:{executionId:identity.runId,heads:[{workspaceId,commit}]}});
+ const child=Bun.spawn(["/usr/bin/git","-c","user.name=External","-c","user.email=external@example.invalid","commit","--allow-empty","-m","External scene change"],{cwd:workspace.cwd,stdout:"ignore",stderr:"pipe"});expect(await child.exited).toBe(0);
+ const changed=(await (await GitRepository.open(workspace.cwd)).inspect()).head;expect(changed).not.toBe(commit);
+ await expect(manager.acquire(workspaceId,{runId:executionId,nodeId:"repair",attempt:1})).rejects.toThrow("HEAD被外部修改");
+ expect((await (await GitRepository.open(workspace.cwd)).inspect()).head).toBe(changed);expect((await manager.inspect(workspaceId)).lease).toBeNull();
+},20_000);
+test("多目录交接关联部分失败，原请求补剩余授权不重复、零writer投递",async()=>{
+ const {manager,authorization,identity}=await fixture(),oldIds=[crypto.randomUUID(),crypto.randomUUID()],heads=[];
+ for(let index=0;index<2;index++){
+  const auth={...authorization,nodes:[authorization.nodes[index]]},workspace=await manager.create(oldIds[index],auth);
+  const lease=await manager.bindWriter(await manager.acquire(oldIds[index],{...identity,nodeId:auth.nodes[0].nodeId}),"original");
+  await writeFile(join(workspace.cwd,"a.txt"),`saved-${index}\n`);const saved=await manager.finish(lease,false,async()=>true);heads.push({workspaceId:oldIds[index],commit:saved.commit});
+ }
+ const executionId=crypto.randomUUID(),renewed={...authorization,authorizationId:crypto.randomUUID(),nodes:[{nodeId:"repair-a"},{nodeId:"repair-b"}]};
+ const config={version:2 as const,authorization:renewed,bindings:oldIds.map((workspaceId,index)=>({workspaceId,nodeId:renewed.nodes[index].nodeId})),continuation:{executionId:identity.runId,heads}};
+ const target=manager as unknown as {write:(...args:unknown[])=>Promise<void>},original=target.write.bind(manager);let writes=0;
+ const injected=spyOn(target,"write").mockImplementation(async(...args)=>{if(++writes===2)throw Error("association disk error");return original(...args);});
+ try{await expect(manager.prepareExecution(executionId,config)).rejects.toThrow("association disk error");}finally{injected.mockRestore();}
+ expect((await manager.inspect(oldIds[0])).executionAuthorizations).toHaveLength(1);expect((await manager.inspect(oldIds[1])).executionAuthorizations).toBeUndefined();
+ await manager.prepareExecution(executionId,config);
+ for(const id of oldIds){const record=await manager.inspect(id);expect(record.executionAuthorizations).toHaveLength(1);expect(record.lease).toBeNull();expect(record.results).toHaveLength(1);}
+},30_000);
+
+test("现场指纹识别同一路径dirty内容变化，读取不创建commit或覆盖文件", async () => {
+  const { cwd, authorization } = await fixture();
+  const repo = await GitRepository.open(cwd);
+  const first = await repo.sceneFingerprint();
+  await writeFile(join(cwd, "a.txt"), "dirty-one\n");
+  const second = await repo.sceneFingerprint();
+  await writeFile(join(cwd, "a.txt"), "dirty-two\n");
+  const third = await repo.sceneFingerprint();
+  expect(second.state.changedPaths).toEqual(third.state.changedPaths);
+  expect(second.hash).not.toBe(first.hash); expect(third.hash).not.toBe(second.hash);
+  expect((await repo.inspect()).head).toBe(authorization.baseCommit);
+  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("dirty-two\n");
+});
+test("现场指纹拒绝软链接和超限内容，不追读链接或接受不完整证据", async () => {
+  const { cwd, root } = await fixture();
+  const repo = await GitRepository.open(cwd);
+  await writeFile(join(root,"outside.txt"),"outside");
+  await symlink(join(root,"outside.txt"),join(cwd,"linked.txt"));
+  await expect(repo.sceneFingerprint()).rejects.toThrow();
+  expect(await Bun.file(join(root,"outside.txt")).text()).toBe("outside");
+  await rm(join(cwd,"linked.txt"));
+  await writeFile(join(cwd,"large.bin"),new Uint8Array(16*1024*1024+1));
+  await expect(repo.sceneFingerprint()).rejects.toThrow("16MiB");
+  expect((await repo.inspect()).changedPaths).toEqual(["large.bin"]);
+});
+test("工作文件回到HEAD但暂存区不同仍改变现场指纹，读取不清除暂存",async()=>{
+ const {cwd}=await fixture(),repo=await GitRepository.open(cwd);
+ const original=await repo.sceneFingerprint();
+ await writeFile(join(cwd,"a.txt"),"staged\n");
+ const add=Bun.spawn(["/usr/bin/git","add","--","a.txt"],{cwd,stdout:"ignore",stderr:"pipe"});expect(await add.exited).toBe(0);
+ await writeFile(join(cwd,"a.txt"),"base\n");
+ const changed=await repo.sceneFingerprint();expect(changed.hash).not.toBe(original.hash);
+ expect(changed.state.changedPaths).toEqual(["a.txt"]);
+ const read=Bun.spawn(["/usr/bin/git","show",":a.txt"],{cwd,stdout:"pipe",stderr:"pipe"});expect(await new Response(read.stdout).text()).toBe("staged\n");expect(await read.exited).toBe(0);
+});
+test("受管现场仅暂存区有变化时拒绝交接与空成果，不清除暂存内容",async()=>{
+ const {manager,workspaceId,authorization,identity}=await fixture();
+ const auth={...authorization,nodes:[authorization.nodes[0]]},workspace=await manager.create(workspaceId,auth);
+ await writeFile(join(workspace.cwd,"a.txt"),"staged\n");
+ const add=Bun.spawn(["/usr/bin/git","add","--","a.txt"],{cwd:workspace.cwd,stdout:"ignore",stderr:"pipe"});expect(await add.exited).toBe(0);
+ await writeFile(join(workspace.cwd,"a.txt"),"base\n");
+ await expect(manager.acquire(workspaceId,identity)).rejects.toThrow("未收尾");
+ await expect((await GitRepository.open(workspace.cwd)).save({requestId:crypto.randomUUID(),baseCommit:auth.baseCommit,startCommit:auth.baseCommit})).rejects.toThrow("暂存区与工作文件不一致");
+ const read=Bun.spawn(["/usr/bin/git","show",":a.txt"],{cwd:workspace.cwd,stdout:"pipe",stderr:"pipe"});expect(await new Response(read.stdout).text()).toBe("staged\n");expect(await read.exited).toBe(0);
+ expect((await (await GitRepository.open(workspace.cwd)).inspect()).head).toBe(auth.baseCommit);
+});
 test("最终交付拒绝锁/漂移，清理后仍可读取完整来源且关联失败重试不重复commit", async () => {
   const { manager, workspaceId, authorization, identity, cwd } = await fixture();
   const auth = { ...authorization, nodes: [authorization.nodes[0]] };
@@ -88,7 +217,16 @@ test("多独立分支拒绝交付，真实多父集成后只交付完整tree", a
   expect(delivery.commit).toBe(merged.commit); expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe([auth.baseCommit,...commits].join(" "));
   expect(await git("rev-parse", `${delivery.commit}^{tree}`)).toBe(await git("rev-parse", `${merged.commit}^{tree}`));
   expect(await git("rev-list", "--count", `${auth.baseCommit}..${delivery.commit}`)).toBe("3");
-});
+  const executionId=crypto.randomUUID(),renewed={...auth,authorizationId:crypto.randomUUID(),nodes:[{nodeId:"repair"}]};
+  const continuation={executionId:identity.runId,heads:[...bindings.slice(0,2).map((binding,index)=>({workspaceId:binding.workspaceId,commit:commits[index]})),{workspaceId:merge.workspaceId,commit:merged.commit}]};
+  await expect(manager.prepareExecution(executionId,{version:2,authorization:renewed,bindings:[{nodeId:"repair",workspaceId:bindings[0].workspaceId}],continuation})).rejects.toThrow("尚未被所选现场显式集成");
+  const nextConfig={version:2 as const,authorization:renewed,bindings:[{nodeId:"repair",workspaceId:merge.workspaceId}],continuation};
+  await manager.prepareExecution(executionId,nextConfig);
+  const nextLease=await manager.bindWriter(await manager.acquire(merge.workspaceId,{runId:executionId,nodeId:"repair",attempt:1}),"new-writer");
+  await writeFile(join(merge.cwd,"a.txt"),"repaired\n");await manager.finish(nextLease,true,async()=>true);
+  const next=await manager.finalizeSource(executionId,nextConfig,["repair"]);expect(await mainContains(next.commit,merged.commit)).toBe(true);
+  async function mainContains(source:string,parent:string){return (await git("merge-base",source,parent))===parent;}
+},40_000);
 
 test("partial不能自动最终交付，失败诊断耐久但不制造交付记录", async () => {
   const { manager, workspaceId, authorization, identity, root } = await fixture();

@@ -10,7 +10,7 @@ Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API�
 
 ## 两种模块形状
 
-### 受信任本地模块（CLI `wave-flow run`）
+### 受信任本地模块（用户选择并预检）
 
 ```ts
 import { agent, log, parallel, phase, pipeline } from "wave-flow";
@@ -19,6 +19,7 @@ export const meta = {
   name: "code-review",
   description: "审查变更并汇总问题。",
   phases: [{ title: "审查" }, { title: "汇总" }],
+  inputSchema: { type: "object", properties: { target: { type: "string", minLength: 1 } }, required: ["target"], additionalProperties: false },
   exampleArgs: { target: "src" },
 };
 
@@ -40,8 +41,7 @@ export default async function run(args: Args) {
 - 入口必须是恰好一个参数的函数声明 `export default async function run(args)`。
 - 顶层只允许 import、`meta`、类型声明与默认 `run`；不得执行其他顶层语句。
 
-运行：`wave-flow run <workflow.ts> [--input '<json>'] [--cwd <path>]`。`run()` 的返回值
-成为 Run 结果；内容型成果优先由 Agent 写入文件，返回值保持紧凑（路径、格式、摘要）。
+本地来源经桌面选择、预检并确认后执行，历史 `wave-flow run` 产品命令已删除；`run()` 的返回值成为 Run 结果。内容型成果优先由 Agent 写入文件，返回值保持紧凑（路径、格式、摘要）。冻结恢复使用原源码快照，不读取用户后来修改的文件；修改文件或输入须准备新版并确认新的Execution。
 
 ### 主控受限草案（`propose_workflow_revision` → 用户审批 → Execution）
 
@@ -75,7 +75,7 @@ async function run(args: Args) {
 
 ## `meta`
 
-Wave Flow 新增（新本地 Task，实施中）：纯字面量 `inputSchema?: JsonObject`，新本地任务预检必填 `type: "object"`，旧模块直接加载和冻结恢复不追加强制要求。参数 Schema 使用 AJV 校验，不自动填默认，`exampleArgs`不作为校验或批准。
+Wave Flow 新增（新本地 Task，已实现）：纯字面量 `inputSchema?: JsonObject`，新本地任务预检必填 `type: "object"`，旧模块直接加载和冻结恢复不追加强制要求。参数 Schema 使用 AJV 校验，不自动填默认，`exampleArgs`不作为校验或批准。
 
 ```ts
 type WorkflowMeta = {

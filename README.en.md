@@ -39,7 +39,7 @@ Each Worker uses an independent real ACP session with your selected local CLI an
 
 Adjust proposals through conversation and retain each revision. Discarding a proposal does not discard the task or conversation. The controller proposes; your confirmation authorizes execution. Follow progress, provide human assistance, pause or stop, and explicitly recover interrupted work.
 
-> Pre-execution proposal changes and original-version recovery are available. Post-execution workflow revision and continuation are not publicly enabled. Arbitrary node rollback and automatic cross-version replay are not provided.
+> Each new Task owns one evolving workflow chain. Revise source, input or CLI configuration after feedback, then explicitly confirm a new Execution on the safely handed-off current scene. Original-version recovery stays within the same Execution; arbitrary node rollback and cross-version automatic replay are not provided.
 
 ## A strong fit for
 
@@ -49,17 +49,22 @@ Adjust proposals through conversation and retain each revision. Discarding a pro
 
 ## Quick start
 
-Coming soon.
+Open the desktop app and choose a project, then select automatic orchestration, a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start.
+
+After the impact summary is complete, revise generated proposals through chat, prepare a template parameter version, or edit and recheck a local file. For CLI-only changes, choose “Keep source, prepare a new CLI configuration version.” Write revisions explicitly continue saved workspaces; independent branches require integration. New Executions work anew, and archived Tasks remain read-only.
 
 ## Current boundaries
 
 Wave Flow is in early development. Please keep these limits in mind:
 
-- The local `.ts` workflow task entry is not publicly enabled. URL workflow downloads, visual workflow editing, remote control, and cloud sync are not supported.
+- Local workflows are explicitly selected trusted `.ts` extensions inside the project. New local Tasks require a literal `meta.inputSchema` object schema; preflight reads but does not execute. URL downloads, visual workflow editing, remote control and cloud sync are not supported.
 - Controllers retain OS write isolation and four narrow tools. Workers use trusted native CLI configuration and permissions, without additional Wave Flow OS file isolation. Worktrees/cwd separate ordinary work, but do not prevent writing other worktrees, shared Git, user files or credentials. Native directories include `~/.codex` and `~/.kimi-code`; model tools can also modify configuration and credentials. Task intent is not a security guarantee. Parallel branches may change the same file; explicit integration resolves conflicts.
 - A complete ready source can be reviewed and explicitly squash-merged into a local branch. Target drift and dirty/staged/untracked overwrite risks are rejected; no automatic push. Git evidence does not cover external effects or replace sensitive-content review.
-- Automatic impact summaries are available. Continuing from an edited workflow across versions is not publicly enabled.
+- Revised execution requires complete impact summaries, current-scene supplements and verified writer handoffs. Every actual node in a new Execution works anew; completed results are not cached across Executions. New Tasks use one evolving chain; old multi-card records are not automatically migrated. Archived Tasks are read-only.
 - Interrupted execution recovery only reuses strictly matching completed prefixes within the same execution. It does not roll back files or undo external effects.
+- Worker stall handling records a diagnostic and interrupts after five minutes without native session events; it does not automatically resend tasks. Human-input waits, user pauses and control operations are exempt. Silence and read-only intent do not establish the absence of side effects.
+- Original-version recovery requires a complete impact summary and scene checks. Changed Git evidence requires a separate supplement and renewed confirmation. Unresolved writer handoffs, unsaved changes or inconsistent saved results block recovery without rolling back files; Git fingerprints do not establish external-system state.
+- If business execution completed but final Git source persistence failed, explicitly retry the Git handoff without rerunning business Workers. An unverified writer exit still prevents handoff.
 - The workbench and execution engine run locally. Model requests still go to the provider used by your chosen CLI; local execution does not mean offline inference or that data never leaves your machine.
 
 Have a suggestion or want to help maintain the project? Contact: <oliver.ysq@gmail.com>

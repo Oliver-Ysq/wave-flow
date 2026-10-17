@@ -85,6 +85,7 @@ export class ControlServer {
   #blocks = new BlockBroker();
   #answering = new Set<string>();
   #continuing = new Set<string>();
+  #blocking = new Set<string>();
 
   constructor(
     private readonly journal: RunJournal,
@@ -149,6 +150,14 @@ export class ControlServer {
     return this.state.hasNodeSession(nodeId, agentSessionId);
   }
 
+  /** 停滞采样的等待豁免：Run控制转换或原节点非running时不计时；不授权任何操作。 */
+  isWorkerWaiting(nodeId: string, agentSessionId: string): boolean {
+    const node = this.state.agent(nodeId);
+    const key = controlKey(this.runId, nodeId);
+    return node.agentSessionId !== agentSessionId || this.state.snapshot().status !== "running" || node.status !== "running"
+      || this.#completing.has(key) || Boolean(node.block&&this.#continuing.has(node.block.blockRequestId)) || this.#blocking.has(key);
+  }
+
   /** 原执行器按注册身份读取当前协议事实；互斥区核验会话/Journal/状态，返回副本且零写入。 */
   async workerTurnContext(identity: Pick<RegisteredControlNode,"runId"|"nodeId"|"agentSessionId"|"capability">):Promise<WorkerTurnContext> {
     return this.exclusive(async()=>{
@@ -162,9 +171,11 @@ export class ControlServer {
     });
   }
 
-  /** 执行器启动前回退等诊断的耐久写入；只追加 log.written 事实，不改变任何节点状态。 */
-  async recordExecutorDiagnostic(message: string): Promise<void> {
-    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message };
+  /** 执行器诊断耐久写入；可绑定当前节点/会话，缺省Run级，不改变业务状态。 */
+  async recordExecutorDiagnostic(message: string, nodeId: string | null = null, agentSessionId: string | null = null): Promise<void> {
+    if ((nodeId === null) !== (agentSessionId === null)) throw new Error("诊断节点与会话必须同时提供。");
+    if (nodeId !== null && this.state.agent(nodeId).agentSessionId !== agentSessionId) throw new Error("诊断会话已过期。");
+    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic: message, message };
     await this.journal.append(event);
     this.state.apply(event);
   }
@@ -223,6 +234,7 @@ export class ControlServer {
     }
     if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
     const created = this.#blocks.create(request);
+    this.#blocking.add(key);
     try {
       const event: JournalEvent = {
         type: "block.created", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
@@ -235,6 +247,8 @@ export class ControlServer {
     } catch (error) {
       this.#blocks.discard(created.blockRequestId);
       throw error;
+    } finally {
+      this.#blocking.delete(key);
     }
     return created;
     });

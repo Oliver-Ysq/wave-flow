@@ -12,7 +12,7 @@ description: 把用户的任务描述变成可运行的 Wave Flow Workflow 脚�
 
 Wave Flow 有两种模块形状，规则不同，写代码前必须确认目标：
 
-1. **受信任本地模块**：用户通过 CLI `wave-flow run <workflow.ts>` 运行的项目内 `.ts` 文件。
+1. **受信任本地模块**：用户明确选择并预检的项目内 `.ts` 文件；通过桌面新建任务入口确认运行，不提供历史 `wave-flow run` 命令。
    是 ESM 模块：`import` 作者 API → `export const meta` → `export default async function run(args)`。
 2. **主控受限草案**：主控（Harness）经 `propose_workflow_revision` 提交、用户审批后由受限 Runtime 执行的脚本。
    **不是模块**：禁止一切 `import`/`export`；顶层只有 `const meta = { … }`、`async function run(args)` 和类型声明；作者 API 由运行时注入。
@@ -32,7 +32,7 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 
 meta.description 用简短任务名称式说明（建议20个中文字符以内），用于聊天方案标题；不要把完整目标、范围和风险塞进description。详细内容放在提案goal/scope，短标题不替代这些边界。
 
-Wave Flow新增本地Task输入契约（实施中）：受信任本地模块用于新Task时必须声明纯字面量`meta.inputSchema`，为JSON-safe对象Schema（`type: "object"`）；无参数用`{type:"object",properties:{},additionalProperties:false}`。它不等于节点结果schema，不以exampleArgs猜默认或必填。旧模块直接加载/恢复可缺省，主控受限草案不因此自动获得新入口。
+Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用于新Task时必须声明纯字面量`meta.inputSchema`，为JSON-safe对象Schema（`type: "object"`）；无参数用`{type:"object",properties:{},additionalProperties:false}`。它不等于节点结果schema，不以exampleArgs猜默认或必填。旧模块直接加载/恢复可缺省，主控受限草案不因此自动获得新入口。
 
 `meta` 必须是纯字面量（无变量、调用、展开、计算属性或模板字符串）：
 
@@ -79,6 +79,8 @@ Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MC
 
 Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt，不保证上下文压缩后业务判断无损；作者不新增重试/收尾API，也不把回合结束当作交付。
 
+Wave Flow 新增恢复边界：原生ACP事件静默超过宿主窗口时只诊断并中断，保留现场，不自动重发任务、换CLI或创建attempt；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的成果恢复只补Git保存/关联，不重做Worker。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
+
 ## 人工决策
 
 - 脚本级的业务决策（仅在受限草案可用）：`decisionGate(id, question, answerSchema?)`，
@@ -94,7 +96,7 @@ Runtime在原Worker回合结束但未完成时，最多补发一次由Control当
 
 ## 受限草案的额外硬约束
 
-先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task；修订只能保存草案，现场续作尚未开放，不能承诺立即运行。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
+先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task。主控只能准备草案，不能批准或自动启动；用户确认和当前现场证据仍由Engine核验。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
 
 ### 影响面总结与证据读取（Wave Flow 新增设计）
 
@@ -103,6 +105,8 @@ Runtime在原Worker回合结束但未完成时，最多补发一次由Control当
 每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原状态、已验证交付、缺口与下一步；Schema通过不是验收。受管写以Capsule真实Git基准、ready/partial及commit说明影响，未配置或缺失/截断不能当完整基线。工作区外写没有Wave Flow OS拦截；网络/外部副作用不能由Git推断。只能提出草案，不能批准或派发。
 
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。
+源码修订必须先读取当前Capsule，提供顶层`baseRevision`等于当前最新版本；首次没有版本时允许0或省略。已有单链版本缺失或过期依据会拒绝，不能用迟到提案覆盖用户修改。参数模式仍使用`parameters.baseRevision`，两处同时提供时必须一致。该宿主版本护栏不新增Workflow作者API或执行权。
+宿主续作使用独立新授权，原worktree与实际HEAD明确引用，不覆盖旧授权或复制completed节点。作者不能提供continuation/workspace/commit字段。新版修改Prompt应先检查已有改动，再修正与验证，不返回历史JSON代替重新工作。最终来源须覆盖全部原保存commit；已集成ready分支可由完整来源父链覆盖，未集成/partial须明确接续处理，不直接当ready。CLI-only修订由用户准备配置新版本，主控不选择/批准/派发。
 这是 Wave Flow 主控控制面，不是 Workflow 作者 API。同一未执行候选的修改追加同卡版本，
 接受不执行，旧批准不能启动新版本。前次执行终态且主控空闲后，可以由用户显式发起下一轮；
 不得自动批准、启动或注入旧结果。修改模板控制流时同卡追加 generated 版本，Engine 留存

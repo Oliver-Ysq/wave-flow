@@ -19,7 +19,7 @@ export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,r
  const saveRequest=useRef<{payload:string;id:string}|null>(null);
  return <section className="connection-panel" aria-label="本地工作流预检">
    <header><h2>本地工作流预检</h2><button type="button" onClick={()=>{serial.current++;onClose();}}>返回</button></header>
-   <p>专用验收：只检查项目内 TypeScript 文件。预检不会创建任务、运行脚本或启动 Worker。</p>
+   <p>只检查项目内 TypeScript 文件。预检不会创建任务、运行脚本或启动 Worker。</p>
    <label>Workflow 文件路径<input value={path} disabled={busy||!!revision} onChange={event=>{setPath(event.target.value);setResult(null);}} placeholder="项目内 workflow.ts" /></label>
    {!revision&&<button type="button" disabled={busy} onClick={async()=>{const selected=await open({multiple:false,directory:false,filters:[{name:"TypeScript Workflow",extensions:["ts"]}]});if(typeof selected==="string"){setPath(selected);setResult(null);}}}>选择 TypeScript 文件</button>}
    <button type="button" disabled={busy||!path.trim()} onClick={async()=>{
@@ -29,6 +29,6 @@ export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,r
      finally{if(serial.current===token)setBusy(false);}
    }}>{busy?"正在静态检查…":"检查文件"}</button>
    {error&&<p role="alert">{error}</p>}
-   {result&&<><div role="status"><h3>静态预检通过：{result.meta.description}</h3><p>{result.meta.phases.map(phase=>phase.title).join(" / ")}</p><p>填写参数保存候选，不会自动运行。修订执行将在后续能力完成后开放。</p></div><CompactParameterForm identity={`${projectId}:${result.sourceHash}`} schema={result.inputSchema} initialValue={revision?.input??result.meta.exampleArgs??{}} busy={busy} onSubmit={async input=>{const payload=JSON.stringify({projectId,path:result.path,hash:result.sourceHash,input,replacement,revision});if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};setBusy(true);try{onPrepared(revision?await api.reviseLocalTask(revision.harnessRunId,revision.baseRevision,result.sourceHash,input,saveRequest.current.id):replacement?await api.reviseLocalTask(replacement.harnessRunId,replacement.baseRevision,result.sourceHash,input,saveRequest.current.id,result.path):await api.createLocalTask(projectId,result.path,result.sourceHash,input,saveRequest.current.id));}finally{setBusy(false);}}}/></>}
+   {result&&<><div role="status"><h3>静态预检通过：{result.meta.description}</h3><p>{result.meta.phases.map(phase=>phase.title).join(" / ")}</p><p>填写参数保存候选，不会自动运行。确认执行时会复核冻结版本和当前现场。</p></div><CompactParameterForm identity={`${projectId}:${result.sourceHash}`} schema={result.inputSchema} initialValue={revision?.input??result.meta.exampleArgs??{}} busy={busy} onSubmit={async input=>{const payload=JSON.stringify({projectId,path:result.path,hash:result.sourceHash,input,replacement,revision});if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};setBusy(true);try{onPrepared(revision?await api.reviseLocalTask(revision.harnessRunId,revision.baseRevision,result.sourceHash,input,saveRequest.current.id):replacement?await api.reviseLocalTask(replacement.harnessRunId,replacement.baseRevision,result.sourceHash,input,saveRequest.current.id,result.path):await api.createLocalTask(projectId,result.path,result.sourceHash,input,saveRequest.current.id));}finally{setBusy(false);}}}/></>}
  </section>;
 }

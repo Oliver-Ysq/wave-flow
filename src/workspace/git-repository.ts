@@ -1,6 +1,8 @@
 // Git temporary-index/NUL staging adapted from BloopAI/vibe-kanban d5cbb538.
 // Modified for Bun, durable candidates and explicit user merge. See third-party/NOTICE.md.
 import { link, lstat, mkdtemp, open, readFile, realpath, rm, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { WorkflowContractError } from "../workflow/errors";
 
@@ -49,7 +51,7 @@ export type GitWorkspaceState = {
   readonly head: string;
   /** 当前分支全名；detached HEAD 为 null。 */
   readonly branch: string | null;
-  /** 相对 HEAD 的 tracked/untracked 改动路径，重命名按删除与新增处理。 */
+  /** 相对HEAD的工作文件、暂存区及非ignored untracked差异；重命名按删除与新增，暂存差异也阻止交接。 */
   readonly changedPaths: readonly string[];
   /** 尚未解决的冲突路径；非空时不能交付。 */
   readonly conflicts: readonly string[];
@@ -191,10 +193,50 @@ export class GitRepository {
     const head = await this.commitOid("HEAD");
     const branch = (await git(this.cwd, ["symbolic-ref", "-q", "HEAD"], true)).trim() || null;
     const tracked = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
+    const staged = splitPaths(await git(this.cwd, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
     const untracked = splitPaths(await git(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z"]));
     const conflicts = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z", "--"]));
     const ignoredPaths=[...splitPaths(await git(this.cwd,["ls-files","--others","--ignored","--exclude-standard","-z"])), ...untracked.filter(path => path.split("/").includes("node_modules"))];
-    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...untracked.filter(path => !path.split("/").includes("node_modules"))])].sort(), conflicts,ignoredPaths };
+    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...staged, ...untracked.filter(path => !path.split("/").includes("node_modules"))])].sort(), conflicts,ignoredPaths };
+  }
+
+  /** 当前Git可见现场指纹；包括改动正文/删除/模式，忽略内容和外部系统不覆盖，变动中拒绝。 */
+  async sceneFingerprint(): Promise<{ readonly hash: string; readonly state: GitWorkspaceState }> {
+    const state = await this.inspect();
+    const index = await git(this.cwd, ["ls-files", "--stage", "-z"]);
+    const hash = createHash("sha256").update(JSON.stringify([state,index]));
+    let bytes = 0;
+    for (const path of state.changedPaths) {
+      const absolute = resolve(this.cwd, path);
+      const inside = relative(this.cwd, absolute);
+      if (!inside || inside === ".." || inside.startsWith("../") || isAbsolute(inside)) fail("现场证据路径越界。");
+      hash.update(JSON.stringify(path));
+      let handle;
+      try {
+        if (await realpath(join(absolute, "..")) !== join(absolute, "..")) fail("现场证据父目录包含软链接。");
+        handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") { hash.update("deleted"); continue; }
+        throw error;
+      }
+      try {
+        const before = await handle.stat();
+        bytes += before.size;
+        if (!before.isFile() || bytes > 16 * 1024 * 1024) fail("当前现场证据无法完整核验或超过16MiB。");
+        hash.update(JSON.stringify([before.mode, before.size]));
+        const content = await handle.readFile();
+        if (content.length !== before.size) fail("现场读取期间文件长度变化，请重新检查。");
+        hash.update(content);
+        const after = await handle.stat();
+        const current = await lstat(absolute);
+        if (await realpath(join(absolute, "..")) !== join(absolute, "..")
+          || current.isSymbolicLink() || current.dev !== after.dev || current.ino !== after.ino
+          || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+          || current.size !== after.size || current.mtimeMs !== after.mtimeMs || current.ctimeMs !== after.ctimeMs) fail("现场读取期间发生变化或文件替换，请重新检查。");
+      } finally { await handle.close(); }
+    }
+    if (JSON.stringify(await this.inspect()) !== JSON.stringify(state) || await git(this.cwd, ["ls-files", "--stage", "-z"]) !== index) fail("现场读取期间Git状态或暂存区变化，请重新检查。");
+    return { hash: hash.digest("hex"), state };
   }
 
   /** 集成前重新核验真实commit与父提交范围，不能只相信Workspace JSON中的hash。 */
@@ -281,6 +323,7 @@ export class GitRepository {
       // 路径已经由tracked diff + exclude-standard untracked核定，-f仅避免新ignore规则拒绝tracked文件。
       if (state.changedPaths.length) await git(this.cwd, ["--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], false, env, state.changedPaths.join("\0")+"\0");
       let tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
+      if (!request.mergeParents?.length && tree === (await git(this.cwd,["rev-parse","HEAD^{tree}"])).trim()) fail("暂存区与工作文件不一致但工作内容等于HEAD；请先处理现场，不清空暂存或制造空成果。");
       // 同请求候选以Git tree耐久冻结；失败重试不重新解释后来产生的成果。
       const intent = join(await this.gitDirectory(), `wf-save-${request.requestId}.json`);
       const candidate = { request, tree, paths: [...state.changedPaths].sort() };

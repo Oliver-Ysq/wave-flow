@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   // 解析或启动历史控制面入口。
   process.env.WF_DESKTOP_ENGINE = "1";
   const deterministicForTest = process.env.WF_ENGINE_DETERMINISTIC === "1";
-  const engine = new DesktopExecutionEngine({ deterministicForTest, singleWorkflowForAcceptance: process.env.WF_SINGLE_WORKFLOW_ACCEPTANCE === "1" });
+  const engine = new DesktopExecutionEngine({ deterministicForTest });
   // Engine 进程重启时绝不认领旧 ACP session。必须在接受任何新 action 前将
   // 上一个进程遗留的活跃事实收敛，避免 UI 短暂展示一个实际上无人持有的 Worker。
   await engine.convergeStaleAcpWorkers();

@@ -167,8 +167,17 @@ export type HarnessSnapshot = {
   readonly workflowRevisions: readonly WorkflowRevision[];
   /** 本 Harness 顺序拥有的 WorkflowExecution 登记；执行细节在 Execution 自己的 Run Journal。 */
   readonly executions: readonly WorkflowExecutionRecord[];
+  /** 最终确认在准备版本前冻结的请求摘要；历史缺省为空，重试不能更换载荷。 */
+  readonly executionConfirmations?: readonly ExecutionConfirmation[];
   /** 主控发起的用户决策请求；答案经独立 API 耐久，不经过回合 mutation 锁。 */
   readonly decisions: readonly HarnessDecision[];
+};
+
+/** 最终确认的耐久收据；不代表Execution已关联或允许后台自动投递。 */
+export type ExecutionConfirmation = {
+  /** 用户确认UUID，同Task内唯一。 */ readonly requestId: string;
+  /** 确认展示的正整数版本，准备参数版本时仍保持原值。 */ readonly revision: number;
+  /** 版本、输入、配置及现场证据的SHA-256。 */ readonly payloadHash: string;
 };
 
 /** 聊天执行历史的稳定投影，不复制节点权威状态。 */
@@ -195,6 +204,12 @@ export type ExecutionHistoryItem={
 
 /** 终态事件同时建立的总结义务；完整回答及回合终结耐久后才完成。 */
 export type ImpactSummary = {
+  /** 总结使用的现场证据SHA-256；缺省为尚未绑定，不能作为最新现场批准。 */
+  readonly evidenceHash?: string;
+  /** 现场补充绑定原总结key；缺省为原终态总结，原回答不改写。 */
+  readonly supplementOf?: string;
+  /** 过时且未完成的现场补充由哪个证据义务替代；缺省仍有效，保留原状态/诊断历史。 */
+  readonly supersededBy?: string;
   /** 最新总结回合的唯一身份；旧记录缺省使用summary:key，重试不复用过程身份。 */
   readonly turnId?: string;
   /** Task/execution/attempt/终态事实确定性 SHA-256，不是授权秘密。 */
@@ -310,6 +325,8 @@ export type ExecutionConfigSnapshot = {
 
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */
 export type WorkflowExecutionRecord = {
+  /** 前一终态Execution的启动现场证据；首次缺省，确认时冻结，不作为跨执行Replay或权限。 */
+  readonly sceneEvidenceHash?:string;
   /** 来源控制路由；历史缺省restricted-execution；local-run使用独立Run Store，不变更源码信任。 */
   readonly kind?: "restricted-execution" | "local-run";
   /** 模板确认请求 UUID；缺省为历史/自动编排执行，同请求重试不再次派发。 */

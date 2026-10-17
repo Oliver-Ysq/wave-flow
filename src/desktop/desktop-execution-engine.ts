@@ -6,6 +6,7 @@ import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
+import { ImpactSupplementRequiredError } from "../harness/impact-summary";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import type { AgentNodeExecutor } from "../runtime/run-types";
@@ -65,7 +66,7 @@ export type EngineEventFrame = {
 
 /** Desktop Execution Engine 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
 export type DesktopExecutionEngineOptions = {
-  /** 专用验收构建启用单链基础；生产默认false，不迁移存量Task。 */
+  /** 新Task单链/三来源契约，默认true；false仅供兼容测试，不迁移存量Task。 */
   readonly singleWorkflowForAcceptance?: boolean;
   /** 仅自动测试使用确定性执行器；不能用于用户 CLI。默认 false。 */
   readonly deterministicForTest?: boolean;
@@ -143,7 +144,8 @@ export class DesktopExecutionEngine {
   constructor(options: DesktopExecutionEngineOptions | boolean = {}) {
     const normalized = typeof options === "boolean" ? { deterministicForTest: options } : options;
     this.deterministicForTest = normalized.deterministicForTest === true;
-    this.singleWorkflowForAcceptance = normalized.singleWorkflowForAcceptance === true;
+    // 新建Task默认启用联合验收后的单链/三来源/修订续作；false仅供存量兼容测试。
+    this.singleWorkflowForAcceptance = normalized.singleWorkflowForAcceptance !== false;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
     this.harnessRoot = harnessRoot;
@@ -176,15 +178,21 @@ export class DesktopExecutionEngine {
       if (this.hasCustomHarnessSession) return { fingerprint: "injected-harness-session" };
       const runtime = await this.#cliRuntimes.resolveSelectedHarness();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
-    }, normalized.singleWorkflowForAcceptance ?? false);
+    }, this.singleWorkflowForAcceptance);
     // 事件总线：只把耐久事实派生的事件推给订阅者；瞬时 reasoning/assistant delta 不上帧，
     // Web 实时展示与重开回放因此始终同源（Journal → 投影/事件帧）。
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
       finalizeSource: (executionId, config, snapshot) => this.finalizeSource(executionId, config, snapshot),
+      prepareResume: async (executionId, snapshot) => {
+        const original = this.#workspaceExecutors.get(executionId);
+        if (!original) return; // 新Engine不认领旧writer，后续现场/退出核验仍fail closed。
+        for (const node of snapshot.phases.flatMap(phase => phase.agents)) if (node.status === "completed") await original.finalizeCompleted(node);
+      },
     }, harnessRoot, this.storeRoot,this.workspaceRoot);
     this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
+    this.#harness.setExecutionSceneReader((taskId, executionId) => this.#executions.sceneEvidence(taskId, executionId));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
@@ -509,6 +517,7 @@ export class DesktopExecutionEngine {
   private async validateExecutionConfigValue(harnessRunId: string, revisionNumber: number, raw: unknown): Promise<import("../harness/types").ExecutionConfigSnapshot> {
     if (!raw) throw new EngineActionError(400, "创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
     const snapshot = await this.#harness.snapshot(harnessRunId);
+    if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length&&!this.singleWorkflowForAcceptance)throw new EngineActionError(409,"修订现场续作仅专用验收入口可用，尚未正式开放。");
     const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
     if (!revision) throw new EngineActionError(400, "创建 Execution 必须绑定当前 revision。 ");
     const extracted = extractAgentWorkers(revision.source);
@@ -517,6 +526,7 @@ export class DesktopExecutionEngine {
     let config: import("../harness/types").ExecutionConfigSnapshot;
     try { config = validateExecutionConfig(raw, extracted.workers, verified); }
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    if(config.workspaces?.continuation&&snapshot.task?.workflowContract!=="single-workflow-v1")throw new EngineActionError(409,"旧任务不能通过续作配置扩张执行契约。");
     const harnessRuntimeId = snapshot.runtime?.runtimeId ?? list.harnessRuntimeId;
     if (!harnessRuntimeId || config.fallbackRuntimeId !== harnessRuntimeId) throw new EngineActionError(400, "执行配置快照的回退目标必须是当前主控 Runtime。 ");
     return config;
@@ -542,7 +552,26 @@ export class DesktopExecutionEngine {
         workspacePlan = { nodeIds: intent.nodeIds, repository: snapshot.cwd, baseCommit: null, dirtyPaths: [], diagnostic: intent.uncertain ? "写意图包含动态或展开选项，需改为可核验固定节点。" : null };
         if (!intent.uncertain) try { const git = await (await GitRepository.open(snapshot.cwd)).inspect(); workspacePlan = { ...workspacePlan, baseCommit: git.head, dirtyPaths: git.changedPaths }; } catch (error) { workspacePlan = { ...workspacePlan, diagnostic: error instanceof Error ? error.message : String(error) }; }
       }
-      return { workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
+      const sceneEvidenceHash=snapshot.task?.workflowContract==="single-workflow-v1"?await this.#harness.currentImpactEvidence(harnessRunId):null;
+      let continuationPlan:ExecutionPlanResponse["continuationPlan"]=null;
+      const prior=[...snapshot.executions].reverse().find(item=>item.config?.workspaces);
+      if(workspacePlan&&!intent.uncertain&&snapshot.task?.workflowContract==="single-workflow-v1"&&prior?.config?.workspaces){
+        if(!this.singleWorkflowForAcceptance)throw new Error("修订现场续作仅专用验收入口可用。");
+        const frozen=prior.config.workspaces,manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId),items=[];
+        for(const workspaceId of new Set(frozen.bindings.map(binding=>binding.workspaceId))){
+          const record=await manager.inspect(workspaceId),latest=record.results.at(-1);
+          if(record.lease||record.cleanedAt||record.cleanupRequestedAt)throw new Error("原writer未交接或工作区已清理，不能准备新版写入。");
+          if(!latest)continue;
+          const repo=await GitRepository.open(record.cwd),scene=await repo.inspect();
+          if(latest.runId!==prior.executionId||scene.head!==latest.commit||scene.changedPaths.length||scene.conflicts.length)throw new Error("原现场尚未保存或已经漂移，请先处理原执行成果。");
+          for(const result of record.results)await repo.verifyCommitObject(result.commit,result.startCommit,result.paths);
+          items.push({workspaceId,commit:latest.commit,nodeIds:frozen.bindings.filter(binding=>binding.workspaceId===workspaceId).map(binding=>binding.nodeId),ready:latest.ready});
+        }
+        if(!items.length)throw new Error("原执行没有可交接的已保存现场。");
+        continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaces:items};
+        workspacePlan={...workspacePlan,baseCommit:frozen.authorization.baseCommit,dirtyPaths:[],diagnostic:null};
+      }
+      return { continuationPlan,sceneEvidenceHash, workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -691,6 +720,7 @@ export class DesktopExecutionEngine {
       }
       case "templates.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value);
       case "executions.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value,false);
+      case "workflows.prepareConfigurationRevision": return {harness:await this.#harness.prepareConfigurationRevision(requiredString(value,"harnessRunId"),requiredString(value,"clientRequestId"),requiredInteger(value,"baseRevision"))};
       case "harnesses.list": return this.listHarnesses();
       case "harnesses.create": return this.createHarness(value);
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
@@ -700,6 +730,15 @@ export class DesktopExecutionEngine {
       case "harnesses.stopImpactSummary": return {harness:await this.#harness.stopImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"),requiredString(value,"turnId"))};
       case "harnesses.recoverController": return {harness:await this.#harness.recoverController(requiredString(value,"harnessRunId"))};
       case "executions.capsule": return this.#harness.executionCapsule(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
+      case "executions.checkScene": {
+        const taskId=requiredString(value,"harnessRunId"), executionId=requiredString(value,"executionId");
+        try { await this.#harness.ensureCurrentImpact(taskId,executionId); }
+        catch (error) {
+          if (!(error instanceof ImpactSupplementRequiredError)) throw error;
+          // 变化已耐久建立pending补充，检查动作返回待办，不谎报启动成功。
+        }
+        return {harness:await this.#harness.snapshot(taskId)};
+      }
       case "harnesses.abort": return this.abortHarness(requiredString(value, "harnessRunId"), {});
       case "harnesses.complete": {const request=value as Record<string,unknown>;if(request.abandonImpactSummaries!==undefined&&typeof request.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return {harness:await this.#harness.complete(requiredString(value,"harnessRunId"),request.abandonImpactSummaries===true)};}
       case "harnesses.retryInitialization": return { harness: await this.#harness.retryInitialization(requiredString(value, "harnessRunId")) };
@@ -778,7 +817,9 @@ export class DesktopExecutionEngine {
 
   /** 模板最终确认：同一生命周期短事务复核资格/输入/配置，再批准、登记和派发。 */
   private async confirmTemplate(id:string,value:unknown,templateOnly=true):Promise<ExecutionResponse>{
-    if(Object.keys(object(value)).some(key=>!["harnessRunId","revision","config","clientRequestId","input"].includes(key)))throw new Error("模板确认不接受额外字段。");
+    if(Object.keys(object(value)).some(key=>!["harnessRunId","revision","config","clientRequestId","input","sceneEvidenceHash"].includes(key)))throw new Error("模板确认不接受额外字段。");
+    const confirmedScene=object(value).sceneEvidenceHash;
+    if(confirmedScene!==undefined&&confirmedScene!==null&&(typeof confirmedScene!=="string"||! /^[a-f0-9]{64}$/.test(confirmedScene)))throw new Error("确认现场证据版本无效。");
     const requestId=requiredString(value,"clientRequestId");
     if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw new Error("确认请求必须是 UUID。");
     return this.#harness.lifecycle.run(id,async()=>{
@@ -791,11 +832,18 @@ export class DesktopExecutionEngine {
       const rawConfig=object(value).config;
       const localWrite=revision.localOrigin?readWorkspaceWriteIntent(revision.source):null;
       if(revision.localOrigin ? (localWrite!.nodeIds.length||localWrite!.uncertain ? !isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces : rawConfig!==undefined) : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。" : "确认配置必须是 JSON-safe 对象。");
-      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null})).digest("hex");
+      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null,...(confirmedScene?{sceneEvidenceHash:confirmedScene}:{})})).digest("hex");
+      const receipt=snapshot.executionConfirmations?.find(item=>item.requestId===requestId);
+      if(receipt&&(receipt.payloadHash!==payloadHash||receipt.revision!==number))throw new Error("相同确认请求不能更换版本、输入或配置。");
       const previous=snapshot.executions.find(item=>item.confirmationRequestId===requestId);
       if(previous){
         if(previous.confirmationPayloadHash!==payloadHash)throw new Error("相同确认请求不能更换版本、输入或配置。");
         return this.executionSnapshot(id,previous.executionId);
+      }
+      if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length&&!this.singleWorkflowForAcceptance)throw new Error("修订现场续作仅专用验收入口可用，尚未正式开放。");
+      if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length){
+        const current=await this.#harness.currentImpactEvidence(id);
+        if(!confirmedScene||confirmedScene!==current)throw new Error("确认时的现场证据已变化，请重新检查并确认；不启动新版工作。");
       }
       // 若上次确认已耐久参数新版本、却在登记执行前失败，同请求只能继续那个
       // 已保存版本；不能把任意旧revision重新变为可启动。
@@ -806,6 +854,7 @@ export class DesktopExecutionEngine {
       else if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("生成方案的输入须由主控明确准备，不能在启动时注入未知参数。");
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
       const config=rawConfig===undefined?undefined:await this.validateExecutionConfigValue(id,number,rawConfig);
+      if(!receipt)await this.#harness.prepareExecutionConfirmation(id,{requestId,revision:number,payloadHash});
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
         const origin=revision.templateOrigin;
@@ -813,7 +862,7 @@ export class DesktopExecutionEngine {
         selected=prepared.workflowRevisions.find(item=>item.saveRequestId===requestId)!;
       }
       if(selected.acceptedAt===null)await this.#harness.acceptWorkflowRevision(id,selected.revision);
-      const created=await this.#executions.createExecution(id,selected.revision,input,config,{confirmationRequestId:requestId,confirmationPayloadHash:payloadHash});
+      const created=await this.#executions.createExecution(id,selected.revision,input,config,{confirmationRequestId:requestId,confirmationPayloadHash:payloadHash,...(confirmedScene?{sceneEvidenceHash:confirmedScene as string}:{})});
       return {...created,controllable:this.#executions.isControllable(created.execution.executionId)};
     });
   }

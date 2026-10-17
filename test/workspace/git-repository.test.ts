@@ -34,7 +34,7 @@ test("显式squash合入已checkout主分支，单父/同请求幂等，未跟�
  await expect(repo.fileDiff(base,saved.commit,".git/config")).rejects.toThrow("不属于");
  await writeFile(join(cwd,"user.txt"),"keep");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"user.txt")).text()).toBe("keep");await rm(join(cwd,"user.txt"));
  await writeFile(join(cwd,"b.txt"),"dirty\n");await git(cwd,"add","b.txt");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"b.txt")).text()).toBe("dirty\n");await git(cwd,"restore","--staged","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");
- await writeFile(join(cwd,"b.txt"),"staged\n");await git(cwd,"add","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");expect((await repo.inspect()).changedPaths).toEqual([]);await expect(repo.mergeSquash(input)).rejects.toThrow("暂存");await git(cwd,"restore","--staged","b.txt");
+  await writeFile(join(cwd,"b.txt"),"staged\n");await git(cwd,"add","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");expect((await repo.inspect()).changedPaths).toEqual(["b.txt"]);await expect(repo.mergeSquash(input)).rejects.toThrow("未提交/暂存");await git(cwd,"restore","--staged","b.txt");
  const merged=await repo.mergeSquash(input);expect(await repo.mergeSquash(input)).toEqual(merged);
  expect(await git(cwd,"show","-s","--format=%P",merged.commit)).toBe(base);expect(await git(cwd,"rev-list","--count",`${base}..main`)).toBe("1");
  expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("result\n");expect((await repo.inspect()).changedPaths).toEqual([]);

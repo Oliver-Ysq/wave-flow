@@ -165,6 +165,19 @@ export type CreateExecutionRequest = {
 
 /** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
 export type ExecutionPlanResponse = {
+  /** 原执行安全可交接的Git现场；仅专用续作验收提供，用户明确选择，不自动合并partial。 */
+  readonly continuationPlan?: {
+    /** 同Task最近写执行UUID；中间只读轮次不清除已有成果。 */ readonly executionId:string;
+    /** 原冻结Git基准，保留累计diff。 */ readonly baseCommit:string;
+    /** 各原分支当前保存现场，非ready仍显示partial。 */ readonly workspaces:readonly {
+      /** 原受管目录UUID。 */ readonly workspaceId:string;
+      /** 当前可核验HEAD。 */ readonly commit:string;
+      /** 原绑定节点名称，帮助用户选现场，不复制节点完成状态。 */ readonly nodeIds:readonly string[];
+      /** 最近保存是否ready；false保留未完成状态。 */ readonly ready:boolean;
+    }[];
+  }|null;
+  /** 最新终态执行的现场证据hash；首次为null，确认须携带，变化拒绝旧确认；不是授权凭据。 */
+  readonly sceneEvidenceHash?: string | null;
   /** 固定写节点与实时Git基准预检；无写节点为null，无法验证有diagnostic并禁止受管写。 */
   readonly workspacePlan?: { readonly nodeIds: readonly string[]; readonly repository: string; readonly baseCommit: string | null; readonly dirtyPaths: readonly string[]; readonly diagnostic: string | null } | null;
   /** 已校验 meta.phases 的声明顺序标题；只作预览词表，不表达执行顺序或依赖。 */

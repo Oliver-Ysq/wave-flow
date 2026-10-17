@@ -16,3 +16,11 @@ test("历史无 cardId 不与同名新卡合并，也永远不可编辑",()=>{
  expect(workflowCells(task).map(item=>item.revision)).toEqual([1,2,3]);
  expect(editableRevision(task,legacyA)).toBe(false);expect(editableRevision(task,legacyB)).toBe(false);
 });
+test("单链执行后新修订可编辑，旧多卡规则不迁移；活跃或已执行新版仍禁止",()=>{
+ const first=revision(1,"card"),second=revision(2,"card"),executions=[{revision:1,finishedAt:"finished"}];
+ const task={task:{title:"目标",workflowContract:"single-workflow-v1"},status:"idle",workflowRevisions:[first,second],executions} as unknown as HarnessSnapshot;
+ expect(editableRevision(task,second)).toBe(true);expect(editableRevision(task,first)).toBe(false);
+ expect(editableRevision({...task,task:{...task.task!,workflowContract:undefined}},second)).toBe(false);
+ expect(editableRevision({...task,executions:[{revision:1,finishedAt:null}] as never},second)).toBe(false);
+ expect(editableRevision({...task,executions:[...executions,{revision:2,finishedAt:"finished"}] as never},second)).toBe(false);
+});

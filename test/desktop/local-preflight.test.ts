@@ -21,9 +21,9 @@ test("本地预检IPC只读取Project指定文件，不创建Task/Run或返回�
  }finally{engine.shutdown();}
 });
 
-test("普通构建拒绝本地预检IPC，不依赖前端隐藏入口",async()=>{
+test("显式关闭新Task契约的兼容实例拒绝本地预检IPC",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-preflight-disabled-"));roots.push(root);
- const engine=new DesktopExecutionEngine({harnessRoot:join(root,"harness-runs"),storeRoot:join(root,"runs"),deterministicForTest:true});
+ const engine=new DesktopExecutionEngine({harnessRoot:join(root,"harness-runs"),storeRoot:join(root,"runs"),deterministicForTest:true,singleWorkflowForAcceptance:false});
  try{await expect(engine.handleDesktopAction("workflows.preflightLocal",{projectId:"p",path:"a.ts"})).rejects.toThrow("专用验收");}
  finally{engine.shutdown();}
 });
@@ -42,5 +42,28 @@ test("本地确认不需要分配快照，相同UUID不重复执行，配置覆�
   expect(created.execution.kind).toBe("local-run");expect(created.execution.config).toBeUndefined();
   const retry=await engine.handleDesktopAction("executions.confirm",request) as typeof created;
   expect(retry.execution.executionId).toBe(created.execution.executionId);
+ }finally{engine.shutdown();}
+});
+test("本地同链修订绑定现场确认，新Execution保留旧结果；重复UUID零重派发",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-revision-"));roots.push(root);
+ const engine=new DesktopExecutionEngine({harnessRoot:join(root,"state","harness-runs"),storeRoot:join(root,"state","runs"),deterministicForTest:true,singleWorkflowForAcceptance:true});
+ const source=(value:number)=>`export const meta={name:"local",description:"核验",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};export default async function run(args:unknown){return {value:${value}};}`;
+ const wait=async(id:string,executionId:string)=>{for(let n=0;n<200;n++){const {harness}=await engine.handleDesktopAction("harnesses.get",{harnessRunId:id}) as {harness:import("../../src/harness/types").HarnessSnapshot};if(harness.impactSummaries?.some(item=>item.executionId===executionId&&item.status==="completed"))return harness;await Bun.sleep(5);}throw Error("总结未完成");};
+ try{
+  const {project}=await engine.handleDesktopAction("projects.create",{cwd:root}) as {project:{projectId:string}},path=join(root,"a.ts");await writeFile(path,source(1));
+  let preview=await engine.handleDesktopAction("workflows.preflightLocal",{projectId:project.projectId,path}) as {sourceHash:string};
+  const {harness}=await engine.handleDesktopAction("workflows.createLocalTask",{projectId:project.projectId,path,sourceHash:preview.sourceHash,input:{},clientRequestId:crypto.randomUUID()}) as {harness:{harnessRunId:string}},id=harness.harnessRunId;
+  const first=await engine.handleDesktopAction("executions.confirm",{harnessRunId:id,revision:1,clientRequestId:crypto.randomUUID()}) as import("../../src/desktop/types").ExecutionResponse;
+  const old=await wait(id,first.execution.executionId);
+  await writeFile(path,source(2));preview=await engine.handleDesktopAction("workflows.preflightLocal",{projectId:project.projectId,path}) as {sourceHash:string};
+  await engine.handleDesktopAction("workflows.reviseLocalTask",{harnessRunId:id,baseRevision:1,sourceHash:preview.sourceHash,input:{},clientRequestId:crypto.randomUUID()});
+  const plan=await engine.handleDesktopAction("executions.plan",{harnessRunId:id,revision:2}) as import("../../src/desktop/types").ExecutionPlanResponse;
+  const request={harnessRunId:id,revision:2,clientRequestId:crypto.randomUUID(),sceneEvidenceHash:plan.sceneEvidenceHash};
+  await expect(engine.handleDesktopAction("executions.confirm",{...request,sceneEvidenceHash:"a".repeat(64)})).rejects.toThrow("现场证据已变化");
+  const second=await engine.handleDesktopAction("executions.confirm",request) as typeof first;
+  expect((await engine.handleDesktopAction("executions.confirm",request) as typeof first).execution.executionId).toBe(second.execution.executionId);
+  const next=await wait(id,second.execution.executionId);expect(next.executions).toHaveLength(2);expect(next.executions[0]).toEqual(old.executions[0]);expect(next.executions[1].summary).toEqual({value:2});
+  await expect(engine.handleDesktopAction("executions.resume",{harnessRunId:id,executionId:first.execution.executionId})).rejects.toThrow("旧执行只能查看历史");
+  await expect(engine.handleDesktopAction("executions.confirm",{...request,sceneEvidenceHash:"b".repeat(64)})).rejects.toThrow("相同确认请求");
  }finally{engine.shutdown();}
 });

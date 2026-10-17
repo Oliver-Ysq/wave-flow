@@ -45,6 +45,7 @@ function SchemaField({
             key={String(option)}
             type="button"
             role="radio"
+            aria-label={`${name}：${option ? "是" : "否"}`}
             aria-checked={value === option}
             className={value === option ? "selected" : undefined}
             onClick={() => onChange(option)}
@@ -63,6 +64,7 @@ function SchemaField({
             key={String(option)}
             type="button"
             role="radio"
+            aria-label={`${name}：${String(option)}`}
             aria-checked={value === option}
             className={value === option ? "selected" : undefined}
             onClick={() => onChange(option)}

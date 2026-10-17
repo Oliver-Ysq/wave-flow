@@ -91,7 +91,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     const binding = this.binding(node), workspace = await this.manager.inspect(binding.workspaceId);
     const existing = workspace.results.find(result => result.runId === this.runId && result.nodeId === node.id && result.attempt === node.executionAttemptId && result.ready);
     if (existing) {
-      const allowed=workspace.authorization.nodes.find(item=>item.nodeId===node.id);
+      const allowed=this.manager.authorizationFor(workspace,this.runId).nodes.find(item=>item.nodeId===node.id);
       if(!allowed)throw new WorkflowContractError("已保存成果缺少原提交授权。");
       const repo=await GitRepository.open(workspace.cleanedAt?workspace.authorization.repository:workspace.cwd);
       if(repo.commonDirectory!==workspace.commonDirectory)throw new WorkflowContractError("成果仓库身份漂移。");

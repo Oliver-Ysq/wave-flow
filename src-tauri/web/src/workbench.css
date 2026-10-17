@@ -790,6 +790,7 @@ body { min-height:100%; overscroll-behavior:none; }
 .workflow-workspace-config fieldset{display:grid;gap:10px;margin:0;padding:12px;border:1px solid var(--wf-line);border-radius:10px}
 .workflow-workspace-config label{display:grid;gap:6px;font-size:13px}
 .workflow-workspace-config textarea{min-height:64px;resize:vertical}
+.workflow-workspace-config select{max-width:100%;min-height:36px;padding:8px;color:var(--wf-ink);background:var(--wf-input);border:1px solid var(--wf-line);border-radius:6px}
 .workflow-workspace-config .workspace-confirm{display:flex;grid-template-columns:auto 1fr;align-items:flex-start;gap:8px;line-height:1.45}
 .execution-workspace-evidence{display:grid;gap:10px;margin:16px 0;padding:14px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
 .execution-workspace-evidence code{overflow-wrap:anywhere;white-space:normal}

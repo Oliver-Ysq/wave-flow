@@ -675,7 +675,7 @@ export function App() {
       </aside>
       <section className="conversation-pane" hidden={workflowPanelOpen}>
         {harness?.status==="interrupted"&&<button onClick={()=>void api.recoverController(harness.harnessRunId).catch(error=>setError(String(error)))}>恢复主控待命（不重发任务）</button>}
-        {harness?.impactSummaries?.filter(item=>item.status==="interrupted"||item.status==="cancelled").map(item=><ImpactSummaryPanel key={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/>)}
+        {harness?.impactSummaries?.filter(item=>!item.supersededBy&&(item.status==="interrupted"||item.status==="cancelled")).map(item=><ImpactSummaryPanel key={item.key} summaryKey={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/>)}
         {!harness ? (
           <DraftConversation
             project={
@@ -689,7 +689,7 @@ export function App() {
             onSend={() => void sendHarness()}
             title={taskTitle} onTitle={setTaskTitle}
             onTemplate={()=>setTemplatePicker(true)}
-            onLocal={(import.meta as ImportMeta & {env?:Record<string,string>}).env?.VITE_LOCAL_WORKFLOW_ACCEPTANCE==="1"?()=>setLocalPreview(true):undefined}
+            onLocal={()=>setLocalPreview(true)}
           />
         ) : (
           <HarnessConversation
@@ -699,7 +699,7 @@ export function App() {
             onSend={() => void sendHarness()}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
             onComplete={() => {
-              const unfinished=harness.impactSummaries?.filter(item=>item.status!=="completed")??[];
+              const unfinished=harness.impactSummaries?.filter(item=>!item.supersededBy&&item.status!=="completed")??[];
               if(unfinished.length){setArchiveConfirmation({harnessRunId:harness.harnessRunId,count:unfinished.length});return;}
               const finishBusy=beginBusy(`task:${harness.harnessRunId}`,"complete-harness"),pageToken=navigationToken.current;
               void taskMutation(harness.harnessRunId,()=>api.completeHarness(harness.harnessRunId))
@@ -838,6 +838,7 @@ export function App() {
           {executionDetail && harness && route.kind === "workflow" && routeMatchesTask(harness,route) && route.section === "execution" ? (
           <div className="workflow-detail-scroll">
             <ExecutionDetail
+              readOnly={harness.status==="completed"||harness.task?.workflowContract==="single-workflow-v1"&&harness.executions.at(-1)?.executionId!==executionDetail.execution.executionId}
               detail={executionDetail}
               selectedAttempt={route.attempt}
               onSelectAttempt={attempt=>setRoute({...route,attempt})}
@@ -1770,7 +1771,7 @@ function DraftConversation({
   onSend: () => void;
   title: string; onTitle: (value: string) => void;
   /** 打开预置来源；不创建任务。 */ onTemplate:()=>void;
-  /** 专用验收构建的无执行本地预检；生产缺省禁用。 */ onLocal?:()=>void;
+  /** 打开零执行的项目内本地Workflow预检。 */ onLocal?:()=>void;
 }) {
   const ready = project !== null;
   return (
@@ -1789,7 +1790,7 @@ function DraftConversation({
       <div className="conversation-scroll">
         <div className="conversation-intro">
           <span>自动编排</span>
-          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button onClick={onTemplate} disabled={!ready}>预置工作流</button><button onClick={onLocal} disabled={!ready||!onLocal}>本地工作流{onLocal?" · 验收预检":" · 尚未开放"}</button></div>
+          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button onClick={onTemplate} disabled={!ready}>预置工作流</button><button onClick={onLocal} disabled={!ready||!onLocal}>本地工作流</button></div>
           <label>任务标题（可选）<input value={title} maxLength={120} onChange={event=>onTitle(event.target.value)} /></label>
           <h2>你想完成什么任务？</h2>
           <p>
@@ -2022,10 +2023,14 @@ function HistoricalResults({taskId,executionId,currentAttempt,harness}:{taskId:s
 }
 
 /** 义务与完整回答均来自原Task快照；重试不重跑业务执行。 */
-function ImpactSummaryPanel({harness,executionId,attempt}:{harness:HarnessSnapshot;executionId:string;attempt:number}) {
-  const obligation=harness.impactSummaries?.find(item=>item.executionId===executionId&&item.attempt===attempt);
+function ImpactSummaryPanel({harness,executionId,attempt,summaryKey}:{harness:HarnessSnapshot;executionId:string;attempt:number;summaryKey?:string}) {
+  const summaries=harness.impactSummaries?.filter(item=>item.executionId===executionId&&item.attempt===attempt)??[];
+  const obligation=summaryKey?summaries.find(item=>item.key===summaryKey):summaries[0];
   const [busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
   if(!obligation)return <p>此尝试未保存影响面总结义务；不补造历史结论。</p>;
+  if(!summaryKey)return <section aria-label="原总结与现场补充">{summaries.map(item=><div key={item.key}>{item.supplementOf&&<h3>现场影响面补充</h3>}<ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt} summaryKey={item.key}/></div>)}{error&&<p role="alert">{error}</p>}{harness.status!=="completed"&&<button disabled={busy||harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null)} onClick={async()=>{setBusy(true);setError(null);try{await api.checkExecutionScene(harness.harnessRunId,executionId);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在检查现场…":"检查当前现场（不执行）"}</button>}</section>;
+  if(obligation.supersededBy)return <p>此现场补充已被新的证据版本替代；保留历史，不再阻塞恢复。请查看最新现场补充。</p>;
+  if(obligation.supplementOf&&obligation.status==="interrupted"&&harness.status!=="completed")return <section><p role="alert">{obligation.diagnostic??"现场补充已中断"}</p>{error&&<p role="alert">{error}</p>}<button disabled={busy||harness.status==="running"} onClick={async()=>{setBusy(true);setError(null);try{const checked=await api.checkExecutionScene(harness.harnessRunId,executionId);const current=checked.harness.impactSummaries?.find(item=>item.executionId===executionId&&!item.supersededBy&&item.status==="interrupted");if(current)await api.retryImpactSummary(harness.harnessRunId,current.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>重新检查现场并重试补充</button></section>;
   const message=harness.messages.find(item=>item.id===obligation.messageId);
   const gitLimitation=harness.executions.find(item=>item.executionId===executionId)?.config?.workspaces
     ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已合入主工作区或外部系统已回滚。"
@@ -2035,6 +2040,7 @@ function ImpactSummaryPanel({harness,executionId,attempt}:{harness:HarnessSnapsh
 }
 
 function ExecutionDetail({
+  readOnly=false,
   detail,
   selectedAttempt,
   onSelectAttempt,
@@ -2047,6 +2053,8 @@ function ExecutionDetail({
   onSavePartial,
   onCleanupWorkspaces,
 }: {
+  /** 归档或旧Execution只读，隐藏所有副作用入口；diff与历史证据仍可读。 */
+  readOnly?:boolean;
   detail: ExecutionResponse;
   busy: string | null;
   /** 该 revision 静态无法枚举的动态节点数；0 表示无动态节点或不可用。 */
@@ -2100,10 +2108,11 @@ function ExecutionDetail({
       <label>执行尝试<select value={readingAttempt} onChange={event=>onSelectAttempt?.(Number(event.target.value))}>{attemptIds.map(attempt=><option key={attempt} value={attempt}>attempt #{attempt}{attempt === detail.snapshot.currentExecutionAttemptId ? "（当前）" : "（历史只读）"}</option>)}</select></label>
       {detail.workspaceDiagnostic&&<p role="alert">{detail.workspaceDiagnostic}</p>}
       {detail.sourceDiagnostic&&<p role="alert">尚未形成完整成果来源：{detail.sourceDiagnostic}</p>}
-      {detail.sourceEvidence&&<GitReviewPanel key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`} taskId={harnessRunId} executionId={executionId} sourceCommit={detail.sourceEvidence.sourceCommit} writable={Boolean(onCleanupWorkspaces)&&!historical}/>}
+      {!readOnly&&!historical&&detail.snapshot.status==="completed"&&detail.execution.config?.workspaces&&(!detail.sourceEvidence||detail.sourceDiagnostic)&&<button disabled={!!busy} onClick={()=>void onControl("resume")}>重试 Git 成果收尾（不重跑业务）</button>}
+      {detail.sourceEvidence&&<GitReviewPanel key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`} taskId={harnessRunId} executionId={executionId} sourceCommit={detail.sourceEvidence.sourceCommit} writable={!readOnly&&Boolean(onCleanupWorkspaces)&&!historical}/>}
       {partialError&&<p role="alert">{partialError}</p>}
-      {!historical&&detail.workspaceEvidence?.some(item=>item.lease)&&["cancelled","interrupted"].includes(detail.snapshot.status)&&<><button disabled={!!busy} onClick={()=>{setPartialError(null);void onSavePartial?.().catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>保存停止现场（partial，不代表交付）</button>{partialError&&<p role="alert">{partialError}</p>}</>}
-      {!historical&&detail.workspaceEvidence?.length&&!detail.controllable&&<><button disabled={!!busy} onClick={()=>{if(!confirmCleanup){setConfirmCleanup(true);return;}setPartialError(null);void onCleanupWorkspaces?.().then(()=>setConfirmCleanup(false)).catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>{confirmCleanup?"确认移除干净 checkout？分支和 commit 将保留":"清理受管 checkout"}</button>{confirmCleanup&&<button onClick={()=>setConfirmCleanup(false)}>取消清理</button>}{partialError&&<p role="alert">{partialError}</p>}</>}
+      {!readOnly&&!historical&&detail.workspaceEvidence?.some(item=>item.lease)&&["cancelled","interrupted"].includes(detail.snapshot.status)&&<><button disabled={!!busy} onClick={()=>{setPartialError(null);void onSavePartial?.().catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>保存停止现场（partial，不代表交付）</button>{partialError&&<p role="alert">{partialError}</p>}</>}
+      {!readOnly&&!historical&&detail.workspaceEvidence?.length&&!detail.controllable&&<><button disabled={!!busy} onClick={()=>{if(!confirmCleanup){setConfirmCleanup(true);return;}setPartialError(null);void onCleanupWorkspaces?.().then(()=>setConfirmCleanup(false)).catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>{confirmCleanup?"确认移除干净 checkout？分支和 commit 将保留":"清理受管 checkout"}</button>{confirmCleanup&&<button onClick={()=>setConfirmCleanup(false)}>取消清理</button>}{partialError&&<p role="alert">{partialError}</p>}</>}
       {historical ? <><p>历史访问证据，只读；控制原执行请切回当前 attempt。</p><TeamPanel readOnly key={`${executionId}:${readingAttempt}`} runId={executionId} currentExecutionAttemptId={readingAttempt} phaseTitles={detail.snapshot.phases.map(phase=>phase.title)} visits={allVisits.filter(visit=>visit.executionAttemptId === readingAttempt)} busy={null} onAnswer={async()=>{throw new Error("历史 attempt 不能回答。");}} /></> : <>
       <ExecutionProgressCard
         snapshot={detail.snapshot}
@@ -2130,7 +2139,7 @@ function ExecutionDetail({
         )}
       </div>
       {detail.workspaceEvidence&&<details className="execution-workspace-evidence"><summary>内部 Git 检查点与诊断详情</summary>{detail.workspaceEvidence.map(item=><article key={item.nodeId}><strong>{item.nodeId}</strong><code>{item.branch}</code>{item.lease&&<span role="status">writer / Git 收尾锁仍保留 · attempt #{item.lease.attempt}</span>}{item.results.length===0&&!item.lease&&<small>尚无保存成果</small>}{item.results.map(result=><div key={`${result.attempt}:${result.commit}`}><span>{result.ready?"成果 ready":"partial，未交付"} · attempt #{result.attempt}{result.unchanged?" · 无文件变化":""}</span><code title={result.commit}>{result.commit.slice(0,12)}</code><small>{result.paths.length?result.paths.join("、"):"没有提交文件"}{result.mergeParents.length?` · 集成 ${result.mergeParents.length} 个来源`:" · 未集成其他分支"}</small></div>)}</article>) }<p>Git 证据只覆盖受管Git文件与已执行验证，不证明外部系统已回滚。</p></details>}
-      <div className="actions">
+      {!readOnly&&<div className="actions">
         {detail.controllable && detail.snapshot.status === "running" && (
           <Action
             label="暂停"
@@ -2169,8 +2178,8 @@ function ExecutionDetail({
             onClick={() => void onControl("stop")}
           />
         )}
-      </div>
-      {!detail.controllable && detail.snapshot.status !== "completed" && detail.snapshot.status !== "interrupted" && detail.snapshot.status !== "cancelled" && (
+      </div>}
+      {!readOnly&&!detail.controllable && detail.snapshot.status !== "completed" && detail.snapshot.status !== "interrupted" && detail.snapshot.status !== "cancelled" && (
         <div className="diagnostic">
           该 Execution 不在当前 Engine 的可控制生命周期内（Engine 已重启）；只能显式
           resume 创建新 attempt，pause/stop 与决策门回答都会被拒绝。

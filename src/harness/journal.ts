@@ -33,10 +33,34 @@ export type HarnessManifest = {
 
 /** Harness 档案的全部耐久事件类型；导出供记录器等内部写路径复用同一形状。 */
 export type HarnessEvent =
+  /** 准备版本前冻结用户确认；不启动Execution。 */
+  | {
+      /** 固定确认收据事件类型。 */ readonly type:"workflow.execution_confirmation";
+      /** 用户确认的ISO时间。 */ readonly at:string;
+      /** 收据所属Task UUID。 */ readonly harnessRunId:string;
+      /** 原版本与完整载荷摘要，不代表已派发。 */ readonly confirmation:import("./types").ExecutionConfirmation;
+    }
   /** 用户独立恢复主控，仅idle，不安排prompt或清义务。 */
   | {readonly type:"harness.controller_recovered";readonly at:string;readonly harnessRunId:string}
   /** 总结初始化失败，不伪造已开始回合；pending 转 interrupted，完整结果不覆盖。 */
   | {readonly type:"harness.summary_interrupted";readonly at:string;readonly harnessRunId:string;readonly key:string;readonly diagnostic:string}
+  /** 绑定当前总结读取的现场证据；不覆盖已经完成的说明。 */
+  | {
+      /** 固定现场绑定事实，不完成总结。 */ readonly type:"harness.summary_evidence";
+      /** 绑定发生的ISO时间。 */ readonly at:string;
+      /** 所属Task UUID。 */ readonly harnessRunId:string;
+      /** 有效pending/interrupted总结义务key。 */ readonly key:string;
+      /** 完整现场证据SHA-256，不是授权秘密。 */ readonly evidenceHash:string;
+    }
+  /** 现场变化的独立总结义务；同原总结/证据版本只创建一次。 */
+  | {
+      /** 固定补充事实，同时替代旧非running待办。 */ readonly type:"harness.summary_supplement_required";
+      /** 建立补充的ISO时间。 */ readonly at:string;
+      /** 所属Task UUID。 */ readonly harnessRunId:string;
+      /** 原总结key与现场hash确定性生成的唯一key。 */ readonly key:string;
+      /** 已完整保存的原终态总结key，不能指向其他补充。 */ readonly originalKey:string;
+      /** 此补充冻结的完整现场证据SHA-256。 */ readonly evidenceHash:string;
+    }
   /** Task 初始目标已耐久后绑定已验证主控来源；不重复更换。 */
   | {readonly type:"harness.runtime_initialized";readonly at:string;readonly harnessRunId:string;readonly runtime:RuntimeProvenance}
   /** 初始目标已保存但主控初始化失败；可重试原回合。 */
@@ -170,6 +194,7 @@ export class HarnessProjection {
   #toolActivitiesByMessageId: Record<string, HarnessToolActivity[]> = {};
   #workflowRevisions: WorkflowRevision[] = [];
   #executions: WorkflowExecutionRecord[] = [];
+  #executionConfirmations: import("./types").ExecutionConfirmation[] = [];
   #executionHistory:import("./types").ExecutionHistoryItem[]=[];
   #decisions: HarnessDecision[] = [];
   #impactSummaries: import("./types").ImpactSummary[] = [];
@@ -190,8 +215,29 @@ export class HarnessProjection {
     // “完成”是会话档案的终态，而非仅供 Web 隐藏的一枚标签。完成事实之后
     // 不得再写入消息、草案、执行登记或决策，重开 Journal 时同样 fail closed。
     if (this.#completedAt !== null && event.type !== "harness.completed") throw new Error("已完成的 Harness 不能追加新事实。 ");
+    if(event.type==="workflow.execution_confirmation") {
+      const prior=this.#executionConfirmations.find(item=>item.requestId===event.confirmation.requestId);
+      if(prior||this.#status!=="idle"||!this.#workflowRevisions.some(item=>item.revision===event.confirmation.revision))throw new Error("最终确认收据重复或版本无效。");
+      this.#executionConfirmations.push({...event.confirmation});return;
+    }
     if (event.type === "harness.created") { if (this.#created) throw new Error("Harness created 重复。 "); this.#created = true; return; }
     if(event.type==="harness.controller_recovered"){if(this.#status!=="interrupted")throw new Error("只能恢复已中断主控。");this.#status="idle";this.#diagnostic=null;return;}
+    if(event.type === "harness.summary_evidence") {
+      const index = this.#impactSummaries.findIndex(item => item.key === event.key);
+      if (index < 0 || this.#impactSummaries[index].supersededBy || !["pending", "interrupted"].includes(this.#impactSummaries[index].status)) throw new Error("总结现场证据只能绑定有效待执行义务。");
+      const original = this.#impactSummaries[index];
+      if (original.supplementOf && original.evidenceHash !== event.evidenceHash) throw new Error("补充证据版本已变化，不能覆盖原补充。");
+      this.#impactSummaries[index] = { ...original, evidenceHash: event.evidenceHash }; return;
+    }
+    if(event.type === "harness.summary_supplement_required") {
+      const original = this.#impactSummaries.find(item => item.key === event.originalKey && !item.supplementOf);
+      if (!original || original.status !== "completed" || this.#impactSummaries.some(item => item.supplementOf === original.key && item.status === "running") || event.key !== createHash("sha256").update(JSON.stringify([event.originalKey, event.evidenceHash])).digest("hex")) throw new Error("现场补充身份或原总结状态无效。");
+      const existing = this.#impactSummaries.find(item => item.key === event.key);
+      if (existing && ((!existing.supersededBy && existing.status !== "completed") || existing.supplementOf !== original.key || existing.evidenceHash !== event.evidenceHash)) throw new Error("现场补充重复或身份冲突。");
+      // 原子替代未完成的旧证据义务；不把过时说明伪装为completed，也不取消模型回合。
+      this.#impactSummaries = this.#impactSummaries.map(item => item.supplementOf !== original.key ? item : item.key === event.key ? { ...item, supersededBy: undefined } : item.status === "pending" || item.status === "interrupted" ? { ...item, supersededBy: event.key } : item);
+      if (!existing) this.#impactSummaries.push({ ...original, key: event.key, supplementOf: original.key, evidenceHash: event.evidenceHash, status: "pending", createdAt: event.at, completedAt: null, messageId: null, diagnostic: null, turnId: undefined }); return;
+    }
     if(event.type==="harness.summary_interrupted"){
       const index=this.#impactSummaries.findIndex(item=>item.key===event.key);
       if(index<0||!["pending","interrupted"].includes(this.#impactSummaries[index].status))throw new Error("总结中断身份或状态不匹配。");
@@ -216,7 +262,7 @@ export class HarnessProjection {
       if (event.summaryKey) {
         const index = this.#impactSummaries.findIndex(item => item.key === event.summaryKey);
         const obligation = this.#impactSummaries[index];
-        if (!obligation || !["pending", "interrupted"].includes(obligation.status) || !(event.userMessageId === `summary:${event.summaryKey}` || event.userMessageId.startsWith(`summary:${event.summaryKey}:`))) throw new Error("总结义务身份或状态不匹配。");
+        if (!obligation || obligation.supersededBy || !["pending", "interrupted"].includes(obligation.status) || !(event.userMessageId === `summary:${event.summaryKey}` || event.userMessageId.startsWith(`summary:${event.summaryKey}:`))) throw new Error("总结义务身份或状态不匹配。");
         this.#impactSummaries[index] = {...obligation, turnId:event.userMessageId, status: "running", diagnostic: null};
         this.#summaryKey = event.summaryKey;
       } else if (this.#messages.at(-1)?.id !== event.userMessageId) throw new Error("Harness turn_started 不匹配最新用户消息。 ");
@@ -290,9 +336,15 @@ export class HarnessProjection {
   if (event.type === "workflow.execution_created") {
       assertImpactSummariesComplete(this.snapshot());
       if(event.execution.confirmationRequestId&&this.#executions.some(item=>item.confirmationRequestId===event.execution.confirmationRequestId))throw new Error("模板确认请求已登记执行，不能重复追加。");
+      const receipt=this.#executionConfirmations.find(item=>item.requestId===event.execution.confirmationRequestId);
+      if(receipt&&receipt.payloadHash!==event.execution.confirmationPayloadHash)throw new Error("执行载荷不匹配原确认收据。");
       const revision = this.#workflowRevisions.find((item) => item.revision === event.execution.revision);
       if((event.execution.kind==="local-run")!==!!revision?.localOrigin)throw new Error("执行来源kind必须与冻结revision一致。");
-      if (this.manifest.task && (this.#status !== "idle" || this.#executions.some(execution=>this.#workflowRevisions.find(item=>item.revision===execution.revision)?.cardId===revision?.cardId) || revision?.abandonedAt || this.#workflowRevisions.at(-1)?.revision !== revision?.revision)) throw new Error("当前任务方案已取代、放弃或已执行。");
+      if (this.manifest.task && (this.#status !== "idle" || this.#executions.some(execution=>this.manifest.task?.workflowContract==="single-workflow-v1"?execution.revision===revision?.revision:this.#workflowRevisions.find(item=>item.revision===execution.revision)?.cardId===revision?.cardId) || revision?.abandonedAt || this.#workflowRevisions.at(-1)?.revision !== revision?.revision)) throw new Error("当前任务方案已取代、放弃或已执行。");
+      if(this.manifest.task?.workflowContract==="single-workflow-v1"&&this.#executions.length){
+        const prior=this.#executions.at(-1)!;
+        if(!event.execution.confirmationRequestId||!event.execution.sceneEvidenceHash||!this.#impactSummaries.some(item=>item.executionId===prior.executionId&&!item.supersededBy&&item.status==="completed"&&item.evidenceHash===event.execution.sceneEvidenceHash))throw new Error("修订执行缺少冻结现场确认或完整说明事实。");
+      }
       // Execution 只能绑定已接受冻结的 revision；草稿、已拒绝或序号不存在的草案永远不能执行。
       if (!revision || revision.acceptedAt === null || (revision.rejectedAt ?? null) !== null || revision.sourceHash !== event.execution.sourceHash) throw new Error("WorkflowExecution 必须绑定已接受冻结的 revision。 ");
       if (this.#executions.some((item) => item.executionId === event.execution.executionId)) throw new Error("WorkflowExecution id 重复。 ");
@@ -320,6 +372,7 @@ export class HarnessProjection {
       const index = this.#executions.findIndex((item) => item.executionId === event.executionId);
       if (index < 0) throw new Error("workflow.execution_resumed 指向未知 Execution。 ");
       const execution = this.#executions[index];
+      if(this.manifest.task?.workflowContract==="single-workflow-v1"&&this.#executions.at(-1)?.executionId!==execution.executionId)throw new Error("已有较新Execution，旧版只能查看历史。");
       if ((execution.status !== "interrupted" && execution.status !== "cancelled") || execution.finishedAt === null) throw new Error("只有已中断或已取消的 WorkflowExecution 可以显式 resume。 ");
       this.#executions[index] = { ...execution, status: "running", finishedAt: null, diagnostic: null, summary: null };
       return;
@@ -335,7 +388,7 @@ export class HarnessProjection {
       return;
     }
   }
-  snapshot(): HarnessSnapshot { return { impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: this.manifest.task } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }; }
+snapshot(): HarnessSnapshot { return structuredClone({ executionConfirmations:this.#executionConfirmations, impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: this.manifest.task } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }); }
   /** 条目事件只能属于当前运行中回合；重放乱序即 fail closed。 */
   private assertEntryTurn(turnId: string): void {
     if (this.#status !== "running" || this.#turnUserMessageId !== turnId) throw new Error("Harness 对话条目必须属于当前运行中回合。 ");
@@ -370,9 +423,12 @@ function validateManifest(value: unknown): HarnessManifest {
 function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (!plain(value) || typeof value.type !== "string" || value.harnessRunId !== harnessRunId || typeof value.at !== "string" || Number.isNaN(Date.parse(value.at))) throw new Error("Harness 事件身份或时间无效。 ");
   const item = value as Record<string, unknown>;
+  if(item.type==="workflow.execution_confirmation"&&plain(item.confirmation)&&typeof item.confirmation.requestId==="string"&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(item.confirmation.requestId)&&Number.isInteger(item.confirmation.revision)&&(item.confirmation.revision as number)>0&&typeof item.confirmation.payloadHash==="string"&&/^[a-f0-9]{64}$/.test(item.confirmation.payloadHash))return item as unknown as HarnessEvent;
   if(item.type==="harness.runtime_initialized"&&isRuntimeProvenance(item.runtime))return item as unknown as HarnessEvent;
   if (item.type === "harness.created") return item as unknown as HarnessEvent;
   if(item.type==="harness.controller_recovered")return item as unknown as HarnessEvent;
+  if(item.type === "harness.summary_evidence" && typeof item.key === "string" && /^[a-f0-9]{64}$/.test(item.key) && typeof item.evidenceHash === "string" && /^[a-f0-9]{64}$/.test(item.evidenceHash)) return item as unknown as HarnessEvent;
+  if(item.type === "harness.summary_supplement_required" && [item.key,item.originalKey,item.evidenceHash].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))) return item as unknown as HarnessEvent;
   if(item.type==="harness.summary_interrupted"&&typeof item.key==="string"&&/^[a-f0-9]{64}$/.test(item.key)&&typeof item.diagnostic==="string"&&item.diagnostic.trim())return item as unknown as HarnessEvent;
   if (item.type === "harness.initialization_failed" && typeof item.diagnostic === "string" && item.diagnostic.trim()) return item as unknown as HarnessEvent;
   if (item.type === "workflow.card_abandoned" && typeof item.cardId === "string" && item.cardId.trim()) return item as unknown as HarnessEvent;
@@ -442,6 +498,7 @@ function isWorkflowRevision(value: unknown): value is WorkflowRevision { return 
 function isExecutionStatus(value: unknown): value is WorkflowExecutionRecord["status"] { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isPolicy(value: unknown): boolean { return plain(value) && Number.isInteger(value.maxNodes) && (value.maxNodes as number) >= 1 && Number.isInteger(value.maxPhaseVisits) && (value.maxPhaseVisits as number) >= 1 && Number.isInteger(value.maxGates) && (value.maxGates as number) >= 1; }
 function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
+  if(plain(value)&&value.sceneEvidenceHash!==undefined&&(typeof value.sceneEvidenceHash!=="string"||!/^[a-f0-9]{64}$/.test(value.sceneEvidenceHash)))return false;
   if (!plain(value) || typeof value.executionId !== "string") return false;
   if (value.kind !== undefined && value.kind !== "local-run" && value.kind !== "restricted-execution") return false;
   if(value.confirmationRequestId!==undefined||value.confirmationPayloadHash!==undefined){

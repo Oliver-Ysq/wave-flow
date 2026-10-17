@@ -34,7 +34,9 @@ export const api = {
   /** 编辑本地文件/参数后追加未批准版本，不能启动修订执行。 */
   reviseLocalTask:(harnessRunId:string,baseRevision:number,sourceHash:string,input:Record<string,unknown>,clientRequestId:string,path?:string)=>action<HarnessRunResponse>("workflows.reviseLocalTask",{harnessRunId,baseRevision,sourceHash,input,clientRequestId,...(path?{path}:{})}),
   /** 当前设计一次确认，不再要求单独接受/分配卡；批准与派发由Engine仲裁。 */
-  confirmWorkflow:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot|undefined,clientRequestId:string)=>action<ExecutionResponse>("executions.confirm",{harnessRunId,revision,...(config?{config}:{}),clientRequestId}),
+  prepareConfigurationRevision:(harnessRunId:string,baseRevision:number,clientRequestId:string)=>action<HarnessRunResponse>("workflows.prepareConfigurationRevision",{harnessRunId,baseRevision,clientRequestId}),
+  /** 确认冻结源码/输入/CLI及现场版本，重复UUID只返回原执行。 */
+  confirmWorkflow:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot|undefined,clientRequestId:string,sceneEvidenceHash?:string|null)=>action<ExecutionResponse>("executions.confirm",{harnessRunId,revision,...(config?{config}:{}),clientRequestId,...(sceneEvidenceHash?{sceneEvidenceHash}:{})}),
   /** 获取内置版本化目录，不创建任何运行对象。 */
   templates:()=>action<{templates:import("../../../src/harness/workflow-templates").WorkflowTemplate[]}>("templates.list"),
   /** 保存未批准候选；needsGuidance 才安排主控。编辑必须携带 cardId 和正整数 baseRevision；同请求重试不新增版本或引导回合。 */
@@ -42,9 +44,11 @@ export const api = {
   /** 创建预置Task与未批准候选；needsGuidance才安排主控，不启动Worker。 */
   createTemplateTask:(projectId:string,text:string,clientRequestId:string,template:import("../../../src/harness/task-contract").TemplateSelection,title?:string)=>action<HarnessRunResponse>("harnesses.startConversation",{projectId,text,clientRequestId,template,...(title?{title}:{})}),
   /** 最终确认才耐久批准并派发执行。 */
-  confirmTemplate:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot,clientRequestId:string,input?:Record<string,unknown>)=>action<ExecutionResponse>("templates.confirm",{harnessRunId,revision,config,clientRequestId,...(input?{input}:{})}),
+  confirmTemplate:(harnessRunId:string,revision:number,config:ExecutionConfigSnapshot,clientRequestId:string,input?:Record<string,unknown>,sceneEvidenceHash?:string|null)=>action<ExecutionResponse>("templates.confirm",{harnessRunId,revision,config,clientRequestId,...(input?{input}:{}),...(sceneEvidenceHash?{sceneEvidenceHash}:{})}),
   /** 特定 attempt 的只读证据；不存在时拒绝，不启动执行。 */
   attemptResults:(harnessRunId:string,executionId:string,attempt:number)=>action<{executionId:string;attempt:number;status:string|null;summary:Record<string,unknown>|null;nodes:Array<{id:string;label:string;result:Record<string,unknown>|null}>}>("executions.attemptResults",{harnessRunId,executionId,attempt}),
+  /** 显式重新核验现场；变化只追加补充义务，既不恢复也不启动Execution。 */
+  checkExecutionScene:(harnessRunId:string,executionId:string)=>action<{harness:import("./types").HarnessSnapshot}>("executions.checkScene",{harnessRunId,executionId}),
   desktopStatus: () => action<DesktopStatusResponse>("status"),
   createRun: (request: CreateRunRequest) => action<RunResponse>("runs.create", request),
   listRuns: () => action<RunListItem[]>("runs.list"),

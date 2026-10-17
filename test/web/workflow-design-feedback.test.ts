@@ -1,5 +1,24 @@
 import {expect,test} from "bun:test";
 
+test("结果页逐一显示原总结与现场补充，过时义务不暴露重试按钮或计入归档待办", async () => {
+ const source=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(source).toContain('aria-label="原总结与现场补充"');
+ expect(source).toContain('summaryKey={item.key}');
+ expect(source).toContain('if(obligation.supersededBy)return');
+ expect(source).toContain('此现场补充已被新的证据版本替代');
+ expect(source).toContain('filter(item=>!item.supersededBy&&item.status!=="completed")');
+ expect(source).toContain('重试 Git 成果收尾（不重跑业务）');
+ expect(source).toContain('重新检查现场并重试补充');
+ expect(source).toContain('api.checkExecutionScene');
+});
+test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",async()=>{
+ const app=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(app).toContain('readOnly={harness.status==="completed"||harness.task?.workflowContract==="single-workflow-v1"&&harness.executions.at(-1)?.executionId!==executionDetail.execution.executionId}');
+ expect(app).toContain('writable={!readOnly&&Boolean(onCleanupWorkspaces)&&!historical}');
+ expect(app).toContain('!readOnly&&!historical&&detail.workspaceEvidence');
+ expect(app).toContain('{!readOnly&&<div className="actions">');
+});
+
 test("整工作区授权与显式diff合入，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
@@ -26,7 +45,7 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
  expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');
- expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit)');
+ expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit,plan.continuationPlan)');
  expect(source).toContain('localChoices[worker.id]=runtimeId');
 });
 

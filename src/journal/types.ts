@@ -84,7 +84,9 @@ export type JournalEvent = JournalBase & ({
   readonly type: "phase.changed";
   readonly title: string;
 } | {
+  /** Run日志或绑定节点/会话的执行器诊断；不改变业务状态。 */
   readonly type: "log.written";
+  /** 可读说明；节点诊断同时保存diagnostic及定位身份。 */
   readonly message: string;
 } | {
   readonly type: "agent.created";

@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {SchemaForm} from "../../src-tauri/web/src/forms/schema-form";
+
+test("布尔及枚举单选项读屏包含字段与不同选项，不读成重复字段名", () => {
+ const html=renderToStaticMarkup(<SchemaForm schema={{type:"object",properties:{confirmed:{type:"boolean"},choice:{type:"string",enum:["a","b"]}},additionalProperties:false}} onSubmit={async()=>{}}/>);
+ expect(html).toContain('aria-label="confirmed：是"');expect(html).toContain('aria-label="confirmed：否"');
+ expect(html).toContain('aria-label="choice：a"');expect(html).toContain('aria-label="choice：b"');
+});
 import {
   coerceValue,
   initialValueFor,

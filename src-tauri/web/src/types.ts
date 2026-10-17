@@ -184,15 +184,23 @@ export type WorkflowRevision = {
   };
 };
 /** Harness 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
-export type WorkflowExecution = { executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
+export type WorkflowExecution = {
+ /** 本次明确确认冻结的前执行现场hash；首次缺省，不构成Replay或权限。 */ sceneEvidenceHash?:string;
+ executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
 export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
-export type ExecutionWorkspaceConfig = { version:2; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string;externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
+export type ExecutionWorkspaceConfig = {
+ /** 明确复用原执行保存现场，不复用节点完成状态；缺省首次分配。 */ continuation?:{executionId:string;heads:Array<{workspaceId:string;commit:string}>};
+ version:2; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string;externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
+  /** 已核验原执行保存现场，用户明确选择，不自动合并partial或复制节点状态。 */
+  continuationPlan?:{executionId:string;baseCommit:string;workspaces:Array<{workspaceId:string;commit:string;nodeIds:string[];ready:boolean}>}|null;
+  /** 最新终态执行现场证据；首次null，确认绑定此版本，不构成授权。 */
+  sceneEvidenceHash?:string|null;
   workspacePlan?:{nodeIds:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
   harnessRunId: string;
   revision: number;

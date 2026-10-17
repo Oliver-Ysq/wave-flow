@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import type { HarnessSnapshot } from "./types";
 
+/** 当前现场已有待补充义务；检查可返回待办，启动/恢复仍须拒绝。 */
+export class ImpactSupplementRequiredError extends Error {}
+
 /** 绑定原终态事件，不依赖当前时间或重试次数。 */
 export function impactSummaryKey(taskId: string, executionId: string, attempt: number, at: string): string {
   return createHash("sha256").update(JSON.stringify([taskId, executionId, attempt, at])).digest("hex");
@@ -8,7 +11,7 @@ export function impactSummaryKey(taskId: string, executionId: string, attempt: n
 
 /** 直接 IPC/服务硬门禁；浏览、反馈、pause/recover 不调用此门。 */
 export function assertImpactSummariesComplete(snapshot: HarnessSnapshot): void {
-  if (snapshot.impactSummaries?.some(item => item.status !== "completed")) throw new Error("影响面总结尚未完整保存；请先完成或重试影响面总结，再启动或恢复执行。");
+  if (snapshot.impactSummaries?.some(item => !item.supersededBy && item.status !== "completed")) throw new Error("影响面总结尚未完整保存；请先完成或重试影响面总结，再启动或恢复执行。");
 }
 
 /** 历史内容只作为数据；遮蔽已知凭据，限制整个响应 UTF-8 字节，默认 48KiB。 */

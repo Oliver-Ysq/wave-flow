@@ -6,7 +6,7 @@ export class DesignConfirmationCache {
   private readonly requests=new ViewCache<{id:string;config:ExecutionConfigSnapshot}>(64);
   /** 身份包含Task/card/revision；参数或CLI选择改变后生成新请求，原载荷重试复用完整冻结配置。 */
   get(identity:string,input:Record<string,unknown>|undefined,choices:Readonly<Record<string,string>>,plan:ExecutionPlanResponse,workspaces?:ExecutionWorkspaceConfig):{id:string;config:ExecutionConfigSnapshot} {
-    const key=JSON.stringify({identity,input,choices,workspaces});
+    const key=JSON.stringify({identity,input,choices,workspaces,sceneEvidenceHash:plan.sceneEvidenceHash??null});
     const prior=this.requests.get(key);
     if(prior)return structuredClone(prior);
     const request={id:crypto.randomUUID(),config:{...designExecutionConfig(plan,choices),...(workspaces?{workspaces}:{})}};
@@ -18,15 +18,21 @@ export class DesignConfirmationCache {
 /** Git授权载荷重试缓存；仅显式选择改变或基准改变时产生新UUID，不因点击重试扩张权限。 */
 export class WorkspaceConfirmationCache {
   private readonly requests=new ViewCache<ExecutionWorkspaceConfig>(64);
-  get(identity:string,plan:NonNullable<ExecutionPlanResponse["workspacePlan"]>,drafts:Readonly<Record<string,{resources:string;workspaceId:string;sources?:string;workspaceGroup?:string}>>,excludeDirty:boolean,approved:boolean):ExecutionWorkspaceConfig {
+  get(identity:string,plan:NonNullable<ExecutionPlanResponse["workspacePlan"]>,drafts:Readonly<Record<string,{resources:string;workspaceId:string;sources?:string;workspaceGroup?:string}>>,excludeDirty:boolean,approved:boolean,continuation?:ExecutionPlanResponse["continuationPlan"]):ExecutionWorkspaceConfig {
     if(!approved)throw new Error("请明确勾选授权受管成果提交。");
     if(plan.diagnostic||!plan.baseCommit)throw new Error(plan.diagnostic??"Git基准不可用。");
     if(plan.dirtyPaths.length&&!excludeDirty)throw new Error("已有dirty内容，请明确选择排除或先处理工作区。");
-    const key=JSON.stringify({identity,plan,drafts,excludeDirty,approved});const prior=this.requests.get(key);if(prior)return structuredClone(prior);
+    const key=JSON.stringify({identity,plan,drafts,excludeDirty,approved,continuation});const prior=this.requests.get(key);if(prior)return structuredClone(prior);
     const nodes=plan.nodeIds.map(nodeId=>{const draft=drafts[nodeId];const externalResources=(draft?.resources??"").split("\n").map(path=>path.trim()).filter(Boolean);return {nodeId,...(externalResources.length?{externalResources}:{})};});
     const value:ExecutionWorkspaceConfig={version:2,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:plan.repository,baseCommit:plan.baseCommit,excludeExistingDirty:excludeDirty,nodes},bindings:nodes.map(node=>{const draft=drafts[node.nodeId],sources=(draft?.sources??"").split("\n").map(id=>id.trim()).filter(Boolean);if(sources.some(id=>!plan.nodeIds.includes(id)||id===node.nodeId))throw new Error(`集成来源 ${node.nodeId} 无效。`);return {nodeId:node.nodeId,workspaceId:draft?.workspaceId??crypto.randomUUID(),...(sources.length?{integrationSources:{nodeIds:sources}}:{})};})};
     const groups=new Map<string,string>();
     for(const binding of value.bindings){const group=drafts[binding.nodeId]?.workspaceGroup?.trim()||binding.nodeId;const prior=groups.get(group);if(prior)binding.workspaceId=prior;else groups.set(group,binding.workspaceId);}
+    if(continuation){
+      const ids=new Set(value.bindings.map(binding=>binding.workspaceId));
+      const selected=continuation.workspaces.filter(item=>ids.has(item.workspaceId));
+      if(!selected.length)throw new Error("请明确选择至少一份原保存现场，不能从历史基准重做并丢弃已有改动。");
+      value.continuation={executionId:continuation.executionId,heads:continuation.workspaces.map(item=>({workspaceId:item.workspaceId,commit:item.commit}))};
+    }
     this.requests.set(key,value);return structuredClone(value);
   }
 }

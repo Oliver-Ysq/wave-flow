@@ -38,8 +38,10 @@ export class ProductionWorkspaceExecutor {
     const manager = await WorkspaceManager.open(this.stateRoot, this.engineInstanceId);
     for (const id of new Set(this.config.bindings.map(binding => binding.workspaceId))) {
       const nodeIds = new Set(this.config.bindings.filter(binding => binding.workspaceId === id).map(binding => binding.nodeId));
+      if(this.config.continuation?.heads.some(head=>head.workspaceId===id))continue;
       await manager.create(id, { ...this.config.authorization, nodes: this.config.authorization.nodes.filter(node => nodeIds.has(node.nodeId)) });
     }
+    if(this.config.continuation)await manager.prepareExecution(runtime.journal.manifest.runId,this.config);
     const readOnly = new RuntimeAcpWorkerExecutor(this.runtimes, (identity, scratch) => this.controlMcp(identity, scratch), undefined, this.fallbackRuntimeId, `${this.stateRoot}/read-only-scratch`);
     const delegate = new WorkspaceExecutor(manager, runtime.journal.manifest.runId, this.config.bindings, readOnly, async (node, binding) => {
       const selected = node.request.assignedRuntimeId ? await this.runtimes.resolveWorkerById(node.request.assignedRuntimeId) : await this.runtimes.resolveWorker(node.cli);

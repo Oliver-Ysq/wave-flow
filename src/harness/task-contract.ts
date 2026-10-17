@@ -77,7 +77,6 @@ export function assertStartable(snapshot: HarnessSnapshot, revisionNumber: numbe
   assertImpactSummariesComplete(snapshot);
   if (snapshot.status !== "idle") throw new Error("主控必须空闲且任务未归档，才能配置或启动工作流。");
   const revision = snapshot.workflowRevisions.find(item => item.revision === revisionNumber);
-  if (snapshot.task?.workflowContract === "single-workflow-v1" && snapshot.executions.length) throw new Error("修订现场续作尚未开放；可以保存同链草案，原冻结执行仍可恢复。");
   if (snapshot.task) {
     if (!revision?.cardId || candidateRevision(snapshot)?.revision !== revisionNumber || revision.abandonedAt) throw new Error("方案已被取代或放弃，不能启动。");
   }
