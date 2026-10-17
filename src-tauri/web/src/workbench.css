@@ -786,3 +786,15 @@ body { min-height:100%; overscroll-behavior:none; }
 .workflow-design-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--wf-line-soft); }
 .workflow-design-row select { max-width: 280px; color: var(--wf-ink); background: var(--wf-input); border: 1px solid var(--wf-line); border-radius: 6px; padding: 8px; }
 .workflow-design small { display: block; margin: 10px 0; color: var(--wf-muted); }
+.workflow-workspace-config{display:grid;gap:12px;margin-top:16px;padding:16px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
+.workflow-workspace-config fieldset{display:grid;gap:10px;margin:0;padding:12px;border:1px solid var(--wf-line);border-radius:10px}
+.workflow-workspace-config label{display:grid;gap:6px;font-size:13px}
+.workflow-workspace-config textarea{min-height:64px;resize:vertical}
+.workflow-workspace-config .workspace-confirm{display:flex;grid-template-columns:auto 1fr;align-items:flex-start;gap:8px;line-height:1.45}
+.execution-workspace-evidence{display:grid;gap:10px;margin:16px 0;padding:14px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
+.execution-workspace-evidence code{overflow-wrap:anywhere;white-space:normal}
+.execution-workspace-evidence summary{cursor:pointer}
+details.execution-workspace-evidence{display:block}
+details.execution-workspace-evidence>article{margin-top:10px}
+.execution-workspace-evidence article{display:grid;grid-template-columns:minmax(100px,.6fr) minmax(160px,1.4fr);gap:6px 12px;padding:10px;border:1px solid var(--wf-line-soft);border-radius:10px}
+.execution-workspace-evidence article>div,.execution-workspace-evidence article>small,.execution-workspace-evidence article>span{grid-column:1/-1;display:grid;gap:4px}

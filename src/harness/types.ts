@@ -304,6 +304,8 @@ export type ExecutionConfigSnapshot = {
   readonly defaultAssignment: WorkerAssignment;
   /** 逐 Worker 指派；agentId 不得重复。 */
   readonly assignments: readonly WorkerAssignment[];
+  /** Wave Flow新增Git成果授权与绑定；省略仅允许无受管写成果的既有路径，不隐式创建worktree/commit。 */
+  readonly workspaces?: import("../workspace/execution-workspaces").ExecutionWorkspaceConfig;
 };
 
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */

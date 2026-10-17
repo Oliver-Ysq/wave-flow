@@ -21,8 +21,11 @@ export class HarnessControlPipe {
   #request: ReturnType<typeof createReadStream>;
   #response: ReturnType<typeof createWriteStream>;
 
-  constructor(private readonly invoke: (request: { readonly operation: "list" | "call"; readonly value: Record<string, unknown> }) => Promise<unknown>) {
-    const directory = mkdtempSync(join(tmpdir(), "wave-flow-harness-control-"));
+  constructor(private readonly invoke: (request: { readonly operation: "list" | "call"; readonly value: Record<string, unknown> }) => Promise<unknown>,
+    /** Engine的私有主控scratch；默认系统tmp仅供独立管道测试，不授权整个父目录。 */
+    root = tmpdir(),
+  ) {
+    const directory = mkdtempSync(join(root, "wave-flow-harness-control-"));
     chmodSync(directory, 0o700);
     const requestFifo = join(directory, "request"); const responseFifo = join(directory, "response");
     const made = Bun.spawnSync(["/usr/bin/mkfifo", "-m", "600", requestFifo, responseFifo]);

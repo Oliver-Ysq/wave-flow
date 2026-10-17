@@ -2,6 +2,10 @@ export type AgentStatus = "queued" | "running" | "blocked" | "pausing" | "paused
 export type RunStatus = "running" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
 
 export type AgentSnapshot = {
+  /** 当前节点的Wave Flow会话身份；未派发时null，缺失时UI不得批准文件操作。 */
+  agentSessionId?: string | null;
+  /** 节点所属耐久attempt；缺失时不能证明权限请求归属。 */
+  executionAttemptId?: number;
   /** Run 内稳定节点 id。 */
   id: string;
   /** 面向界面展示的节点名称。 */
@@ -185,9 +189,11 @@ export type WorkflowExecution = { executionId: string; revision: number; sourceH
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
 export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
-export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[] };
+export type ExecutionWorkspaceConfig = { version:1; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;/** 新启动确认授权自动squash，缺省旧记录不交付。 */autoSquashDelivery?:boolean;nodes:Array<{nodeId:string;paths:string[];externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
+export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
+  workspacePlan?:{nodeIds:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
   harnessRunId: string;
   revision: number;
   /** 已校验的阶段词表，按 meta 声明排序；不代表实际执行顺序。 */
@@ -246,6 +252,17 @@ export type HarnessProjectResponse = { project: HarnessProject };
 export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
+  workspaceDiagnostic?:string;
+  /** 自动交付证据；仅新分支，未合入主分支或push。 */
+  deliveryEvidence?: {
+    /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
+    /** 新交付分支及单父commit完整oid。 */ branch:string; commit:string;
+    /** 内部最终成果及工作区身份。 */ sourceCommit:string; sourceWorkspaceId:string;
+    /** 基准和冻结授权身份。 */ baseCommit:string; authorizationId:string;
+    /** 实际变化文件与耐久时间。 */ paths:string[]; deliveredAt:string;
+  };
+  /** 收尾失败原因，不代表业务节点未complete。 */ deliveryDiagnostic?:string;
+  workspaceEvidence?:Array<{nodeId:string;branch:string;lease:{attempt:number}|null;results:Array<{attempt:number;commit:string;paths:string[];ready:boolean;unchanged:boolean;mergeParents:string[]}>}>;
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };

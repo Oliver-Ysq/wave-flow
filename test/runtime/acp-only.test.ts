@@ -75,6 +75,21 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
   expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", delivery: "acp", acp: expect.objectContaining({ sessionId: "native-session" }) }));
 });
 
+test("受管写ACP complete后先close，再由成果阶段核验退出；核验失败不得丢句柄", async () => {
+  const value = await fixture(); let capability = "", closed = 0, verifies = 0, fail = true;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() { await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() { closed++; }, async verifyClosed() { verifies++; if (fail) throw new Error("组内仍有迟到进程"); },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, true);
+  executor.bindControl(value.control);
+  expect(await executor.execute(value.node)).toEqual({ ok: true }); expect(closed).toBe(1);
+  await expect(executor.finalizeCompleted(value.state.agent("node"))).rejects.toThrow("迟到进程");
+  fail = false; await executor.finalizeCompleted(value.state.agent("node")); expect(verifies).toBe(2);
+  await executor.finalizeCompleted(value.state.agent("node")); expect(verifies).toBe(2);
+});
+
 for(const answered of [false,true])test(`收尾从Control补回原block，answered=${answered}，不新建请求或代替continue`,async()=>{
  const value=await fixture();let identity:any;const blockRequestId=crypto.randomUUID();const prompts:string[]=[];
  const needHelp="请选择数字",answerSchema={type:"object",properties:{x:{type:"integer"}},required:["x"],additionalProperties:false};

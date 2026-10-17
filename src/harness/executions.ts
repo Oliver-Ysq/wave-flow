@@ -18,6 +18,9 @@ import { HarnessJournal } from "./journal";
 import { canonicalJson, validateTemplateInput } from "./workflow-templates";
 import {loadWorkflowSource} from "../workflow/load-workflow";
 import {preflightLocalWorkflow,validateLocalInput} from "../workflow/preflight-local";
+import { dirname } from "node:path";
+import { assertWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
+import { WorkspaceManager } from "../workspace/workspace-manager";
 
 /** Engine 注入的执行器工厂产物；wiring 是 Engine 私有接线上下文，本服务不透明传递。 */
 export type HarnessExecutionExecutor = {
@@ -29,6 +32,8 @@ export type HarnessExecutionExecutor = {
 
 /** Engine 注入的真实执行器接线；测试可全部省略。 */
 export type HarnessExecutionHooks = {
+  /** Run已completed、所有节点收尾后调用；只处理Git交付，不改业务状态、不派发Worker。缺省无动作。 */
+  readonly finalizeDelivery?: (executionId: string, config: ExecutionConfigSnapshot, snapshot: RunSnapshot) => Promise<void>;
   /**
    * 节点启动前绑定本实例的 ControlServer；缺省不接线。可返回同步释放器，捕获
    * 本次具体资源身份，在耐久终态后退役时调用一次；不得按 executionId 清理新实例。
@@ -58,6 +63,8 @@ export class HarnessExecutionService {
     private readonly root = harnessRunsRoot(),
     /** 独立本地Run Store；Engine显式传入，不复制节点状态。 */
     private readonly localStoreRoot = runsRoot(),
+    /** Engine唯一Workspace Store；不可从Harness/Run根目录猜测。 */
+    private readonly workspaceRoot = join(dirname(runsRoot()),"workspaces"),
   ) {}
 
   /** 从原 Run Journal 提取特定 attempt 证据；不读取其他尝试、不回放调度。 */
@@ -77,7 +84,15 @@ export class HarnessExecutionService {
       if(event.type==="block.created"||event.type==="block.answered"||event.type==="gate.created"||event.type==="gate.answered")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,diagnostic:event.diagnostic,decision:event.type.endsWith("answered")?"已交付原请求答案，不授权新动作":"原请求待处理"});
     }
     const page = (await this.runtimeFor(taskId, executionId)).state.listPhaseVisits(attempt, null, 1000, true);
-    return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence:{cwd:run.journal.manifest.workflowProjectCwd,status:"没有起止Git基线；不能证明文件归因或外部副作用"},nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
+    const execution=(await this.harness.snapshot(taskId)).executions.find(item=>item.executionId===executionId);
+    let workspaceEvidence:unknown={cwd:run.journal.manifest.workflowProjectCwd,status:"没有受管Git起止证据；不能证明文件归因或外部副作用"};
+    if(execution?.config?.workspaces){
+      try{
+        const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
+        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,delivery:await manager.inspectDelivery(executionId),deliveryDiagnostic:await manager.inspectDeliveryDiagnostic(executionId),branches:await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const workspace=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,workspaceId:binding.workspaceId,branch:workspace.branch,lease:workspace.lease?{runId:workspace.lease.runId,nodeId:workspace.lease.nodeId,attempt:workspace.lease.attempt}:null,results:workspace.results.filter(result=>result.runId===executionId&&result.attempt===attempt).map(result=>({commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};})),limitation:"Git证据只覆盖受管文件和所执行验证，不证明外部系统已回滚或无副作用"};
+      }catch(error){workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,status:"受管Git证据不可读取",diagnostic:error instanceof Error?error.message:String(error),limitation:"缺失不代表没有改动"};}
+    }
+    return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence,nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
   }
 
   /** Execution 档案位于所属 Harness 档案内的嵌套 Run Store。 */
@@ -117,7 +132,7 @@ export class HarnessExecutionService {
     // 受限 Execution 的脚本字面量 cli/model 不直接生效；没有分配卡冻结的快照就没有
     // 任何诚实依据决定节点落到哪个 Runtime，必须在任何耐久事实之前拒绝。
     if (!revision.localOrigin && !config) throw new Error("创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
-    if (revision.localOrigin && config) throw new Error("本地 Workflow 不接受 CLI 分配配置，请使用作者声明。 ");
+    if (revision.localOrigin) { const intent=readWorkspaceWriteIntent(revision.source); if((intent.nodeIds.length||intent.uncertain)&&!config?.workspaces)throw new Error("本地 Workflow 的workspace-write必须携带用户Git成果授权。 "); if(!intent.nodeIds.length&&!intent.uncertain&&config)throw new Error("纯只读本地 Workflow 不接受执行配置。 "); }
     // 编译失败在任何耐久事实之前拒绝，不产生 Execution。
     if(revision.localOrigin){
       const checked=await preflightLocalWorkflow(revision.localOrigin.path,snapshot.cwd);
@@ -126,6 +141,7 @@ export class HarnessExecutionService {
       if(canonicalJson(input)!==canonicalJson(revision.input))throw new Error("本地输入与批准版本不匹配。");
     }
     const module = revision.localOrigin?await loadWorkflowSource(revision.source,revision.localOrigin.path):compileRestrictedWorkflow(revision.source);
+    if (config?.workspaces) assertWorkspaceWriteIntent(revision.source, config.workspaces);
     const policy = DEFAULT_RESTRICTED_WORKFLOW_POLICY;
     const executionId = crypto.randomUUID();
     const root = revision.localOrigin?this.localStoreRoot:this.executionsRoot(harnessRunId);
@@ -136,7 +152,7 @@ export class HarnessExecutionService {
     let created: HarnessExecutionExecutor;
     let runtime: RunRuntime;
     try {
-    created = this.createExecutor(revision.localOrigin?null:config);
+    created = this.createExecutor(config?.workspaces?config:revision.localOrigin?null:config);
     runtime = await RunRuntime.create({
       workflow: module, input, workflowSource: revision.source, clientRequestId: crypto.randomUUID(),
       workflowProjectCwd: snapshot.cwd, workflowPath: sourcePath, storeRoot: root,
@@ -397,7 +413,7 @@ export class HarnessExecutionService {
     const source = await readFile(sourcePath, "utf8").catch(() => { throw new Error("Execution 冻结源码快照不可读取。 "); });
     if (createHash("sha256").update(source).digest("hex") !== record.sourceHash) throw new Error("Execution 冻结源码快照与登记 hash 不一致，fail closed。 ");
     const module = record.kind==="local-run"?await loadWorkflowSource(source,revision.localOrigin?.path):compileRestrictedWorkflow(source);
-    const resumedExecutor = this.createExecutor(record.kind==="local-run"?null:record.config??null);
+    const resumedExecutor = this.createExecutor(record.config?.workspaces?record.config:record.kind==="local-run"?null:record.config??null);
     // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
     // waiter 和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
     // 尝试收敛为 interrupted，再由标准 Replay 路径创建新 attempt。
@@ -495,9 +511,16 @@ export class HarnessExecutionService {
         // interrupted 优先采用本次 run() 的真实 rejection；snapshot.diagnostic 可能是
         // 旧 attempt 遗留的终态诊断（例如 resume 重放在首个节点前被拒，快照从未更新）。
         // cancelled 的诊断以快照为准（"用户停止"/"退出 Wave Flow" 语义由控制路径耐久）。
-        const diagnostic = terminal === "completed" ? null
+        let diagnostic = terminal === "completed" ? null
           : terminal === "interrupted" && runtimeError ? runtimeError.message
           : snapshot.diagnostic;
+        if (terminal === "completed" && this.#instances.get(executionId) === instance) {
+          const execution = (await this.harness.snapshot(harnessRunId)).executions.find(item => item.executionId === executionId);
+          if (execution?.config?.workspaces) {
+            try { await this.hooks.finalizeDelivery?.(executionId, execution.config, snapshot); }
+            catch (error) { diagnostic = `Git最终交付诊断未能保存：${error instanceof Error ? error.message : String(error)}；业务已完成，不自动重跑。`; }
+          }
+        }
         // 终态发布与 resume 共用 Harness 事务锁：身份校验和 append 之间不能换代。
         await this.withLifecycleLock(harnessRunId, async () => {
           if (this.#instances.get(executionId) !== instance) return;

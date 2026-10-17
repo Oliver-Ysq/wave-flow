@@ -12,6 +12,7 @@ import {inspectLocalWorkflowSource,validateLocalInput} from "../workflow/preflig
 import {createHash} from "node:crypto";
 import {canonicalJson} from "./workflow-templates";
 import { impactSummaryKey, assertImpactSummariesComplete } from "./impact-summary";
+import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 
 /** 当前Harness档案格式；只读取本格式，不迁移或兼容旧开发档案。 */
 export const HARNESS_JOURNAL_VERSION = 8;
@@ -459,6 +460,7 @@ function isExecutionConfigSnapshot(value: unknown): value is import("./types").E
   if (!plain(value)) return false;
   if (value.version !== 1 || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)) || typeof value.fallbackRuntimeId !== "string" || !value.fallbackRuntimeId.trim() || (value.ruleText !== null && typeof value.ruleText !== "string") || typeof value.ruleDegraded !== "boolean" || !Array.isArray(value.assignments)) return false;
   if (!isWorkerAssignment(value.defaultAssignment)) return false;
+  if (value.workspaces !== undefined) { try { validateExecutionWorkspaces(value.workspaces); } catch { return false; } }
   const ids = new Set<string>();
   for (const assignment of value.assignments) {
     if (!isWorkerAssignment(assignment)) return false;

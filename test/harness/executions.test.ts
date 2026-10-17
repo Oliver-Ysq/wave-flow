@@ -56,6 +56,27 @@ async function waitFor(condition: () => Promise<boolean> | boolean): Promise<voi
 }
 
 describe("HarnessExecutionService", () => {
+  test("自动交付在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
+    const { harness, harnessRunId, root } = await fixture();
+    let finalized = false, called = 0;
+    const config = { ...testConfig(), workspaces: { version: 1 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, autoSquashDelivery: true, nodes: [{ nodeId: "w1", paths: ["a.txt"] }] }, bindings: [{ nodeId: "w1", workspaceId: crypto.randomUUID() }] } };
+    const executions = new HarnessExecutionService(harness, () => ({ executor: { execute: async () => ({ ok: true }), finalizeCompleted: async () => { finalized = true; } } }), {
+      finalizeDelivery: async (id, frozen) => {
+        expect(finalized).toBe(true); expect(frozen).toEqual(config); called++;
+        expect((await harness.snapshot(harnessRunId)).executions.find(item => item.executionId === id)?.finishedAt).toBeNull();
+        throw new Error("模拟交付证据磁盘失败");
+      },
+    }, root);
+    try {
+      const source = SIMPLE_SOURCE.replace('cli: "codex"', 'cli: "codex", sandbox: "workspace-write"');
+      await harness.proposeWorkflowRevision(harnessRunId, source); await harness.acceptWorkflowRevision(harnessRunId, 1);
+      const { execution } = await executions.createExecution(harnessRunId, 1, {}, config);
+      await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+      const record = (await executions.listExecutions(harnessRunId))[0];
+      expect(record.status).toBe("completed"); expect(record.diagnostic).toContain("模拟交付证据磁盘失败"); expect(called).toBe(1);
+      expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).status).toBe("completed");
+    } finally { harness.close(); }
+  });
   test("控制初始化失败保留原Execution并收敛interrupted，不创建Worker",async()=>{
     const {harness,harnessRunId,root}=await fixture();let workers=0;
     const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{workers++;return {};}}}),{wireControl:()=>{throw Error("接线失败");}},root);

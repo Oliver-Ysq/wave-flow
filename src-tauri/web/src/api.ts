@@ -9,6 +9,10 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
+  savePartial: (harnessRunId:string,executionId:string)=>action<ExecutionResponse>("executions.savePartial",{harnessRunId,executionId,authorized:true}),
+  /** 用户确认后只清理已保存/无writer的checkout，分支与commit保留。 */
+  cleanupWorkspaces:(harnessRunId:string,executionId:string)=>action<ExecutionResponse>("executions.cleanupWorkspaces",{harnessRunId,executionId,authorized:true}),
   /** 只重试原义务的主控总结，不能派发或恢复Worker。 */
   retryImpactSummary:(harnessRunId:string,key:string)=>action<HarnessRunResponse>("harnesses.retryImpactSummary",{harnessRunId,key}),
   /** 仅停止指定总结的本次回合；key与turnId均必填，过期或缺失身份不能停止重试/其他回合。 */

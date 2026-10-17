@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {designExecutionConfig,DesignConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
+import {designExecutionConfig,DesignConfirmationCache,WorkspaceConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
 import type {ExecutionPlanResponse} from "../../src-tauri/web/src/types";
 const runtime=(runtimeId:string,cli:"codex"|"kimi")=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:cli==="codex"?"codex-acp":"kimi-acp",adapterVersion:"1",harnessTools:true}});
 const plan={workers:[{id:"reviewer"},{id:"verifier"}],pool:[runtime("c","codex"),runtime("k","kimi")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
@@ -37,4 +37,19 @@ test("确认缓存有界且App新会话不假装恢复旧请求",()=>{
  for(let i=0;i<64;i++)cache.get(`other:card:${i}`,{}, {},plan);
  expect(cache.get("task:card:1",{}, {},plan).id).not.toBe(first.id);
  expect(new DesignConfirmationCache().get("task:card:1",{}, {},plan).id).not.toBe(first.id);
+});
+test("Git授权必须显式确认dirty与文件范围，失败重试复用授权UUID",()=>{
+ const cache=new WorkspaceConfirmationCache();const workspacePlan={nodeIds:["a","integrate"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:["user.txt"],diagnostic:null};
+ const drafts={a:{paths:"a.ts",resources:"port:4173",workspaceId:crypto.randomUUID()},integrate:{paths:"a.ts\nb.ts",resources:"",workspaceId:crypto.randomUUID(),sources:"a"}};
+ expect(()=>cache.get("task",workspacePlan,drafts,false,true)).toThrow("dirty");expect(()=>cache.get("task",workspacePlan,drafts,true,false)).toThrow("勾选");
+ const first=cache.get("task",workspacePlan,drafts,true,true),retry=cache.get("task",workspacePlan,drafts,true,true);expect(retry).toEqual(first);expect(first.bindings[1]?.integrationSources).toEqual({nodeIds:["a"]});expect(first.authorization.nodes[0]?.externalResources).toEqual(["port:4173"]);
+ expect(first.authorization.autoSquashDelivery).toBe(true);
+ expect(cache.get("task",workspacePlan,{...drafts,a:{...drafts.a,paths:"other.ts"}},true,true).authorization.authorizationId).not.toBe(first.authorization.authorizationId);
+});
+test("独立工作区重叠文件拒绝，相同分组顺序复用允许且不生成第二worktree",()=>{
+ const cache=new WorkspaceConfirmationCache(),workspacePlan={nodeIds:["a","b"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
+ const drafts={a:{paths:"a.ts",resources:"",workspaceId:crypto.randomUUID()},b:{paths:"a.ts",resources:"",workspaceId:crypto.randomUUID()}};
+ expect(()=>cache.get("task",workspacePlan,drafts,false,true)).toThrow("重叠");
+ const value=cache.get("task",workspacePlan,{a:{...drafts.a,workspaceGroup:"chain"},b:{...drafts.b,workspaceGroup:"chain"}},false,true);
+ expect(value.bindings[0]?.workspaceId).toBe(value.bindings[1]?.workspaceId);
 });

@@ -8,7 +8,8 @@ const skillRoot = join(import.meta.dir, "../../skills/workflow-creator");
 test("主控系统 prompt 内嵌 workflow-creator skill 全文", async () => {
   const prompt = buildHarnessSystemPrompt();
   // 行为边界在前。
-  expect(prompt).toContain("propose_workflow_revision 只产生草案，用户接受后才可能创建 Execution");
+  expect(prompt).toContain("propose_workflow_revision只产生草案，不批准或派发");
+  expect(prompt).toContain("使用当前CLI原生Read/Grep/Shell工具读取项目及本机文件");
   // skill 正文与两个 references 以附录形式拍平注入；磁盘上的 skill 文件是唯一事实来源。
   const guide = await readFile(join(skillRoot, "SKILL.md"), "utf8");
   const api = await readFile(join(skillRoot, "references/api.md"), "utf8");

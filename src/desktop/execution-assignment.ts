@@ -1,6 +1,8 @@
 import type { ExecutionConfigSnapshot, WorkerAssignment } from "../harness/types";
 import type { CliRuntimeView, RuntimeCli } from "../runtimes/types";
 import type { ExtractedAgentWorker } from "../workflow/restricted/extract-agents";
+import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
+import { adapterById } from "../runtimes/adapter-catalog";
 
 /**
  * 分配卡的纯函数助手：把已枚举 Worker、已验证 Runtime 池与用户选择组装成可冻结的
@@ -56,5 +58,10 @@ export function validateExecutionConfig(value: unknown, workers: readonly Extrac
     return assignment;
   });
   if (!byId.has(config.fallbackRuntimeId)) throw new Error("执行配置快照的回退 Runtime 不存在或未验证。 ");
-  return { version: 1, createdAt: typeof config.createdAt === "string" ? config.createdAt : new Date().toISOString(), fallbackRuntimeId: config.fallbackRuntimeId, ruleText: (config.ruleText as string | null) ?? null, ruleDegraded: config.ruleDegraded, defaultAssignment, assignments };
+  const workspaces = config.workspaces === undefined ? undefined : validateExecutionWorkspaces(config.workspaces);
+  if (workspaces) for (const binding of workspaces.bindings) {
+    const assignment = assignments.find(item => item.agentId === binding.nodeId) ?? defaultAssignment;
+    if (!adapterById(assignment.adapterId)?.sessionIsolation?.enabledRoles.includes("worker")) throw new Error("所选Adapter尚未完成受管写隔离验收；请重新选择CLI。");
+  }
+  return { version: 1, createdAt: typeof config.createdAt === "string" ? config.createdAt : new Date().toISOString(), fallbackRuntimeId: config.fallbackRuntimeId, ruleText: (config.ruleText as string | null) ?? null, ruleDegraded: config.ruleDegraded, defaultAssignment, assignments, ...(workspaces ? { workspaces } : {}) };
 }

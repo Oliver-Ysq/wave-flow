@@ -71,6 +71,10 @@ export class LimitedAgentExecutor implements AgentNodeExecutor {
     this.#releases.delete(key);
   }
 
+  /** 已完成业务的Git成果收尾也必须透传；不申请新Worker名额，不触发重复执行。 */
+  async finalizeCompleted(node: AgentNodeSnapshot): Promise<void> { await this.delegate.finalizeCompleted?.(node); }
+  async finalizePartial(node: AgentNodeSnapshot): Promise<void> { await this.delegate.finalizePartial?.(node); }
+
   /** 控制能力不消耗或归还名额；只透明转发给实际 Adapter。 */
   pause(node: AgentNodeSnapshot, signal?: AbortSignal) {
     if (!this.delegate.pause) throw new Error(`节点 ${node.id} 的执行器不支持 pause。`);

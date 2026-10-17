@@ -178,7 +178,7 @@ describe("HarnessService", () => {
       isRunning: false,
       subscribe: () => () => {},
       async prompt() {
-        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "inspect_execution", arguments: {} } });
         return "已读取项目目录。";
       },
       abort() {},
@@ -191,8 +191,8 @@ describe("HarnessService", () => {
     // v5 起新回合不再写 harness.tool_activity 批量摘要（它会让新界面出现重复工具行）；
     // 工具目标、输出与状态由颗粒化条目承载，重开回放同源一致。
     const tool = completed.conversationEntries.find((entry) => entry.kind === "tool");
-    expect(tool).toMatchObject({ kind: "tool", name: "查询项目状态", toolKind: "command", target: "pwd", status: "completed", source: "engine-mcp", hasDetail: true, legacy: false });
-    expect(tool && tool.kind === "tool" ? tool.output : null).toContain(cwd.split("/").at(-1) ?? "");
+    expect(tool).toMatchObject({ kind: "tool", toolKind: "mcp", status: "completed", source: "engine-mcp", hasDetail: true, legacy: false });
+    expect(tool && tool.kind === "tool" ? tool.output : null).toContain("[");
     expect(completed.toolActivitiesByMessageId).toEqual({});
     const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
     await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ conversationEntries: completed.conversationEntries });
@@ -403,7 +403,7 @@ describe("HarnessService", () => {
       async prompt() {
         const emit = (event: HarnessStreamEvent) => { for (const listener of this.#listeners) listener(event); };
         emit({ type: "assistant_delta", delta: "先读取项目" });
-        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "inspect_execution", arguments: {} } });
         emit({ type: "assistant_delta", delta: "读取完成" });
         emit({ type: "reasoning_delta", delta: "检查结果" });
         emit({ type: "assistant_delta", delta: "准备验证" });
@@ -539,11 +539,11 @@ describe("HarnessService", () => {
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
       async prompt() {
         // 形态一：name 携带编码名；形态二：name 缺省、仅 title 携带（真实 Kimi CLI 行为）。
-        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-1", title: "mcp__wave-flow-harness__read_project_file", name: "mcp__wave-flow-harness__read_project_file", toolKind: "file-read", status: "in_progress", locations: [], contentText: null, rawInput: { path: "package.json" }, rawOutput: null } });
-        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "read_project_file", arguments: { path: "package.json" } } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-1", title: "mcp__wave-flow-harness__inspect_execution", name: "mcp__wave-flow-harness__inspect_execution", toolKind: "mcp", status: "in_progress", locations: [], contentText: null, rawInput: {}, rawOutput: null } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "inspect_execution", arguments: {} } });
         for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "acp-1", patch: { status: "completed", contentText: "{}" } });
-        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-2", title: "mcp__wave-flow-harness__query_project", name: null, toolKind: "command", status: "in_progress", locations: [], contentText: null, rawInput: null, rawOutput: null } });
-        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "query_project", arguments: { command: "pwd", args: [] } } });
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "acp-2", title: "mcp__wave-flow-harness__read_run_capsule", name: null, toolKind: "mcp", status: "in_progress", locations: [], contentText: null, rawInput: null, rawOutput: null } });
+        await service.mcpTools(created.harnessRunId, { operation: "call", value: { name: "read_run_capsule", arguments: {} } });
         for (const listener of this.#listeners) listener({ type: "acp_tool_update", callId: "acp-2", patch: { status: "completed" } });
         return "已读取。";
       }

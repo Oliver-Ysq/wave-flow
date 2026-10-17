@@ -42,7 +42,7 @@ export class AcpHarnessSession implements HarnessSession {
     try {
       if (!this.#initialized) {
         await this.#client.initialize(controller.signal);
-        await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer]);
+        await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
         this.#initialized = true;
       }
       const prompt = this.#primed ? text : this.primePrompt(text);

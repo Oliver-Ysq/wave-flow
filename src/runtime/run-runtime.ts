@@ -258,7 +258,7 @@ export class RunRuntime {
       return this.snapshot();
     } catch (error) {
       const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
-      await this.transitionRun("interrupted", diagnostic);
+      if (this.state.snapshot().status !== "cancelled") await this.transitionRun("interrupted", diagnostic);
       throw error;
     } finally {
       for (const node of targets) this.host.endStop(node.id);

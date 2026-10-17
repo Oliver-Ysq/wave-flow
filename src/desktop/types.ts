@@ -165,6 +165,8 @@ export type CreateExecutionRequest = {
 
 /** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
 export type ExecutionPlanResponse = {
+  /** 固定写节点与实时Git基准预检；无写节点为null，无法验证有diagnostic并禁止受管写。 */
+  readonly workspacePlan?: { readonly nodeIds: readonly string[]; readonly repository: string; readonly baseCommit: string | null; readonly dirtyPaths: readonly string[]; readonly diagnostic: string | null } | null;
   /** 已校验 meta.phases 的声明顺序标题；只作预览词表，不表达执行顺序或依赖。 */
   readonly phaseTitles: readonly string[];
   /** 每个源码 agent() 调用一个展示示意（含动态 id）；不用于分配校验或运行节点定位。 */
@@ -199,6 +201,14 @@ export type ExecutionResponse = {
    * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
    */
   readonly controllable: boolean;
+  /** 受管Git成果投影；只展示WorkspaceManager事实，不改变Run业务状态。 */
+  readonly workspaceEvidence?: readonly { readonly nodeId:string; readonly branch:string; readonly lease:{readonly attempt:number}|null; readonly results:readonly {readonly attempt:number;readonly commit:string;readonly paths:readonly string[];readonly ready:boolean;readonly unchanged:boolean;readonly mergeParents:readonly string[]}[] }[];
+  /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
+  readonly workspaceDiagnostic?: string;
+  /** 自动单父交付的耐久Git证据；缺省表示尚未形成交付，不代表主分支已合入。 */
+  readonly deliveryEvidence?: import("../workspace/workspace-manager").WorkspaceDelivery;
+  /** 自动交付失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
+  readonly deliveryDiagnostic?: string;
 };
 
 /** 单个执行尝试的只读结果证据；缺失结果不从其他 attempt 补造。 */

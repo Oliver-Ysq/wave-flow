@@ -5,6 +5,7 @@ import type { JsonObject } from "../shared/json";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { RuntimeProvenance } from "../runtimes/types";
 import type * as acp from "@agentclientprotocol/sdk";
+import { WorkflowContractError } from "../workflow/errors";
 
 /** ACP Worker 会话的最小使用面，便于在不依赖真实模型的情况下验证 Runtime/Control 边界。 */
 export interface AcpWorkerSession {
@@ -15,6 +16,8 @@ export interface AcpWorkerSession {
   prompt(text: string, signal: AbortSignal): Promise<{ readonly stopReason: string }>;
   cancel(signal: AbortSignal): Promise<void>;
   close(): void;
+  /** 受管写session在close后独立核验进程组已退出；普通测试session省略。 */
+  verifyClosed?(): Promise<void>;
 }
 
 /**
@@ -27,10 +30,12 @@ export interface AcpWorkerSession {
 export class AcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
   #active = new Map<string, ActiveAcpWorker>();
+  #closedSessions = new Map<string, AcpWorkerSession>();
+  #verifiedSessions = new Set<string>();
 
   constructor(
     private readonly launcher: AcpLauncher,
-    // Worker 是 Runtime 已授权的真实执行面，读写与 shell 权限不由 Harness Shell Policy 限制。
+    // CLI请求统一allow；生产文件权限由外层OS强制，不开放宿主文件委托。
     private readonly createSession: (launcher: AcpLauncher) => AcpWorkerSession = (value) => new AcpSessionClient(value, undefined, "allow"),
     /** 已验证用户 CLI 的来源；遗留 Journal 可省略，新的 Runtime 路径必须提供。 */
     private readonly runtime?: RuntimeProvenance,
@@ -38,6 +43,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly createControlMcp?: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer,
     /** 判定节点 cli 是否有已验证的 Worker adapter；默认查询内置 Adapter Catalog。 */
     private readonly isSupportedWorkerCli: (cli: string) => boolean = (cli) => workerAdapterForCli(cli) !== null,
+    /** 受管写要求真实退出证明；默认false保持现有只读/测试路径，生产workspace工厂必须true。 */
+    private readonly requireWriterExit = false,
   ) {}
 
   /** Runtime 创建当前 Run 的 Control 后调用；缺失时绝不启动真实 Agent。 */
@@ -97,11 +104,27 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       active.releaseResume?.();
       this.#active.delete(key);
       session.close();
+      if (this.requireWriterExit) this.#closedSessions.set(key, session);
       // Worker 未 complete 就停止、取消或异常结束时也必须回收本 session 的私有
       // Control 通道；它不能存活到整个 Engine 退出后才消失。
       for (const server of mcpServers ?? []) (server as import("@agentclientprotocol/sdk").McpServer & { readonly close?: () => void }).close?.();
     }
   }
+
+  /** 业务complete后只验证关闭的writer，不创建新ACP回合；超时不丢证明句柄。 */
+  async finalizeCompleted(node: AgentNodeSnapshot): Promise<void> {
+    if (!this.requireWriterExit) return;
+    const key = nodeKey(node);
+    if (this.#verifiedSessions.has(key)) return;
+    const session = this.#closedSessions.get(key);
+    if (!session?.verifyClosed) throw new WorkflowContractError("受管ACP写Worker没有可核验退出句柄。");
+    try { await session.verifyClosed(); }
+    catch (error) { throw new WorkflowContractError(`受管writer退出核验失败：${error instanceof Error ? error.message : String(error)}`); }
+    this.#closedSessions.delete(key);
+    this.#verifiedSessions.add(key);
+  }
+  /** stop已使execute进入finally并close；退出证明与completed共用，不推断业务成功。 */
+  finalizePartial(node: AgentNodeSnapshot): Promise<void> { return this.finalizeCompleted(node); }
 
   /** 同一 Engine 内暂停：cancel 必须真实以 cancelled 结束，不能把未知中断伪装为 paused。 */
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> {
@@ -256,7 +279,7 @@ function workerControlToolGuide(): string {
 
 function managedPrompt(node: AgentNodeSnapshot): string {
   const schema = node.request.schema ? `\n最终 JSON 必须符合此 resultSchema：${JSON.stringify(node.request.schema)}` : "";
-  return `${node.request.prompt}\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n${workerControlToolGuide()}\n完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block。它单次最多等待约 25 秒：返回 { status: "answered", blockRequestId, answer } 表示用户已作答；返回 { status: "waiting", blockRequestId } 表示尚未作答，你必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用 wave_flow_block 继续等待，直到 answered 为止——不要结束回合、不要修改参数、不要新建 block、不要把 waiting 当作答案。收到答案并确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
+  return `${node.request.prompt}\n\n文件权限边界：本机文件允许读取；业务写入仅限当前受管工作区，read-only节点不得写业务文件。私有运行状态和必要专属Git元数据由宿主另行核定。当前CLI原生目录是宿主声明的可写例外，允许登录续期、配置及运行数据；其他工作区外写入一律拒绝，没有用户批准后扩权入口；不得解除sandbox、改用宿主工具或重跑越界命令。需导出成果先生成在当前工作区，由用户自行搬出。\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n${workerControlToolGuide()}\n完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block。它单次最多等待约 25 秒：返回 { status: "answered", blockRequestId, answer } 表示用户已作答；返回 { status: "waiting", blockRequestId } 表示尚未作答，你必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用 wave_flow_block 继续等待，直到 answered 为止——不要结束回合、不要修改参数、不要新建 block、不要把 waiting 当作答案。收到答案并确认答案已解决问题后调用 wave_flow_continue。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时节点会被标记为 interrupted。`;
 }
 
 function recoveryPrompt(): string {

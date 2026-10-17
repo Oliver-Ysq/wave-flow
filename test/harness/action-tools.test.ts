@@ -47,7 +47,7 @@ describe("Harness action tools", () => {
   });
 
   test("beforeToolCall 白名单只允许已注册工具", () => {
-    expect(isHarnessToolAllowed("read_project_file", false)).toBe(true);
+    expect(isHarnessToolAllowed("read_project_file", false)).toBe(false);
     expect(isHarnessToolAllowed("propose_workflow_revision", true)).toBe(true);
     expect(isHarnessToolAllowed("propose_workflow_revision", false)).toBe(false);
     expect(isHarnessToolAllowed("complete", true)).toBe(false);

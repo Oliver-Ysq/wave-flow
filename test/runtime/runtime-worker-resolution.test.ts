@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ControlServer } from "../../src/control/control-server";
@@ -10,6 +10,7 @@ import { AcpWorkerExecutor } from "../../src/runtime/acp-worker-executor";
 import { RuntimeAcpWorkerExecutor } from "../../src/runtime/runtime-acp-worker-executor";
 import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
 import type { AgentCli } from "../../src/shared/workflow-types";
+import { adapterById } from "../../src/runtimes/adapter-catalog";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -59,6 +60,28 @@ describe("AcpWorkerExecutor cli 门禁", () => {
     executor.bindControl({} as ControlServer);
     await expect(executor.execute(node("traex" as never))).rejects.toThrow("不支持 cli: traex");
   });
+});
+
+test("生产普通ACP路径拒绝业务写节点，不创建私有目录或调用CLI工厂",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-readonly-route-"));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await kimiRecord(root));let factories=0;
+ const executor=new RuntimeAcpWorkerExecutor(registry,()=>({name:"private",command:"fake",args:[],env:[]}) as never,()=>{factories++;throw new Error("不能创建");},null,join(root,"scratch"));executor.bindControl({} as ControlServer);
+ await expect(executor.execute(node("kimi"))).rejects.toThrow("Workspace执行器");expect(factories).toBe(0);expect(await Bun.file(join(root,"scratch")).exists()).toBe(false);
+});
+
+test("只读Worker退出核验失败保留原句柄，重试只核验不重新启动",async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-readonly-close-")));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await kimiRecord(root));const cwd=join(root,"project");await mkdir(cwd);
+ const executor=new RuntimeAcpWorkerExecutor(registry,()=>({name:"private",command:"fake",args:[],env:[]}) as never,undefined,null,join(root,"scratch"));executor.bindControl({} as ControlServer);
+ let checks=0,starts=0;
+ const profile=adapterById("kimi-acp")!.sessionIsolation!;
+ const prepare=spyOn(profile,"prepare").mockImplementation(async launcher=>launcher);
+ const execute=spyOn(AcpWorkerExecutor.prototype,"execute").mockImplementation(async()=>{starts++;return{ok:true};});
+ const finalize=spyOn(AcpWorkerExecutor.prototype,"finalizeCompleted").mockImplementation(async()=>{checks++;if(checks<=2)throw new Error("原进程仍存在");});
+ const value={...node("kimi"),sandbox:"read-only" as const,cwd,request:{...node("kimi").request,sandbox:"read-only" as const,cwd}};
+ try{
+  await expect(executor.execute(value)).rejects.toThrow("原进程仍存在");expect(starts).toBe(1);expect(checks).toBe(2);
+  await executor.finalizeCompleted(value);expect(starts).toBe(1);expect(checks).toBe(3);
+  await executor.finalizeCompleted(value);expect(checks).toBe(3);
+ }finally{prepare.mockRestore();execute.mockRestore();finalize.mockRestore();}
 });
 
 /** 携带分配快照指派的节点；assignedRuntimeId 写在生效请求上。 */

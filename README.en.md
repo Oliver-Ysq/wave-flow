@@ -19,6 +19,8 @@ With Wave Flow, you can:
 3. **Step in when needed.** Agents explicitly request human assistance. Your answer supplies information; the original agent confirms continuation. You can also pause or stop execution.
 4. **Inspect what happened.** Browse structured deliverables and historical attempts. Recover interrupted work explicitly—never through a silent rerun.
 
+Write workflows use isolated Git worktrees for internal checkpoints. Parallel write branches must be combined by an explicit integration Worker. On completion, Wave Flow automatically creates a `codex/delivery-<executionId>` branch containing one commit after the frozen base. It does not modify the primary worktree, primary branch, or remote, and does not push anything; internal checkpoints remain available for recovery and diagnostics.
+
 ## Why Wave Flow?
 
 ### Long tasks need a workflow, not just a remembered plan
@@ -54,8 +56,9 @@ Coming soon.
 Wave Flow is in early development. Please keep these limits in mind:
 
 - The local `.ts` workflow task entry is not publicly enabled. URL workflow downloads, visual workflow editing, remote control, and cloud sync are not supported.
-- Automatic impact summaries, worktree isolation, and execution of revised workflows against the current workspace are not publicly enabled. Results currently appear as structured data.
-- Workers share the project directory by default. Parallel writes require provably disjoint paths; conflicting work must run sequentially.
+- Business-file writes are limited to the managed worktree. Controllers and Workers may also write the selected CLI's native runtime directory (`~/.codex` for Codex and `~/.kimi-code` for Kimi) for login renewal, configuration, and runtime data; model tools can also modify configuration and credentials there. Other CLI directories and other out-of-workspace writes remain denied. Independent parallel writes require non-overlapping authorized paths, and multiple sources require explicit integration. Execution is rejected when the safe scope cannot be proven.
+- Automatic single-parent delivery creates only a new local delivery branch. It does not merge into the primary branch or push. No final delivery is created while independent branches remain unintegrated or a partial result, writer lease, or workspace drift exists.
+- Automatic impact summaries are available. Continuing from an edited workflow across versions is not publicly enabled.
 - Interrupted execution recovery only reuses strictly matching completed prefixes within the same execution. It does not roll back files or undo external effects.
 - The workbench and execution engine run locally. Model requests still go to the provider used by your chosen CLI; local execution does not mean offline inference or that data never leaves your machine.
 

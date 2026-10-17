@@ -46,7 +46,8 @@ describe("RunRuntime ACP-neutral core", () => {
     while(initial.snapshot().phases[0].agents.some(node=>node.status!=="interrupted")){if(Date.now()>deadline)throw new Error("初始节点未收敛");await Bun.sleep(1);}
     const executed: string[] = [];
     const resumed = await RunRuntime.resume(initial.snapshot().id,{execute:async node=>{executed.push(node.id);return {id:node.id};}},join(initial.journal.directory,".."));
-    await expect(resumed.run(concurrent)).resolves.toEqual([{id:"a"},{id:"b"}]);
+    // 先await以保留Runtime原始诊断，避免resolves matcher掩盖并行恢复错误。
+    expect(await resumed.run(concurrent)).toEqual([{id:"a"},{id:"b"}]);
     expect(executed.sort()).toEqual(["a","b"]);
     const {events} = await RunJournal.open(initial.snapshot().id,join(initial.journal.directory,".."));
     expect(events.filter(event=>event.type==="execution-attempt.started"&&event.executionAttemptId===2)).toHaveLength(1);

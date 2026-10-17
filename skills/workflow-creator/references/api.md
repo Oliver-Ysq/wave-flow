@@ -2,6 +2,16 @@
 
 本文件是当前已实现公开契约的唯一依据。不要因为其他 Workflow 运行时存在某个能力就在这里添加它。
 
+## 宿主成果交接边界
+
+文件边界新增例外：当前Adapter声明的CLI原生目录可写用于认证/配置/运行数据，三角色一致；不是作者参数，不开放其他CLI根/整个Home，业务及Git授权不变。
+
+启动Git授权覆盖内部检查点与最终自动squash：Engine以冻结base为唯一父、完整最终ready成果为tree创建新交付分支，不合入主分支、不push。作者接口不增加交付方法；多个独立分支必须先显式集成，不能由completed推断最终交付。无额外交付按钮，内部commit仍保留用于恢复。
+
+统一角色权限由宿主OS层强制，不是作者接口：主控/只读Worker全局读、仅私有状态写；写Worker仅当前受管worktree、私有状态和专属Git元数据可写，其他文件写一律拒绝，无用户批准后扩权或宿主文件委托通道。工作区文件写不逐次审批，Git成果提交/基线/清理仍需原授权；不新增agent参数。
+
+Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API。业务 complete 耐久后，受管写执行器须完成 Git 成果保存与关联，`agent()` 才返回原 JSON；保存错误作为 WorkflowContractError 穿透 parallel/pipeline。原版 resume 可只恢复宿主成果交接，业务 completed 不回退，不创建新 Worker 或假 executionAttempt。Codex与Kimi 2.2.0受管并行写/集成、自动单父交付与桌面收尾已有真实证据，执行仍要求Engine冻结授权和已验证Adapter；不能使用未公开workspace作者字段或把当前两种CLI能力扩展到未知CLI。
+
 ## 两种模块形状
 
 ### 受信任本地模块（CLI `wave-flow run`）
@@ -158,8 +168,9 @@ const drafted = await pipeline(
 );
 ```
 
-注意：并发写入同一项目 cwd 没有 worktree 隔离；多个 `workspace-write` Agent 不得并行
-修改同一文件或逻辑区域，写任务默认顺序执行。
+注意：worktree/commit/集成来源不是作者 API。Desktop 对固定写节点冻结用户 Git 授权后，
+不同且不重叠的受管工作区可并行；相同分组顺序复用。没有授权或隔离验证时写节点 fail
+closed。作者仍须先 await 来源，再调用普通集成 Agent；不得在脚本里预测 commit hash。
 
 ## `log()`
 

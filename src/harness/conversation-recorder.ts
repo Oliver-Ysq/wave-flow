@@ -17,7 +17,7 @@ const PARAMS_MAX_CHARS = 2_000;
 const TARGET_MAX_CHARS = 1_000;
 
 /** Engine 私有 sidecar 的窄工具注册名；这些调用由执行包装器权威记录，ACP 侧的同名通知视为重复来源而跳过。 */
-const ENGINE_MCP_TOOL_NAMES = new Set(["read_project_file", "query_project", "propose_workflow_revision", "inspect_execution", "read_run_capsule", "request_user_decision"]);
+const ENGINE_MCP_TOOL_NAMES = new Set(["propose_workflow_revision", "inspect_execution", "read_run_capsule", "request_user_decision"]);
 
 /** ACP 对 MCP 工具名的标准编码 `mcp__<server>__<tool>`；仅在完整匹配该形态时还原工具名，不按相似名称猜测。 */
 export function unmangleAcpMcpToolName(name: string | null): string | null {

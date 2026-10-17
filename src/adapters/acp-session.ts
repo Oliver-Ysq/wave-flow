@@ -14,6 +14,12 @@ export type AcpLauncher = {
 
 /** ACP Agent 请求权限时的客户端决策；Harness 与 Worker 不能共用默认值。 */
 export type AcpPermissionMode = "deny" | "allow";
+/** Adapter无关的权限决策；未来桌面协调器可耐久等待用户，测试/兼容模式仍用deny/allow。 */
+export type AcpPermissionResolver = (
+  /** 原CLI的结构化请求，不从文本重建路径或操作。 */ request: acp.RequestPermissionRequest,
+  /** 连接/回合取消时中止等待；迟到决定不得返回allow。 */ signal: AbortSignal,
+) => Promise<acp.RequestPermissionResponse> | acp.RequestPermissionResponse;
+
 
 /** ACP transport 的可关闭资源。 */
 export type AcpTransport = {
@@ -23,6 +29,10 @@ export type AcpTransport = {
   readonly exited: Promise<number>;
   /** 只关闭 transport；不会将未确认 prompt 解释为未发送。 */
   close(): void;
+  /** 生产stdio真实进程组身份；测试transport可省略，省略不能用于受管写退出证明。 */
+  readonly writerProcess?: import("../workspace/writer-process-group").OwnedWriterProcess;
+  /** 受管写transport提供的有界退出核验；close本身仍为非阻塞清理。 */
+  verifyClosed?(): Promise<void>;
 };
 
 /** 允许替换 transport，确保协议测试不依赖真实模型或本地登录。 */
@@ -65,11 +75,15 @@ export class AcpSessionClient {
   #capabilities: acp.AgentCapabilities | null = null;
   #subscribers = new Set<(event: AcpSessionEvent) => void>();
   #closed: Error | null = null;
+  #closingTransport: AcpTransport | null = null;
+  #permissionAbort = new AbortController();
+  #permissionTurn: AbortController | null = null;
+  #permissionSignal: AbortSignal | null = null;
 
   constructor(
     private readonly launcher: AcpLauncher,
     private readonly createTransport: AcpTransportFactory = bunAcpTransport,
-    private readonly permissionMode: AcpPermissionMode = "deny",
+    private readonly permission: AcpPermissionMode | AcpPermissionResolver = "deny",
   ) {}
 
   /** 当前已确认 binding；尚未 new/load 时为 null。 */
@@ -90,7 +104,7 @@ export class AcpSessionClient {
     const transport = await this.createTransport(this.launcher, signal);
     const app = acp.client({ name: "wave-flow" })
       .onNotification(acp.methods.client.session.update, (context) => this.onSessionUpdate(context.params))
-      .onRequest(acp.methods.client.session.requestPermission, (context) => this.resolvePermission(context.params));
+      .onRequest(acp.methods.client.session.requestPermission, async (context) => this.resolvePermission(context.params));
     const connection = app.connect(transport.stream);
     this.#transport = transport;
     this.#connection = connection;
@@ -142,6 +156,10 @@ export class AcpSessionClient {
   async prompt(text: string, signal: AbortSignal): Promise<acp.PromptResponse> {
     const binding = this.requireBinding();
     if (!text.trim()) throw new Error("ACP prompt 不能为空。 ");
+    if (this.#permissionTurn) throw new Error("ACP回合仍在运行，不能覆盖权限等待身份。");
+    const turn = new AbortController();
+    this.#permissionTurn = turn;
+    this.#permissionSignal = AbortSignal.any([signal, turn.signal, this.#permissionAbort.signal]);
     try {
       return await this.requireConnection().agent.request(acp.methods.agent.session.prompt, {
         sessionId: binding.sessionId,
@@ -150,6 +168,9 @@ export class AcpSessionClient {
     } catch (error) {
       if (signal.aborted || this.#closed) throw new AcpAmbiguousPromptError(`ACP prompt 投递结果不确定：${messageOf(error)}`);
       throw error;
+    } finally {
+      turn.abort();
+      if (this.#permissionTurn === turn) { this.#permissionTurn = null; this.#permissionSignal = null; }
     }
   }
 
@@ -157,15 +178,25 @@ export class AcpSessionClient {
   async cancel(signal: AbortSignal): Promise<void> {
     const binding = this.requireBinding();
     if (signal.aborted) throw new Error("ACP cancel 已取消。 ");
+    this.#permissionTurn?.abort();
     await this.requireConnection().agent.notify(acp.methods.agent.session.cancel, { sessionId: binding.sessionId });
   }
 
   /** 关闭连接和 Agent 子进程；不会伪造任何 prompt 或 Worker 状态。 */
   close(): void {
+    this.#permissionAbort.abort();
+    this.#closingTransport ??= this.#transport;
     this.#transport?.close();
     this.#connection?.close();
     this.#transport = null;
     this.#connection = null;
+  }
+
+  /** 宿主Git交接前验证整个writer退出；普通/未知transport不能伪装为受管写证明。 */
+  async verifyClosed(): Promise<void> {
+    const transport = this.#closingTransport;
+    if (!transport?.verifyClosed) throw new Error("ACP transport没有可核验的writer退出证明。");
+    await transport.verifyClosed();
   }
 
   private async requireCapabilities(signal: AbortSignal): Promise<acp.AgentCapabilities> {
@@ -183,10 +214,20 @@ export class AcpSessionClient {
   }
 
   /** Worker allow 模式只从 Agent 实际提供的选项中选择 allow；没有 allow 选项仍拒绝。 */
-  private resolvePermission(request: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
-    if (this.permissionMode === "deny") return { outcome: { outcome: "cancelled" } };
-    const option = request.options.find((item) => item.kind === "allow_always")
-      ?? request.options.find((item) => item.kind === "allow_once");
+  private async resolvePermission(request: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
+    if (typeof this.permission === "function") {
+      const signal = this.#permissionSignal;
+      if (!signal || signal.aborted || !this.#binding || request.sessionId !== this.#binding.sessionId) return { outcome: { outcome: "cancelled" } };
+      const resolver = this.permission;
+      const response = await waitPermission(Promise.resolve().then(() => resolver(request, signal)), signal);
+      if (signal.aborted || this.#closed || this.#binding?.sessionId !== request.sessionId) return { outcome: { outcome: "cancelled" } };
+      const outcome = response.outcome;
+      if (outcome.outcome === "selected" && !request.options.some(option => option.optionId === outcome.optionId)) return { outcome: { outcome: "cancelled" } };
+      return response;
+    }
+    if (this.permission === "deny") return { outcome: { outcome: "cancelled" } };
+    const option = request.options.find((item) => item.kind === "allow_once")
+      ?? request.options.find((item) => item.kind === "allow_always");
     return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
   }
 
@@ -196,14 +237,26 @@ export class AcpSessionClient {
     return this.#connection;
   }
 
+
   private requireBinding(): AcpSessionBinding {
     if (!this.#binding) throw new Error("ACP 尚未创建或加载 session。 ");
     return this.#binding;
   }
 
   private fail(error: Error): void {
+    this.#permissionAbort.abort();
     if (!this.#closed) this.#closed = error;
   }
+}
+
+/** 取消即结算原权限RPC；Resolver不遵守signal时也不能拖住CLI或放行迟到批准。 */
+function waitPermission(pending: Promise<acp.RequestPermissionResponse>, signal: AbortSignal): Promise<acp.RequestPermissionResponse> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => { signal.removeEventListener("abort", cancelled); resolve({ outcome: { outcome: "cancelled" } }); };
+    if (signal.aborted) { cancelled(); return; }
+    signal.addEventListener("abort", cancelled, { once: true });
+    pending.then(value => { signal.removeEventListener("abort", cancelled); resolve(value); }, error => { signal.removeEventListener("abort", cancelled); reject(error); });
+  });
 }
 
 /** Bun 生产 stdio transport；launcher argv 只能来自 Engine 的已验证配置。 */
@@ -244,6 +297,7 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
       abort() { child.stdin.end(); },
     }), child.stdout),
     exited,
+    writerProcess: { pid: child.pid, exited: child.exited, terminate: terminateGroup },
     close: () => { signal.removeEventListener("abort", abort); process.removeListener("exit", onParentExit); terminateGroup(); },
   };
 };

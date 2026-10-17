@@ -42,8 +42,10 @@ export class WorkerControlPipe {
     private readonly control: ControlServer,
     private readonly identity: WorkerControlIdentity,
     private readonly onCompleted?: () => void,
+    /** 受管writer专用scratch；生产Engine验证后传入，省略沿用系统临时目录。 */
+    privateRoot = tmpdir(),
   ) {
-    const directory = mkdtempSync(join(tmpdir(), "wave-flow-worker-control-"));
+    const directory = mkdtempSync(join(privateRoot, "wave-flow-worker-control-"));
     chmodSync(directory, 0o700);
     const requestFifo = join(directory, "request");
     const responseFifo = join(directory, "response");

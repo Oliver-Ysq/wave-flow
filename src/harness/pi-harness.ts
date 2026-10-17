@@ -10,5 +10,5 @@ export type HarnessPiSession = HarnessSession;
 
 /** Harness MCP 的工具白名单，保留给契约测试使用。 */
 export function isHarnessToolAllowed(name: string, hasActions: boolean): boolean {
-  return name === "read_project_file" || name === "query_project" || hasActions && (HARNESS_ACTION_TOOL_NAMES as readonly string[]).includes(name);
+  return hasActions && (HARNESS_ACTION_TOOL_NAMES as readonly string[]).includes(name);
 }

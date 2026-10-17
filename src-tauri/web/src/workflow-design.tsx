@@ -1,13 +1,15 @@
 import {useEffect,useState} from "react";
 import {api} from "./api";
-import type {ExecutionPlanResponse,ExecutionResponse,WorkflowRevision,WorkflowExecution} from "./types";
+import type {ExecutionPlanResponse,ExecutionResponse,ExecutionWorkspaceConfig,WorkflowRevision,WorkflowExecution} from "./types";
 import {ViewCache} from "./workbench-state";
-import {DesignConfirmationCache} from "./workflow-design-config";
+import {DesignConfirmationCache,WorkspaceConfirmationCache} from "./workflow-design-config";
 import {groupWorkersByPhase} from "./conversation/plan-groups";
 const cliDrafts=new ViewCache<Record<string,string>>(64);
 const plans=new ViewCache<ExecutionPlanResponse>(64);
 const confirmations=new DesignConfirmationCache();
 const localConfirmations=new ViewCache<string>(64);
+const workspaceDrafts=new ViewCache<Record<string,{paths:string;resources:string;workspaceId:string;sources?:string;workspaceGroup?:string}>>(64);
+const workspaceConfirmations=new WorkspaceConfirmationCache();
 
 /** Workflow设计与CLI内联选择；只有确认按钮发起执行，读取计划不调度Worker。 */
 export function WorkflowDesign({taskId,revision,editable,onCreated,input,execution,validateBeforeRun}:{
@@ -22,6 +24,8 @@ export function WorkflowDesign({taskId,revision,editable,onCreated,input,executi
  const identity=`${taskId}:${revision.cardId??"legacy"}:${revision.revision}`;
  const [plan,setPlan]=useState<ExecutionPlanResponse|null>(plans.get(identity)??null),[error,setError]=useState<string|null>(null);
  const [choices,setChoices]=useState<Record<string,string>>(cliDrafts.get(identity)??{}),[busy,setBusy]=useState(false);
+ const [workspaceDraft,setWorkspaceDraft]=useState<Record<string,{paths:string;resources:string;workspaceId:string;sources?:string;workspaceGroup?:string}>>(workspaceDrafts.get(identity)??{});
+ const [excludeDirty,setExcludeDirty]=useState(false),[approveGit,setApproveGit]=useState(false);
  const [checking,setChecking]=useState(false),[checkAttempt,setCheckAttempt]=useState(0);
  const [planError,setPlanError]=useState<string|null>(null);
  const local=!!revision.localOrigin;
@@ -39,13 +43,25 @@ export function WorkflowDesign({taskId,revision,editable,onCreated,input,executi
    if(validateBeforeRun&&!validateBeforeRun())return;
    setBusy(true);try{
      let result:ExecutionResponse;
-     if(revision.localOrigin){let requestId=localConfirmations.get(identity);if(!requestId){requestId=crypto.randomUUID();localConfirmations.set(identity,requestId);}result=await api.confirmWorkflow(taskId,revision.revision,undefined,requestId);}
-     else {const confirmation=confirmations.get(identity,input,choices,plan);result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id);}
+     if(revision.localOrigin){
+       if(plan.workspacePlan){
+         const localChoices:Record<string,string>={};for(const worker of plan.workers){if(!worker.cli)throw new Error(`本地写节点 ${worker.id} 的CLI必须为固定字面量。`);const runtimeId=plan.selectedByCli[worker.cli]??plan.pool.find(item=>item.cli===worker.cli)?.runtimeId;if(!runtimeId)throw new Error(`没有已验证的 ${worker.cli} Runtime。`);localChoices[worker.id]=runtimeId;}
+         const workspaces=workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit);const confirmation=confirmations.get(identity,input,localChoices,plan,workspaces);result=await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id);}
+       else {let requestId=localConfirmations.get(identity);if(!requestId){requestId=crypto.randomUUID();localConfirmations.set(identity,requestId);}result=await api.confirmWorkflow(taskId,revision.revision,undefined,requestId);}
+     }
+     else {
+       let workspaces:ExecutionWorkspaceConfig|undefined;
+       if(plan.workspacePlan){
+         workspaces=workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit);
+       }
+       const confirmation=confirmations.get(identity,input,choices,plan,workspaces);result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id);
+     }
      onCreated(result);
    }catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
  }
  const titles=revision.preview?.phaseTitles??[];
  return <section className="workflow-design"><h3>Workflow 设计</h3>{groupWorkersByPhase(titles,plan?.previewAgents??revision.preview?.previewAgents??[]).map(group=><section key={group.key}><h4>{group.title}</h4>{group.workers.map(worker=><div className="workflow-design-row" key={worker.key}><strong>{worker.name}{worker.loop&&<small>循环/批量调用，数量由实际路径决定</small>}</strong>{cliSelect(worker.nodeId??"*",worker.name)}</div>)}</section>)}
+   {plan?.workspacePlan&&<section className="workflow-workspace-config"><h4>Git 成果授权</h4><small>基准 {plan.workspacePlan.baseCommit?.slice(0,12)??"不可用"} · {plan.workspacePlan.dirtyPaths.length?`已有 ${plan.workspacePlan.dirtyPaths.length} 项改动`:"工作区干净"}。只在受管分支提交，不提交主工作区、不 push。</small>{plan.workspacePlan.diagnostic&&<p role="alert">{plan.workspacePlan.diagnostic}</p>}{plan.workspacePlan.dirtyPaths.length>0&&<label className="workspace-confirm"><input type="checkbox" checked={excludeDirty} onChange={event=>setExcludeDirty(event.target.checked)}/>明确排除当前 dirty 内容，仅从上述已提交基准创建 worktree</label>}{plan.workspacePlan.nodeIds.map(nodeId=>{const draft=workspaceDraft[nodeId]??{paths:"",resources:"",workspaceId:crypto.randomUUID(),sources:"",workspaceGroup:nodeId};return <fieldset key={nodeId}><legend>{nodeId}</legend><label>工作区分组（相同名称表示顺序复用同一 worktree）<input disabled={!editable||busy} value={draft.workspaceGroup??nodeId} onChange={event=>setWorkspaceDraft(current=>{const next={...current,[nodeId]:{...draft,workspaceGroup:event.target.value}};workspaceDrafts.set(identity,next);return next;})}/></label><label>成果文件路径（每行一个）<textarea disabled={!editable||busy} value={draft.paths} onChange={event=>setWorkspaceDraft(current=>{const next={...current,[nodeId]:{...draft,paths:event.target.value}};workspaceDrafts.set(identity,next);return next;})}/></label><label>外部独占资源（可选，每行一个）<textarea disabled={!editable||busy} value={draft.resources} onChange={event=>setWorkspaceDraft(current=>{const next={...current,[nodeId]:{...draft,resources:event.target.value}};workspaceDrafts.set(identity,next);return next;})}/></label><label>集成来源节点（可选，每行一个）<textarea disabled={!editable||busy} value={draft.sources??""} onChange={event=>setWorkspaceDraft(current=>{const next={...current,[nodeId]:{...draft,sources:event.target.value}};workspaceDrafts.set(identity,next);return next;})}/></label></fieldset>;})}<label className="workspace-confirm"><input type="checkbox" checked={approveGit} onChange={event=>setApproveGit(event.target.checked)}/>我确认以上节点、文件范围、外部资源与集成来源，并授权 Wave Flow 保存内部检查点、完成后自动生成单条 squash 交付 commit（不合入主分支、不 push）</label></section>}
    {!!plan?.dynamicCount&&!revision.localOrigin&&<div className="workflow-design-row"><span>其余动态 Worker 默认使用</span>{cliSelect("*","动态Worker")}</div>}
    <small>设计来自源码声明；实际执行路径以运行记录为准。CLI 使用自身默认模型。</small>
    {error&&<p role="alert">{error}</p>}

@@ -1,13 +1,19 @@
 import type { ControlServer } from "../control/control-server";
 import { resolveWorkerLauncher } from "../runtimes/worker-launcher-resolver";
 import { runtimeProvenance } from "../runtimes/worker-launcher-resolver";
-import type { AcpLauncher } from "../adapters/acp-session";
+import { AcpSessionClient, type AcpLauncher } from "../adapters/acp-session";
 import type { CliRuntimeRegistry } from "../runtimes/registry";
 import type { RuntimeProvenance, VerifiedCliRuntime } from "../runtimes/types";
 import { AcpWorkerExecutor } from "./acp-worker-executor";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { JsonObject } from "../shared/json";
 import type * as acp from "@agentclientprotocol/sdk";
+import { adapterById } from "../runtimes/adapter-catalog";
+import { prepareIsolatedLauncher } from "../runtimes/session-isolation";
+import { prepareSessionScratch } from "../workspace/session-scratch";
+import { managedAcpTransport } from "../workspace/managed-acp-transport";
+import { WriterProcessGroups } from "../workspace/writer-process-group";
+import { WorkflowContractError } from "../workflow/errors";
 
 /**
  * 延迟解析用户 Runtime 的 ACP Executor。Run/Execution 可先建立 Journal 与 Control，
@@ -22,14 +28,18 @@ import type * as acp from "@agentclientprotocol/sdk";
 export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
   #workers = new Map<string, AcpWorkerExecutor>();
+  /** 只保留退出未核验的本实例句柄，供宿主收尾重试；不跨Engine认领旧PID。 */
+  #closing = new Map<string, AcpWorkerExecutor>();
 
   constructor(
     private readonly runtimes: CliRuntimeRegistry,
-    private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }) => acp.McpServer,
+    private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string) => acp.McpServer,
     /** 测试注入的 Worker 构造；生产省略时使用真实 AcpWorkerExecutor。 */
     private readonly createWorker: (launcher: AcpLauncher, runtime: RuntimeProvenance) => AcpWorkerExecutor = (launcher, runtime) => new AcpWorkerExecutor(launcher, undefined, runtime, createControlMcp),
     /** 分配快照冻结的回退目标（主控 CLI runtimeId）；受信任 Run 与不指派节点为 null。 */
     private readonly fallbackRuntimeId: string | null = null,
+    /** Engine指定的只读Worker私有状态根；省略仅供历史测试，生产必须提供。 */
+    private readonly readOnlyStateRoot?: string,
   ) {}
 
   bindControl(control: ControlServer): void {
@@ -58,15 +68,46 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
 
   /** 用已复核的 Runtime 组装 launcher 并执行；createSession 抛错前都允许上层回退。 */
   private async launch(node: AgentNodeSnapshot, runtime: VerifiedCliRuntime, control: ControlServer): Promise<JsonObject | null> {
-    const worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
+    let worker: AcpWorkerExecutor;
+    let isolated = false;
+    if (this.readOnlyStateRoot) {
+      if (node.sandbox !== "read-only") throw new WorkflowContractError("业务写Worker必须通过已授权Workspace执行器，不能回退普通ACP启动。");
+      const profile = adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation;
+      const scratch = await prepareSessionScratch(this.readOnlyStateRoot, node.cwd);
+      const launcher = await prepareIsolatedLauncher(profile, resolveWorkerLauncher(runtime), scratch, "read-only-worker");
+      const transport = managedAcpTransport({ boundary: { workspace: null, scratch, controlFiles: [], protectedDirectories: [node.cwd], readOnlyPaths: profile?.readOnlyPaths(launcher) ?? [], cliWritableRoots: profile?.writableRoots?.(launcher) ?? [] }, groups: new WriterProcessGroups(), bindWriter: async () => {} });
+      worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(runtime), identity => this.createControlMcp(identity, scratch), undefined, true);
+      isolated = true;
+    } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);
     const key = keyOf(node);
     this.#workers.set(key, worker);
-    try { return await worker.execute(node); }
-    finally { this.#workers.delete(key); }
+    try {
+      const result = await worker.execute(node);
+      if (isolated) { this.#closing.set(key, worker); await this.finalizeCompleted(node); }
+      return result;
+    } catch (error) {
+      // 异常也尽力核验退出，但原错误仍是权威诊断；未知退出不认领或重派发。
+      if (isolated) {
+        this.#closing.set(key, worker);
+        try { await this.finalizePartial(node); } catch { /* 保留句柄，不掩盖原执行/退出错误。 */ }
+      }
+      throw error;
+    } finally { this.#workers.delete(key); }
   }
 
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> { return this.require(node).pause(node, signal); }
+  /** 正常或completed重放只核验本Engine留下的句柄；无句柄不重新启动CLI。
+   * 只读节点没有业务文件交接；跨Engine复用结果仍由Journal/provenance复核。
+   */
+  async finalizeCompleted(node: AgentNodeSnapshot): Promise<void> {
+    const key = keyOf(node), worker = this.#closing.get(key);
+    if (!worker) return;
+    await worker.finalizeCompleted(node);
+    this.#closing.delete(key);
+  }
+  /** 中断收尾核验与completed同实现，不改变业务状态。 */
+  finalizePartial(node: AgentNodeSnapshot): Promise<void> { return this.finalizeCompleted(node); }
   async recover(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<{}> { return this.require(node).recover(node, signal); }
   async stop(node: AgentNodeSnapshot): Promise<void> { return this.require(node).stop(node); }
   private require(node: AgentNodeSnapshot): AcpWorkerExecutor { const worker = this.#workers.get(keyOf(node)); if (!worker) throw new Error(`节点 ${node.id} 没有可控制的本机 CLI ACP 会话。`); return worker; }

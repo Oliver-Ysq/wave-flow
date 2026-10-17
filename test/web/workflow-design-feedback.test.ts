@@ -1,5 +1,15 @@
 import {expect,test} from "bun:test";
 
+test("最终squash交付无需额外点击，启动授权告知自动收尾并折叠内部检查点",async()=>{
+ const app=await Bun.file("src-tauri/web/src/App.tsx").text();
+ const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
+ expect(design).toContain("完成后自动生成单条 squash 交付 commit");
+ expect(app).toContain("已自动整理为一条单父 commit");
+ expect(app).toContain("尚未形成最终交付");
+ expect(app).toContain("<summary>内部 Git 检查点与诊断详情</summary>");
+ expect(app).not.toContain("onDeliverSquash");
+});
+
 /** 组件接线回归；只证明加载/重试/启动互斥代码存在，不代替真实 DOM 与像素验收。 */
 test("执行配置预检失败提供重检入口，检查期间与失败状态均禁止确认",async()=>{
  const source=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
@@ -13,7 +23,9 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
  expect(source).toContain("尚未设置已验证主控 CLI，请在执行底座设置中验证并选择");
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
- expect(source).toContain('confirmations.get(identity,input,choices,plan)');
+ expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');
+ expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit)');
+ expect(source).toContain('localChoices[worker.id]=runtimeId');
 });
 
 test("本地来源替换明确导航到新方案，目标态已有执行不再提示选择无关工作流",async()=>{
@@ -35,4 +47,19 @@ test("详情页隐藏重复目标标题且缩短导航留白，保留对话独�
 test("窄窗详情底部为固定导航保留安全空间",async()=>{
  const css=await Bun.file("src-tauri/web/src/workbench.css").text();
  expect(css).toContain(".agent-workbench .central-workflow { padding:24px 20px 80px; }");
+});
+
+test("影响面总结按所选Execution的受管配置显示Git证据限制，不固定宣称无基线",async()=>{
+ const source=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(source).toContain("const gitLimitation=harness.executions.find(item=>item.executionId===executionId)?.config?.workspaces");
+ expect(source).toContain("受管Git证据仅覆盖批准文件；缺失或不可读取的记录不代表没有改动");
+ expect(source).toContain("<p>{gitLimitation}</p>");
+ expect(source).not.toContain("<p>尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。</p>");
+});
+
+test("工作区外写入不再提供文件审批UI或API",async()=>{
+ const app=await Bun.file("src-tauri/web/src/App.tsx").text();
+ const api=await Bun.file("src-tauri/web/src/api.ts").text();
+ expect(app).not.toContain("FilePermissionCards");
+ expect(api).not.toContain("executions.decideFilePermission");
 });

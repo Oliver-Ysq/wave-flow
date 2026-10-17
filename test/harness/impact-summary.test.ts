@@ -137,7 +137,9 @@ test("总结准备期间用户先发消息，保留pending且用户回合结束�
  const started=new Promise<void>(done=>{readerStarted=done;});
  let reads=0;
  service.setExecutionCapsuleReader(async()=>{reads++;if(reads===1){readerStarted();return new Promise(done=>{releaseEvidence=done;});}return {status:"cancelled"};});
- await started;await service.send(id,"用户优先反馈");releaseEvidence({status:"cancelled"});await Bun.sleep(30);
+ await started;await service.send(id,"用户优先反馈");releaseEvidence({status:"cancelled"});
+ const pendingDeadline=Date.now()+1_000;
+ while((await service.snapshot(id)).impactSummaries![0].status!=="pending"){if(Date.now()>pendingDeadline)throw new Error("总结准备竞态未收敛pending");await Bun.sleep(2);}
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("pending");expect(calls).toBe(1);
  finishUser("反馈已接收");await summaryStarted(service,id);await settled(service,id);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("completed");expect(calls).toBe(2);

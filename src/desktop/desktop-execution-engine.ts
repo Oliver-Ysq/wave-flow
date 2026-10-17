@@ -30,9 +30,17 @@ import { DeterministicHarnessSession } from "../harness/deterministic-session";
 import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
 import { WorkerControlPipe } from "../runtime/worker-control-pipe";
 import { HarnessControlPipe } from "../harness/harness-control-pipe";
+import { createIsolatedHarness } from "../harness/isolated-harness";
+import { prepareSessionScratch } from "../workspace/session-scratch";
+import { adapterById } from "../runtimes/adapter-catalog";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
 import { validateExecutionConfig } from "./execution-assignment";
+import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-executor";
+import { readWorkspaceWriteIntent } from "../workspace/write-intent";
+import { GitRepository } from "../workspace/git-repository";
+import { WorkspaceManager, isRetryableDeliveryError } from "../workspace/workspace-manager";
+import { WorkflowContractError } from "../workflow/errors";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
@@ -99,6 +107,8 @@ export class DesktopExecutionEngine {
   #harnessControlPipes = new Map<string, HarnessControlPipe>();
   /** 当前 Engine 内每个真实 Worker 的私有 Control FIFO；从不发布或持久化。 */
   #workerControlPipes = new Map<string, WorkerControlPipe>();
+  /** 当前Engine的受管writer证明对象；终态后保留用于显式partial收尾，不跨进程认领。 */
+  #workspaceExecutors = new Map<string, ProductionWorkspaceExecutor>();
   /** ACP 缺少跨 Engine identity；仅提供诚实 UI 提示，绝不伪造 session 认领。 */
   #acpWorkersNeedingResume = 0;
   #createRequests = new Map<string, Promise<RunResponse>>();
@@ -119,6 +129,7 @@ export class DesktopExecutionEngine {
   private readonly singleWorkflowForAcceptance: boolean;
   private readonly storeRoot: string;
   private readonly harnessRoot: string;
+  private readonly workspaceRoot: string;
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
   private readonly hasCustomHarnessSession: boolean;
@@ -136,6 +147,7 @@ export class DesktopExecutionEngine {
     this.storeRoot = normalized.storeRoot ?? runsRoot();
     const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
     this.harnessRoot = harnessRoot;
+    this.workspaceRoot=join(dirname(this.storeRoot),"workspaces");
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
     this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
@@ -147,13 +159,16 @@ export class DesktopExecutionEngine {
       const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
       const compiled = import.meta.dir.startsWith("/$bunfs/");
       const command = process.execPath;
-      const pipe = new HarnessControlPipe(request => this.#harness.mcpTools(harnessRunId, request));
+      const scratch = await prepareSessionScratch(join(dirname(harnessRoot), "harness-scratch"), cwd);
+      const pipe = new HarnessControlPipe(request => this.#harness.mcpTools(harnessRunId, request), scratch);
       this.#harnessControlPipes.set(harnessRunId, pipe);
       const args = compiled ? ["__harness-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__harness-mcp"];
       const mcpServer = { name: "wave-flow-harness", command, args, env: [
         { name: "WF_HARNESS_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_HARNESS_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
       ] } as any;
-      const session = new AcpHarnessSession(resolveHarnessLauncher(runtime), cwd, buildHarnessSystemPrompt(), prior, mcpServer);
+      let session: AcpHarnessSession;
+      try { session = await createIsolatedHarness({ launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(), prior, mcp: mcpServer }); }
+      catch (error) { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); throw error; }
       const close = session.close.bind(session); session.close = () => { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); close(); };
       return session;
     });
@@ -167,11 +182,30 @@ export class DesktopExecutionEngine {
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
-    }, harnessRoot, this.storeRoot);
+      finalizeDelivery: (executionId, config, snapshot) => this.finalizeDelivery(executionId, config, snapshot),
+    }, harnessRoot, this.storeRoot,this.workspaceRoot);
     this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
+  }
+
+  /** 启动授权内的自动Git收尾；失败独立耐久展示，不覆写原Run completed或重跑Worker。 */
+  private async finalizeDelivery(executionId: string, config: import("../harness/types").ExecutionConfigSnapshot, snapshot: import("../runtime/run-types").RunSnapshot): Promise<void> {
+    if (config.workspaces?.authorization.autoSquashDelivery !== true) return;
+    const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
+    for (let attempt = 1; attempt <= 3; attempt++) try {
+      const writers = snapshot.phases.flatMap(phase => phase.agents).filter(node => node.sandbox === "workspace-write");
+      if (snapshot.status !== "completed" || writers.some(node => node.status !== "completed")) throw new WorkflowContractError("实际写节点尚未全部completed，不能最终交付。");
+      await manager.deliverSquash(executionId, config.workspaces, writers.map(node => node.id));
+      return;
+    }
+    catch (error) {
+      const retryable = isRetryableDeliveryError(error);
+      if (retryable && attempt < 3) continue;
+      await manager.recordDeliveryDiagnostic(executionId, error instanceof Error ? error.message : String(error), retryable);
+      return;
+    }
   }
 
   /** 释放当前 Desktop Execution Engine 的内存会话；不会删除 Journal 或本地结果文件。 */
@@ -265,7 +299,17 @@ export class DesktopExecutionEngine {
     let harnessIds: readonly string[] = [];
     try { harnessIds = await readdir(this.harnessRoot); } catch { harnessIds = []; }
     for (const harnessRunId of harnessIds) {
-      try { await this.#executions.convergeStaleExecutions(harnessRunId); }
+      try {
+        await this.#executions.convergeStaleExecutions(harnessRunId);
+        const task = await this.#harness.snapshot(harnessRunId);
+        for (const execution of task.executions) if (execution.status === "completed" && execution.config?.workspaces?.authorization.autoSquashDelivery === true) {
+          const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
+          // 缺失交付或可重试关联失败只补宿主收尾；确定性契约拒绝不循环，成功记录无旧错误时跳过。
+          const delivered = await manager.inspectDelivery(execution.executionId);
+          const diagnostic = await manager.inspectDeliveryDiagnostic(execution.executionId);
+          if ((!delivered || diagnostic) && await manager.canRetryDelivery(execution.executionId)) await this.finalizeDelivery(execution.executionId, execution.config, await this.#executions.snapshotExecution(harnessRunId, execution.executionId));
+        }
+      }
       catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
     }
     await this.#harness.convergeStaleTurns();
@@ -282,7 +326,11 @@ export class DesktopExecutionEngine {
   /** Execution 的底座执行器；Harness 执行只走用户已验证的本机 ACP Worker 或测试确定性执行器。 */
   private createExecutionExecutor(config: import("../harness/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
-    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity), undefined, config?.fallbackRuntimeId ?? null);
+    if (config?.workspaces) {
+      const base = new ProductionWorkspaceExecutor(config.workspaces, this.workspaceRoot, this.instanceId, this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), config.fallbackRuntimeId);
+      return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
+    }
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, config?.fallbackRuntimeId ?? null, join(dirname(this.storeRoot), "read-only-scratch"));
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -291,15 +339,19 @@ export class DesktopExecutionEngine {
    * runId 注册，Worker 的 complete/block/continue 经本节点私有 FIFO MCP 到达 Control，
    * 不知道自己在 Execution 中。
    */
-  private wireExecutionControl(runtime: RunRuntime, wiring: unknown): void | (() => void) {
-    if (this.deterministicForTest || !wiring || !isControlBoundExecutor(wiring as AgentNodeExecutor)) return;
+  private async wireExecutionControl(runtime: RunRuntime, wiring: unknown): Promise<void | (() => void)> {
+    if (this.deterministicForTest || !wiring || (!(wiring instanceof ProductionWorkspaceExecutor) && !isControlBoundExecutor(wiring as AgentNodeExecutor))) return;
     const control = runtime.createControlServer();
-    (wiring as ControlBoundExecutor).bindControl(control);
     const runId = runtime.journal.manifest.runId;
     if (this.#controls.has(runId)) throw new Error("该 Execution 的 ControlServer 已注册。 ");
     this.#controls.set(runId, control);
+    try {
+      if (wiring instanceof ProductionWorkspaceExecutor) await wiring.bindRuntime(runtime, control);
+      else (wiring as ControlBoundExecutor).bindControl(control);
+    } catch (error) { this.#controls.delete(runId); throw error; }
+    if (wiring instanceof ProductionWorkspaceExecutor) this.#workspaceExecutors.set(runId,wiring);
     // 释放器捕获具体 Control 身份，不按 runId 误删 resume 后的新控制资源。
-    return () => { if (this.#controls.get(runId) === control) this.#controls.delete(runId); };
+    return () => { if (this.#controls.get(runId) === control) this.#controls.delete(runId); if (wiring instanceof ProductionWorkspaceExecutor) wiring.close(); };
   }
 
 
@@ -327,12 +379,12 @@ export class DesktopExecutionEngine {
   }
   private async listProjects(): Promise<HarnessProjectListResponse> { return { projects: await this.#projects.list() }; }
   /** Worker 专属 MCP 只代理当前节点的 Control；token/capability 不会进入 Web 或 Journal。 */
-  private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }): import("@agentclientprotocol/sdk").McpServer {
+  private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string): import("@agentclientprotocol/sdk").McpServer {
     const control = this.#controls.get(identity.runId);
     if (!control) throw new Error("Worker MCP 创建时找不到当前 Engine 的 ControlServer。 ");
     const key = `${identity.runId}\0${identity.nodeId}\0${identity.agentSessionId}`;
     if (this.#workerControlPipes.has(key)) throw new Error("当前 Worker 已有私有 Control 通道。 ");
-    const pipe = new WorkerControlPipe(control, identity, () => this.#workerControlPipes.delete(key));
+    const pipe = new WorkerControlPipe(control, identity, () => this.#workerControlPipes.delete(key), scratch);
     this.#workerControlPipes.set(key, pipe);
     const command = process.execPath;
     const compiled = import.meta.dir.startsWith("/$bunfs/");
@@ -484,7 +536,13 @@ export class DesktopExecutionEngine {
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
       const harnessRuntimeId=snapshot.runtime?.runtimeId??list.harnessRuntimeId;
-      return { harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
+      const intent = readWorkspaceWriteIntent(revision.source);
+      let workspacePlan: ExecutionPlanResponse["workspacePlan"] = null;
+      if (intent.nodeIds.length || intent.uncertain) {
+        workspacePlan = { nodeIds: intent.nodeIds, repository: snapshot.cwd, baseCommit: null, dirtyPaths: [], diagnostic: intent.uncertain ? "写意图包含动态或展开选项，需改为可核验固定节点。" : null };
+        if (!intent.uncertain) try { const git = await (await GitRepository.open(snapshot.cwd)).inspect(); workspacePlan = { ...workspacePlan, baseCommit: git.head, dirtyPaths: git.changedPaths }; } catch (error) { workspacePlan = { ...workspacePlan, diagnostic: error instanceof Error ? error.message : String(error) }; }
+      }
+      return { workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -499,7 +557,19 @@ export class DesktopExecutionEngine {
     try {
       const task=await this.#harness.snapshot(harnessRunId);
       const revision=task.workflowRevisions.find(item=>item.revision===execution.revision);
-      return { execution, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+      let workspaceEvidence:ExecutionResponse["workspaceEvidence"];
+      let workspaceDiagnostic:string|undefined;
+      let deliveryEvidence:ExecutionResponse["deliveryEvidence"];
+      let deliveryDiagnostic:string|undefined;
+      if(execution.config?.workspaces){
+        try {
+        const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
+        deliveryEvidence=await manager.inspectDelivery(executionId)??undefined;
+        deliveryDiagnostic=await manager.inspectDeliveryDiagnostic(executionId)??undefined;
+        workspaceEvidence=await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const value=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,branch:value.branch,lease:value.lease?{attempt:value.lease.attempt}:null,results:value.results.filter(result=>result.runId===executionId).map(result=>({attempt:result.attempt,commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};}));
+        } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
+      }
+      return { execution, workspaceEvidence, workspaceDiagnostic, deliveryEvidence, deliveryDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -641,6 +711,28 @@ export class DesktopExecutionEngine {
       case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
+      case "executions.savePartial": {
+        if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
+        const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId");
+        const task=await this.#harness.snapshot(taskId);
+        if(task.status==="completed"||!task.executions.some(item=>item.executionId===executionId))throw new Error("执行不属于当前未归档任务。");
+        const detail=await this.executionSnapshot(taskId,executionId);
+        if(detail.snapshot.status!=="cancelled"&&detail.snapshot.status!=="interrupted")throw new Error("只有停止/中断后的执行可以显式保存现场。");
+        const executor=this.#workspaceExecutors.get(executionId);
+        if(!executor)throw new Error("本Engine没有原writer可核验句柄；重启后需人工核查现场，不能按旧PID保存或交接。");
+        for(const node of detail.snapshot.phases.flatMap(phase=>phase.agents))if(node.status==="cancelled"||node.status==="interrupted")await executor.finalizePartial(node);
+        return this.executionSnapshot(taskId,executionId);
+      }
+      case "executions.cleanupWorkspaces": {
+        if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
+        const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId"),task=await this.#harness.snapshot(taskId);
+        const execution=task.executions.find(item=>item.executionId===executionId);
+        if(task.status==="completed"||!execution?.config?.workspaces)throw new Error("只能清理当前未归档任务的受管workspace。");
+        if(execution.finishedAt===null)throw new Error("执行尚未终态，禁止清理。");
+        const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
+        for(const id of new Set(execution.config.workspaces.bindings.map(binding=>binding.workspaceId)))await manager.cleanup(id,true);
+        return this.executionSnapshot(taskId,executionId);
+      }
       case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
       case "executions.phaseVisits": return this.executionPhaseVisits(value);
       case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
@@ -682,7 +774,8 @@ export class DesktopExecutionEngine {
       const input=object(value).input??revision.input??{};
       if(!isJsonObject(input))throw new Error("工作流参数必须是JSON-safe对象。");
       const rawConfig=object(value).config;
-      if(revision.localOrigin ? rawConfig !== undefined : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 不接受 CLI 分配配置。" : "确认配置必须是 JSON-safe 对象。");
+      const localWrite=revision.localOrigin?readWorkspaceWriteIntent(revision.source):null;
+      if(revision.localOrigin ? (localWrite!.nodeIds.length||localWrite!.uncertain ? !isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces : rawConfig!==undefined) : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。" : "确认配置必须是 JSON-safe 对象。");
       const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null})).digest("hex");
       const previous=snapshot.executions.find(item=>item.confirmationRequestId===requestId);
       if(previous){
@@ -697,7 +790,7 @@ export class DesktopExecutionEngine {
       if(revision.templateOrigin)validateTemplateInput(revision.templateOrigin.inputSchema,input);
       else if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("生成方案的输入须由主控明确准备，不能在启动时注入未知参数。");
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
-      const config=revision.localOrigin ? undefined : await this.validateExecutionConfigValue(id,number,rawConfig);
+      const config=rawConfig===undefined?undefined:await this.validateExecutionConfigValue(id,number,rawConfig);
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
         const origin=revision.templateOrigin;
@@ -809,7 +902,7 @@ export class DesktopExecutionEngine {
     if (!this.deterministicForTest) await this.requireWorkerCandidate();
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity));
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"));
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
@@ -909,7 +1002,7 @@ export class DesktopExecutionEngine {
     const workflow = await loadWorkflow(manifest.workflowPath, cwd);
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity) => this.workerControlMcp(identity));
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"));
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
     await this.reconcileResumeSessions(runtime);
@@ -975,6 +1068,7 @@ export class DesktopExecutionEngine {
     }
     return null;
   }
+
 
   private async inspect(runId: string): Promise<RunResponse> {
     const memory = this.#runs.get(runId);

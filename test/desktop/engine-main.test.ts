@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,10 +11,61 @@ import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
 import type { HarnessSession } from "../../src/harness/session";
 import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
+import { WorkspaceManager } from "../../src/workspace/workspace-manager";
+import { GitRepository } from "../../src/workspace/git-repository";
+import { HarnessService } from "../../src/harness/service";
+import { HarnessExecutionService } from "../../src/harness/executions";
+import { mkdir, realpath } from "node:fs/promises";
 
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
+
+test("Engine重启仅补已授权completed的缺失自动交付，私有IPC展示单父成果且不重跑业务", async () => {
+ const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-auto-delivery-")));roots.push(root);
+ const cwd=join(root,"repo");await mkdir(cwd);
+ const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Test","-c","user.email=test@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
+ await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","fixture");
+ const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),harnessRoot=join(root,"harness-runs");
+ const manager=await WorkspaceManager.open(join(root,"workspaces"),crypto.randomUUID());
+ const authorization={authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,autoSquashDelivery:true,nodes:[{nodeId:"writer",paths:["a.txt"]}]};
+ const workspace=await manager.create(workspaceId,authorization);
+ const harness=new HarnessService(harnessRoot,async()=>{throw Error("不会运行主控");});const task=await harness.create(cwd);
+ const source='const meta={name:"auto-delivery",description:"自动交付",phases:[{title:"write"}]};async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
+ await harness.proposeWorkflowRevision(task.harnessRunId,source);await harness.acceptWorkflowRevision(task.harnessRunId,1);
+ const assignment={agentId:"writer",cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test-runtime",adapterId:"codex-acp" as const,adapterVersion:"test"};
+ const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test-runtime",ruleText:null,ruleDegraded:false,defaultAssignment:{...assignment,agentId:"*"},assignments:[assignment],workspaces:{version:1 as const,authorization,bindings:[{nodeId:"writer",workspaceId}]}};
+ let calls=0,runId="";
+ const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer");await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.finish(lease,true,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},harnessRoot,join(root,"runs"),join(root,"workspaces"));
+ const {execution}=await executions.createExecution(task.harnessRunId,1,{},config);
+ for(let n=0;n<1000;n++){if((await executions.listExecutions(task.harnessRunId))[0].finishedAt!==null)break;await Bun.sleep(10);}
+ expect((await executions.listExecutions(task.harnessRunId))[0].status).toBe("completed");expect(calls).toBe(1);harness.close();
+ expect(await manager.inspectDelivery(execution.executionId)).toBeNull();
+ // Git ref已成功而记录写失败：三次预算耗尽后耐久标为可重试，下一次启动只补关联。
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot,deterministicForTest:true});
+ try {
+  const proto=WorkspaceManager.prototype as unknown as {write:(...args:unknown[])=>Promise<void>};
+  const write=proto.write;
+  let failures=0;
+  const injected=spyOn(proto,"write").mockImplementation(async function(this:WorkspaceManager,...args:unknown[]){if(args[2]==="delivery"&&failures++<3)throw Error("fixture disk unavailable");return write.apply(this,args);});
+  try {await engine.convergeStaleAcpWorkers();} finally {injected.mockRestore();}
+  expect(failures).toBe(3);
+  expect(await manager.inspectDelivery(execution.executionId)).toBeNull();
+  expect(await manager.canRetryDelivery(execution.executionId)).toBe(true);
+  expect(await manager.inspectDeliveryDiagnostic(execution.executionId)).toContain("fixture disk unavailable");
+  const savedRef=await git("rev-parse",`refs/heads/codex/delivery-${execution.executionId}`);
+  await engine.convergeStaleAcpWorkers();
+  const detail=await engine.handleDesktopAction("executions.get",{harnessRunId:task.harnessRunId,executionId:execution.executionId}) as import("../../src/desktop/types").ExecutionResponse;
+  expect(detail.deliveryEvidence?.branch).toBe(`codex/delivery-${execution.executionId}`);
+  expect(detail.deliveryEvidence?.commit).toBe(savedRef);
+  expect(detail.deliveryDiagnostic).toBeUndefined();
+  expect(await git("show","-s","--format=%P",detail.deliveryEvidence!.commit)).toBe(base);
+  expect(await git("rev-list","--count",`${base}..${detail.deliveryEvidence!.commit}`)).toBe("1");
+  expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+  await engine.convergeStaleAcpWorkers();expect(await manager.inspectDelivery(execution.executionId)).toEqual(detail.deliveryEvidence!);expect(calls).toBe(1);
+ }finally{engine.shutdown();}
+},30_000);
 afterEach(async () => { for (const child of children.splice(0)) child.kill(); await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+
 
 test("Engine 停止总结必须携带本次turnId，缺失或非法身份在读档前拒绝",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-stop-summary-"));roots.push(root);
@@ -327,4 +378,18 @@ test("Engine runtimes.validate 走统一验证器入口", async () => {
     const listed = await engine.handleDesktopAction("runtimes.list", {}) as { runtimes: { cli: string }[] };
     expect(listed.runtimes).toHaveLength(1);
   } finally { engine.shutdown(); }
+});
+test("显式partial保存缺授权或跨任务时拒绝，不创建Git工作区", async () => {
+  const engine = new DesktopExecutionEngine({ deterministicForTest: true });
+  await expect(engine.handleDesktopAction("executions.savePartial", { harnessRunId: crypto.randomUUID(), executionId: crypto.randomUUID() })).rejects.toThrow("明确授权");
+  engine.shutdown();
+});
+
+test("已取消的文件批准动作拒绝且不创建权限Store", async () => {
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-no-file-approval-"));roots.push(root);
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true});
+ try{
+  await expect(engine.handleDesktopAction("executions.decideFilePermission",{approved:true})).rejects.toThrow();
+  expect(await Bun.file(join(root,"file-permissions")).exists()).toBe(false);
+ }finally{engine.shutdown();}
 });

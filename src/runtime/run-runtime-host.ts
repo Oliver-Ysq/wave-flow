@@ -93,6 +93,9 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     return this.executor.stop(node);
   }
 
+  /** 普通用户停止后的Git partial收尾；调用前节点必须已耐久cancelled。 */
+  finalizePartial(node: import("./run-types").AgentNodeSnapshot): Promise<void> { return this.executor.finalizePartial?.(node) ?? Promise.resolve(); }
+
   /** stop 期间执行器 rejection 不代表异常；Runtime 会把节点收敛为 cancelled。 */
   beginStop(nodeId: string): void { this.#stopping.add(nodeId); }
   endStop(nodeId: string): void { this.#stopping.delete(nodeId); }
@@ -132,7 +135,20 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       // replay 复用除请求指纹外还要复核 provenance：旧 attempt 实际落过的 Runtime
       // （含启动前回退）与当前分配快照不一致时，旧结果不可复用，从该节点开始新 attempt。
       const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
-      if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) return existing.result;
+      if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) {
+        // 业务JSON可复用不代表Git成果可交接。宿主先恢复原成果保存/关联，不能重跑业务。
+        await this.executor.finalizeCompleted?.(existing);
+        if (this.executor.finalizeCompleted && this.resumeInterrupted) {
+          // 纯Git收尾恢复没有新Worker，不伪造executionAttempt；仅在收尾核验成功后恢复Run调度。
+          await this.mutationExclusive(async () => {
+            const status = this.state.snapshot().status;
+            if (status !== "interrupted" && status !== "cancelled") return;
+            const event = this.event({ type: "run.status", nodeId: null, status: "running", diagnostic: "用户显式resume，原completed节点宿主成果交接已恢复；未重跑业务Worker。" });
+            this.state.assertApplicable(event); await this.journal.append(event); this.state.apply(event);
+          });
+        }
+        return existing.result;
+      }
       if ((existing.status === "running" || existing.status === "blocked") && this.#replayPrefix) throw new WorkflowContractError(`resume 遇到仍存活或未确认丢失的节点：${nodeId}；先恢复其 Control 或将其明确标记为 interrupted。`);
       const invalidatedByPriorRestart = !this.#replayPrefix || (existing.status === "completed" && !provenanceMatches);
       // 复用资格按逻辑调用顺序撤销，必须先于任何await；否则并行后续调用
@@ -166,6 +182,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       const current = this.state.agent(nodeId);
       if (current.status === "completed") {
         if (result === null || !isDeepStrictEqual(current.result, result)) throw new Error("真实执行器返回结果与已耐久的 complete 结果不一致。");
+        await this.executor.finalizeCompleted?.(current);
         return result;
       }
       if (result === null) {
@@ -175,6 +192,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       }
       const resultPath = await this.journal.writeResult(nodeId, result, node.agentSessionId ?? undefined);
       await this.durableApply(this.event({ type: "agent.completed", nodeId, agentSessionId: node.agentSessionId, resultPath, result }));
+      await this.executor.finalizeCompleted?.(this.state.agent(nodeId));
       return result;
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);

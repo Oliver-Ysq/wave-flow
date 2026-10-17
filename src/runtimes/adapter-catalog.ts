@@ -1,6 +1,7 @@
 import { codexAcpAdapterEntry } from "./codex-acp-entry";
 import { createKimiWorkerEnvironment, createWorkerEnvironment } from "./worker-environment";
 import type { RuntimeCli, VerifiedCliRuntime } from "./types";
+import { codexSessionIsolation, kimiSessionIsolation, type SessionIsolationProfile } from "./session-isolation";
 
 /** 当前锁定的 Codex ACP adapter 来源；用户 runtime 不得决定 adapter argv。 */
 export const CODEX_ACP_ADAPTER = { id: "codex-acp" as const, version: "2.2.2", protocolVersion: 1 };
@@ -39,6 +40,8 @@ export type AdapterCatalogEntry = {
   readonly launcher: (runtime: VerifiedCliRuntime) => { readonly command: string; readonly args: readonly string[] };
   /** 由已复核 runtime 构造最小白名单环境。 */
   readonly environment: (runtime: VerifiedCliRuntime) => Readonly<Record<string, string>>;
+  /** 私有状态与隔离启动配置；缺省不支持，宿主按角色能力拒绝，不以CLI名称分支。 */
+  readonly sessionIsolation?: SessionIsolationProfile;
 };
 
 const entries: readonly AdapterCatalogEntry[] = [
@@ -53,6 +56,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     requiresNodeRuntime: true,
     launcher: () => codexAcpAdapterEntry(),
     environment: (runtime) => createWorkerEnvironment(runtime),
+    sessionIsolation: codexSessionIsolation,
   },
   {
     adapterId: "kimi-acp",
@@ -66,6 +70,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     // Kimi CLI 自身即 ACP server；命令直接是用户已验证的 realpath。
     launcher: (runtime) => ({ command: runtime.executablePath, args: ["acp"] }),
     environment: (runtime) => createKimiWorkerEnvironment(runtime),
+    sessionIsolation: kimiSessionIsolation,
   },
 ];
 
