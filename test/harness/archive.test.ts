@@ -85,6 +85,31 @@ test("归档预览对已归档或不存在任务返回明确错误", async () =>
   await expect(instance.archivePreview(crypto.randomUUID())).rejects.toThrow();
 });
 
+test("已归档旧草案缺少或过期预览时，读取与幂等归档不补写封存后的事实", async () => {
+  for (const oldPreview of [undefined, { previewVersion: 1, sourceHash: hash(source("archived-old")), phaseTitles: ["检查"], previewAgents: [] }]) {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-archive-preview-")); roots.push(root);
+    const state = join(root, "state"), creator = service(state);
+    const task = await creator.create(root, "p", { clientRequestId: crypto.randomUUID(), payloadHash: "a".repeat(64), title: "历史预览", initialGoal: "目标" });
+    creator.close();
+    const id = task.harnessRunId, cardId = crypto.randomUUID(), at = new Date().toISOString();
+    const journal = (await HarnessJournal.open(id, state)).journal;
+    await journal.append({ type: "workflow.revision_proposed", at, harnessRunId: id, revision: { revision: 1, cardId, parentRevision: null, goal: "目标", scope: "只读", abandonedAt: null, turnId: task.messages[0].id, source: source("archived-old"), sourceHash: hash(source("archived-old")), createdAt: at, acceptedAt: null, rejectedAt: null, ...(oldPreview ? { preview: oldPreview } : {}) } });
+    await journal.append({ type: "workflow.card_abandoned", at, harnessRunId: id, cardId });
+    await journal.append({ type: "harness.completed", at, harnessRunId: id });
+    const path = join(state, id, "journal.jsonl"), before = await Bun.file(path).text();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reader = service(state);
+      expect((await reader.snapshot(id)).status).toBe("completed");
+      expect((await reader.snapshot(id)).workflowRevisions[0].preview).toEqual(oldPreview);
+      await expect(reader.archivePreview(id)).rejects.toThrow("已归档");
+      expect((await reader.complete(id, true)).status).toBe("completed");
+      reader.close();
+      expect(await Bun.file(path).text()).toBe(before);
+      expect((await HarnessJournal.open(id, state)).snapshot.status).toBe("completed");
+    }
+  }
+});
+
 test("协调归档一次确认：决策失效、候选放弃、总结取消并封存，重开一致", async () => {
   const { state, id, candidateCard, decisionId } = await fixture();
   const instance = service(state);

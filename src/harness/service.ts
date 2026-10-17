@@ -868,7 +868,9 @@ export class HarnessService {
     const opened = await HarnessJournal.open(harnessRunId, this.root);
     const projection = new HarnessProjection(opened.journal.manifest); for (const event of opened.events) projection.apply(event);
     const entry: HarnessEntry = { journal: opened.journal, projection, session: null, listeners: new Set<(event: HarnessStreamEvent) => void>(), turn: null, recorder: null };
-    for (const revision of projection.snapshot().workflowRevisions) {
+    // 归档是 Journal 的不可变终态；历史档案缺少展示 preview 时只能如实显示缺失，
+    // 不能在 harness.completed 之后追加派生事实，否则重开会因封存后写入而 fail closed。
+    if (projection.snapshot().status !== "completed") for (const revision of projection.snapshot().workflowRevisions) {
       if (revision.preview && revision.preview.previewVersion >= REVISION_PREVIEW_VERSION && revision.preview.description && revision.preview.workflowName) continue;
       try {
         const preview = this.buildRevisionPreview(revision.source);
