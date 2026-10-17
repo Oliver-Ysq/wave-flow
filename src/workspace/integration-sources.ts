@@ -59,10 +59,10 @@ export async function resolveIntegrationSources(options: {
     const result = workspace.results.findLast(result => result.runId === options.runId && result.nodeId === id && result.attempt === node.executionAttemptId);
     if (!result?.ready) fail(`集成来源 ${id} 成果未ready，不能用业务completed代替Git交付。`);
     const allowed = workspace.authorization.nodes.find(item => item.nodeId === id);
-    if (!allowed || result.paths.some(path => !allowed.paths.includes(path))) fail(`集成来源 ${id} 超出原提交授权。`);
+    if (!allowed) fail(`集成来源 ${id} 超出原提交授权。`);
     const repo = await GitRepository.open(workspace.cleanedAt?workspace.authorization.repository:workspace.cwd);
     if (repo.commonDirectory !== workspace.commonDirectory) fail("集成来源Git仓库身份漂移。");
-    await repo.verifyCommitObject(result.commit,result.startCommit,allowed.paths,result.paths);
+    await repo.verifyCommitObject(result.commit,result.startCommit,result.paths);
     if(!workspace.cleanedAt){const latest=workspace.results.at(-1),state=await repo.inspect();if(!latest?.ready||state.head!==latest.commit||state.changedPaths.length||state.conflicts.length)fail("集成来源持续worktree现场漂移或未收尾。");}
     contexts.push({ runId: options.runId, nodeId: id, attempt: node.executionAttemptId, workspaceId: binding.workspaceId, commonDirectory: workspace.commonDirectory, commit: result.commit, paths: result.paths });
   }

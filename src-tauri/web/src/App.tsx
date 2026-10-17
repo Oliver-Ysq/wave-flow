@@ -2028,7 +2028,7 @@ function ImpactSummaryPanel({harness,executionId,attempt}:{harness:HarnessSnapsh
   if(!obligation)return <p>此尝试未保存影响面总结义务；不补造历史结论。</p>;
   const message=harness.messages.find(item=>item.id===obligation.messageId);
   const gitLimitation=harness.executions.find(item=>item.executionId===executionId)?.config?.workspaces
-    ? "受管Git证据仅覆盖批准文件；缺失或不可读取的记录不代表没有改动，也不证明已合入主工作区或外部系统已回滚。"
+    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已合入主工作区或外部系统已回滚。"
     : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
   if(obligation.status==="cancelled")return <article aria-label="影响面总结"><h2>影响面总结</h2><p>用户已放弃总结并只读归档；影响面未完成，不再开放执行。</p></article>;
   return <article aria-label="影响面总结"><h2>影响面总结</h2><p role="status">{{pending:"准备总结",running:"正在总结",interrupted:"总结中断，须重试",completed:"总结已完整保存"}[obligation.status]}</p>{obligation.status!=="completed"&&<p>完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。</p>}{obligation.diagnostic&&<p role="alert">{obligation.diagnostic}</p>}{error&&<p role="alert">{error}</p>}{obligation.status==="completed"&&message&&<MessageBody text={message.text}/>}<p>{gitLimitation}</p>{harness.status!=="completed"&&obligation.status!=="completed"&&<button disabled={busy||(obligation.status==="running"&&!obligation.turnId)||(harness.status==="running"&&obligation.status!=="running")} onClick={async()=>{setBusy(true);setError(null);try{if(obligation.status==="running")await api.stopImpactSummary(harness.harnessRunId,obligation.key,obligation.turnId!);else await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在处理…":obligation.status==="running"?"停止影响面总结":"重试影响面总结"}</button>}</article>;
@@ -2099,8 +2099,8 @@ function ExecutionDetail({
     <>
       <label>执行尝试<select value={readingAttempt} onChange={event=>onSelectAttempt?.(Number(event.target.value))}>{attemptIds.map(attempt=><option key={attempt} value={attempt}>attempt #{attempt}{attempt === detail.snapshot.currentExecutionAttemptId ? "（当前）" : "（历史只读）"}</option>)}</select></label>
       {detail.workspaceDiagnostic&&<p role="alert">{detail.workspaceDiagnostic}</p>}
-      {detail.deliveryDiagnostic&&<p role="alert">尚未形成最终交付：{detail.deliveryDiagnostic}</p>}
-      {detail.deliveryEvidence&&<section className="execution-workspace-evidence" aria-label="最终交付"><h3>最终交付</h3><p role="status">已自动整理为一条单父 commit</p><code>{detail.deliveryEvidence.branch}</code><code title={detail.deliveryEvidence.commit}>{detail.deliveryEvidence.commit}</code><p>{detail.deliveryEvidence.paths.length?detail.deliveryEvidence.paths.join("、"):"相对基准没有文件变化"}</p><small>未合入主分支，未 push；内部检查点保留。</small></section>}
+      {detail.sourceDiagnostic&&<p role="alert">尚未形成完整成果来源：{detail.sourceDiagnostic}</p>}
+      {detail.sourceEvidence&&<GitReviewPanel key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`} taskId={harnessRunId} executionId={executionId} sourceCommit={detail.sourceEvidence.sourceCommit} writable={Boolean(onCleanupWorkspaces)&&!historical}/>}
       {partialError&&<p role="alert">{partialError}</p>}
       {!historical&&detail.workspaceEvidence?.some(item=>item.lease)&&["cancelled","interrupted"].includes(detail.snapshot.status)&&<><button disabled={!!busy} onClick={()=>{setPartialError(null);void onSavePartial?.().catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>保存停止现场（partial，不代表交付）</button>{partialError&&<p role="alert">{partialError}</p>}</>}
       {!historical&&detail.workspaceEvidence?.length&&!detail.controllable&&<><button disabled={!!busy} onClick={()=>{if(!confirmCleanup){setConfirmCleanup(true);return;}setPartialError(null);void onCleanupWorkspaces?.().then(()=>setConfirmCleanup(false)).catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>{confirmCleanup?"确认移除干净 checkout？分支和 commit 将保留":"清理受管 checkout"}</button>{confirmCleanup&&<button onClick={()=>setConfirmCleanup(false)}>取消清理</button>}{partialError&&<p role="alert">{partialError}</p>}</>}
@@ -2129,7 +2129,7 @@ function ExecutionDetail({
           </small>
         )}
       </div>
-      {detail.workspaceEvidence&&<details className="execution-workspace-evidence"><summary>内部 Git 检查点与诊断详情</summary>{detail.workspaceEvidence.map(item=><article key={item.nodeId}><strong>{item.nodeId}</strong><code>{item.branch}</code>{item.lease&&<span role="status">writer / Git 收尾锁仍保留 · attempt #{item.lease.attempt}</span>}{item.results.length===0&&!item.lease&&<small>尚无保存成果</small>}{item.results.map(result=><div key={`${result.attempt}:${result.commit}`}><span>{result.ready?"成果 ready":"partial，未交付"} · attempt #{result.attempt}{result.unchanged?" · 无文件变化":""}</span><code title={result.commit}>{result.commit.slice(0,12)}</code><small>{result.paths.length?result.paths.join("、"):"没有提交文件"}{result.mergeParents.length?` · 集成 ${result.mergeParents.length} 个来源`:" · 未集成其他分支"}</small></div>)}</article>) }<p>Git 证据只覆盖批准文件与已执行验证，不证明外部系统已回滚。</p></details>}
+      {detail.workspaceEvidence&&<details className="execution-workspace-evidence"><summary>内部 Git 检查点与诊断详情</summary>{detail.workspaceEvidence.map(item=><article key={item.nodeId}><strong>{item.nodeId}</strong><code>{item.branch}</code>{item.lease&&<span role="status">writer / Git 收尾锁仍保留 · attempt #{item.lease.attempt}</span>}{item.results.length===0&&!item.lease&&<small>尚无保存成果</small>}{item.results.map(result=><div key={`${result.attempt}:${result.commit}`}><span>{result.ready?"成果 ready":"partial，未交付"} · attempt #{result.attempt}{result.unchanged?" · 无文件变化":""}</span><code title={result.commit}>{result.commit.slice(0,12)}</code><small>{result.paths.length?result.paths.join("、"):"没有提交文件"}{result.mergeParents.length?` · 集成 ${result.mergeParents.length} 个来源`:" · 未集成其他分支"}</small></div>)}</article>) }<p>Git 证据只覆盖受管Git文件与已执行验证，不证明外部系统已回滚。</p></details>}
       <div className="actions">
         {detail.controllable && detail.snapshot.status === "running" && (
           <Action
@@ -2617,3 +2617,4 @@ function statusLabel(status: string): string {
     )[status] ?? status
   );
 }
+import { GitReviewPanel } from "./git-review";

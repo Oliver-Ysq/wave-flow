@@ -1,9 +1,41 @@
-import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+// Git temporary-index/NUL staging adapted from BloopAI/vibe-kanban d5cbb538.
+// Modified for Bun, durable candidates and explicit user merge. See third-party/NOTICE.md.
+import { link, lstat, mkdtemp, open, readFile, realpath, rm, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { WorkflowContractError } from "../workflow/errors";
 
 /** Git子进程执行失败；区别于授权/现场契约拒绝，允许有界幂等收尾重试。 */
 export class GitCommandError extends WorkflowContractError {}
+/** 证据超过资源上限；保存拒绝，diff展示可明确标记省略。 */
+export class GitEvidenceLimitError extends WorkflowContractError {}
+
+/** 用户审阅的冻结来源diff，不代表未提交现场或外部副作用。 */
+export type GitReview = {
+  /** 原冻结基准。 */ readonly baseCommit: string;
+  /** 唯一完整ready来源。 */ readonly sourceCommit: string;
+  /** 实际相对基准变更文件。 */ readonly paths: readonly string[];
+  /** 本机分支及本次读取的HEAD，确认时须复核。 */ readonly targets: readonly { /** 本机分支短名，不含受管工作分支。 */ readonly branch: string; /** 本次审阅目标完整oid，合入时漂移则拒绝。 */ readonly head: string }[];
+  /** 已耐久合入事实；重新打开页面不会误显示为未合入。 */ readonly merged?: GitMergeResult;
+};
+/** 单文件有界diff；不能将省略当作没有改动。 */
+export type GitFileDiff = {
+  /** 已核验属于冻结diff的相对路径。 */ readonly path: string;
+  /** 文本patch，省略时为空。 */ readonly patch: string;
+  /** 二进制或过大时为true。 */ readonly omitted: boolean;
+  /** 无省略时null，其他允许值说明不能inline的原因。 */ readonly reason: "binary" | "too-large" | null;
+};
+/** 明确用户操作的squash请求，不支持远程push。 */
+export type GitMergeRequest = {
+  /** 原确认UUID；commit trailer用于崩溃重试核验。 */ readonly requestId: string;
+  /** 用户已审阅基准完整oid。 */ readonly baseCommit: string;
+  /** 用户已审阅完整ready来源oid。 */ readonly sourceCommit: string;
+  /** 本机目标分支短名；不接受refs或选项。 */ readonly targetBranch: string;
+  /** 用户确认时读取的目标HEAD，漂移则拒绝。 */ readonly targetHead: string;
+};
+/** 已合入本机分支的证据；不代表已push。 */
+export type GitMergeResult = GitMergeRequest & {
+  /** 合入后的唯一单父commit。 */ readonly commit: string;
+};
 
 /** Git 可见现场；不是外部副作用快照，不读取 ignored 文件正文。 */
 export type GitWorkspaceState = {
@@ -11,7 +43,7 @@ export type GitWorkspaceState = {
   readonly cwd: string;
   /** canonical 共享 Git 元数据目录，用于区分不同仓库。 */
   readonly commonDirectory: string;
-  /** 当前worktree专属Git元数据目录；允许集成写index/MERGE_HEAD，不开放共享refs。 */
+  /** 当前worktree专属Git元数据目录，用于身份复核；不是权限边界。 */
   readonly gitDirectory: string;
   /** 工作区 HEAD 的完整 commit oid。 */
   readonly head: string;
@@ -25,7 +57,7 @@ export type GitWorkspaceState = {
   readonly ignoredPaths: readonly string[];
 };
 
-/** 用户明确授权的受管成果保存请求；只授权指定工作区与文件，不授权 push/远程。 */
+/** 用户明确授权的受管成果保存请求；授权整个指定受管工作区，不授权 push/远程。 */
 export type GitSaveRequest = {
   /** 独立保存请求 UUID，写入 commit trailer，关联失败后用于核验既有成果。 */
   readonly requestId: string;
@@ -33,12 +65,8 @@ export type GitSaveRequest = {
   readonly baseCommit: string;
   /** 本次 writer 启动前 HEAD，commit 只能以该节点现场为父。 */
   readonly startCommit: string;
-  /** 精确的仓库相对文件路径白名单；未知文件使保存失败，不使用 git add 全目录。 */
-  readonly allowedPaths: readonly string[];
   /** 集成成果的额外父提交；均由Engine核验，普通writer为空。 */
   readonly mergeParents?: readonly string[];
-  /** 受管writer私有对象库；宿主在更新ref前导入可达对象，必须位于私有scratch。 */
-  readonly alternateObjectDirectory?: string;
 };
 
 /** 保存的标准 Git 证据；无改动不创建空 commit。 */
@@ -47,26 +75,17 @@ export type GitSavedResult = {
   readonly requestId: string;
   /** 成果 commit；无改动时等于 startCommit。 */
   readonly commit: string;
-  /** 本次实际提交路径，不能超出用户授权。 */
+  /** 本次实际提交路径，来源为整个受管工作区。 */
   readonly paths: readonly string[];
   /** true 表示未新建 commit。 */
   readonly unchanged: boolean;
 };
 
-/** 用户明确确认的最终交付；只创建新ref，不checkout、不修改主分支或远程。 */
-export type GitDeliveryRequest = {
-  /** 确认请求UUID；同分支同请求异载荷拒绝。 */ readonly requestId: string;
-  /** 冻结基准完整oid，也是交付commit的唯一父。 */ readonly baseCommit: string;
-  /** 已核验最终ready成果的完整oid；只读取其tree。 */ readonly sourceCommit: string;
-  /** 精确文件授权集合；最终相对基准的diff不能越界。 */ readonly allowedPaths: readonly string[];
-  /** 仅允许codex/delivery-<Execution UUID>，不得覆盖已有异源分支。 */ readonly branch: string;
-};
-
-/** 单父交付证据；内部来源commit仍保留，不代表主分支已合入。 */
-export type GitDeliveryResult = {
+/** 最终ready来源证据；不代表已合入目标分支。 */
+export type GitSourceResult = {
   /** 原确认请求UUID。 */ readonly requestId: string;
-  /** 新交付分支短名。 */ readonly branch: string;
-  /** 单父交付commit完整oid。 */ readonly commit: string;
+  /** 最终来源的受管分支短名。 */ readonly branch: string;
+  /** 最终来源commit完整oid。 */ readonly commit: string;
   /** 被整理的最终内部成果完整oid。 */ readonly sourceCommit: string;
   /** 相对冻结基准实际变化文件。 */ readonly paths: readonly string[];
 };
@@ -74,6 +93,83 @@ export type GitDeliveryResult = {
 /** 固定 Git argv、禁 hooks/外部 diff/filter 的受管 Git 底座；不负责 writer 生命周期。 */
 export class GitRepository {
   private constructor(readonly cwd: string, readonly commonDirectory: string) {}
+
+  /** 读取冻结commit之间的实际路径；不读取当前未保存现场。 */
+  async changedBetween(base: string, source: string): Promise<string[]> {
+    assertOid(base); assertOid(source);
+    const paths = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, source, "--"])).sort();
+    paths.forEach(assertPath); return paths;
+  }
+
+  /** 只读审阅数据；隐藏受管内部工作分支作为目标，仍由merge重新核验。 */
+  async review(baseCommit: string, sourceCommit: string): Promise<GitReview> {
+    await this.assertIdentity(); await this.assertSafe();
+    const paths = await this.changedBetween(baseCommit, sourceCommit);
+    const targets = (await git(this.cwd, ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"])).trim().split("\n").filter(Boolean).map(line => {
+      const [branch, head] = line.split(" "); return { branch, head };
+    }).filter(target => !target.branch.startsWith("codex/wf-") && !target.branch.startsWith("codex/delivery-"));
+    return { baseCommit, sourceCommit, paths, targets };
+  }
+
+  /** 按已保存的Git对象加载文件patch，不允许任意路径读取。 */
+  async fileDiff(base: string, source: string, path: string): Promise<GitFileDiff> {
+    if (!(await this.changedBetween(base, source)).includes(path)) fail("文件不属于冻结成果diff。");
+    const numstat = await git(this.cwd, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--numstat", base, source, "--", path]);
+    if (numstat.startsWith("-\t-\t")) return { path, patch: "", omitted: true, reason: "binary" };
+    try {
+      const patch = await git(this.cwd, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", base, source, "--", path]);
+      return { path, patch, omitted: false, reason: null };
+    } catch (error) {
+      if (error instanceof GitEvidenceLimitError) return { path, patch: "", omitted: true, reason: "too-large" };
+      throw error;
+    }
+  }
+
+  /** Kanban式单父squash：目标前进/dirty拒绝，未checkout只CAS ref，已checkout同步安全更新现场。
+   * 不改来源refs，不push；原请求重试识别同commit并补checkout，不新增commit。
+   */
+  async mergeSquash(
+    /** 用户确认的冻结来源与目标，不能自动选取。 */ request: GitMergeRequest,
+    /** 安全预检后、任何ref更新前耐久原请求；独立Git测试可省略。 */ persistIntent?: () => Promise<void>,
+  ): Promise<GitMergeResult> {
+    assertOid(request.baseCommit); assertOid(request.sourceCommit); assertOid(request.targetHead);
+    if (!/^[a-f0-9-]{36}$/.test(request.requestId) || request.targetBranch.startsWith("-") || request.targetBranch.startsWith("refs/") || request.targetBranch.startsWith("codex/wf-") || request.targetBranch.startsWith("codex/delivery-")) fail("合入请求身份或目标分支无效。");
+    await git(this.cwd, ["check-ref-format", "--branch", request.targetBranch]);
+    await this.assertIdentity(); await this.assertSafe();
+    const ref = `refs/heads/${request.targetBranch}`, head = await this.commitOid(ref);
+    const tree = (await git(this.cwd, ["rev-parse", `${request.sourceCommit}^{tree}`])).trim();
+    const message = `Wave Flow squash merge\n\nWave-Flow-Merge: ${request.requestId}\nWave-Flow-Source: ${request.sourceCommit}\nWave-Flow-Base: ${request.baseCommit}\nWave-Flow-Target: ${request.targetHead}`;
+    const retry = head !== request.targetHead;
+    if (retry && ((await git(this.cwd, ["show", "-s", "--format=%B", head])).trimEnd() !== message || (await git(this.cwd, ["show", "-s", "--format=%P", head])).trim() !== request.targetHead || (await git(this.cwd, ["rev-parse", `${head}^{tree}`])).trim() !== tree)) fail("目标分支已变化；请重新审阅，不能覆盖。");
+    if (request.targetHead !== request.baseCommit) fail("目标分支已偏离冻结基准；请先显式集成目标变化并重新审阅。");
+    await git(this.cwd, ["merge-base", "--is-ancestor", request.baseCommit, request.sourceCommit]);
+    const worktrees = (await git(this.cwd, ["worktree", "list", "--porcelain", "-z"])).split("\0");
+    let checkout: string | null = null, path = "";
+    for (const field of worktrees) { if (field.startsWith("worktree ")) path = field.slice(9); if (field === `branch ${ref}`) checkout = path; }
+    if (checkout) {
+      const repo = await GitRepository.open(checkout), state = await repo.inspect();
+      if (state.commonDirectory !== this.commonDirectory || state.branch !== ref || state.conflicts.length) fail("目标checkout身份或冲突现场无效。");
+      const affected = await this.changedBetween(request.targetHead, request.sourceCommit);
+      if (state.ignoredPaths.some(ignored => affected.some(file => file===ignored || file.startsWith(ignored+"/") || ignored.startsWith(file+"/")))) fail("目标工作区存在会被覆盖的ignored或排除文件；请先处理。");
+      const staged = await git(checkout,["diff","--cached","--no-ext-diff","--no-textconv","--name-only","-z","--"]);
+      if (!retry && (state.changedPaths.length || staged)) fail("目标工作区存在未提交/暂存/未跟踪文件；请先处理，不自动提交或覆盖。");
+      if (retry && !state.changedPaths.length && staged) fail("合入后目标暂存区已变化，不能自动补checkout。");
+      const directory = await repo.gitDirectory();
+      for (const name of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]) {
+        try { await lstat(join(directory,name)); fail("目标工作区仍有Git操作进行中。"); } catch(error) { if((error as NodeJS.ErrnoException).code!=="ENOENT") throw error; }
+      }
+      if (retry && state.changedPaths.length) {
+        // CAS之后崩溃时index可能仍为旧tree，仅恢复精确旧现场；用户后续变化不能覆盖。
+        if ((await git(checkout, ["write-tree"])).trim() !== (await git(checkout, ["rev-parse", `${request.targetHead}^{tree}`])).trim()
+          || await git(checkout, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--"]) || await git(checkout, ["ls-files", "--others", "--exclude-standard"])) fail("合入后目标现场已变化，不能自动补checkout。");
+      }
+    }
+    await persistIntent?.();
+    const commit = retry ? head : (await git(this.cwd, ["commit-tree", tree, "-p", request.targetHead], false, {}, message+"\n")).trim();
+    if (!retry) await git(this.cwd, ["update-ref", ref, commit, request.targetHead]);
+    if (checkout) await git(checkout, ["read-tree", "-u", "-m", request.targetHead, commit]);
+    return { ...request, commit };
+  }
 
   /** 只读打开仓库根目录，拒绝软链接入口、非根目录及不安全仓库特性。 */
   static async open(path: string): Promise<GitRepository> {
@@ -97,19 +193,19 @@ export class GitRepository {
     const tracked = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
     const untracked = splitPaths(await git(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z"]));
     const conflicts = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z", "--"]));
-    const ignoredPaths=splitPaths(await git(this.cwd,["ls-files","--others","--ignored","--exclude-standard","-z"]));
-    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...untracked])].sort(), conflicts,ignoredPaths };
+    const ignoredPaths=[...splitPaths(await git(this.cwd,["ls-files","--others","--ignored","--exclude-standard","-z"])), ...untracked.filter(path => path.split("/").includes("node_modules"))];
+    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...untracked.filter(path => !path.split("/").includes("node_modules"))])].sort(), conflicts,ignoredPaths };
   }
 
   /** 集成前重新核验真实commit与父提交范围，不能只相信Workspace JSON中的hash。 */
-  async verifySavedCommit(commit: string, allowedPaths: readonly string[], startCommit?: string, expectedPaths?: readonly string[]): Promise<void> {
-    assertOid(commit); allowedPaths.forEach(assertPath);
+  async verifySavedCommit(commit: string, startCommit?: string, expectedPaths?: readonly string[]): Promise<void> {
+    assertOid(commit);
     if (await this.commitOid(commit) !== commit) fail("成果commit不可验证。");
     if (startCommit) {
       assertOid(startCommit);
       await git(this.cwd, ["merge-base", "--is-ancestor", startCommit, commit]);
       const paths = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", startCommit, commit, "--"])).sort();
-      assertAllowed(paths, allowedPaths);
+      paths.forEach(assertPath);
       if (expectedPaths && JSON.stringify(paths) !== JSON.stringify([...expectedPaths].sort())) fail("成果commit文件范围与耐久关联不一致。");
     }
     const state = await this.inspect();
@@ -140,12 +236,12 @@ export class GitRepository {
   }
 
   /** checkout已清理时从仓库对象核验成果，不要求当前HEAD等于来源commit。 */
-  async verifyCommitObject(commit: string, startCommit: string, allowedPaths: readonly string[], expectedPaths: readonly string[]): Promise<void> {
-    assertOid(commit); assertOid(startCommit); allowedPaths.forEach(assertPath); expectedPaths.forEach(assertPath);
+  async verifyCommitObject(commit: string, startCommit: string, expectedPaths: readonly string[]): Promise<void> {
+    assertOid(commit); assertOid(startCommit); expectedPaths.forEach(assertPath);
     if (await this.commitOid(commit) !== commit) fail("成果commit不可验证。");
     await git(this.cwd, ["merge-base", "--is-ancestor", startCommit, commit]);
     const paths=splitPaths(await git(this.cwd,["diff","--no-ext-diff","--no-textconv","--no-renames","--name-only","-z",startCommit,commit,"--"])).sort();
-    assertAllowed(paths,allowedPaths);if(JSON.stringify(paths)!==JSON.stringify([...expectedPaths].sort()))fail("成果commit文件范围与耐久关联不一致。");
+    paths.forEach(assertPath);if(JSON.stringify(paths)!==JSON.stringify([...expectedPaths].sort()))fail("成果commit文件范围与耐久关联不一致。");
   }
 
   /** 核验最终来源的Git父链覆盖每份独立成果，不凭声明推断已集成。 */
@@ -154,39 +250,9 @@ export class GitRepository {
     return (await git(this.cwd, ["merge-base", ancestor, source])).trim() === ancestor;
   }
 
-  /** 整理最终tree为基准之后一条单父commit；CAS仅创建新分支，重试复核原载荷。 */
-  async deliverSquash(request: GitDeliveryRequest): Promise<GitDeliveryResult> {
-    assertOid(request.baseCommit); assertOid(request.sourceCommit); request.allowedPaths.forEach(assertPath);
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.requestId)
-      || !/^codex\/delivery-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.branch)) fail("交付请求/分支身份必须为UUID安全命名。");
-    await this.assertIdentity(); await this.assertSafe();
-    await this.commitOid(request.baseCommit); await this.commitOid(request.sourceCommit);
-    await git(this.cwd, ["merge-base", "--is-ancestor", request.baseCommit, request.sourceCommit]);
-    const paths = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", request.baseCommit, request.sourceCommit, "--"])).sort();
-    assertAllowed(paths, request.allowedPaths);
-    const tree = (await git(this.cwd, ["rev-parse", `${request.sourceCommit}^{tree}`])).trim();
-    const message = `Wave Flow squash delivery\n\nWave-Flow-Delivery: ${request.requestId}\nWave-Flow-Source: ${request.sourceCommit}\nWave-Flow-Paths: ${JSON.stringify([...new Set(request.allowedPaths)].sort())}`;
-    const ref = `refs/heads/${request.branch}`;
-    const existing = (await git(this.cwd, ["rev-parse", "--verify", "--quiet", ref], true)).trim();
-    if (existing) {
-      if ((await git(this.cwd, ["show", "-s", "--format=%P", existing])).trim() !== request.baseCommit
-        || (await git(this.cwd, ["rev-parse", `${existing}^{tree}`])).trim() !== tree
-        || (await git(this.cwd, ["show", "-s", "--format=%B", existing])).trimEnd() !== message) fail("交付分支已存在且请求/来源/授权冲突，禁止覆盖。");
-      return { requestId: request.requestId, branch: request.branch, commit: existing, sourceCommit: request.sourceCommit, paths };
-    }
-    const commit = (await git(this.cwd, ["commit-tree", tree, "-p", request.baseCommit], false, {}, `${message}\n`)).trim();
-    assertOid(commit);
-    await git(this.cwd, ["update-ref", ref, commit, "0".repeat(commit.length)]);
-    return { requestId: request.requestId, branch: request.branch, commit, sourceCommit: request.sourceCommit, paths };
-  }
-
-  /** writer 已退出后调用；只保存白名单文件，已有同请求 commit 时复核后返回而非重复提交。 */
+  /** writer 已退出后调用；保存实际Git改动，已有同请求 commit 时复核后返回而非重复提交。 */
   async save(request: GitSaveRequest): Promise<GitSavedResult> {
     assertRequest(request);
-    if (request.alternateObjectDirectory) {
-      const info = await lstat(request.alternateObjectDirectory);
-      if (!info.isDirectory() || info.isSymbolicLink() || await realpath(request.alternateObjectDirectory) !== request.alternateObjectDirectory) fail("私有Git对象目录身份不安全。");
-    }
     const state = await this.inspect();
     if (await this.gitDirectory() === this.commonDirectory || !state.branch?.startsWith("refs/heads/codex/wf-")) fail("禁止保存主工作区或非受管分支。");
     if (state.conflicts.length) fail("尚有 merge 冲突，成果不可 ready。");
@@ -197,23 +263,43 @@ export class GitRepository {
       const expectedParents = [request.startCommit, ...(request.mergeParents ?? [])].join(" ");
       if (parents !== expectedParents || message.trimEnd() !== `Wave Flow managed result\n\nWave-Flow-Save: ${request.requestId}`) fail("HEAD 已发生未授权变化，不能补存或猜测成果。");
       const paths = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", request.startCommit, state.head, "--"]));
-      assertAllowed(paths, request.allowedPaths);
       // update-ref 成功后、index 刷新前进程可能中断。先比较工作区字节对应树，再恢复索引。
-      await this.assertTreeMatchesHead(request.allowedPaths);
+      await this.assertTreeMatchesHead();
       await git(this.cwd, ["read-tree", state.head]);
       if (request.mergeParents?.length) await git(this.cwd, ["merge", "--quit"]);
       return { requestId: request.requestId, commit: state.head, paths, unchanged: false };
     }
-    assertAllowed(state.changedPaths, request.allowedPaths);
-    if (!state.changedPaths.length && !request.mergeParents?.length) return { requestId: request.requestId, commit: state.head, paths: [], unchanged: true };
+    if (!state.changedPaths.length && !request.mergeParents?.length) {
+      try { await lstat(join(await this.gitDirectory(),`wf-save-${request.requestId}.json`)); fail("保存候选已冻结，现场发生变化；不能返回无改动。"); } catch(error) { if((error as NodeJS.ErrnoException).code!=="ENOENT") throw error; }
+      return { requestId: request.requestId, commit: state.head, paths: [], unchanged: true };
+    }
     for (const path of state.changedPaths) await this.assertFilePath(path);
     const temp = await mkdtemp(join(await this.gitDirectory(), "wf-index-"));
     try {
-      const env = { GIT_INDEX_FILE: join(temp, "index"), ...(request.alternateObjectDirectory ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: request.alternateObjectDirectory } : {}) };
+      const env = { GIT_INDEX_FILE: join(temp, "index") };
       await git(this.cwd, ["read-tree", state.head], false, env);
-      if (state.changedPaths.length) await git(this.cwd, ["--literal-pathspecs", "add", "--", ...state.changedPaths], false, env);
-      const tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
-      if (request.alternateObjectDirectory) await importGitObjects(this.cwd, tree, env);
+      // 路径已经由tracked diff + exclude-standard untracked核定，-f仅避免新ignore规则拒绝tracked文件。
+      if (state.changedPaths.length) await git(this.cwd, ["--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], false, env, state.changedPaths.join("\0")+"\0");
+      let tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
+      // 同请求候选以Git tree耐久冻结；失败重试不重新解释后来产生的成果。
+      const intent = join(await this.gitDirectory(), `wf-save-${request.requestId}.json`);
+      const candidate = { request, tree, paths: [...state.changedPaths].sort() };
+      const intentTemp = `${intent}.${crypto.randomUUID()}.tmp`;
+      try {
+        const file = await open(intentTemp, "wx", 0o600);
+        try { await file.writeFile(JSON.stringify(candidate)); await file.sync(); } finally { await file.close(); }
+        // hard-link发布完整已fsync的常规文件；EEXIST不覆盖原候选，避免半份JSON成为权威。
+        await link(intentTemp, intent);
+        const directory = await open(await this.gitDirectory(), "r"); try { await directory.sync(); } finally { await directory.close(); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const info = await lstat(intent); if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077)) fail("Git候选意图文件不安全。");
+        const frozen = JSON.parse(await readFile(intent, "utf8"));
+        if (JSON.stringify(frozen.request) !== JSON.stringify(request) || frozen.tree !== tree || JSON.stringify(frozen.paths) !== JSON.stringify([...state.changedPaths].sort())) fail("保存候选已冻结，现场或请求发生变化；不能重新收集覆盖。");
+        tree = frozen.tree;
+      } finally { await unlink(intentTemp).catch(error=>{if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}); }
+      const modes = splitPaths(await git(this.cwd, ["ls-tree", "-r", "-z", tree], false, env));
+      if (modes.some(entry => !/^(100644|100755) blob /.test(entry))) fail("候选tree包含不支持的文件模式。");
       const parents = [state.head, ...(request.mergeParents ?? [])];
       for (const parent of parents) { assertOid(parent); if (await this.commitOid(parent) !== parent) fail("集成父commit不可验证。"); }
       const commit = (await git(this.cwd, ["commit-tree", tree, ...parents.flatMap(parent => ["-p", parent])], false, {}, `Wave Flow managed result\n\nWave-Flow-Save: ${request.requestId}\n`)).trim();
@@ -226,15 +312,14 @@ export class GitRepository {
     } finally { await rm(temp, { recursive: true, force: true }); }
   }
 
-  private async assertTreeMatchesHead(allowed: readonly string[]): Promise<void> {
+  private async assertTreeMatchesHead(): Promise<void> {
     const temp = await mkdtemp(join(await this.gitDirectory(), "wf-index-"));
     try {
       const env = { GIT_INDEX_FILE: join(temp, "index") };
       await git(this.cwd, ["read-tree", "HEAD"], false, env);
       const paths = (await this.inspect()).changedPaths;
-      assertAllowed(paths, allowed);
       for (const path of paths) await this.assertFilePath(path);
-      if (paths.length) await git(this.cwd, ["--literal-pathspecs", "add", "--", ...paths], false, env);
+      if (paths.length) await git(this.cwd, ["--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], false, env, paths.join("\0")+"\0");
       const tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
       const expected = (await git(this.cwd, ["rev-parse", "HEAD^{tree}"])).trim();
       if (tree !== expected) fail("保存 commit 后现场已改变，拒绝补关联；请显式修订。");
@@ -282,7 +367,7 @@ export class GitRepository {
       try {
         const info = await lstat(join(this.cwd, ...segments.slice(0, i)));
         if (info.isSymbolicLink()) fail("成果文件路径包含符号链接。");
-        if (i === segments.length && !info.isFile()) fail("成果白名单只能包含常规文件，禁止目录递归暂存。");
+        if (i === segments.length && !info.isFile()) fail("成果只能包含常规文件，禁止目录递归暂存。");
       }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }
@@ -301,41 +386,18 @@ async function git(cwd: string, args: readonly string[], allowMissing = false, e
     const [out, err, code] = await Promise.all([readBounded(child.stdout), readBounded(child.stderr), child.exited]);
     if (code !== 0 && !(allowMissing && code === 1)) throw new GitCommandError(`Git ${args[0]} 失败（${code}）：${err.slice(0, 1000)}`);
     return out;
-  } finally { clearTimeout(timeout); }
+  } catch (error) { child.kill(); throw error; } finally { clearTimeout(timeout); }
 }
 
 async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
-  try { while (true) { const value = await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > 2_000_000) { await reader.cancel(); fail("Git 证据超过读取上限，拒绝截断后保存。"); } chunks.push(value.value); } }
+    try { while (true) { const value = await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > 2_000_000) { await reader.cancel(); throw new GitEvidenceLimitError("Git 证据超过读取上限，拒绝截断后保存。"); } chunks.push(value.value); } }
   finally { reader.releaseLock(); }
   return Buffer.concat(chunks).toString("utf8");
 }
 function splitPaths(text: string): string[] { return text.split("\0").filter(Boolean); }
 function assertOid(oid: string): void { if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) fail("必须使用已验证完整 commit oid。"); }
 function assertPath(path: string): void { if (!path || isAbsolute(path) || path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\x00-\x1f\x7f\\]/.test(path)) fail("成果路径必须为安全仓库相对文件路径。"); }
-function assertRequest(request: GitSaveRequest): void { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.requestId)) fail("保存请求必须为 UUID。"); assertOid(request.baseCommit); assertOid(request.startCommit); request.allowedPaths.forEach(assertPath); (request.mergeParents ?? []).forEach(assertOid); if (new Set(request.mergeParents ?? []).size !== (request.mergeParents ?? []).length || request.mergeParents?.includes(request.startCommit)) fail("集成父commit重复或包含起点。"); if (request.alternateObjectDirectory !== undefined && (!isAbsolute(request.alternateObjectDirectory) || !request.alternateObjectDirectory.endsWith("/objects"))) fail("私有Git对象目录无效。"); }
-function assertAllowed(paths: readonly string[], allowed: readonly string[]): void { paths.forEach(assertPath); if (paths.some(path => !allowed.includes(path))) fail("现场包含未授权文件，保留现场并拒绝保存。"); }
+function assertRequest(request: GitSaveRequest): void { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.requestId)) fail("保存请求必须为 UUID。"); assertOid(request.baseCommit); assertOid(request.startCommit); (request.mergeParents ?? []).forEach(assertOid); if (new Set(request.mergeParents ?? []).size !== (request.mergeParents ?? []).length || request.mergeParents?.includes(request.startCommit)) fail("集成父commit重复或包含起点。"); }
 function within(parent: string, child: string): boolean { const path = relative(parent, child); return path === "" || (path !== ".." && !path.startsWith("../") && !isAbsolute(path)); }
 function fail(message: string): never { throw new WorkflowContractError(message); }
-
-/** 将writer私有对象库中tree可达对象导入受信任共享库；ref更新必须晚于此步骤。 */
-export async function importGitObjects(cwd: string, tree: string, env: Record<string, string>): Promise<void> {
-  assertOid(tree);
-  const baseEnv: Record<string, string> = { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", ...env };
-  const pack = Bun.spawn(["/usr/bin/git", "pack-objects", "--stdout", "--revs"], { cwd, env: baseEnv, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-  pack.stdin.write(`${tree}\n`); pack.stdin.end();
-  // index-pack不得继承GIT_OBJECT_DIRECTORY，否则会把导入结果仍写回scratch。
-  const sharedEnv = { ...baseEnv }; delete sharedEnv.GIT_OBJECT_DIRECTORY; delete sharedEnv.GIT_INDEX_FILE;
-  const index = Bun.spawn(["/usr/bin/git", "index-pack", "--stdin", "--fix-thin"], { cwd, env: sharedEnv, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-  const timeout = setTimeout(() => { pack.kill(); index.kill(); }, 15_000);
-  const packErrorPending = new Response(pack.stderr).text(), indexErrorPending = new Response(index.stderr).text();
-  const indexOutput = new Response(index.stdout).text();
-  const reader = pack.stdout.getReader(); let bytes = 0;
-  try {
-    while (true) { const chunk = await reader.read(); if (chunk.done) break; bytes += chunk.value.length; if (bytes > 100_000_000) fail("Git对象导入超过100MB上限。"); index.stdin.write(chunk.value); }
-    index.stdin.end();
-    const [packCode, indexCode, packError, indexError] = await Promise.all([pack.exited, index.exited, packErrorPending, indexErrorPending, indexOutput]);
-    if (packCode !== 0 || indexCode !== 0) fail(`Git对象导入失败：pack=${packCode} ${packError.slice(0,500)} index=${indexCode} ${indexError.slice(0,500)}`);
-  } catch (error) { pack.kill(); index.kill(); throw error; }
-  finally { clearTimeout(timeout); reader.releaseLock(); }
-}

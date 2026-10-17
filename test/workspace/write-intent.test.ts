@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { assertWorkspaceWriteIntent } from "../../src/workspace/write-intent";
 import type { ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
-const config: ExecutionWorkspaceConfig = { version: 1, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "write", paths: ["a.ts"] }] }, bindings: [{ nodeId: "write", workspaceId: crypto.randomUUID() }] };
+const config: ExecutionWorkspaceConfig = { version: 2, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "write" }] }, bindings: [{ nodeId: "write", workspaceId: crypto.randomUUID() }] };
 test("写意图只核对固定节点，不从phase/label/prompt猜来源", () => {
   expect(() => assertWorkspaceWriteIntent('async function run() { await agent("merge everything", { id: "read", cli: "codex" }); await agent("work", { id: "write", cli: "codex", sandbox: "workspace-write" }); }', config)).not.toThrow();
   expect(() => assertWorkspaceWriteIntent('async function run() { await agent("write", { id: "write", cli: "codex" }); }', config)).toThrow("不一致");

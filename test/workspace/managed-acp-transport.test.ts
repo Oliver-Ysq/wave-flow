@@ -3,17 +3,24 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as acp from "@agentclientprotocol/sdk";
-import { managedAcpTransport } from "../../src/workspace/managed-acp-transport";
+import { managedAcpTransport, ownedAcpTransport } from "../../src/workspace/managed-acp-transport";
 import { WriterProcessGroups } from "../../src/workspace/writer-process-group";
 import type { AcpLauncher, AcpTransport } from "../../src/adapters/acp-session";
 
 const paths: string[] = [];
+test("可信Worker保留原生launcher及HOME，但投递前必须绑定真实进程证明",async()=>{
+ const groups=new WriterProcessGroups(()=>false);let launched:AcpLauncher|null=null,bound="";
+ const stream=acp.ndJsonStream(new WritableStream<Uint8Array>(),new ReadableStream<Uint8Array>());
+ const launcher={id:"test",command:"/bin/true",args:["native"],env:{HOME:"/native/home",CODEX_HOME:"/native/home/.codex"}};
+ const factory=ownedAcpTransport({groups,bindWriter:async identity=>{bound=identity;},transport:async value=>{launched=value;return {stream,exited:Promise.resolve(0),close(){},writerProcess:{pid:43210,exited:Promise.resolve(0),terminate(){}}};}});
+ const transport=await factory(launcher,new AbortController().signal);expect(launched as AcpLauncher|null).toEqual(launcher);expect(bound).not.toBe("");await transport.verifyClosed!();expect(groups.hasExited(bound)).toBe(true);
+});
 afterEach(async () => { for (const path of paths.splice(0)) await rm(path, { recursive: true, force: true }); });
 async function boundary() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-acp-boundary-test-"))); paths.push(root);
   const workspace = join(root, "workspace"), scratch = join(root, "scratch"), main = join(root, "main");
   for (const path of [workspace, scratch, main]) await mkdir(path);
-  return { workspace, scratch, controlFiles: [], protectedDirectories: [main] };
+  return { workspace: null, scratch, controlFiles: [], protectedDirectories: [main] };
 }
 test.skipIf(process.platform !== "darwin")("受管transport先绑定writer再交付ACP stream，close不等于退出核验", async () => {
   const value = await boundary(); let launched: AcpLauncher | null = null, bound = "", closed = 0, alive = true, exit!: () => void;

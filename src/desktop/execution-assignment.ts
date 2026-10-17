@@ -61,7 +61,7 @@ export function validateExecutionConfig(value: unknown, workers: readonly Extrac
   const workspaces = config.workspaces === undefined ? undefined : validateExecutionWorkspaces(config.workspaces);
   if (workspaces) for (const binding of workspaces.bindings) {
     const assignment = assignments.find(item => item.agentId === binding.nodeId) ?? defaultAssignment;
-    if (!adapterById(assignment.adapterId)?.sessionIsolation?.enabledRoles.includes("worker")) throw new Error("所选Adapter尚未完成受管写隔离验收；请重新选择CLI。");
+    if (!adapterById(assignment.adapterId)?.capabilities.workerControlMcp) throw new Error("所选Adapter尚未完成Worker私有完成协议验证；请重新选择CLI。");
   }
   return { version: 1, createdAt: typeof config.createdAt === "string" ? config.createdAt : new Date().toISOString(), fallbackRuntimeId: config.fallbackRuntimeId, ruleText: (config.ruleText as string | null) ?? null, ruleDegraded: config.ruleDegraded, defaultAssignment, assignments, ...(workspaces ? { workspaces } : {}) };
 }

@@ -19,7 +19,7 @@ With Wave Flow, you can:
 3. **Step in when needed.** Agents explicitly request human assistance. Your answer supplies information; the original agent confirms continuation. You can also pause or stop execution.
 4. **Inspect what happened.** Browse structured deliverables and historical attempts. Recover interrupted work explicitly—never through a silent rerun.
 
-Write workflows use isolated Git worktrees for internal checkpoints. Parallel write branches must be combined by an explicit integration Worker. On completion, Wave Flow automatically creates a `codex/delivery-<executionId>` branch containing one commit after the frozen base. It does not modify the primary worktree, primary branch, or remote, and does not push anything; internal checkpoints remain available for recovery and diagnostics.
+Write workflows use independent Git worktrees and save actual tracked changes and non-ignored untracked files, excluding untracked node_modules. No upfront file allowlist is required. Parallel branches require an explicit integration Worker. Review the final diff and explicitly squash it into a local target branch; no automatic merge or push. Internal checkpoints remain for recovery.
 
 ## Why Wave Flow?
 
@@ -56,8 +56,8 @@ Coming soon.
 Wave Flow is in early development. Please keep these limits in mind:
 
 - The local `.ts` workflow task entry is not publicly enabled. URL workflow downloads, visual workflow editing, remote control, and cloud sync are not supported.
-- Business-file writes are limited to the managed worktree. Controllers and Workers may also write the selected CLI's native runtime directory (`~/.codex` for Codex and `~/.kimi-code` for Kimi) for login renewal, configuration, and runtime data; model tools can also modify configuration and credentials there. Other CLI directories and other out-of-workspace writes remain denied. Independent parallel writes require non-overlapping authorized paths, and multiple sources require explicit integration. Execution is rejected when the safe scope cannot be proven.
-- Automatic single-parent delivery creates only a new local delivery branch. It does not merge into the primary branch or push. No final delivery is created while independent branches remain unintegrated or a partial result, writer lease, or workspace drift exists.
+- Controllers retain OS write isolation and four narrow tools. Workers use trusted native CLI configuration and permissions, without additional Wave Flow OS file isolation. Worktrees/cwd separate ordinary work, but do not prevent writing other worktrees, shared Git, user files or credentials. Native directories include `~/.codex` and `~/.kimi-code`; model tools can also modify configuration and credentials. Task intent is not a security guarantee. Parallel branches may change the same file; explicit integration resolves conflicts.
+- A complete ready source can be reviewed and explicitly squash-merged into a local branch. Target drift and dirty/staged/untracked overwrite risks are rejected; no automatic push. Git evidence does not cover external effects or replace sensitive-content review.
 - Automatic impact summaries are available. Continuing from an edited workflow across versions is not publicly enabled.
 - Interrupted execution recovery only reuses strictly matching completed prefixes within the same execution. It does not roll back files or undo external effects.
 - The workbench and execution engine run locally. Model requests still go to the provider used by your chosen CLI; local execution does not mean offline inference or that data never leaves your machine.

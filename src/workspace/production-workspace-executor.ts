@@ -9,12 +9,10 @@ import type { CliRuntimeRegistry } from "../runtimes/registry";
 import { resolveWorkerLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { WorkflowContractError } from "../workflow/errors";
 import { validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "./execution-workspaces";
-import { managedAcpTransport } from "./managed-acp-transport";
+import { ownedAcpTransport } from "./managed-acp-transport";
 import { WorkspaceManager } from "./workspace-manager";
 import { WorkspaceExecutor } from "./workspace-executor";
 import { WriterProcessGroups } from "./writer-process-group";
-import { adapterById } from "../runtimes/adapter-catalog";
-import { prepareIsolatedLauncher } from "../runtimes/session-isolation";
 
 /** Engine受管Workspace路径；首次执行/恢复沿用冻结Git授权，不重新让主控生成配置。 */
 export class ProductionWorkspaceExecutor {
@@ -45,11 +43,9 @@ export class ProductionWorkspaceExecutor {
     const readOnly = new RuntimeAcpWorkerExecutor(this.runtimes, (identity, scratch) => this.controlMcp(identity, scratch), undefined, this.fallbackRuntimeId, `${this.stateRoot}/read-only-scratch`);
     const delegate = new WorkspaceExecutor(manager, runtime.journal.manifest.runId, this.config.bindings, readOnly, async (node, binding) => {
       const selected = node.request.assignedRuntimeId ? await this.runtimes.resolveWorkerById(node.request.assignedRuntimeId) : await this.runtimes.resolveWorker(node.cli);
-      const resolved = resolveWorkerLauncher(selected);
-      const launcher = await prepareIsolatedLauncher(adapterById(selected.verifiedAdapter.adapterId)?.sessionIsolation, resolved, binding.scratch, "worker");
-      const profile=adapterById(selected.verifiedAdapter.adapterId)?.sessionIsolation;
-      const transport = managedAcpTransport({ boundary: { workspace: binding.cwd, scratch: binding.scratch, gitDirectory: binding.gitDirectory, commonDirectory: binding.commonDirectory, controlFiles: [], readOnlyPaths: profile?.readOnlyPaths(launcher) ?? [], cliWritableRoots: profile?.writableRoots?.(launcher) ?? [], protectedDirectories: [this.config.authorization.repository, binding.commonDirectory] }, groups: this.#groups, bindWriter: binding.bindWriter });
-      // 只允许CLI在外层OS边界内写受管工作区；不注册宿主文件写或越界审批通道。
+      const launcher = resolveWorkerLauncher(selected);
+      const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter });
+      // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
       const worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected), identity => this.controlMcp(identity, binding.scratch), undefined, true);
       const commits = binding.integrationCommits;
       return {

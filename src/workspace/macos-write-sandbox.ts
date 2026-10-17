@@ -5,16 +5,12 @@ import { WorkflowContractError } from "../workflow/errors";
 
 /** Engine 提供的 OS 写边界；不是 Workflow JavaScript sandbox，也不授权外部资源。 */
 export type MacosWriteBoundary = {
-  /** 已验证的受管worktree；read-only节点为null，不允许写业务目录。 */
-  readonly workspace: string | null;
+  /** 主控固定null，不存在业务工作区/Git写例外。 */
+  readonly workspace: null;
   /** 本session私有scratch目录；不默认开放用户HOME/CLI配置/系统tmp。 */
   readonly scratch: string;
   /** Adapter声明的当前CLI原生可写目录；缺省空，禁止Home根/软链接/与业务及Engine目录重叠。 */
   readonly cliWritableRoots?: readonly string[];
-  /** worktree专属Git元数据目录；允许index/MERGE_HEAD，不得等于共享Git根。 */
-  readonly gitDirectory?: string;
-  /** 共享Git元数据根；仅作为只读alternate object来源。 */
-  readonly commonDirectory?: string;
   /** 仅开放Engine已创建的session私有FIFO端点，不开放其父目录。 */
   readonly controlFiles: readonly string[];
   /** 位于可写目录内但必须保持只读的配置、认证引用或子树；deny优先于父级allow。 */
@@ -27,17 +23,15 @@ export type MacosWriteBoundary = {
 export async function macosWriteProfile(boundary: MacosWriteBoundary): Promise<string> {
   if (process.platform !== "darwin") throw new WorkflowContractError("受管写隔离当前仅验证macOS，其他平台拒绝启动。");
   const nativeRoots = boundary.cliWritableRoots ?? [];
-  const writable = [boundary.scratch, ...(boundary.workspace ? [boundary.workspace] : []), ...(boundary.gitDirectory ? [boundary.gitDirectory] : []), ...nativeRoots];
+  const writable = [boundary.scratch, ...nativeRoots];
   for (const path of nativeRoots) {
-    if (path === homedir() || path === dirname(boundary.scratch) || overlaps(path, boundary.scratch) || (boundary.workspace && overlaps(path, boundary.workspace))) throw new WorkflowContractError("CLI原生目录不得覆盖Home根、业务工作区或会话目录。");
+    if (path === homedir() || path === dirname(boundary.scratch) || overlaps(path, boundary.scratch)) throw new WorkflowContractError("CLI原生目录不得覆盖Home根、业务工作区或会话目录。");
   }
   for (const path of [...writable, ...boundary.protectedDirectories]) {
     await canonical(path, true);
   }
-  if (boundary.gitDirectory && !boundary.protectedDirectories.some(path => boundary.gitDirectory!.startsWith(`${path}/worktrees/`) && relative(`${path}/worktrees`, boundary.gitDirectory!).split("/").length === 1)) throw new WorkflowContractError("Git写例外必须为共享Git/worktrees下的单一受管目录。");
   for (const path of writable) for (const protectedPath of boundary.protectedDirectories) {
-    const scopedGitException = path === boundary.gitDirectory && inside(protectedPath, path) && path !== protectedPath;
-    if (overlaps(path, protectedPath) && !scopedGitException) throw new WorkflowContractError("可写目录与主工作区/Git元数据重叠，拒绝启动。");
+    if (overlaps(path, protectedPath)) throw new WorkflowContractError("可写目录与主工作区/Git元数据重叠，拒绝启动。");
   }
   const files = [];
   for (const path of boundary.controlFiles) { await canonical(path, false); files.push(`(literal ${quote(path)})`); }

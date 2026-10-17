@@ -95,7 +95,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
       if(!allowed)throw new WorkflowContractError("已保存成果缺少原提交授权。");
       const repo=await GitRepository.open(workspace.cleanedAt?workspace.authorization.repository:workspace.cwd);
       if(repo.commonDirectory!==workspace.commonDirectory)throw new WorkflowContractError("成果仓库身份漂移。");
-      await repo.verifyCommitObject(existing.commit,existing.startCommit,allowed.paths,existing.paths);
+      await repo.verifyCommitObject(existing.commit,existing.startCommit,existing.paths);
       if(!workspace.cleanedAt){
         const latest=workspace.results.at(-1),state=await repo.inspect();
         if(workspace.lease||!latest?.ready||state.head!==latest.commit||state.changedPaths.length||state.conflicts.length)throw new WorkflowContractError("持续worktree现场漂移或尚未交接，拒绝复用旧成果。");

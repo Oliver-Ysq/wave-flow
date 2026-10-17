@@ -39,7 +39,7 @@ import { validateExecutionConfig } from "./execution-assignment";
 import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-executor";
 import { readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { GitRepository } from "../workspace/git-repository";
-import { WorkspaceManager, isRetryableDeliveryError } from "../workspace/workspace-manager";
+import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace-manager";
 import { WorkflowContractError } from "../workflow/errors";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
@@ -182,7 +182,7 @@ export class DesktopExecutionEngine {
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
-      finalizeDelivery: (executionId, config, snapshot) => this.finalizeDelivery(executionId, config, snapshot),
+      finalizeSource: (executionId, config, snapshot) => this.finalizeSource(executionId, config, snapshot),
     }, harnessRoot, this.storeRoot,this.workspaceRoot);
     this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
@@ -191,19 +191,19 @@ export class DesktopExecutionEngine {
   }
 
   /** 启动授权内的自动Git收尾；失败独立耐久展示，不覆写原Run completed或重跑Worker。 */
-  private async finalizeDelivery(executionId: string, config: import("../harness/types").ExecutionConfigSnapshot, snapshot: import("../runtime/run-types").RunSnapshot): Promise<void> {
-    if (config.workspaces?.authorization.autoSquashDelivery !== true) return;
+  private async finalizeSource(executionId: string, config: import("../harness/types").ExecutionConfigSnapshot, snapshot: import("../runtime/run-types").RunSnapshot): Promise<void> {
+    if (!config.workspaces) return;
     const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
     for (let attempt = 1; attempt <= 3; attempt++) try {
       const writers = snapshot.phases.flatMap(phase => phase.agents).filter(node => node.sandbox === "workspace-write");
       if (snapshot.status !== "completed" || writers.some(node => node.status !== "completed")) throw new WorkflowContractError("实际写节点尚未全部completed，不能最终交付。");
-      await manager.deliverSquash(executionId, config.workspaces, writers.map(node => node.id));
+      await manager.finalizeSource(executionId, config.workspaces, writers.map(node => node.id));
       return;
     }
     catch (error) {
-      const retryable = isRetryableDeliveryError(error);
+      const retryable = isRetryableSourceError(error);
       if (retryable && attempt < 3) continue;
-      await manager.recordDeliveryDiagnostic(executionId, error instanceof Error ? error.message : String(error), retryable);
+      await manager.recordSourceDiagnostic(executionId, error instanceof Error ? error.message : String(error), retryable);
       return;
     }
   }
@@ -302,12 +302,12 @@ export class DesktopExecutionEngine {
       try {
         await this.#executions.convergeStaleExecutions(harnessRunId);
         const task = await this.#harness.snapshot(harnessRunId);
-        for (const execution of task.executions) if (execution.status === "completed" && execution.config?.workspaces?.authorization.autoSquashDelivery === true) {
+        for (const execution of task.executions) if (execution.status === "completed" && execution.config?.workspaces) {
           const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
           // 缺失交付或可重试关联失败只补宿主收尾；确定性契约拒绝不循环，成功记录无旧错误时跳过。
-          const delivered = await manager.inspectDelivery(execution.executionId);
-          const diagnostic = await manager.inspectDeliveryDiagnostic(execution.executionId);
-          if ((!delivered || diagnostic) && await manager.canRetryDelivery(execution.executionId)) await this.finalizeDelivery(execution.executionId, execution.config, await this.#executions.snapshotExecution(harnessRunId, execution.executionId));
+          const delivered = await manager.inspectSource(execution.executionId);
+          const diagnostic = await manager.inspectSourceDiagnostic(execution.executionId);
+          if ((!delivered || diagnostic) && await manager.canRetrySource(execution.executionId)) await this.finalizeSource(execution.executionId, execution.config, await this.#executions.snapshotExecution(harnessRunId, execution.executionId));
         }
       }
       catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
@@ -559,17 +559,17 @@ export class DesktopExecutionEngine {
       const revision=task.workflowRevisions.find(item=>item.revision===execution.revision);
       let workspaceEvidence:ExecutionResponse["workspaceEvidence"];
       let workspaceDiagnostic:string|undefined;
-      let deliveryEvidence:ExecutionResponse["deliveryEvidence"];
-      let deliveryDiagnostic:string|undefined;
+      let sourceEvidence:ExecutionResponse["sourceEvidence"];
+      let sourceDiagnostic:string|undefined;
       if(execution.config?.workspaces){
         try {
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
-        deliveryEvidence=await manager.inspectDelivery(executionId)??undefined;
-        deliveryDiagnostic=await manager.inspectDeliveryDiagnostic(executionId)??undefined;
+        sourceEvidence=await manager.inspectSource(executionId)??undefined;
+        sourceDiagnostic=await manager.inspectSourceDiagnostic(executionId)??undefined;
         workspaceEvidence=await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const value=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,branch:value.branch,lease:value.lease?{attempt:value.lease.attempt}:null,results:value.results.filter(result=>result.runId===executionId).map(result=>({attempt:result.attempt,commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};}));
         } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
       }
-      return { execution, workspaceEvidence, workspaceDiagnostic, deliveryEvidence, deliveryDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+      return { execution, workspaceEvidence, workspaceDiagnostic, sourceEvidence, sourceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -711,6 +711,21 @@ export class DesktopExecutionEngine {
       case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
+      case "executions.review":
+      case "executions.fileDiff":
+      case "executions.merge": {
+        const taskId = requiredString(value, "harnessRunId"), executionId = requiredString(value, "executionId");
+        const task = await this.#harness.snapshot(taskId), execution = task.executions.find(item => item.executionId === executionId);
+        if (!execution?.config?.workspaces) throw new Error("执行不属于当前任务或没有Git成果配置。");
+        const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId), evidence = await manager.inspectSource(executionId);
+        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无完整ready来源可审阅合入。");
+        const repo = await GitRepository.open(execution.config.workspaces.authorization.repository);
+        if (action === "executions.review") return { ...await repo.review(evidence.baseCommit, evidence.sourceCommit), merged: await manager.inspectMerge(executionId) ?? undefined };
+        if (action === "executions.fileDiff") return repo.fileDiff(evidence.baseCommit, evidence.sourceCommit, requiredString(value, "path"));
+        if (task.status === "completed" || task.executions.at(-1)?.executionId !== executionId || object(value).authorized !== true) throw new Error("只能明确合入未归档任务的最新执行。");
+        if (requiredString(value, "sourceCommit") !== evidence.sourceCommit) throw new Error("审阅来源已变化；请重新读取diff。");
+        return manager.merge(executionId, repo.cwd, { requestId: requiredString(value, "requestId"), baseCommit: evidence.baseCommit, sourceCommit: evidence.sourceCommit, targetBranch: requiredString(value, "targetBranch"), targetHead: requiredString(value, "targetHead") });
+      }
       case "executions.savePartial": {
         if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
         const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId");

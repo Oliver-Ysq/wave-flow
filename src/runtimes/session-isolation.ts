@@ -5,11 +5,11 @@ import { prepareCodexSessionHome, prepareKimiSessionHome } from "../workspace/cl
 import { WorkflowContractError } from "../workflow/errors";
 
 /** 宿主角色决定OS边界；Adapter只负责运行目录与原生启动配置，不决定业务权限。 */
-export type IsolatedSessionRole = "harness" | "read-only-worker" | "worker";
+export type IsolatedSessionRole = "harness";
 
 /** 内置Adapter的实际隔离启动能力；缺省不存在，未知Adapter不能自动使用普通launcher回退。 */
 export type SessionIsolationProfile = {
-  /** 经真实验证可接入的角色；worker表示受管写路径，不由普通ACP握手推断。 */
+  /** 仅主控harness启用隔离；Worker使用原生launcher，不消费此Profile。 */
   readonly enabledRoles: readonly IsolatedSessionRole[];
   /** 准备私有状态/认证引用并返回固定启动配置；不得启动进程或扩大宿主文件权限。 */
   readonly prepare: (launcher: AcpLauncher, scratch: string, role: IsolatedSessionRole) => Promise<AcpLauncher>;
@@ -25,9 +25,9 @@ export async function prepareIsolatedLauncher(profile: SessionIsolationProfile |
   return profile.prepare(launcher, scratch, role);
 }
 
-/** Codex私有状态配置；已验证受管写，主控使用相同外层OS机制独立验收。 */
+/** Codex主控私有状态配置；Worker不使用此私有Home。 */
 export const codexSessionIsolation: SessionIsolationProfile = {
-  enabledRoles: ["harness", "read-only-worker", "worker"],
+  enabledRoles: ["harness"],
   prepare: async (launcher, scratch) => ({ ...launcher, env: { ...launcher.env, CODEX_HOME: await prepareCodexSessionHome(scratch) } }),
   writableRoots: () => [join(homedir(), ".codex")],
   readOnlyPaths: launcher => launcher.env?.CODEX_HOME ? ["config.toml", "plugins", "hooks", "skills", "AGENTS.md"].map(path=>join(launcher.env!.CODEX_HOME,path)) : [],
@@ -35,7 +35,7 @@ export const codexSessionIsolation: SessionIsolationProfile = {
 
 /** Kimi私有状态启动；角色能力由真实隔离链验证，不在主控/Workspace核心按CLI分支。 */
 export const kimiSessionIsolation: SessionIsolationProfile = {
-  enabledRoles: ["harness", "read-only-worker", "worker"],
+  enabledRoles: ["harness"],
   prepare: async (launcher, scratch) => {
     const home = await prepareKimiSessionHome(scratch);
     return { ...launcher, args: ["--skills-dir", join(home, "empty-skills"), ...launcher.args], env: { ...launcher.env, KIMI_CODE_HOME: home, KIMI_CODE_NO_AUTO_UPDATE: "1", KIMI_DISABLE_TELEMETRY: "1" } };

@@ -189,7 +189,7 @@ export type WorkflowExecution = { executionId: string; revision: number; sourceH
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
 export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
-export type ExecutionWorkspaceConfig = { version:1; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;/** 新启动确认授权自动squash，缺省旧记录不交付。 */autoSquashDelivery?:boolean;nodes:Array<{nodeId:string;paths:string[];externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
+export type ExecutionWorkspaceConfig = { version:2; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string;externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
@@ -253,15 +253,15 @@ export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   workspaceDiagnostic?:string;
-  /** 自动交付证据；仅新分支，未合入主分支或push。 */
-  deliveryEvidence?: {
+  /** 最终ready来源证据；不创建交付分支，不代表已合入或push。 */
+  sourceEvidence?: {
     /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
-    /** 新交付分支及单父commit完整oid。 */ branch:string; commit:string;
+    /** 受管来源分支及commit完整oid。 */ branch:string; commit:string;
     /** 内部最终成果及工作区身份。 */ sourceCommit:string; sourceWorkspaceId:string;
     /** 基准和冻结授权身份。 */ baseCommit:string; authorizationId:string;
-    /** 实际变化文件与耐久时间。 */ paths:string[]; deliveredAt:string;
+    /** 实际变化文件与耐久时间。 */ paths:string[]; savedAt:string;
   };
-  /** 收尾失败原因，不代表业务节点未complete。 */ deliveryDiagnostic?:string;
+  /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
   workspaceEvidence?:Array<{nodeId:string;branch:string;lease:{attempt:number}|null;results:Array<{attempt:number;commit:string;paths:string[];ready:boolean;unchanged:boolean;mergeParents:string[]}>}>;
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;

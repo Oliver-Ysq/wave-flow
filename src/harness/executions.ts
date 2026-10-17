@@ -32,8 +32,8 @@ export type HarnessExecutionExecutor = {
 
 /** Engine 注入的真实执行器接线；测试可全部省略。 */
 export type HarnessExecutionHooks = {
-  /** Run已completed、所有节点收尾后调用；只处理Git交付，不改业务状态、不派发Worker。缺省无动作。 */
-  readonly finalizeDelivery?: (executionId: string, config: ExecutionConfigSnapshot, snapshot: RunSnapshot) => Promise<void>;
+  /** Run已completed、所有节点收尾后调用；只处理最终Git来源证据，不改业务状态、不派发Worker。缺省无动作。 */
+  readonly finalizeSource?: (executionId: string, config: ExecutionConfigSnapshot, snapshot: RunSnapshot) => Promise<void>;
   /**
    * 节点启动前绑定本实例的 ControlServer；缺省不接线。可返回同步释放器，捕获
    * 本次具体资源身份，在耐久终态后退役时调用一次；不得按 executionId 清理新实例。
@@ -89,7 +89,7 @@ export class HarnessExecutionService {
     if(execution?.config?.workspaces){
       try{
         const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
-        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,delivery:await manager.inspectDelivery(executionId),deliveryDiagnostic:await manager.inspectDeliveryDiagnostic(executionId),branches:await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const workspace=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,workspaceId:binding.workspaceId,branch:workspace.branch,lease:workspace.lease?{runId:workspace.lease.runId,nodeId:workspace.lease.nodeId,attempt:workspace.lease.attempt}:null,results:workspace.results.filter(result=>result.runId===executionId&&result.attempt===attempt).map(result=>({commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};})),limitation:"Git证据只覆盖受管文件和所执行验证，不证明外部系统已回滚或无副作用"};
+        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,source:await manager.inspectSource(executionId),sourceDiagnostic:await manager.inspectSourceDiagnostic(executionId),branches:await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const workspace=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,workspaceId:binding.workspaceId,branch:workspace.branch,lease:workspace.lease?{runId:workspace.lease.runId,nodeId:workspace.lease.nodeId,attempt:workspace.lease.attempt}:null,results:workspace.results.filter(result=>result.runId===executionId&&result.attempt===attempt).map(result=>({commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};})),limitation:"Git证据只覆盖受管文件和所执行验证，不证明外部系统已回滚或无副作用"};
       }catch(error){workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,status:"受管Git证据不可读取",diagnostic:error instanceof Error?error.message:String(error),limitation:"缺失不代表没有改动"};}
     }
     return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence,nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
@@ -517,7 +517,7 @@ export class HarnessExecutionService {
         if (terminal === "completed" && this.#instances.get(executionId) === instance) {
           const execution = (await this.harness.snapshot(harnessRunId)).executions.find(item => item.executionId === executionId);
           if (execution?.config?.workspaces) {
-            try { await this.hooks.finalizeDelivery?.(executionId, execution.config, snapshot); }
+            try { await this.hooks.finalizeSource?.(executionId, execution.config, snapshot); }
             catch (error) { diagnostic = `Git最终交付诊断未能保存：${error instanceof Error ? error.message : String(error)}；业务已完成，不自动重跑。`; }
           }
         }

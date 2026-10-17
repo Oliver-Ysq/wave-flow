@@ -1,4 +1,4 @@
-import { afterEach, expect, test as bunTest } from "bun:test";
+import { afterEach, expect, spyOn, test as bunTest } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -20,10 +20,62 @@ async function fixture() {
   await writeFile(join(cwd, "a.txt"), "base\n"); await writeFile(join(cwd, "b.txt"), "base\n");
   await git(cwd, "add", "--", "a.txt", "b.txt"); await git(cwd, "commit", "-m", "fixture");
   const repo = await GitRepository.open(cwd), base = (await repo.inspect()).head;
-  const request: GitSaveRequest = { requestId: crypto.randomUUID(), baseCommit: base, startCommit: base, allowedPaths: ["a.txt"] };
+  const request: GitSaveRequest = { requestId: crypto.randomUUID(), baseCommit: base, startCommit: base };
   return { root, cwd, repo, base, request };
 }
-test("独立worktree不复制主工作区dirty内容，白名单成果保存与同请求重试只创建一个commit", async () => {
+
+test("显式squash合入已checkout主分支，单父/同请求幂等，未跟踪与dirty不覆盖", async () => {
+ const {root,cwd,repo,base,request}=await fixture();
+ const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
+ await writeFile(join(worker.cwd,"a.txt"),"result\n");
+ const saved=await worker.save(request), input={requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"main",targetHead:base};
+ const review=await repo.review(base,saved.commit);expect(review.paths).toEqual(["a.txt"]);expect(review.targets).toEqual([{branch:"main",head:base}]);
+ expect((await repo.fileDiff(base,saved.commit,"a.txt")).patch).toContain("+result");
+ await expect(repo.fileDiff(base,saved.commit,".git/config")).rejects.toThrow("不属于");
+ await writeFile(join(cwd,"user.txt"),"keep");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"user.txt")).text()).toBe("keep");await rm(join(cwd,"user.txt"));
+ await writeFile(join(cwd,"b.txt"),"dirty\n");await git(cwd,"add","b.txt");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"b.txt")).text()).toBe("dirty\n");await git(cwd,"restore","--staged","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");
+ await writeFile(join(cwd,"b.txt"),"staged\n");await git(cwd,"add","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");expect((await repo.inspect()).changedPaths).toEqual([]);await expect(repo.mergeSquash(input)).rejects.toThrow("暂存");await git(cwd,"restore","--staged","b.txt");
+ const merged=await repo.mergeSquash(input);expect(await repo.mergeSquash(input)).toEqual(merged);
+ expect(await git(cwd,"show","-s","--format=%P",merged.commit)).toBe(base);expect(await git(cwd,"rev-list","--count",`${base}..main`)).toBe("1");
+ expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("result\n");expect((await repo.inspect()).changedPaths).toEqual([]);
+ await expect(repo.mergeSquash({...input,requestId:crypto.randomUUID()})).rejects.toThrow("已变化");
+});
+test("未checkout目标仅CAS ref；目标前进拒绝，二进制diff明确省略",async()=>{
+ const {root,cwd,repo,base,request}=await fixture();await git(cwd,"branch","target");
+ const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,"image.bin"),Buffer.from([0,1,2]));const saved=await worker.save(request);
+ expect(await repo.fileDiff(base,saved.commit,"image.bin")).toMatchObject({omitted:true,reason:"binary"});
+ const merged=await repo.mergeSquash({requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"target",targetHead:base});
+ expect((await repo.inspect()).head).toBe(base);expect(await git(cwd,"rev-parse","target")).toBe(merged.commit);
+ await expect(repo.mergeSquash({requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"target",targetHead:merged.commit})).rejects.toThrow("偏离");
+});
+test("大文本diff明确省略而不丢失成果文件，已跟踪ignored依赖仍保存",async()=>{
+ const {root,cwd,repo}=await fixture();await mkdir(join(cwd,"node_modules"));await writeFile(join(cwd,"node_modules","tracked.txt"),"base\n");await git(cwd,"add","node_modules/tracked.txt");await git(cwd,"commit","-m","tracked fixture");const base=(await repo.inspect()).head;
+ const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,".gitignore"),"node_modules/\n");await writeFile(join(worker.cwd,"node_modules","tracked.txt"),"changed\n");await writeFile(join(worker.cwd,"large.txt"),"line content\n".repeat(170000));
+ const saved=await worker.save({requestId:crypto.randomUUID(),baseCommit:base,startCommit:base});expect(saved.paths).toContain("node_modules/tracked.txt");expect(saved.paths).toContain("large.txt");expect(await repo.fileDiff(base,saved.commit,"large.txt")).toMatchObject({omitted:true,reason:"too-large",patch:""});
+},20000);
+test("tracked始终纳入，gitignored和未跟踪node_modules不收集，特殊路径通过NUL暂存",async()=>{
+ const {root,cwd,repo,base}=await fixture();const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
+ await writeFile(join(worker.cwd,".gitignore"),"*.log\n");await writeFile(join(worker.cwd,"debug.log"),"ignored");await mkdir(join(worker.cwd,"node_modules"));await writeFile(join(worker.cwd,"node_modules","dep"),"ignored dependency");await writeFile(join(worker.cwd,"[x] space.ts"),"new");
+ const saved=await worker.save({requestId:crypto.randomUUID(),baseCommit:base,startCommit:base});expect(saved.paths).toEqual([".gitignore","[x] space.ts"]);expect((await worker.inspect()).changedPaths).toEqual([]);
+ expect(await Bun.file(join(worker.cwd,"debug.log")).text()).toBe("ignored");expect((await repo.inspect()).head).toBe(base);
+});
+test("候选已冻结但ref更新失败时，重试拒绝新增成果；恢复原tree后保存同候选",async()=>{
+ const {root,repo,base,request}=await fixture(),worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
+ await writeFile(join(worker.cwd,"a.txt"),"frozen\n");
+ const original=Bun.spawn, injected=spyOn(Bun,"spawn").mockImplementation((...args:any[])=>{const argv=args[0];if(Array.isArray(argv)&&argv.includes("update-ref"))throw Error("fixture ref unavailable");return (original as any)(...args);});
+ try{await expect(worker.save(request)).rejects.toThrow("fixture ref unavailable");}finally{injected.mockRestore();}
+ await writeFile(join(worker.cwd,"extra.txt"),"late");await expect(worker.save(request)).rejects.toThrow("候选已冻结");expect((await worker.inspect()).head).toBe(base);await rm(join(worker.cwd,"extra.txt"));
+ const saved=await worker.save(request);expect(saved.paths).toEqual(["a.txt"]);expect(await worker.save(request)).toEqual(saved);
+});
+test("合入CAS成功但checkout失败时重试补现场，不覆盖随后用户变化",async()=>{
+ const {root,cwd,repo,base,request}=await fixture(),worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,"a.txt"),"result\n");const saved=await worker.save(request);
+ const input={requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"main",targetHead:base},original=Bun.spawn;
+ const injected=spyOn(Bun,"spawn").mockImplementation((...args:any[])=>{const argv=args[0];if(Array.isArray(argv)&&argv.includes("read-tree")&&argv.includes("-u"))throw Error("fixture checkout unavailable");return (original as any)(...args);});
+ try{await expect(repo.mergeSquash(input)).rejects.toThrow("fixture checkout unavailable");}finally{injected.mockRestore();}
+ const head=await git(cwd,"rev-parse","HEAD");expect(head).not.toBe(base);await writeFile(join(cwd,"b.txt"),"user\n");await expect(repo.mergeSquash(input)).rejects.toThrow("现场已变化");expect(await Bun.file(join(cwd,"b.txt")).text()).toBe("user\n");await writeFile(join(cwd,"b.txt"),"base\n");
+ expect((await repo.mergeSquash(input)).commit).toBe(head);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("result\n");expect((await repo.inspect()).changedPaths).toEqual([]);
+});
+test("独立worktree不复制主工作区dirty内容，实际成果保存与同请求重试只创建一个commit", async () => {
   const { root, cwd, repo, base, request } = await fixture();
   await writeFile(join(cwd, "a.txt"), "user dirty\n");
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
@@ -37,40 +89,16 @@ test("独立worktree不复制主工作区dirty内容，白名单成果保存与�
   expect(await git(cwd, "rev-parse", "HEAD")).toBe(base);
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("user dirty\n");
 });
-test("单父squash交付只创建新ref，重试幂等且不改主HEAD/index/dirty内容", async () => {
-  const { root, cwd, repo, base, request } = await fixture();
-  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-  await writeFile(join(worker.cwd, "a.txt"), "delivery\n");
-  const saved = await worker.save(request);
-  await writeFile(join(cwd, "b.txt"), "user dirty\n");
-  await git(cwd, "add", "b.txt");
-  const index = await git(cwd, "write-tree"), executionId = crypto.randomUUID();
-  const input = { requestId: executionId, baseCommit: base, sourceCommit: saved.commit, allowedPaths: ["a.txt"], branch: `codex/delivery-${executionId}` };
-  await expect(repo.deliverSquash({ ...input, allowedPaths: ["b.txt"] })).rejects.toThrow("未授权");
-  const delivery = await repo.deliverSquash(input);
-  expect(await repo.deliverSquash(input)).toEqual(delivery);
-  expect(await git(cwd, "show", "-s", "--format=%P", delivery.commit)).toBe(base);
-  expect(await git(cwd, "rev-parse", `${delivery.commit}^{tree}`)).toBe(await git(cwd, "rev-parse", `${saved.commit}^{tree}`));
-  expect(await git(cwd, "rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
-  expect(await git(cwd, "rev-parse", "HEAD")).toBe(base);
-  expect(await git(cwd, "write-tree")).toBe(index);
-  expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("user dirty\n");
-  await expect(repo.deliverSquash({ ...input, requestId: crypto.randomUUID() })).rejects.toThrow("冲突");
-  await expect(repo.deliverSquash({ ...input, sourceCommit: base })).rejects.toThrow("冲突");
-  await expect(repo.deliverSquash({ ...input, allowedPaths: ["a.txt", "b.txt"] })).rejects.toThrow("冲突");
-  await expect(repo.deliverSquash({ ...input, branch: "main" })).rejects.toThrow("安全命名");
-});
 
 test("无改动复用HEAD，不生成空commit", async () => {
   const { root, repo, base, request } = await fixture();
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
   expect(await worker.save(request)).toEqual({ requestId: request.requestId, commit: base, unchanged: true, paths: [] });
 });
-test("未授权untracked内容拒绝保存，保留文件与HEAD", async () => {
+test("额外untracked成果自动保存，无需事先列举文件", async () => {
   const { root, repo, base, request } = await fixture(); const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
   await writeFile(join(worker.cwd, "secret.env"), "secret");
-  await expect(worker.save(request)).rejects.toThrow("未授权文件");
-  expect((await worker.inspect()).head).toBe(base); expect(await Bun.file(join(worker.cwd, "secret.env")).text()).toBe("secret");
+  const saved = await worker.save(request); expect(saved.paths).toEqual(["secret.env"]); expect((await worker.inspect()).head).not.toBe(base); expect(await Bun.file(join(worker.cwd, "secret.env")).text()).toBe("secret");
 });
 test("禁止主工作区保存、越界路径、符号链接与Git attributes", async () => {
   const { root, cwd, repo, base, request } = await fixture();
@@ -79,11 +107,11 @@ test("禁止主工作区保存、越界路径、符号链接与Git attributes", 
   await expect(repo.save(request)).rejects.toThrow("主工作区");
   await expect(repo.createWorktree(join(cwd, "worker"), "codex/wf-worker", base)).rejects.toThrow("之外");
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-  await expect(worker.save({ ...request, allowedPaths: ["../secret"] })).rejects.toThrow("安全仓库相对");
+
   await symlink(join(cwd, "a.txt"), join(worker.cwd, "link"));
-  await expect(worker.save({ ...request, allowedPaths: ["link"] })).rejects.toThrow("符号链接");
+  await expect(worker.save({ ...request })).rejects.toThrow("符号链接");
   await rm(join(worker.cwd, "link")); await writeFile(join(worker.cwd, ".gitattributes"), "*.txt filter=evil\n");
-  await expect(worker.save({ ...request, allowedPaths: [".gitattributes"] })).rejects.toThrow("attributes");
+  await expect(worker.save({ ...request })).rejects.toThrow("attributes");
 });
 test("保存后现场变化不能冒充原成果补关联，既有commit保留", async () => {
   const { root, repo, request } = await fixture(); const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", request.baseCommit);
@@ -106,7 +134,7 @@ test("两个独立成果用标准Git显式合并，主分支不变化；冲突�
   const b = await repo.createWorktree(join(root, "writer-b"), "codex/wf-b", base);
   const integration = await repo.createWorktree(join(root, "integration"), "codex/wf-integration", base);
   await writeFile(join(a.cwd, "a.txt"), "a result\n"); await writeFile(join(b.cwd, "b.txt"), "b result\n");
-  const first = await a.save(request), second = await b.save({ ...request, requestId: crypto.randomUUID(), allowedPaths: ["b.txt"] });
+  const first = await a.save(request), second = await b.save({ ...request, requestId: crypto.randomUUID() });
   await git(integration.cwd, "merge", "--no-edit", first.commit);
   await git(integration.cwd, "merge", "--no-edit", second.commit);
   expect(await Bun.file(join(integration.cwd, "a.txt")).text()).toBe("a result\n"); expect(await Bun.file(join(integration.cwd, "b.txt")).text()).toBe("b result\n");

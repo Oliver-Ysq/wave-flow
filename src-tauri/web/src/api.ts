@@ -9,6 +9,12 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 读取冻结成果diff与本机分支，不产生Git写入。 */
+  reviewGit:(harnessRunId:string,executionId:string)=>action<import("../../../src/workspace/git-repository").GitReview>("executions.review",{harnessRunId,executionId}),
+  /** 仅读取已属于该成果diff的指定文件patch。 */
+  fileDiff:(harnessRunId:string,executionId:string,path:string)=>action<import("../../../src/workspace/git-repository").GitFileDiff>("executions.fileDiff",{harnessRunId,executionId,path}),
+  /** 用户明确确认后squash合入本机分支；原请求重试不新增commit。 */
+  mergeGit:(harnessRunId:string,executionId:string,request:{requestId:string;sourceCommit:string;targetBranch:string;targetHead:string})=>action<import("../../../src/workspace/git-repository").GitMergeResult>("executions.merge",{harnessRunId,executionId,...request,authorized:true}),
   /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
   savePartial: (harnessRunId:string,executionId:string)=>action<ExecutionResponse>("executions.savePartial",{harnessRunId,executionId,authorized:true}),
   /** 用户确认后只清理已保存/无writer的checkout，分支与commit保留。 */

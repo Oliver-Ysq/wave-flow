@@ -83,17 +83,13 @@ const confirmed = unique.filter((_, index) => verdicts[index] !== null);
 
 ## 代码改动任务
 
-宿主允许当前CLI原生运行目录写入（含登录续期），不允许其他CLI根/整个Home；该例外不改变业务写工作区约束。不要把“工作区外拒绝”解释为阻止正常CLI认证刷新。
-
-最终交付由Engine自动收尾，不在脚本/Worker中执行squash。启动Git授权覆盖该动作；若存在多个独立写分支，必须在脚本中await来源后安排显式集成。最终分支只有冻结基准之后一条commit，内部检查点保留；不修改主分支、不push。
-
-文件权限不由编排脚本扩展：Worker允许读取工作区外文件；read-only只写私有状态，workspace-write只写当前受管worktree和必要私有状态/Git元数据。工作区外写一律拒绝，不用decisionGate模拟批准，不新增文件MCP，不要求CLI解除sandbox。需导出成果先生成在工作区，由用户自行搬出。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。整worktree v2授权保存实际tracked与非ignored untracked（排除未跟踪node_modules），不预填paths；独立分支可修改同一文件，必须显式集成。完成后冻结唯一完整ready来源，用户读diff后明确squash合入本机目标分支，不自动合入/push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 给改动类 Agent 明确的项目 `cwd`、`workspace-write` 权限、验收标准和它应运行的检查。
 Wave Flow 的作者 API 不声明 worktree 或 commit。Desktop 会对固定 `workspace-write` 节点
-要求用户冻结 Git 成果范围：不同工作区且文件范围不重叠时可并行，相同工作区分组表示
-同一改动链顺序复用；路径重叠必须顺序分组或由后续显式集成节点处理。未取得此配置、
-动态写节点无法核验、或 Adapter 未通过写隔离验收时 fail closed，不能仅凭 prompt/cwd 并行：
+要求用户冻结整个 Git 工作区授权：独立worktree允许修改同一文件，相同工作区分组表示
+同一改动链顺序复用；独立分支须后续显式集成。未取得此配置、动态写节点无法核验、
+或 Adapter 未通过Worker Control验证时 fail closed。cwd不是OS安全边界：
 
 ```ts
 phase("实现");

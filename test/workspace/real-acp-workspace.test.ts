@@ -29,7 +29,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
   await registry.resolveWorker(cli);
   const pipes: WorkerControlPipe[] = [];
   let runtime!: RunRuntime;
-  const executor = new ProductionWorkspaceExecutor({ version: 1, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, autoSquashDelivery: true, nodes: [{ nodeId: "a", paths: ["a.txt"] }, { nodeId: "b", paths: ["b.txt"] }, { nodeId: "integrate", paths: ["a.txt", "b.txt"] }] }, bindings: [{ nodeId: "a", workspaceId: a }, { nodeId: "b", workspaceId: b }, { nodeId: "integrate", workspaceId: integratedId, integrationSources: { nodeIds: ["a", "b"] } }] }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
+  const executor = new ProductionWorkspaceExecutor({ version: 2, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }, { nodeId: "integrate" }] }, bindings: [{ nodeId: "a", workspaceId: a }, { nodeId: "b", workspaceId: b }, { nodeId: "integrate", workspaceId: integratedId, integrationSources: { nodeIds: ["a", "b"] } }] }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
     const pipe = new WorkerControlPipe(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
     return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo }], close: () => pipe.close() } as acp.McpServer;
   }, null);
@@ -65,19 +65,19 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     expect(await Bun.file(join(integrated.cwd, "a.txt")).text()).toBe("worker-a\n"); expect(await Bun.file(join(integrated.cwd, "b.txt")).text()).toBe("worker-b\n");
     expect(await git("show", "-s", "--format=%P", integrated.results[0].commit)).toBe(`${base} ${first.results[0].commit} ${second.results[0].commit}`);
     // 真实验收启动授权也必须覆盖squash；不对旧记录凭空扩权。
-    expect(executor.config.authorization.autoSquashDelivery).toBe(true);
-    const delivery = await manager.deliverSquash(runtime.snapshot().id, executor.config);
-    expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(base);
+    expect(executor.config.version).toBe(2);
+    const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config);
+    expect(delivery.commit).toBe(integrated.results[0].commit);
     expect(await git("rev-parse", `${delivery.commit}^{tree}`)).toBe(await git("rev-parse", `${integrated.results[0].commit}^{tree}`));
-    expect(await git("rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
-    expect(await manager.deliverSquash(runtime.snapshot().id, executor.config)).toEqual(delivery);
+    expect(delivery.commit).toBe(integrated.results[0].commit);
+    expect(await manager.finalizeSource(runtime.snapshot().id, executor.config)).toEqual(delivery);
     expect(await git("rev-parse", "HEAD")).toBe(base);
     console.log(JSON.stringify({ deliveryBranch: delivery.branch, deliveryCommit: delivery.commit, sourceCommit: delivery.sourceCommit, paths: delivery.paths }));
     console.log(JSON.stringify({ root, runId: runtime.snapshot().id, status: runtime.snapshot().status, commits: [first.results[0].commit, second.results[0].commit], integrationCommit: integrated.results[0].commit }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
 }, 240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine启动授权后自动单父交付，不额外点击、不改变主工作区", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff并经明确确认squash合入", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-auto-delivery-"))), cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const p = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]); if (code) throw Error(err); return out.trim(); };
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "a.txt"); await git("commit", "-m", "acceptance base");
@@ -92,7 +92,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine启�
     const taskId = started.harness.harnessRunId;
     for (let n = 0; n < 1000; n++) { const value = await engine.handleDesktopAction("harnesses.get", { harnessRunId: taskId }) as import("../../src/desktop/types").HarnessRunResponse; if (value.harness.status === "idle" && value.harness.workflowRevisions.length) break; await Bun.sleep(10); }
     const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId: taskId, revision: 1 }) as import("../../src-tauri/web/src/types").ExecutionPlanResponse;
-    const workspaces = { version: 1 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, autoSquashDelivery: true, nodes: [{ nodeId: "writer", paths: ["a.txt"] }] }, bindings: [{ nodeId: "writer", workspaceId: crypto.randomUUID() }] };
+    const workspaces = { version: 2 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, bindings: [{ nodeId: "writer", workspaceId: crypto.randomUUID() }] };
     const request = new DesignConfirmationCache().get(`${taskId}:1`, {}, {}, plan, workspaces);
     const created = await engine.handleDesktopAction("executions.confirm", { harnessRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
     console.log(JSON.stringify({ root, taskId, executionId: created.execution.executionId, cli }));
@@ -100,12 +100,17 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine启�
     const deadline = Date.now() + 150_000;
     while (detail.execution.finishedAt === null && Date.now() < deadline) { await Bun.sleep(100); detail = await engine.handleDesktopAction("executions.get", { harnessRunId: taskId, executionId: created.execution.executionId }) as import("../../src/desktop/types").ExecutionResponse; }
     expect(detail.execution.status, detail.execution.diagnostic ?? "").toBe("completed");
-    expect(detail.deliveryDiagnostic).toBeUndefined(); expect(detail.deliveryEvidence).toBeDefined();
-    const delivery = detail.deliveryEvidence!;
+    expect(detail.sourceDiagnostic).toBeUndefined(); expect(detail.sourceEvidence).toBeDefined();
+    const delivery = detail.sourceEvidence!;
     expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(base);
     expect(await git("rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
     expect(await git("show", `${delivery.commit}:a.txt`)).toBe("done");
     expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
+    const identity={harnessRunId:taskId,executionId:detail.execution.executionId};
+    const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
+    expect(review.paths).toEqual(["a.txt"]);
+    const merged=await engine.handleDesktopAction("executions.merge",{...identity,authorized:true,requestId:crypto.randomUUID(),sourceCommit:review.sourceCommit,targetBranch:"main",targetHead:base}) as import("../../src/workspace/git-repository").GitMergeResult;
+    expect(await git("show","-s","--format=%P",merged.commit)).toBe(base);expect(await git("rev-list","--count",`${base}..main`)).toBe("1");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("done\n");
     console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, delivery }));
   } finally { engine.shutdown(); }
 }, 180_000);

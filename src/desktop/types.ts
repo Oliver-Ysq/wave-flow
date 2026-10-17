@@ -205,10 +205,10 @@ export type ExecutionResponse = {
   readonly workspaceEvidence?: readonly { readonly nodeId:string; readonly branch:string; readonly lease:{readonly attempt:number}|null; readonly results:readonly {readonly attempt:number;readonly commit:string;readonly paths:readonly string[];readonly ready:boolean;readonly unchanged:boolean;readonly mergeParents:readonly string[]}[] }[];
   /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
   readonly workspaceDiagnostic?: string;
-  /** 自动单父交付的耐久Git证据；缺省表示尚未形成交付，不代表主分支已合入。 */
-  readonly deliveryEvidence?: import("../workspace/workspace-manager").WorkspaceDelivery;
-  /** 自动交付失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
-  readonly deliveryDiagnostic?: string;
+  /** 最终ready来源的耐久Git证据；缺省不可合入，不代表主分支已合入。 */
+  readonly sourceEvidence?: import("../workspace/workspace-manager").WorkspaceSource;
+  /** 最终来源收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
+  readonly sourceDiagnostic?: string;
 };
 
 /** 单个执行尝试的只读结果证据；缺失结果不从其他 attempt 补造。 */

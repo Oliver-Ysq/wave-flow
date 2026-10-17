@@ -56,12 +56,12 @@ async function waitFor(condition: () => Promise<boolean> | boolean): Promise<voi
 }
 
 describe("HarnessExecutionService", () => {
-  test("自动交付在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
+  test("来源收尾在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
     const { harness, harnessRunId, root } = await fixture();
     let finalized = false, called = 0;
-    const config = { ...testConfig(), workspaces: { version: 1 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, autoSquashDelivery: true, nodes: [{ nodeId: "w1", paths: ["a.txt"] }] }, bindings: [{ nodeId: "w1", workspaceId: crypto.randomUUID() }] } };
+    const config = { ...testConfig(), workspaces: { version: 2 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "w1" }] }, bindings: [{ nodeId: "w1", workspaceId: crypto.randomUUID() }] } };
     const executions = new HarnessExecutionService(harness, () => ({ executor: { execute: async () => ({ ok: true }), finalizeCompleted: async () => { finalized = true; } } }), {
-      finalizeDelivery: async (id, frozen) => {
+      finalizeSource: async (id, frozen) => {
         expect(finalized).toBe(true); expect(frozen).toEqual(config); called++;
         expect((await harness.snapshot(harnessRunId)).executions.find(item => item.executionId === id)?.finishedAt).toBeNull();
         throw new Error("模拟交付证据磁盘失败");

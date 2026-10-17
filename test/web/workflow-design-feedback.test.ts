@@ -1,11 +1,13 @@
 import {expect,test} from "bun:test";
 
-test("最终squash交付无需额外点击，启动授权告知自动收尾并折叠内部检查点",async()=>{
+test("整工作区授权与显式diff合入，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(design).toContain("完成后自动生成单条 squash 交付 commit");
- expect(app).toContain("已自动整理为一条单父 commit");
- expect(app).toContain("尚未形成最终交付");
+ expect(design).toContain("授权保存整个 worktree 的实际 Git 改动");
+ expect(design).not.toContain("成果文件路径（每行一个）");
+ expect(app).toContain("<GitReviewPanel");
+ const review=await Bun.file("src-tauri/web/src/git-review.tsx").text();expect(review).toContain("确认 squash 合入");expect(review).toContain("generation.current === token");
+ expect(app).toContain("尚未形成完整成果来源");
  expect(app).toContain("<summary>内部 Git 检查点与诊断详情</summary>");
  expect(app).not.toContain("onDeliverSquash");
 });
@@ -52,7 +54,7 @@ test("窄窗详情底部为固定导航保留安全空间",async()=>{
 test("影响面总结按所选Execution的受管配置显示Git证据限制，不固定宣称无基线",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
  expect(source).toContain("const gitLimitation=harness.executions.find(item=>item.executionId===executionId)?.config?.workspaces");
- expect(source).toContain("受管Git证据仅覆盖批准文件；缺失或不可读取的记录不代表没有改动");
+ expect(source).toContain("受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动");
  expect(source).toContain("<p>{gitLimitation}</p>");
  expect(source).not.toContain("<p>尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。</p>");
 });

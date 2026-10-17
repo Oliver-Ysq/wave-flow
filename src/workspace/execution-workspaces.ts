@@ -4,9 +4,9 @@ import { WorkflowContractError } from "../workflow/errors";
 
 /** 用户冻结的Git成果配置；同一Execution不可热修改，read-only默认不提供。 */
 export type ExecutionWorkspaceConfig = {
-  /** 独立契约版本，当前固定1；不复用CLI配置版本作为成果授权。 */
-  readonly version: 1;
-  /** 明确提交授权，绑定项目基准与精确文件范围。 */
+  /** 独立契约版本，当前固定2；旧精确文件授权不自动升级。 */
+  readonly version: 2;
+  /** 明确保存整个受管worktree的授权，绑定项目基准与节点。 */
   readonly authorization: WorkspaceAuthorization;
   /** 每个写节点到workspace UUID的绑定；相同UUID表示同链顺序工作区。 */
   readonly bindings: readonly WorkspaceNodeBinding[];
@@ -14,16 +14,15 @@ export type ExecutionWorkspaceConfig = {
 
 /** 运行时形状与来源绑定验证；不执行Git，也不把静态枚举当实际依赖。 */
 export function validateExecutionWorkspaces(value: unknown): ExecutionWorkspaceConfig {
-  if (!plain(value) || value.version !== 1 || !plain(value.authorization) || !Array.isArray(value.bindings)) fail("Git成果配置格式无效。");
+  if (!plain(value) || value.version !== 2 || !plain(value.authorization) || !Array.isArray(value.bindings)) fail("Git成果配置格式无效；需要整工作区授权v2。");
   const authorization = value.authorization;
-  if (authorization.autoSquashDelivery !== undefined && typeof authorization.autoSquashDelivery !== "boolean") fail("最终自动交付授权必须为boolean。");
+  if ("autoSquashDelivery" in authorization) fail("旧自动交付授权不支持；请重新确认整工作区授权。");
   uuid(authorization.authorizationId);
   if (typeof authorization.approvedAt !== "string" || !Number.isFinite(Date.parse(authorization.approvedAt)) || typeof authorization.repository !== "string" || !authorization.repository.startsWith("/") || typeof authorization.baseCommit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(authorization.baseCommit) || typeof authorization.excludeExistingDirty !== "boolean" || !Array.isArray(authorization.nodes) || !authorization.nodes.length) fail("Git成果授权字段无效。");
   const ids = new Set<string>();
   for (const node of authorization.nodes) {
-    if (!plain(node) || typeof node.nodeId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeId) || ids.has(node.nodeId) || !Array.isArray(node.paths) || !node.paths.length || new Set(node.paths).size !== node.paths.length) fail("Git成果节点授权无效。");
+    if (!plain(node) || typeof node.nodeId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeId) || ids.has(node.nodeId) || "paths" in node) fail("Git成果节点授权无效。");
     ids.add(node.nodeId);
-    for (const path of node.paths) if (typeof path !== "string" || !path || path.startsWith("/") || /[\x00-\x1f\x7f\\]/.test(path) || path.split("/").some(part => !part || part === "." || part === ".." || part === ".git")) fail("Git成果授权路径无效。");
     if (node.externalResources !== undefined && (!Array.isArray(node.externalResources) || new Set(node.externalResources).size !== node.externalResources.length || node.externalResources.some(resource => typeof resource !== "string" || !/^[a-z0-9][a-z0-9:._/-]{0,119}$/.test(resource)))) fail("外部资源授权无效。");
   }
   const seen = new Set<string>();
@@ -39,11 +38,6 @@ export function validateExecutionWorkspaces(value: unknown): ExecutionWorkspaceC
     }
   }
   if (seen.size !== ids.size) fail("已授权写节点缺少workspace绑定。");
-  for(let i=0;i<value.bindings.length;i++)for(let j=i+1;j<value.bindings.length;j++){
-    const left=value.bindings[i],right=value.bindings[j];if(left.workspaceId===right.workspaceId||left.integrationSources||right.integrationSources)continue;
-    const leftNode=authorization.nodes.find(node=>node.nodeId===left.nodeId),rightNode=authorization.nodes.find(node=>node.nodeId===right.nodeId);
-    if(leftNode.paths.some((path:string)=>rightNode.paths.includes(path)))fail("独立写分支成果路径重叠；需顺序复用workspace或显式集成。");
-  }
   // 固定来源图仅做环拒绝，不按源码位置预测运行依赖。动态批次由Runtime核验。
   const bindings = value.bindings as unknown as readonly WorkspaceNodeBinding[];
   const visiting = new Set<string>(), done = new Set<string>();

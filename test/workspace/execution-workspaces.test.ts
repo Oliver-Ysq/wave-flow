@@ -2,22 +2,21 @@ import { expect, test } from "bun:test";
 import { validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
 
 function config(): ExecutionWorkspaceConfig {
-  return { version: 1, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "a", paths: ["a.ts"] }, { nodeId: "integrate", paths: ["a.ts"] }] }, bindings: [{ nodeId: "a", workspaceId: crypto.randomUUID() }, { nodeId: "integrate", workspaceId: crypto.randomUUID(), integrationSources: { nodeIds: ["a"] } }] };
+  return { version: 2, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "integrate" }] }, bindings: [{ nodeId: "a", workspaceId: crypto.randomUUID() }, { nodeId: "integrate", workspaceId: crypto.randomUUID(), integrationSources: { nodeIds: ["a"] } }] };
 }
 test("Git授权深复制冻结，CLI配置不授予新workspace或来源权限", () => {
   const input = config(), accepted = validateExecutionWorkspaces(input); expect(accepted).toEqual(input); expect(accepted).not.toBe(input);
-  (input.authorization.nodes as { nodeId: string; paths: string[] }[])[0].paths.push("secret"); expect(accepted.authorization.nodes[0].paths).toEqual(["a.ts"]);
+  (input.authorization.nodes as { nodeId: string }[])[0].nodeId = "changed"; expect(accepted.authorization.nodes[0].nodeId).toBe("a");
 });
-test("自动squash授权缺省不启用，显式布尔值冻结，非法值拒绝", () => {
+test("旧v1与自动交付授权不能静默扩张为整工作区授权", () => {
  const input = config();
- expect(validateExecutionWorkspaces(input).authorization.autoSquashDelivery).toBeUndefined();
- expect(validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, autoSquashDelivery: true } }).authorization.autoSquashDelivery).toBe(true);
- expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, autoSquashDelivery: "true" } })).toThrow("boolean");
+ expect(() => validateExecutionWorkspaces({...input, version:1})).toThrow("v2");
+ expect(() => validateExecutionWorkspaces({...input, authorization:{...input.authorization, autoSquashDelivery:true}})).toThrow("旧自动");
 });
 test("未授权节点、越界路径、重复绑定和缺失来源拒绝", () => {
   const input = config();
   expect(() => validateExecutionWorkspaces({ ...input, bindings: [...input.bindings, { nodeId: "x", workspaceId: crypto.randomUUID() }] })).toThrow("未授权");
-  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a", paths: ["../secret"] }] } })).toThrow("路径");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a", paths:["../secret"] }] } })).toThrow("节点授权");
   expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], input.bindings[0]] })).toThrow("绑定");
   expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0]] })).toThrow("缺少workspace");
   expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { nodeIds: ["future"] } }] })).toThrow("缺失或成环");

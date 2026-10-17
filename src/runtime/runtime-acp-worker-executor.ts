@@ -8,10 +8,8 @@ import { AcpWorkerExecutor } from "./acp-worker-executor";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { JsonObject } from "../shared/json";
 import type * as acp from "@agentclientprotocol/sdk";
-import { adapterById } from "../runtimes/adapter-catalog";
-import { prepareIsolatedLauncher } from "../runtimes/session-isolation";
 import { prepareSessionScratch } from "../workspace/session-scratch";
-import { managedAcpTransport } from "../workspace/managed-acp-transport";
+import { ownedAcpTransport } from "../workspace/managed-acp-transport";
 import { WriterProcessGroups } from "../workspace/writer-process-group";
 import { WorkflowContractError } from "../workflow/errors";
 
@@ -38,8 +36,8 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     private readonly createWorker: (launcher: AcpLauncher, runtime: RuntimeProvenance) => AcpWorkerExecutor = (launcher, runtime) => new AcpWorkerExecutor(launcher, undefined, runtime, createControlMcp),
     /** 分配快照冻结的回退目标（主控 CLI runtimeId）；受信任 Run 与不指派节点为 null。 */
     private readonly fallbackRuntimeId: string | null = null,
-    /** Engine指定的只读Worker私有状态根；省略仅供历史测试，生产必须提供。 */
-    private readonly readOnlyStateRoot?: string,
+    /** Engine指定的Worker私有Control状态根；省略仅供历史测试，生产必须提供。 */
+    private readonly workerStateRoot?: string,
   ) {}
 
   bindControl(control: ControlServer): void {
@@ -69,26 +67,25 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   /** 用已复核的 Runtime 组装 launcher 并执行；createSession 抛错前都允许上层回退。 */
   private async launch(node: AgentNodeSnapshot, runtime: VerifiedCliRuntime, control: ControlServer): Promise<JsonObject | null> {
     let worker: AcpWorkerExecutor;
-    let isolated = false;
-    if (this.readOnlyStateRoot) {
+    let owned = false;
+    if (this.workerStateRoot) {
       if (node.sandbox !== "read-only") throw new WorkflowContractError("业务写Worker必须通过已授权Workspace执行器，不能回退普通ACP启动。");
-      const profile = adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation;
-      const scratch = await prepareSessionScratch(this.readOnlyStateRoot, node.cwd);
-      const launcher = await prepareIsolatedLauncher(profile, resolveWorkerLauncher(runtime), scratch, "read-only-worker");
-      const transport = managedAcpTransport({ boundary: { workspace: null, scratch, controlFiles: [], protectedDirectories: [node.cwd], readOnlyPaths: profile?.readOnlyPaths(launcher) ?? [], cliWritableRoots: profile?.writableRoots?.(launcher) ?? [] }, groups: new WriterProcessGroups(), bindWriter: async () => {} });
+      const scratch = await prepareSessionScratch(this.workerStateRoot, node.cwd);
+      const launcher = resolveWorkerLauncher(runtime);
+      const transport = ownedAcpTransport({ groups: new WriterProcessGroups(), bindWriter: async () => {} });
       worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(runtime), identity => this.createControlMcp(identity, scratch), undefined, true);
-      isolated = true;
+      owned = true;
     } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);
     const key = keyOf(node);
     this.#workers.set(key, worker);
     try {
       const result = await worker.execute(node);
-      if (isolated) { this.#closing.set(key, worker); await this.finalizeCompleted(node); }
+      if (owned) { this.#closing.set(key, worker); await this.finalizeCompleted(node); }
       return result;
     } catch (error) {
       // 异常也尽力核验退出，但原错误仍是权威诊断；未知退出不认领或重派发。
-      if (isolated) {
+      if (owned) {
         this.#closing.set(key, worker);
         try { await this.finalizePartial(node); } catch { /* 保留句柄，不掩盖原执行/退出错误。 */ }
       }

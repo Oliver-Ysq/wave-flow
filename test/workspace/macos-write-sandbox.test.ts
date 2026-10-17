@@ -3,7 +3,6 @@ import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { macosWriteProfile } from "../../src/workspace/macos-write-sandbox";
-import { GitRepository, importGitObjects } from "../../src/workspace/git-repository";
 
 const directories: string[] = [];
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -13,23 +12,23 @@ async function fixture() {
   for (const path of [workspace, scratch, main, metadata]) await mkdir(path);
   return { root, workspace, scratch, main, metadata };
 }
-test.skipIf(process.platform !== "darwin")("真实shell只写worktree/scratch，绝对路径与符号链接绕路不能写主目录或Git元数据", async () => {
+test.skipIf(process.platform !== "darwin")("主控shell只写scratch，绝对路径与符号链接绕路不能写主目录或Git元数据", async () => {
   const { workspace, scratch, main, metadata } = await fixture();
   await writeFile(join(main, "protected"), "user\n"); await symlink(main, join(workspace, "escape"));
-  const profile = await macosWriteProfile({ workspace, scratch, controlFiles: [], protectedDirectories: [main, metadata] });
+  const profile = await macosWriteProfile({ workspace: null, scratch, controlFiles: [], protectedDirectories: [main, metadata] });
   // 参数通过argv传入，无用户文本shell插值；子shell同样继承Seatbelt。
   const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", 'printf work > "$1/ok"; printf temp > "$2/ok"; /bin/sh -c \'printf bad > "$1/protected"\' ignored "$3"; printf bad > "$1/escape/protected"; printf bad > "$4/config"', "test", workspace, scratch, main, metadata], { stdout: "pipe", stderr: "pipe" });
   const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   expect(code).not.toBe(0); expect(stderr).toContain("Operation not permitted");
-  expect(await Bun.file(join(workspace, "ok")).text()).toBe("work"); expect(await Bun.file(join(scratch, "ok")).text()).toBe("temp");
+  expect(await Bun.file(join(scratch, "ok")).text()).toBe("temp");
   expect(await Bun.file(join(main, "protected")).text()).toBe("user\n"); expect(await Bun.file(join(metadata, "config")).exists()).toBe(false);
 });
 test.skipIf(process.platform !== "darwin")("拒绝重叠、软链接及宽泛根目录写授权", async () => {
   const { root, workspace, scratch, main } = await fixture();
-  await expect(macosWriteProfile({ workspace, scratch, controlFiles: [], protectedDirectories: [root] })).rejects.toThrow("重叠");
+  await expect(macosWriteProfile({ workspace: null, scratch, controlFiles: [], protectedDirectories: [root] })).rejects.toThrow("重叠");
   await symlink(workspace, join(root, "link"));
-  await expect(macosWriteProfile({ workspace: join(root, "link"), scratch, controlFiles: [], protectedDirectories: [main] })).rejects.toThrow("canonical");
-  await expect(macosWriteProfile({ workspace: "/", scratch, controlFiles: [], protectedDirectories: [main] })).rejects.toThrow("路径无效");
+  await expect(macosWriteProfile({ workspace: null, scratch: join(root, "link"), controlFiles: [], protectedDirectories: [main] })).rejects.toThrow("canonical");
+  await expect(macosWriteProfile({ workspace: null, scratch: "/", controlFiles: [], protectedDirectories: [main] })).rejects.toThrow("路径无效");
 });
 
 test.skipIf(process.platform !== "darwin")("CLI原生目录可写和原子刷新，另一个CLI及业务目录仍拒绝，生成配置仍只读", async () => {
@@ -105,22 +104,12 @@ test.skipIf(process.platform !== "darwin")("只读认证引用不能指向本会
   expect(await Bun.file(writableToken).text()).toBe("fixture-token\n");
 });
 
-test.skipIf(process.platform !== "darwin")("worktree专属Git index可写，共享refs及主工作区仍拒绝", async () => {
-  const { workspace, scratch, main, metadata } = await fixture();
-  const gitDirectory = join(metadata, "worktrees", "worker"); await mkdir(gitDirectory, { recursive: true });
-  await mkdir(join(metadata, "refs"));
-  const profile = await macosWriteProfile({ workspace, scratch, gitDirectory, controlFiles: [], protectedDirectories: [main, metadata] });
-  const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", 'printf index > "$1/index"; printf bad > "$2/refs/main"; printf bad > "$3/file"', "test", gitDirectory, metadata, main], { stdout: "ignore", stderr: "ignore" });
-  expect(await child.exited).not.toBe(0); expect(await Bun.file(join(gitDirectory, "index")).text()).toBe("index");
-  expect(await Bun.file(join(metadata, "refs", "main")).exists()).toBe(false); expect(await Bun.file(join(main, "file")).exists()).toBe(false);
-  await expect(macosWriteProfile({ workspace, scratch, gitDirectory: join(metadata, "refs"), controlFiles: [], protectedDirectories: [main, metadata] })).rejects.toThrow("单一受管目录");
-});
 
 test.skipIf(process.platform !== "darwin")("私有状态目录可写但配置、认证引用及其重命名删除保持只读", async () => {
   const { workspace, scratch, main } = await fixture();
   const home=join(scratch,"agent-home"),credentials=join(home,"credentials");await mkdir(home);await mkdir(credentials);
   const config=join(home,"config.toml"),secret=join(credentials,"login.json");await writeFile(config,"safe\n");await writeFile(secret,"token\n");
-  const profile=await macosWriteProfile({workspace,scratch,controlFiles:[],readOnlyPaths:[config,credentials],protectedDirectories:[main]});
+  const profile=await macosWriteProfile({workspace:null,scratch,controlFiles:[],readOnlyPaths:[config,credentials],protectedDirectories:[main]});
   const child=Bun.spawn(["/usr/bin/sandbox-exec","-p",profile,"/bin/sh","-c",'printf ok > "$1/state"; printf bad > "$2"; rm "$3"; mv "$4" "$4.moved"; mv "$1" "$1.moved"',"test",home,config,secret,credentials],{stdout:"ignore",stderr:"pipe"});
   const [code,stderr]=await Promise.all([child.exited,new Response(child.stderr).text()]);
   expect(code).not.toBe(0);expect(stderr).toContain("Operation not permitted");expect(await Bun.file(join(home,"state")).text()).toBe("ok");expect(await Bun.file(config).text()).toBe("safe\n");expect(await Bun.file(secret).text()).toBe("token\n");expect(await Bun.file(`${credentials}.moved`).exists()).toBe(false);
@@ -132,26 +121,3 @@ test.skipIf(process.platform!=="darwin")("未创建插件及MCP路径同样受�
  const child=Bun.spawn(["/usr/bin/sandbox-exec","-p",profile,"/bin/sh","-c",'printf state > "$1/state"; printf bad > "$1/mcp.json"; mkdir "$1/plugins"; mkdir -p "$1/nested/hooks"',"test",home],{stdout:"ignore",stderr:"pipe"});
  expect(await child.exited).not.toBe(0);expect(await Bun.file(join(home,"state")).text()).toBe("state");expect(await Bun.file(join(home,"mcp.json")).exists()).toBe(false);await expect(lstat(join(home,"plugins"))).rejects.toMatchObject({code:"ENOENT"});await expect(lstat(join(home,"nested","hooks"))).rejects.toMatchObject({code:"ENOENT"});
 });
-
-test.skipIf(process.platform !== "darwin")("最小权限下标准git merge --no-commit可运行，不能更新共享分支ref", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-seatbelt-merge-"))); directories.push(root);
-  const main = join(root, "repo"); await mkdir(main);
-  const git = async (cwd: string, ...args: string[]) => { const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code) throw new Error(err); return out.trim(); };
-  await git(main, "init", "-b", "main"); await writeFile(join(main, "a.txt"), "base\n"); await writeFile(join(main, "b.txt"), "base\n"); await git(main, "add", "--", "a.txt", "b.txt"); await git(main, "commit", "-m", "base");
-  const repo = await GitRepository.open(main), base = (await repo.inspect()).head;
-  const source = await repo.createWorktree(join(root, "source"), "codex/wf-source", base), integration = await repo.createWorktree(join(root, "integration"), "codex/wf-integration", base);
-  await writeFile(join(source.cwd, "a.txt"), "source\n"); const saved = await source.save({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base, allowedPaths: ["a.txt"] });
-  const state = await integration.inspect(), scratch = join(root, "scratch"); await mkdir(scratch);
-  const profile = await macosWriteProfile({ workspace: integration.cwd, scratch, gitDirectory: state.gitDirectory, controlFiles: [], protectedDirectories: [main, state.commonDirectory] });
-  const gitArgs = ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Wave Flow", "-c", "user.email=workspace@wave-flow.local"];
-  const objects = join(scratch, "objects"); await mkdir(objects);
-  const sandboxEnv = { PATH: "/usr/bin:/bin", HOME: scratch, TMPDIR: scratch, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: join(state.commonDirectory, "objects") };
-  const merge = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/git", ...gitArgs, "merge", "--no-commit", "--no-ff", saved.commit], { cwd: integration.cwd, env: sandboxEnv, stdout: "pipe", stderr: "pipe" });
-  const [code, stderr] = await Promise.all([merge.exited, new Response(merge.stderr).text()]); expect(code, stderr).toBe(0);
-  expect(await Bun.file(join(integration.cwd, "a.txt")).text()).toBe("source\n"); expect(await Bun.file(join(state.gitDirectory, "MERGE_HEAD")).text()).toContain(saved.commit);
-  const update = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/git", ...gitArgs, "update-ref", "refs/heads/main", saved.commit, base], { cwd: integration.cwd, env: sandboxEnv, stdout: "ignore", stderr: "ignore" });
-  expect(await update.exited).not.toBe(0); expect(await git(main, "rev-parse", "main")).toBe(base);
-  const tree = await git(integration.cwd, "write-tree");
-  await importGitObjects(integration.cwd, tree, { GIT_INDEX_FILE: join(state.gitDirectory, "index"), GIT_ALTERNATE_OBJECT_DIRECTORIES: objects });
-  expect(await git(main, "cat-file", "-t", tree)).toBe("tree");
-}, 15_000);

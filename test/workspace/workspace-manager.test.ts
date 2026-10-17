@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitRepository } from "../../src/workspace/git-repository";
-import { DeliveryPersistenceError, isRetryableDeliveryError, WorkspaceManager, type WorkspaceAuthorization } from "../../src/workspace/workspace-manager";
+import { SourcePersistenceError, isRetryableSourceError, WorkspaceManager, type WorkspaceAuthorization } from "../../src/workspace/workspace-manager";
 import { GitCommandError } from "../../src/workspace/git-repository";
 import { WorkflowContractError } from "../../src/workflow/errors";
 import { WorkspaceExecutor } from "../../src/workspace/workspace-executor";
@@ -15,15 +15,15 @@ const test = (name: string, run: () => Promise<void>, timeout = 15_000) => bunTe
 
 const directories: string[] = [];
 test("交付重试按错误类型分类，安全契约拒绝不误当临时失败",async()=>{
- expect(isRetryableDeliveryError(new DeliveryPersistenceError("fixture"))).toBe(true);
- expect(isRetryableDeliveryError(new GitCommandError("fixture"))).toBe(true);
- expect(isRetryableDeliveryError(new Error("disk"))).toBe(true);
- expect(isRetryableDeliveryError(new WorkflowContractError("未集成/越界/锁"))).toBe(false);
+ expect(isRetryableSourceError(new SourcePersistenceError("fixture"))).toBe(true);
+ expect(isRetryableSourceError(new GitCommandError("fixture"))).toBe(true);
+ expect(isRetryableSourceError(new Error("disk"))).toBe(true);
+ expect(isRetryableSourceError(new WorkflowContractError("未集成/越界/锁"))).toBe(false);
  const {manager,identity}=await fixture();
- await manager.recordDeliveryDiagnostic(identity.runId,"contract refused");
- expect(await manager.canRetryDelivery(identity.runId)).toBe(false);
- await manager.recordDeliveryDiagnostic(identity.runId,"disk",true);
- expect(await manager.canRetryDelivery(identity.runId)).toBe(true);
+ await manager.recordSourceDiagnostic(identity.runId,"contract refused");
+ expect(await manager.canRetrySource(identity.runId)).toBe(false);
+ await manager.recordSourceDiagnostic(identity.runId,"disk",true);
+ expect(await manager.canRetrySource(identity.runId)).toBe(true);
 });
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }); });
 async function fixture() {
@@ -31,41 +31,41 @@ async function fixture() {
   const cwd = join(root, "repo"); await mkdir(cwd);
   async function git(...args: string[]) { const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code) throw new Error(err); return out.trim(); }
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "--", "a.txt"); await git("commit", "-m", "fixture");
-  const authorization: WorkspaceAuthorization = { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: await git("rev-parse", "HEAD"), excludeExistingDirty: false, autoSquashDelivery: true, nodes: [{ nodeId: "a", paths: ["a.txt"] }, { nodeId: "b", paths: ["a.txt"] }] };
+  const authorization: WorkspaceAuthorization = { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: await git("rev-parse", "HEAD"), excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] };
   const manager = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID());
   const workspaceId = crypto.randomUUID(), identity = { runId: crypto.randomUUID(), nodeId: "a", attempt: 1 };
   return { root, cwd, manager, workspaceId, authorization, identity };
 }
-test("最终交付拒绝锁/漂移，清理后仍可单父交付且关联失败重试不重复commit", async () => {
+test("最终交付拒绝锁/漂移，清理后仍可读取完整来源且关联失败重试不重复commit", async () => {
   const { manager, workspaceId, authorization, identity, cwd } = await fixture();
   const auth = { ...authorization, nodes: [authorization.nodes[0]] };
-  const config = { version: 1 as const, authorization: auth, bindings: [{ nodeId: "a", workspaceId }] };
+  const config = { version: 2 as const, authorization: auth, bindings: [{ nodeId: "a", workspaceId }] };
   const workspace = await manager.create(workspaceId, auth);
-  await expect(manager.deliverSquash(identity.runId, { ...config, authorization: { ...auth, autoSquashDelivery: false } })).rejects.toThrow("授权未包含");
-  await expect(manager.deliverSquash(identity.runId, config, ["a"])).rejects.toThrow("缺ready");
-  await expect(manager.deliverSquash(identity.runId, config, ["unknown"])).rejects.toThrow("未授权");
+  await expect(manager.finalizeSource(identity.runId, { ...config, version: 1 } as never)).rejects.toThrow("v2");
+  await expect(manager.finalizeSource(identity.runId, config, ["a"])).rejects.toThrow("缺ready");
+  await expect(manager.finalizeSource(identity.runId, config, ["unknown"])).rejects.toThrow("未授权");
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, identity), "group");
-  await expect(manager.deliverSquash(identity.runId, config)).rejects.toThrow("锁");
+  await expect(manager.finalizeSource(identity.runId, config)).rejects.toThrow("锁");
   await writeFile(join(workspace.cwd, "a.txt"), "final\n");
   const saved = await manager.finish(lease, true, async () => true);
   await writeFile(join(workspace.cwd, "a.txt"), "drift\n");
-  await expect(manager.deliverSquash(identity.runId, config)).rejects.toThrow("漂移");
+  await expect(manager.finalizeSource(identity.runId, config)).rejects.toThrow("漂移");
   await writeFile(join(workspace.cwd, "a.txt"), "final\n");
   await manager.cleanup(workspaceId, true);
   const write = spyOn(manager as unknown as { write: (...args: unknown[]) => Promise<void> }, "write").mockRejectedValueOnce(new Error("delivery association failed"));
-  try { await expect(manager.deliverSquash(identity.runId, config)).rejects.toThrow("association failed"); } finally { write.mockRestore(); }
-  const result = await manager.deliverSquash(identity.runId, config);
+  try { await expect(manager.finalizeSource(identity.runId, config)).rejects.toThrow("association failed"); } finally { write.mockRestore(); }
+  const result = await manager.finalizeSource(identity.runId, config);
   expect(result.sourceCommit).toBe(saved.commit);
-  expect(await manager.deliverSquash(identity.runId, config)).toEqual(result);
-  expect(await manager.inspectDelivery(identity.runId)).toEqual(result);
+  expect(await manager.finalizeSource(identity.runId, config)).toEqual(result);
+  expect(await manager.inspectSource(identity.runId)).toEqual(result);
   await expect((await GitRepository.open(cwd)).inspect()).resolves.toMatchObject({ head: authorization.baseCommit });
 });
 
 test("多独立分支拒绝交付，真实多父集成后只交付完整tree", async () => {
   const { manager, authorization, identity, root, cwd } = await fixture();
-  const auth = { ...authorization, nodes: [{ nodeId: "a", paths: ["a.txt"] }, { nodeId: "b", paths: ["b.txt"] }, { nodeId: "merge", paths: ["a.txt", "b.txt"] }] };
+  const auth = { ...authorization, nodes: [{ nodeId: "a" }, { nodeId: "b" }, { nodeId: "merge" }] };
   const bindings = auth.nodes.map(node => ({ nodeId: node.nodeId, workspaceId: crypto.randomUUID() }));
-  const config = { version: 1 as const, authorization: auth, bindings: bindings.map(binding => binding.nodeId === "merge" ? { ...binding, integrationSources: { nodeIds: ["a", "b"] } } : binding) };
+  const config = { version: 2 as const, authorization: auth, bindings: bindings.map(binding => binding.nodeId === "merge" ? { ...binding, integrationSources: { nodeIds: ["a", "b"] } } : binding) };
   const commits: string[] = [];
   for (const binding of bindings) {
     const workspace = await manager.create(binding.workspaceId, { ...auth, nodes: auth.nodes.filter(node => node.nodeId === binding.nodeId) });
@@ -74,20 +74,20 @@ test("多独立分支拒绝交付，真实多父集成后只交付完整tree", a
     await writeFile(join(workspace.cwd, `${binding.nodeId}.txt`), binding.nodeId + "\n");
     commits.push((await manager.finish(lease, true, async () => true)).commit);
   }
-  await expect(manager.deliverSquash(identity.runId, config)).rejects.toThrow("尚未完整显式集成");
+  await expect(manager.finalizeSource(identity.runId, config)).rejects.toThrow("尚未完整显式集成");
   const merge = await manager.inspect(bindings[2].workspaceId);
   const lease = await manager.bindWriter(await manager.acquire(merge.workspaceId, { ...identity, nodeId: "merge" }, commits), "merge-group");
   await manager.createScratch(lease.leaseId); await mkdir(join(root, "state", "scratch", lease.leaseId, "objects"));
   const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "merge", "--no-commit", "--no-ff", ...commits], { cwd: merge.cwd, stdout: "pipe", stderr: "pipe" });
   const stderr = await new Response(child.stderr).text(); expect(await child.exited, stderr).toBe(0);
   const merged = await manager.finish(lease, true, async () => true);
-  const delivery = await manager.deliverSquash(identity.runId, config);
+  const delivery = await manager.finalizeSource(identity.runId, config);
   expect(delivery.paths).toEqual(["a.txt", "b.txt"]);
   expect(delivery.sourceCommit).toBe(merged.commit);
   async function git(...args: string[]) { const p = Bun.spawn(["/usr/bin/git", ...args], { cwd, stdout: "pipe" }); const out = await new Response(p.stdout).text(); expect(await p.exited).toBe(0); return out.trim(); }
-  expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(auth.baseCommit);
+  expect(delivery.commit).toBe(merged.commit); expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe([auth.baseCommit,...commits].join(" "));
   expect(await git("rev-parse", `${delivery.commit}^{tree}`)).toBe(await git("rev-parse", `${merged.commit}^{tree}`));
-  expect(await git("rev-list", "--count", `${auth.baseCommit}..${delivery.commit}`)).toBe("1");
+  expect(await git("rev-list", "--count", `${auth.baseCommit}..${delivery.commit}`)).toBe("3");
 });
 
 test("partial不能自动最终交付，失败诊断耐久但不制造交付记录", async () => {
@@ -96,11 +96,11 @@ test("partial不能自动最终交付，失败诊断耐久但不制造交付记�
   const workspace = await manager.create(workspaceId, auth);
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, identity), "group");
   await writeFile(join(workspace.cwd, "a.txt"), "partial\n"); await manager.finish(lease, false, async () => true);
-  await expect(manager.deliverSquash(identity.runId, { version: 1, authorization: auth, bindings: [{ nodeId: "a", workspaceId }] })).rejects.toThrow("partial");
-  await manager.recordDeliveryDiagnostic(identity.runId, "partial");
+  await expect(manager.finalizeSource(identity.runId, { version: 2, authorization: auth, bindings: [{ nodeId: "a", workspaceId }] })).rejects.toThrow("partial");
+  await manager.recordSourceDiagnostic(identity.runId, "partial");
   const reopened = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID());
-  expect(await reopened.inspectDelivery(identity.runId)).toBeNull();
-  expect(await reopened.inspectDeliveryDiagnostic(identity.runId)).toBe("partial");
+  expect(await reopened.inspectSource(identity.runId)).toBeNull();
+  expect(await reopened.inspectSourceDiagnostic(identity.runId)).toBe("partial");
 });
 
 test("首次dirty基线拒绝；显式排除用户内容后创建且同身份重试不重复分支", async () => {
@@ -150,7 +150,7 @@ test("重启不按旧租约/PID认领writer，partial保存不伪装ready", asyn
 test("不同worktree的同名外部资源互斥，成果关联后释放", async () => {
   const { root, manager, authorization, identity } = await fixture();
   const firstId = crypto.randomUUID(), secondId = crypto.randomUUID();
-  const external = { ...authorization, nodes: [{ nodeId: "a", paths: ["a.txt"], externalResources: ["port:4173"] }] };
+  const external = { ...authorization, nodes: [{ nodeId: "a", externalResources: ["port:4173"] }] };
   const first = await manager.create(firstId, external), second = await manager.create(secondId, { ...external, authorizationId: crypto.randomUUID() });
   const lease = await manager.bindWriter(await manager.acquire(firstId, identity), "writer");
   await expect(manager.acquire(secondId, identity)).rejects.toThrow("外部资源");
@@ -191,14 +191,14 @@ test("用户stop后的partial关联不冒充ready，失败保留业务外的租�
   const executor=new WorkspaceExecutor(manager,identity.runId,[{nodeId:"a",workspaceId}],{execute:async()=>null},(_,binding)=>({bindControl(){},bindWriter:binding.bindWriter,verifyExited:async()=>exited,execute:async actual=>{await binding.bindWriter("group");await writeFile(join(actual.cwd,"a.txt"),"partial\n");return new Promise(()=>{});},stop:async()=>{},finalizePartial:async()=>{}}));executor.bindControl({} as any);
   const node={id:"a",phase:"run",executionAttemptId:1,phaseVisitId:1,sequence:1,executionBatch:{sequence:1,mode:"serial"},cli:"codex",sandbox:"workspace-write",cwd:authorization.repository,label:"a",status:"running",result:null,diagnostic:null,createdAt:new Date().toISOString(),startedAt:null,endedAt:null,agentSessionId:crypto.randomUUID(),block:null,request:{id:"a",cli:"codex",sandbox:"workspace-write",cwd:authorization.repository,phase:"run",prompt:"work"}} as AgentNodeSnapshot;
   void executor.execute(node);while(!(await manager.inspect(workspaceId)).lease?.writerIdentity)await Bun.sleep(1);
-  await executor.stop(node);await executor.finalizePartial({...node,status:"cancelled"});expect((await manager.inspect(workspaceId)).results[0]).toMatchObject({ready:false,paths:["a.txt"]});
+  await executor.stop(node);await executor.finalizePartial({...node,status:"cancelled"});expect((await manager.inspect(workspaceId)).results[0]).toMatchObject({ready:false});
   expect((await manager.inspect(workspaceId)).lease).toBeNull();
 },15_000);
 test("清理只移除ready且干净的checkout，保留分支commit供后续集成核验",async()=>{
   const {manager,workspaceId,authorization,identity,cwd}=await fixture();const workspace=await manager.create(workspaceId,authorization);
   const lease=await manager.bindWriter(await manager.acquire(workspaceId,identity),"group");await writeFile(join(workspace.cwd,"a.txt"),"ready\n");const saved=await manager.finish(lease,true,async()=>true);
   await expect(manager.cleanup(workspaceId,false)).rejects.toThrow("明确授权");const cleaned=await manager.cleanup(workspaceId,true);expect(cleaned.cleanedAt).not.toBeNull();expect(await Bun.file(workspace.cwd).exists()).toBe(false);
-  const repo=await GitRepository.open(cwd);await repo.verifyCommitObject(saved.commit,authorization.baseCommit,["a.txt"],["a.txt"]);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+  const repo=await GitRepository.open(cwd);await repo.verifyCommitObject(saved.commit,authorization.baseCommit,["a.txt"]);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
 },15_000);
 test("partial、未保存或仍持锁worktree拒绝清理",async()=>{
  const {manager,workspaceId,authorization,identity}=await fixture();await manager.create(workspaceId,authorization);await expect(manager.cleanup(workspaceId,true)).rejects.toThrow("未交付");const lease=await manager.bindWriter(await manager.acquire(workspaceId,identity),"group");await expect(manager.cleanup(workspaceId,true)).rejects.toThrow("锁");await manager.finish(lease,false,async()=>true);await expect(manager.cleanup(workspaceId,true)).rejects.toThrow("partial");
@@ -221,7 +221,7 @@ test("checkout已移除但cleaned关联失败时，重试按耐久意图补关�
 test("显式集成真实来源commit：缺失/未来/partial/仍有锁拒绝，ready批次传递实际hash且现场变化拒绝", async () => {
   const { manager, workspaceId, authorization, identity } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
-  const targetId = crypto.randomUUID(); const targetWorkspace = await manager.create(targetId, { ...authorization, nodes: [{ nodeId: "integrate", paths: ["a.txt"] }] });
+  const targetId = crypto.randomUUID(); const targetWorkspace = await manager.create(targetId, { ...authorization, nodes: [{ nodeId: "integrate" }] });
   const node: AgentNodeSnapshot = { id: "a", phase: "run", executionAttemptId: 1, phaseVisitId: 1, sequence: 1, executionBatch: { sequence: 1, mode: "parallel" }, cli: "codex", sandbox: "workspace-write", cwd: workspace.cwd, label: "a", status: "completed", result: { ok: true }, diagnostic: null, createdAt: new Date().toISOString(), startedAt: null, endedAt: null, agentSessionId: crypto.randomUUID(), block: null, request: { id: "a", cli: "codex", sandbox: "workspace-write", cwd: workspace.cwd, phase: "run", prompt: "work" } };
   const target = { ...node, id: "integrate", sequence: 2, status: "running" as const };
   const options = { runId: identity.runId, integrationNode: target, nodes: [node, target], selection: { nodeIds: ["a"] }, bindings: [{ nodeId: "a", workspaceId }, { nodeId: "integrate", workspaceId: targetId }], manager, targetCommonDirectory: targetWorkspace.commonDirectory };

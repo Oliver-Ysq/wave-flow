@@ -5,13 +5,13 @@ import { adapterById } from "../../src/runtimes/adapter-catalog";
 test("通用隔离入口支持任意已提供能力的Adapter，不按CLI名字分支", async () => {
   const calls: string[] = [];
   const profile: SessionIsolationProfile = {
-    enabledRoles: ["harness", "worker"],
+    enabledRoles: ["harness"],
     prepare: async (launcher, scratch, role) => { calls.push(role); return { ...launcher, env: { PRIVATE_SESSION_ROOT: scratch } }; }, readOnlyPaths:()=>[],
   };
   const launcher = { id: "fixture-future-acp", command: "/fixture/agent", args: ["acp"] };
   expect(await prepareIsolatedLauncher(profile, launcher, "/fixture/scratch", "harness")).toEqual({ ...launcher, env: { PRIVATE_SESSION_ROOT: "/fixture/scratch" } });
-  await prepareIsolatedLauncher(profile, launcher, "/fixture/scratch", "worker");
-  expect(calls).toEqual(["harness", "worker"]);
+
+  expect(calls).toEqual(["harness"]);
 });
 
 test("未声明能力或角色未启用时不调用prepare、不回退普通启动", async () => {
@@ -19,15 +19,15 @@ test("未声明能力或角色未启用时不调用prepare、不回退普通启�
   const launcher = { id: "fixture-other-acp", command: "/fixture/agent", args: [] };
   const profile: SessionIsolationProfile = { enabledRoles: ["harness"], prepare: async value => { calls++; return value; },readOnlyPaths:()=>[] };
   await expect(prepareIsolatedLauncher(undefined, launcher, "/fixture/scratch", "harness")).rejects.toThrow("拒绝普通启动回退");
-  await expect(prepareIsolatedLauncher(profile, launcher, "/fixture/scratch", "worker")).rejects.toThrow("worker");
+  await expect(prepareIsolatedLauncher(profile, launcher, "/fixture/scratch", "worker" as never)).rejects.toThrow("worker");
   expect(calls).toBe(0);
 });
 
 test("当前Adapter隔离能力在Catalog声明，未知CLI未自动开放", () => {
-  expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toContain("worker");
-  expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toContain("worker");
-  expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toContain("read-only-worker");
-  expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toContain("read-only-worker");
+  expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+  expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+  expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+  expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
   expect(adapterById("claude-acp")).toBeNull();
 });
 
@@ -47,11 +47,12 @@ test("主控与Workspace核心不导入特定CLI的私有Home实现", async () =
     expect(source).not.toContain("prepareKimiSessionHome");
     expect(source).not.toContain('selected.cli !== "codex"');
     expect(source).not.toContain('launcher.id === "kimi-acp"');
-    expect(source).toContain("prepareIsolatedLauncher");
+    if(path.includes("isolated-harness"))expect(source).toContain("prepareIsolatedLauncher");
+    else {expect(source).not.toContain("prepareIsolatedLauncher");expect(source).toContain("ownedAcpTransport");}
   }
 });
 
-test("生产主控和Worker统一allow原生ACP权限，文件隔离仍由OS承担", async () => {
+test("生产主控和Worker统一allow原生ACP权限，仅主控文件隔离由OS承担", async () => {
   for (const path of ["src/harness/isolated-harness.ts", "src/runtime/runtime-acp-worker-executor.ts", "src/workspace/production-workspace-executor.ts", "src/runtime/acp-worker-executor.ts"]) {
     const source = await Bun.file(path).text();
     expect(source).toContain(', "allow"');
@@ -59,8 +60,8 @@ test("生产主控和Worker统一allow原生ACP权限，文件隔离仍由OS承�
   }
 });
 
-test("Worker明确说明工作区外写拒绝，生产无宿主文件批准或执行通道", async () => {
- const prompt=await Bun.file("src/runtime/acp-worker-executor.ts").text();expect(prompt).toContain("没有用户批准后扩权入口");
+test("Worker明确说明信任边界，生产无宿主文件批准或执行通道", async () => {
+ const prompt=await Bun.file("src/runtime/acp-worker-executor.ts").text();expect(prompt).toContain("Wave Flow不施加OS文件隔离");expect(prompt).not.toContain("其他工作区外写入一律拒绝");
  for(const path of ["src/workspace/production-workspace-executor.ts","src/desktop/desktop-execution-engine.ts","src/desktop/engine-main.ts"]){
   const source=await Bun.file(path).text();expect(source).not.toContain("FilePermissionCoordinator");expect(source).not.toContain("__file-write");expect(source).not.toContain("decideFilePermission");
  }
