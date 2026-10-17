@@ -21,7 +21,11 @@ export function agent<T extends JsonObject = JsonObject>(prompt: string, options
   const phaseVisit = context.currentPhaseVisit ?? { executionAttemptId: 1, phaseVisitId: 0, title: phase ?? "", occurrence: 0 };
   const executionBatch = currentExecutionBatch();
   return trackWorkflowOperation((async () => {
-    const cwd = await normalizeAgentCwd(options.cwd, context.cwd);
+    // realpath 等待按同步调用顺序串行：并行 agent() 到达宿主的顺序必须确定，
+    // 与 resume 重放复核的 Journal 逻辑顺序一致；单个规范化失败不影响后继调用。
+    const sequenced = context.cwdNormalization.chain.then(() => normalizeAgentCwd(options.cwd, context.cwd));
+    context.cwdNormalization.chain = sequenced.catch(() => undefined);
+    const cwd = await sequenced;
     // 保持已发布 Journal 的默认指纹稳定。当前 Codex ACP Worker 的实际权限不由这个
     // 声明字段收窄；它作为任务意图留给支持可靠 sandbox 的后续 Adapter。
     return context.host.agent({ ...options, cwd, prompt, sandbox: options.sandbox ?? "read-only", phase }, executionBatch, phaseVisit) as Promise<T | null>;

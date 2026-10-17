@@ -48,6 +48,8 @@ test("归档 IPC 参数校验在读档前拒绝，未知任务报明确错误", 
     await expect(engine.handleDesktopAction("harnesses.complete", { harnessRunId, abandonImpactSummaries: flag })).rejects.toThrow("归档放弃标识无效");
   }
   await expect(engine.handleDesktopAction("harnesses.archivePreview", { harnessRunId, extra: true })).rejects.toThrow("额外请求字段");
+  await expect(engine.handleDesktopAction("harnesses.complete", { harnessRunId, abandonPending: true, extra: true })).rejects.toThrow("额外请求字段");
+  await expect(engine.handleDesktopAction("harnesses.complete", { harnessRunId, unknownField: "x" })).rejects.toThrow("额外请求字段");
   await expect(engine.handleDesktopAction("harnesses.archivePreview", { harnessRunId })).rejects.toThrow();
   await expect(engine.handleDesktopAction("harnesses.complete", { harnessRunId })).rejects.toThrow();
 });

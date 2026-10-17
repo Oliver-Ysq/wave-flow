@@ -488,7 +488,9 @@ export class HarnessService {
 
   /**
    * 归档预览（只读）：返回归档确认页所需的全部待定项。
-   * 已归档任务返回明确错误；不存在的任务由档案打开路径报错。本方法不产生任何写入。
+   * 已归档任务返回明确错误；不存在的任务由档案打开路径报错。
+   * 除首次打开旧档案时按既有规则为缺预览的 revision 补齐 workflow.revision_preview_saved
+   * （幂等展示事实）外，本方法不产生任何业务写入。
    */
   async archivePreview(harnessRunId: string): Promise<import("./types").ArchivePreview> {
     const snapshot = await this.snapshot(harnessRunId);
@@ -534,6 +536,9 @@ export class HarnessService {
       if (snapshot.status === "running" || entry.turn) throw new Error("主控回合运行中不能完成会话。 ");
       if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束 Execution，不能完成会话。 ");
       const candidate = snapshot.task ? candidateRevision(snapshot) : undefined;
+      // 与投影判定一致：候选必须携带修订卡身份才能耐久放弃。缺 cardId 说明档案已损坏；
+      // 必须在任何 append 之前拒绝，否则静默跳过会让 harness.completed 写入后重放必炸。
+      if (candidate && !candidate.cardId) throw new Error("任务候选缺少修订卡身份，档案不完整；拒绝归档。 ");
       const pendingDecisions = snapshot.decisions.filter((item) => item.answer === null && !item.invalidatedAt);
       const hasPendingSummaries = !!snapshot.impactSummaries?.some((item) => item.status !== "completed" && item.status !== "cancelled");
       if (!abandonPending) {

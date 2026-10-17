@@ -92,6 +92,8 @@ export function App() {
   };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
   const [archiveConfirmation,setArchiveConfirmation]=useState<{harnessRunId:string;preview:ArchivePreview}|null>(null);
+  /** 归档入口在途任务 id；setState 生效前的双击去重，不构成业务状态。 */
+  const archiveEntryRef=useRef<string|null>(null);
   useEffect(()=>setArchiveConfirmation(null),[harness?.harnessRunId]);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
@@ -554,6 +556,10 @@ export function App() {
   /** 归档入口：先拉取只读预览；有待定项打开确认页由用户决定，零待定项直接归档。 */
   async function beginArchive(task: HarnessSnapshot) {
     const id = task.harnessRunId;
+    // 入口去重：setState 生效前的极端双击只允许一个预览/归档请求在途；
+    // 模态内的确认按钮由组件自身 busy 去重，不走这里。
+    if (archiveEntryRef.current === id) return;
+    archiveEntryRef.current = id;
     const finishBusy = beginBusy(`task:${id}`, "complete-harness");
     try {
       const { preview } = await api.archivePreview(id);
@@ -566,6 +572,7 @@ export function App() {
     } catch (cause) {
       if (harnessRef.current?.harnessRunId === id) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      if (archiveEntryRef.current === id) archiveEntryRef.current = null;
       finishBusy();
     }
   }
@@ -1640,7 +1647,10 @@ function TaskTreeItem({item,active,route,unread,onClick,onWorkflow}:{item:Harnes
   // 单链任务（single-workflow-v1）只展示一条 Workflow 子项，进入该链最新 revision 的中央“方案”视图；
   // 版本历史/Execution/attempt 留在中央区域选择。旧多卡任务保持每卡一条子项的原逻辑。
   const singleCell=singleChainCell(item);
-  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && (singleCell ? <ul><li><button aria-current={active && route.kind==="workflow" && route.taskId===item.harnessRunId ? "page":undefined} onClick={()=>onWorkflow(singleCell,"plan")}><strong>{singleCell.goal ?? `工作流方案 ${singleCell.revision}`}</strong><small>{item.executions.some(ex=>ex.revision===singleCell.revision)?"执行记录":singleCell.acceptedAt?"待运行":singleCell.rejectedAt?"需修改":singleCell.abandonedAt?"已放弃":"待确认"}</small></button></li></ul> : <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>)}</div>;
+  // 单链子项的待答提示与多卡分支同源：任一执行存在 Worker 请求或脚本决策门即提示。
+  const singleAttentionExecution=singleCell?item.executions.find(ex=>{const attention=item.executionAttention?.[ex.executionId];return attention&&(attention.workerRequests>0||attention.scriptGates>0);}):undefined;
+  const singleAttention=singleAttentionExecution?item.executionAttention?.[singleAttentionExecution.executionId]:undefined;
+  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && (singleCell ? <ul><li><button aria-current={active && route.kind==="workflow" && route.taskId===item.harnessRunId ? "page":undefined} onClick={()=>onWorkflow(singleCell,"plan")}><strong>{singleCell.goal ?? `工作流方案 ${singleCell.revision}`}</strong><small>{singleAttention?`需要回答 · ${singleAttention.workerRequests} 个 Worker / ${singleAttention.scriptGates} 个确认`:item.executions.some(ex=>ex.revision===singleCell.revision)?"执行记录":singleCell.acceptedAt?"待运行":singleCell.rejectedAt?"需修改":singleCell.abandonedAt?"已放弃":"待确认"}</small></button></li></ul> : <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>)}</div>;
 }
 function ProjectGroup({
   project,

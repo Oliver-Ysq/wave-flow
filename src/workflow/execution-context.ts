@@ -27,6 +27,12 @@ export type WorkflowExecutionContext = {
   readonly pendingOperations: Set<Promise<unknown>>;
   /** 同一 Run 共享的批次号分配器；派生并发上下文不得复制计数器。 */
   readonly batchAllocator: { next: number };
+  /**
+   * agent() cwd 规范化的顺序链；派生并发上下文共享同一引用。
+   * cwd realpath 是异步等待，并行 agent() 到达宿主的顺序否则由事件循环竞态决定；
+   * resume 重放按 Journal 逻辑调用顺序复核，到达乱序会被误判为契约冲突。
+   */
+  readonly cwdNormalization: { chain: Promise<unknown> };
   /** 当前异步调用域已分配的并发批次；普通顺序调用为 null。 */
   readonly activeBatch: ExecutionBatch | null;
 };
@@ -35,7 +41,7 @@ const storage = new AsyncLocalStorage<WorkflowExecutionContext>();
 
 /** 在独立异步上下文内执行一次 Workflow，确保并行 Run 不共享作者 API 状态。 */
 export function runWithWorkflowContext<Result>(meta: WorkflowMeta, host: WorkflowExecutionHost, cwd: string, callback: () => Promise<Result>): Promise<Result> {
-  return storage.run({ meta, host, cwd, agentIds: new Set(), lifecycle: { active: true }, currentPhase: undefined, currentPhaseVisit: undefined, concurrentDepth: 0, pendingOperations: new Set(), batchAllocator: { next: 0 }, activeBatch: null }, callback);
+  return storage.run({ meta, host, cwd, agentIds: new Set(), lifecycle: { active: true }, currentPhase: undefined, currentPhaseVisit: undefined, concurrentDepth: 0, pendingOperations: new Set(), batchAllocator: { next: 0 }, cwdNormalization: { chain: Promise.resolve() }, activeBatch: null }, callback);
 }
 
 /** 登记一个 Agent 操作；即使作者未 await，Workflow 入口也会在结束前等待它完成。 */

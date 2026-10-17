@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { ArchivePreview } from "../types";
 
-/** 待定总结状态的中文展示；与后端 ArchivePreviewSummary.status 一一对应。 */
+/** 待定总结状态的中文展示；与后端 ArchivePreviewSummary.status 一一对应，未知值显示原始值不补造。 */
 const summaryStatusLabel = (status: ArchivePreview["pendingSummaries"][number]["status"]) =>
-  ({ pending: "准备中", running: "进行中", interrupted: "已中断" })[status];
-/** 候选草案来源的中文展示；历史缺省按 generated（主控生成）。 */
+  ({ pending: "准备中", running: "进行中", interrupted: "已中断" })[status] ?? status;
+/** 候选草案来源的中文展示；历史缺省按 generated（主控生成），未知值显示原始值不补造。 */
 const candidateOriginLabel = (origin: "template" | "local" | "generated") =>
-  ({ template: "预置模板", local: "本地文件", generated: "主控生成" })[origin];
+  ({ template: "预置模板", local: "本地文件", generated: "主控生成" })[origin] ?? origin;
 
 /**
  * 归档确认页：列出归档前全部待定项（候选草案、未完成影响面总结、未答主控决策），
@@ -68,7 +68,11 @@ export function ArchiveImpactConfirmation({
           }
           if (event.key === "Tab") {
             const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
-            if (!buttons?.length) return;
+            // 归档进行中两个按钮全部禁用：无可用焦点目标时也必须保持焦点陷阱，不能让 Tab 逃逸到背景。
+            if (!buttons?.length) {
+              event.preventDefault();
+              return;
+            }
             const first = buttons[0],
               last = buttons[buttons.length - 1];
             if (event.shiftKey && document.activeElement === first) {
@@ -119,7 +123,7 @@ export function ArchiveImpactConfirmation({
           {preview.pendingDecisions.length > 0 && (
             <section aria-label="未回答的主控决策">
               <h3>未回答的主控决策（{preview.pendingDecisions.length} 项，将失效）</h3>
-              <ul>
+              <ul className="archive-pending-list">
                 {preview.pendingDecisions.map((item) => (
                   <li key={item.decisionId}>{item.question}</li>
                 ))}

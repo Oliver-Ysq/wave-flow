@@ -68,7 +68,7 @@ test("归档预览列出候选、各状态总结与未答决策；空任务可�
   expect((await hanging.archivePreview(pending.id)).pendingSummaries[0].status).toBe("running");
   await hanging.abort(pending.id);
 
-  // 预览是纯读：不产生任何新耐久事件。
+  // 首次打开后再次预览是纯读：不产生任何新耐久事件。
   const before = (await eventsOf(interrupted.state, interrupted.id)).length;
   await service(interrupted.state).archivePreview(interrupted.id);
   expect((await eventsOf(interrupted.state, interrupted.id)).length).toBe(before);
@@ -239,6 +239,60 @@ test("归档后所有写入口拒绝：消息/草案/卡操作/总结/决策/执
   const journal = (await HarnessJournal.open(id, state)).journal;
   await journal.append({ type: "harness.decision_answered", at: new Date().toISOString(), harnessRunId: id, decisionId, answer: {} });
   await expect(HarnessJournal.open(id, state)).rejects.toThrow();
+});
+
+test("候选缺少修订卡身份视为档案损坏：任何 append 之前拒绝且零写入", async () => {
+  // 合法重放的单链档案候选必然携带 cardId（投影在 revision_proposed 时强制）；
+  // 这里在内存投影层注入缺失，验证服务门禁与投影判定一致，不写入不可重放事件。
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-archive-cardless-")); roots.push(root);
+  const state = join(root, "state");
+  const creator = service(state);
+  const task = await creator.create(root, "p", { clientRequestId: crypto.randomUUID(), payloadHash: "0".repeat(64), title: "损坏", initialGoal: "目标", workflowContract: "single-workflow-v1" });
+  creator.close();
+  const id = task.harnessRunId, at = new Date().toISOString();
+  await (await HarnessJournal.open(id, state)).journal.append({ type: "workflow.revision_proposed", at, harnessRunId: id, revision: { revision: 1, cardId: crypto.randomUUID(), parentRevision: null, goal: "目标", scope: "只读", abandonedAt: null, turnId: task.messages[0].id, source: source("cardless-1"), sourceHash: hash(source("cardless-1")), createdAt: at, acceptedAt: null, rejectedAt: null } });
+  const instance = service(state);
+  const entry = await (instance as unknown as { entry(harnessRunId: string): Promise<{ projection: { snapshot(): import("../../src/harness/types").HarnessSnapshot } }> }).entry(id);
+  const realSnapshot = entry.projection.snapshot.bind(entry.projection);
+  entry.projection.snapshot = () => { const snapshot = realSnapshot(); return { ...snapshot, workflowRevisions: snapshot.workflowRevisions.map((revision, index, all) => index === all.length - 1 ? { ...revision, cardId: undefined } : revision) }; };
+  const before = (await eventsOf(state, id)).length;
+  await expect(instance.complete(id, true)).rejects.toThrow("修订卡身份");
+  await expect(instance.complete(id)).rejects.toThrow("修订卡身份");
+  expect((await instance.snapshot(id)).status).not.toBe("completed");
+  expect((await eventsOf(state, id)).length).toBe(before);
+  // 档案本身完好可重开，没有写入任何不可重放事件。
+  expect((await HarnessJournal.open(id, state)).snapshot.status).toBe("idle");
+});
+
+test("批量落盘中途失败：同进程重试只补剩余项，不重复写事实", async () => {
+  const { state, id, candidateCard, decisionId } = await fixture();
+  // 第二个未答决策，使协调归档需要批量写入两条失效事实。
+  const decision2 = crypto.randomUUID();
+  await (await HarnessJournal.open(id, state)).journal.append({ type: "harness.decision_requested", at: new Date().toISOString(), harnessRunId: id, decision: { decisionId: decision2, question: "第二个问题", createdAt: new Date().toISOString(), answer: null, answeredAt: null } });
+  const instance = service(state);
+  const entry = await (instance as unknown as { entry(harnessRunId: string): Promise<{ journal: { append(event: HarnessEvent): Promise<void> } }> }).entry(id);
+  const realAppend = entry.journal.append.bind(entry.journal);
+  let invalidated = 0;
+  entry.journal.append = async (event: HarnessEvent) => {
+    if (event.type === "harness.decision_invalidated") { invalidated += 1; if (invalidated === 2) throw new Error("注入落盘失败"); }
+    return realAppend(event);
+  };
+  // 第一条 decision_invalidated 成功、第二条失败：整体拒绝，不报已归档。
+  await expect(instance.complete(id, true)).rejects.toThrow("注入落盘失败");
+  expect((await instance.snapshot(id)).status).not.toBe("completed");
+  let events = await eventsOf(state, id);
+  expect(events.filter((event) => event.type === "harness.decision_invalidated")).toHaveLength(1);
+  expect(events.filter((event) => event.type === "harness.completed")).toHaveLength(0);
+  // 恢复后同一请求只补剩余项：已耐久的失效事实不重复写入。
+  entry.journal.append = realAppend;
+  const archived = await instance.complete(id, true);
+  expect(archived.status).toBe("completed");
+  expect(archived.decisions.map((item) => item.invalidatedAt)).toEqual([expect.any(String), expect.any(String)]);
+  events = await eventsOf(state, id);
+  expect(events.filter((event) => event.type === "harness.decision_invalidated")).toHaveLength(2);
+  expect(events.filter((event) => event.type === "workflow.card_abandoned" && event.cardId === candidateCard)).toHaveLength(1);
+  expect(events.filter((event) => event.type === "harness.completed")).toHaveLength(1);
+  expect(events.filter((event) => event.type === "harness.decision_invalidated" && event.decisionId === decisionId)).toHaveLength(1);
 });
 
 test("未失效决策拒绝迟到答案，失效后不能再回答", async () => {

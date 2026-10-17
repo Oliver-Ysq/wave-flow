@@ -139,7 +139,10 @@ test("总结准备期间用户先发消息，保留pending且用户回合结束�
  service.setExecutionCapsuleReader(async()=>{reads++;if(reads===1){readerStarted();return new Promise(done=>{releaseEvidence=done;});}return {status:"cancelled"};});
  await started;await service.send(id,"用户优先反馈");releaseEvidence({status:"cancelled"});await Bun.sleep(30);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("pending");expect(calls).toBe(1);
- finishUser("反馈已接收");await summaryStarted(service,id);await settled(service,id);
+ finishUser("反馈已接收");
+ // 总结由用户回合 finally 的 setTimeout 调度；高负载全量运行时回合 idle 与总结回合
+ // 启动之间存在空窗，固定轮询 completed 而不是假定调度时序。
+ for(let n=0;n<800&&(await service.snapshot(id)).impactSummaries![0].status!=="completed";n++)await Bun.sleep(5);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("completed");expect(calls).toBe(2);
 });
 

@@ -428,12 +428,13 @@ export class DesktopExecutionEngine {
   private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new EngineActionError(400, "Harness 归档请求无效。 ");
     const request = value as Record<string, unknown>;
+    if (Object.keys(request).some((key) => !["harnessRunId", "abandonPending", "abandonImpactSummaries"].includes(key))) throw new EngineActionError(400, "Harness 归档不接受额外请求字段。 ");
     for (const key of ["abandonPending", "abandonImpactSummaries"]) if (request[key] !== undefined && typeof request[key] !== "boolean") throw new EngineActionError(400, "归档放弃标识无效。 ");
     // abandonImpactSummaries 为上一版前端字段名；两者都收敛到同一协调归档语义，新前端只使用 abandonPending。
     const abandonPending = request.abandonPending === true || request.abandonImpactSummaries === true;
     try { return { harness: await this.#harness.complete(harnessRunId, abandonPending) }; } catch (error) { throw this.executionError(error); }
   }
-  /** 归档预览只读通道；已归档或不存在任务返回明确错误，不产生任何写入。 */
+  /** 归档预览只读通道；已归档或不存在任务返回明确错误。除首次打开旧档案时按既有规则补齐展示预览外，不产生任何业务写入。 */
   private async archivePreview(harnessRunId: string, value: unknown): Promise<ArchivePreviewResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new EngineActionError(400, "归档预览请求无效。 ");
     const { harnessRunId: _identity, ...rest } = value as Record<string, unknown>;

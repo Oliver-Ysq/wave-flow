@@ -55,6 +55,48 @@ test("归档确认页只呈现实际存在的待定项类别，不补造空分�
   expect(html).toContain("未回答的主控决策（1 项，将失效）");
 });
 
+test("未知来源或总结状态显示原始值，不补造成空白或错误文案", () => {
+  const unknown: ArchivePreview = {
+    harnessRunId: "task-1",
+    requiresAbandon: true,
+    candidate: { ...preview.candidate!, origin: "future-origin" as never },
+    pendingSummaries: [{ key: "s-x", executionId: "execution-xxxxyyyyzzzz", attempt: 1, status: "future-state" as never }],
+    pendingDecisions: [],
+  };
+  const html = renderToStaticMarkup(<ArchiveImpactConfirmation preview={unknown} onClose={() => {}} onConfirm={async () => {}} />);
+  expect(html).toContain("来源：future-origin");
+  expect(html).toContain("future-state");
+  expect(html).not.toContain("undefined");
+});
+
+test("归档进行中无可用按钮时 Tab 必须保持焦点陷阱，不能逃逸到背景", async () => {
+  const source = await Bun.file("src-tauri/web/src/conversation/archive-confirmation.tsx").text();
+  const tabStart = source.indexOf('event.key === "Tab"');
+  const tabSource = source.slice(tabStart, source.indexOf("first.focus()", tabStart));
+  expect(tabSource).toContain("button:not(:disabled)");
+  expect(tabSource).toContain("if (!buttons?.length) {");
+  expect(tabSource).toContain("event.preventDefault();");
+});
+
+test("归档入口去重与决策问题行截断有实现锚点", async () => {
+  const app = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(app).toContain("archiveEntryRef.current === id");
+  expect(app).toContain("if (archiveEntryRef.current === id) return;");
+  const modal = await Bun.file("src-tauri/web/src/conversation/archive-confirmation.tsx").text();
+  expect(modal).toContain('className="archive-pending-list"');
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
+  expect(css).toContain(".archive-pending-list li");
+  expect(css).toContain("-webkit-line-clamp:2");
+});
+
+test("单链子项与多卡分支共享 Worker 待答提示", async () => {
+  const app = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(app).toContain("singleAttention");
+  const singleStart = app.indexOf("singleCell ?");
+  const singleSource = app.slice(singleStart, app.indexOf("workflowCells(item).map", singleStart));
+  expect(singleSource).toContain("需要回答 · ${singleAttention.workerRequests} 个 Worker / ${singleAttention.scriptGates} 个确认");
+});
+
 test("归档确认页不直接调用任何 API：返回处理与确认参数完全由回调决定", async () => {
   const source = await Bun.file("src-tauri/web/src/conversation/archive-confirmation.tsx").text();
   expect(source).not.toContain("from \"../api\"");
