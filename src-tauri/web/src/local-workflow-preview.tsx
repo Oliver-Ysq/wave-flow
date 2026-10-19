@@ -20,8 +20,11 @@ export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,r
  const serial=useRef(0);
  const saveRequest=useRef<{payload:string;id:string}|null>(null);
  return <WorkflowSourceDialog title="本地工作流" onClose={()=>{serial.current++;onClose();}}>
-   {!result&&<p>选择项目内的工作流文件。</p>}
-   <label>工作流文件<input value={path} disabled={busy||!!revision} onChange={event=>{setPath(event.target.value);setResult(null);setError(null);}} placeholder="选择文件，或输入项目内 .ts 文件路径" /></label>
+   {!result&&<p className="local-workflow-intro">选择项目内的工作流文件。</p>}
+   <label className="local-workflow-file-label" htmlFor="local-workflow-path">工作流文件</label>
+   <div className="local-workflow-file-row">
+   <input id="local-workflow-path" value={path} disabled={busy||!!revision} onChange={event=>{setPath(event.target.value);setResult(null);setError(null);}} placeholder="选择文件，或输入项目内 .ts 文件路径" />
+   <div className="local-workflow-file-actions">
    {!revision&&<button type="button" disabled={busy} onClick={async()=>{try{const selected=await open({multiple:false,directory:false,filters:[{name:"TypeScript Workflow",extensions:["ts"]}]});if(typeof selected==="string"){setPath(selected);setResult(null);setError(null);}}catch(cause){setError(cause instanceof Error?cause.message:String(cause));}}}>选择工作流文件</button>}
    <button className={path.trim()?"button-primary":""} type="button" disabled={busy||!path.trim()} onClick={async()=>{
      const token=++serial.current;setBusy(true);setError(null);setResult(null);
@@ -29,7 +32,9 @@ export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,r
      catch(cause){if(serial.current===token)setError(cause instanceof Error?cause.message:String(cause));}
      finally{if(serial.current===token)setBusy(false);}
    }}>{busy?"正在静态检查…":"检查文件"}</button>
-   {!result&&<p className="source-safety-note">检查不会运行脚本。</p>}
+   </div>
+   </div>
+   {!result&&<p className="source-safety-note local-workflow-safety-note">检查不会运行脚本。</p>}
    {error&&<p role="alert">{error.startsWith("ENOENT:")?"找不到工作流文件，请检查路径，或重新选择文件。":userFacingText(error)}</p>}
    {result&&<><div className="source-preflight-status" role="status"><strong>{result.meta.description}</strong><small>文件已检查</small></div><details className="source-check-details"><summary>检查详情</summary><p>{result.path}</p><p>阶段：{result.meta.phases.map(phase=>phase.title).join(" / ")}</p><p>仅做静态检查；执行前会再次核对文件和运行条件。</p></details><CompactParameterForm identity={`${projectId}:${result.sourceHash}`} schema={result.inputSchema} initialValue={revision?.input??result.meta.exampleArgs??{}} busy={busy} onSubmit={async input=>{const payload=JSON.stringify({projectId,path:result.path,hash:result.sourceHash,input,replacement,revision});if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};setBusy(true);try{onPrepared(revision?await api.reviseLocalTask(revision.harnessRunId,revision.baseRevision,result.sourceHash,input,saveRequest.current.id):replacement?await api.reviseLocalTask(replacement.harnessRunId,replacement.baseRevision,result.sourceHash,input,saveRequest.current.id,result.path):await api.createLocalTask(projectId,result.path,result.sourceHash,input,saveRequest.current.id));}finally{setBusy(false);}}}/><p className="source-safety-note">保存后不会立即运行。</p></>}
  </WorkflowSourceDialog>;
