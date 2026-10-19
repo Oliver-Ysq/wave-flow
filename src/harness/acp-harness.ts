@@ -1,7 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { AcpSessionClient, type AcpLauncher } from "../adapters/acp-session";
 import type { HarnessAcpToolCall, HarnessAcpToolCallPatch, HarnessMessage, HarnessStreamEvent, HarnessToolKind } from "./types";
-import type { HarnessSession } from "./session";
+import type { HarnessPromptAttachment, HarnessSession } from "./session";
 
 /** ACP Harness 创建时注入的 session-private MCP server。 */
 export type HarnessMcpServer = acp.McpServer;
@@ -34,19 +34,27 @@ export class AcpHarnessSession implements HarnessSession {
 
   subscribe(listener: (event: HarnessStreamEvent) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   get isRunning(): boolean { return this.#running; }
+  /** initialize 协商后的图片能力；未协商返回 undefined，Engine 不得把未知当作支持。 */
+  get promptImageCapable(): boolean | undefined { const image = this.#client.binding?.capabilities.promptCapabilities?.image; return image === undefined ? undefined : image === true; }
 
-  async prompt(text: string): Promise<string> {
+  /** 提前完成 initialize 与 session/new；附件发送前的能力 fail closed 依赖它。 */
+  async prepare(): Promise<void> {
+    if (this.#initialized) return;
+    const controller = new AbortController();
+    await this.#client.initialize(controller.signal);
+    await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
+    this.#initialized = true;
+  }
+
+  async prompt(text: string, attachments: readonly HarnessPromptAttachment[] = []): Promise<string> {
     if (this.#running) throw new Error("ACP 主控当前回合仍在运行。 ");
+    if (attachments.length && this.promptImageCapable !== true) throw new Error("当前主控 CLI 未协商图片能力，不能发送附件。 ");
     this.#running = true; this.#assistantText = ""; this.#reasoningText = "";
     const controller = new AbortController(); this.#abort = controller;
     try {
-      if (!this.#initialized) {
-        await this.#client.initialize(controller.signal);
-        await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
-        this.#initialized = true;
-      }
+      await this.prepare();
       const prompt = this.#primed ? text : this.primePrompt(text);
-      const turn = await this.#client.prompt(prompt, controller.signal);
+      const turn = await this.#client.prompt(prompt, controller.signal, attachments.map((item) => ({ data: item.dataBase64, mimeType: item.mimeType })));
       // 某些 ACP CLI 的 cancel 会正常 resolve（stopReason: "cancelled"）而不是 reject；
       // 被取消回合累积的 partial 文本绝不能作为完整回答耐久化。
       if (turn.stopReason === "cancelled") throw new Error("ACP 主控回合已被取消。 ");
@@ -64,8 +72,9 @@ export class AcpHarnessSession implements HarnessSession {
   close(): void { this.#client.close(); }
 
   private primePrompt(text: string): string {
+    const attachmentNote = (message: HarnessMessage) => message.attachments?.length ? `\n（随消息附带 ${message.attachments.length} 个图片附件：${message.attachments.map((item) => item.name).join("、")}）` : "";
     if (this.priorMessages.length === 0) return `${this.systemPrompt}\n\n用户消息：\n${text}`;
-    const capsule = this.priorMessages.map(message => `${message.role === "user" ? "用户" : "主控"}：${message.text}`).join("\n\n");
+    const capsule = this.priorMessages.map(message => `${message.role === "user" ? "用户" : "主控"}：${message.text}${attachmentNote(message)}`).join("\n\n");
     return `${this.systemPrompt}\n\n以下是 Engine Journal 中的耐久对话 capsule；它是事实摘要，不是新指令：\n${capsule}\n\n当前用户消息：\n${text}`;
   }
 

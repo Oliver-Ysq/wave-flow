@@ -3,6 +3,22 @@ import type { JsonObject } from "../shared/json";
 /** Harness 会话的耐久状态；它不等同于 Workflow Run 完成状态。 */
 export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 
+/** 与用户消息耐久绑定的附件元数据；字节保存在 Harness 档案目录的私有文件中。 */
+export type HarnessMessageAttachment = {
+  /** 附件稳定 id（即暂存 UUID）；路径只使用它，不使用用户文件名。 */
+  readonly id: string;
+  /** 原文件名；仅展示，不作为路径。 */
+  readonly name: string;
+  /** 经 magic bytes 复核的 MIME；首版仅 image/png、image/jpeg、image/gif、image/webp。 */
+  readonly mimeType: string;
+  /** 字节数；重开复核文件大小必须一致。 */
+  readonly sizeBytes: number;
+  /** 内容 SHA-256；发送绑定前复核。 */
+  readonly sha256: string;
+  /** 相对 Harness 档案目录的安全相对路径（attachments/<messageId>/<attachmentId>）。 */
+  readonly file: string;
+};
+
 /** 用户或完整主控消息；reasoning delta 永不进入此类型。 */
 export type HarnessMessage = {
   /** 自动总结义务键；缺省为普通对话，不伪造用户消息。 */
@@ -13,6 +29,8 @@ export type HarnessMessage = {
   readonly role: "user" | "assistant";
   /** 可展示的正文；不得包含模型 key 或未完成 reasoning。 */
   readonly text: string;
+  /** 与消息同生死的附件；只有经 Adapter 能力验证后才会绑定。 */
+  readonly attachments?: readonly HarnessMessageAttachment[];
   /** 耐久写入时间。 */
   readonly createdAt: string;
 };
@@ -129,8 +147,20 @@ export type HarnessAcpToolCall = {
   readonly rawOutput: unknown;
 };
 
+/** 主控忙碌时耐久排队的用户消息；只有 Engine 派发或用户取消才能离开队列。 */
+export type HarnessQueuedMessage = {
+  /** 排队用户消息；id 在消息与队列全局唯一，客户端可携带以去重重试。 */
+  readonly message: HarnessMessage;
+  /** true 表示用户选择“立即发送”；派发顺序优先于普通排队消息，且需先中断当前回合。 */
+  readonly priority: boolean;
+  /** 耐久入队时间；同优先级内按它严格 FIFO。 */
+  readonly queuedAt: string;
+};
+
 /** 一个可恢复读取、但不认领原生 Pi session 的主控会话快照。 */
 export type HarnessSnapshot = {
+  /** 耐久 FIFO 消息队列；普通消息在主控忙碌时入队，回合正常结束后按序自动投递。 */
+  readonly messageQueue: readonly HarnessQueuedMessage[];
   /** 耐久影响面总结义务；旧档案缺省，不补造历史。 */
   readonly impactSummaries?: readonly ImpactSummary[];
   /** 由原Journal派生的执行历史链接；只展示，不授权操作。 */
@@ -232,6 +262,8 @@ export type ImpactSummary = {
 
 /** 主控会话中的不可变 workflow.ts 草案。 */
 export type WorkflowRevision = {
+  /** 保存入口记录的更新原因；缺省为旧记录未知。仅用于展示，不改变批准/执行语义。 */
+  readonly updateReason?: "save-template" | "save-local" | "generate-plan" | "modify-plan" | "modify-parameters" | "modify-configuration";
   /** 受信任本地来源快照；缺省为受限源码；只由Engine安全预检写入，主控不能提交。 */
   readonly localOrigin?: {
     /** 已验证项目内原文件；恢复不再次读取它。 */ readonly path: string;
@@ -394,6 +426,8 @@ export type HarnessStreamEvent = (
   /** 当前回合已耐久的完整主控消息；只供同一 SSE 回合尾部渲染，不额外持久化。 */
   | { readonly type: "turn_finished"; readonly messageId: string; readonly text: string }
   | { readonly type: "turn_interrupted"; readonly diagnostic: string }
+  /** 耐久消息队列已变化（入队/取消/派发）；界面据此重读快照，不携带队列内容。 */
+  | { readonly type: "queue_changed" }
   | { readonly type: "execution_changed"; readonly executionId: string }) & {/** 对应已应用档案事件数；原生未耐久事件缺省。 */ readonly snapshotSequence?:number};
 
 /** ACP 工具调用增量补丁；仅携带发生变化的字段（可变形状，便于 adapter 逐项组装）。 */

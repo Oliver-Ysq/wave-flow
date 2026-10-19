@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import Ajv from "ajv";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } from "../journal/paths";
 import { isJsonObject, type JsonObject } from "../shared/json";
-import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStatus, HarnessToolActivity, HarnessToolEntry, WorkflowExecutionRecord, WorkflowRevision } from "./types";
+import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessQueuedMessage, HarnessSnapshot, HarnessStatus, HarnessToolActivity, HarnessToolEntry, WorkflowExecutionRecord, WorkflowRevision } from "./types";
 import type { RuntimeProvenance } from "../runtimes/types";
 import { isRevisionPreview, previewMatchesSource, type RevisionPreview } from "./revision-preview";
 import { isTemplateOrigin, isTemplateSelection, validateTemplateInput } from "./workflow-templates";
@@ -13,9 +13,10 @@ import {createHash} from "node:crypto";
 import {canonicalJson} from "./workflow-templates";
 import { impactSummaryKey, assertImpactSummariesComplete } from "./impact-summary";
 import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
+import { verifyMessageAttachments } from "./attachments";
 
 /** 当前Harness档案格式；只读取本格式，不迁移或兼容旧开发档案。 */
-export const HARNESS_JOURNAL_VERSION = 8;
+export const HARNESS_JOURNAL_VERSION = 9;
 
 export type HarnessManifest = {
   /** v7 创建身份与固定标题；历史缺省。 */
@@ -68,6 +69,12 @@ export type HarnessEvent =
   /** 放弃整个候选，版本批准证据不删除。 */
   | { readonly type: "workflow.card_abandoned"; readonly at: string; readonly harnessRunId: string; readonly cardId: string }
   | { readonly type: "harness.created"; readonly at: string; readonly harnessRunId: string }  | { readonly type: "harness.user_message"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage }
+  /** v9：主控忙碌时用户消息耐久入队；入队本身不改变回合状态，绝不直接变成时间线消息。 */
+  | { readonly type: "harness.message_queued"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage; /** 用户选择“立即发送”；派发优先且需先中断当前回合。 */ readonly priority?: boolean }
+  /** v9：用户在尚未投递时显式取消排队；只能命中仍在队列中的消息。 */
+  | { readonly type: "harness.message_cancelled"; readonly at: string; readonly harnessRunId: string; readonly messageId: string }
+  /** v9：Engine 把队首消息原子移入时间线（出队与成为用户消息同事务）；随后必须跟随同一消息的 turn_started。 */
+  | { readonly type: "harness.message_dispatched"; readonly at: string; readonly harnessRunId: string; readonly messageId: string }
   | { readonly type: "harness.turn_started"; readonly at: string; readonly harnessRunId: string; readonly userMessageId: string; /** 总结义务键；缺省普通用户回合。 */ readonly summaryKey?: string }
   | { readonly type: "harness.assistant_message"; readonly at: string; readonly harnessRunId: string; readonly message: HarnessMessage }
   | { readonly type: "harness.tool_activity"; readonly at: string; readonly harnessRunId: string; readonly messageId: string; readonly activities: readonly HarnessToolActivity[] }
@@ -108,10 +115,11 @@ export class HarnessJournal {
     await writePrivateFile(join(directory, "journal.jsonl"), "");
     const journal = new HarnessJournal(manifest, directory);
     await journal.append({ type: "harness.created", at: manifest.createdAt, harnessRunId: manifest.harnessRunId });
-    if (manifest.task) {
+    if (manifest.task && !manifest.task.initialAttachmentsPending) {
       await journal.append({ type: "harness.user_message", at: manifest.createdAt, harnessRunId: manifest.harnessRunId, message: { id: manifest.task.clientRequestId, role: "user", text: manifest.task.initialGoal, createdAt: manifest.createdAt } });
-      await writePrivateFile(join(directory, "creation-ready"), "ready\n");
     }
+    // 附件初始消息虽延迟绑定，创建档案仍先耐久标记；之后Journal丢失不能重建并重发。
+    if (manifest.task) await writePrivateFile(join(directory, "creation-ready"), "ready\n");
     return journal;
   }
 
@@ -131,10 +139,10 @@ export class HarnessJournal {
       await writePrivateFile(journalPath, "");
     }
     const opened = await HarnessJournal.open(id, root);
-    if (ready && !opened.events.some(event => event.type === "harness.user_message")) throw new Error("任务 Journal 不完整；拒绝自动重建以避免重复回合。");
-    if (!ready && opened.events.some(event => !["harness.created", "harness.user_message"].includes(event.type)) && !opened.events.some(event => event.type === "harness.user_message")) throw new Error("任务存在运行事实但初始目标缺失，不能自动修复。");
+    if (ready && !manifest.task.initialAttachmentsPending && !opened.events.some(event => event.type === "harness.user_message")) throw new Error("任务 Journal 不完整；拒绝自动重建以避免重复回合。");
+    if (!manifest.task.initialAttachmentsPending && !ready && opened.events.some(event => !["harness.created", "harness.user_message"].includes(event.type)) && !opened.events.some(event => event.type === "harness.user_message")) throw new Error("任务存在运行事实但初始目标缺失，不能自动修复。");
     if (!opened.events.length) await opened.journal.append({ type: "harness.created", at: manifest.createdAt, harnessRunId: id });
-    if (!opened.events.some(event => event.type === "harness.user_message")) await opened.journal.append({ type: "harness.user_message", at: manifest.createdAt, harnessRunId: id, message: { id: manifest.task.clientRequestId, role: "user", text: manifest.task.initialGoal, createdAt: manifest.createdAt } });
+    if (!manifest.task.initialAttachmentsPending && !opened.events.some(event => event.type === "harness.user_message")) await opened.journal.append({ type: "harness.user_message", at: manifest.createdAt, harnessRunId: id, message: { id: manifest.task.clientRequestId, role: "user", text: manifest.task.initialGoal, createdAt: manifest.createdAt } });
     if (!ready) await writePrivateFile(join(directory, "creation-ready"), "ready\n");
     return manifest;
   }
@@ -164,6 +172,10 @@ export class HarnessJournal {
       }
       try { const event = validateEvent(value, harnessRunId); state.apply(event); events.push(event); } catch (error) { throw new Error(`Harness Journal 第 ${index + 1} 行损坏：${error instanceof Error ? error.message : String(error)}`); }
     }
+    // 附件字节与 Journal 同生死：重开时复核文件存在且大小一致，缺失即 fail closed。
+    for (const message of state.snapshot().messages) {
+      if (message.attachments?.length) await verifyMessageAttachments(directory, message.attachments);
+    }
     return { journal: new HarnessJournal(manifest, directory), snapshot: state.snapshot(), events };
   }
 
@@ -189,6 +201,8 @@ export class HarnessProjection {
   #diagnostic: string | null = null;
   #completedAt: string | null = null;
   #messages: HarnessMessage[] = [];
+  /** v9 耐久消息队列；顺序即入队顺序，priority 只在派发选择时优先，不重排队列本身。 */
+  #queue: HarnessQueuedMessage[] = [];
   #turnUserMessageId: string | null = null;
   #assistantMessageId: string | null = null;
   #toolActivitiesByMessageId: Record<string, HarnessToolActivity[]> = {};
@@ -257,6 +271,29 @@ export class HarnessProjection {
       this.#workflowRevisions = this.#workflowRevisions.map(item => item.cardId === event.cardId ? { ...item, abandonedAt: event.at } : item); return;
     }
     if (event.type === "harness.user_message") { if (this.#status === "running" || this.#status === "completed") throw new Error("已完成或运行中的 Harness 不能追加用户消息。 "); this.#messages.push(event.message); this.#status = "idle"; this.#diagnostic = null; return; }
+    if (event.type === "harness.message_queued") {
+      if (this.#status === "completed") throw new Error("已完成的 Harness 不能排队新消息。 ");
+      if (this.#messages.some((message) => message.id === event.message.id) || this.#queue.some((item) => item.message.id === event.message.id)) throw new Error("Harness 排队消息 id 重复。 ");
+      this.#queue.push({ message: event.message, priority: event.priority === true, queuedAt: event.at });
+      return;
+    }
+    if (event.type === "harness.message_cancelled") {
+      const index = this.#queue.findIndex((item) => item.message.id === event.messageId);
+      if (index < 0) throw new Error("只能取消仍在队列中的消息。 ");
+      this.#queue.splice(index, 1);
+      return;
+    }
+    if (event.type === "harness.message_dispatched") {
+      // 出队与进入时间线是同一事件：不存在“已出队但未成为消息”的中间态档案。
+      if (this.#status === "running") throw new Error("运行中的 Harness 不能派发排队消息。 ");
+      const index = this.#queue.findIndex((item) => item.message.id === event.messageId);
+      if (index < 0) throw new Error("只能派发仍在队列中的消息。 ");
+      const [item] = this.#queue.splice(index, 1);
+      this.#messages.push(item.message);
+      this.#status = "idle";
+      this.#diagnostic = null;
+      return;
+    }
     if (event.type === "harness.turn_started") {
       if (this.#status === "running") throw new Error("主控已有运行回合。");
       if (event.summaryKey) {
@@ -388,7 +425,7 @@ export class HarnessProjection {
       return;
     }
   }
-snapshot(): HarnessSnapshot { return structuredClone({ executionConfirmations:this.#executionConfirmations, impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: this.manifest.task } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }); }
+snapshot(): HarnessSnapshot { return structuredClone({ executionConfirmations:this.#executionConfirmations, impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: this.manifest.task } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], messageQueue: this.#queue.map((item) => ({ ...item })), toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }); }
   /** 条目事件只能属于当前运行中回合；重放乱序即 fail closed。 */
   private assertEntryTurn(turnId: string): void {
     if (this.#status !== "running" || this.#turnUserMessageId !== turnId) throw new Error("Harness 对话条目必须属于当前运行中回合。 ");
@@ -414,8 +451,10 @@ function validateManifest(value: unknown): HarnessManifest {
   if (typeof item.harnessRunId !== "string") throw new Error("Harness manifest 缺少 id。 ");
   validateRunId(item.harnessRunId);
   if (item.task !== undefined && !isTaskMetadata(item.task)) throw new Error("Task manifest 无效。");
-  if (plain(item.task) && item.task.workflowContract !== undefined && item.version !== HARNESS_JOURNAL_VERSION) throw new Error("单链契约必须由当前档案版本显式保存，不能修改旧manifest迁移。");
-  if(item.version!==HARNESS_JOURNAL_VERSION)throw new Error("不支持旧版Harness档案；请清空旧开发记录后创建新任务。");
+  if (plain(item.task) && item.task.workflowContract !== undefined && item.version !== HARNESS_JOURNAL_VERSION && item.version !== 8) throw new Error("单链契约必须由当前档案版本显式保存，不能修改旧manifest迁移。");
+  // v9 相对 v8 只新增事件与可选字段：v8 档案按空队列、无附件兼容读取并继续追加；
+  // v1-v7 结构与字段约定不同，仍 fail closed 拒绝，不猜测迁移。
+  if(item.version!==HARNESS_JOURNAL_VERSION&&item.version!==8)throw new Error("不支持旧版Harness档案；请清空旧开发记录后创建新任务。");
   if ((item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt)) || (item.runtime !== undefined && !isRuntimeProvenance(item.runtime))) throw new Error("Harness manifest 无效。 ");
   return item as unknown as HarnessManifest;
 }
@@ -433,6 +472,8 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.initialization_failed" && typeof item.diagnostic === "string" && item.diagnostic.trim()) return item as unknown as HarnessEvent;
   if (item.type === "workflow.card_abandoned" && typeof item.cardId === "string" && item.cardId.trim()) return item as unknown as HarnessEvent;
   if (item.type === "harness.user_message" || item.type === "harness.assistant_message") { if (!isMessage(item.message, item.type === "harness.user_message" ? "user" : "assistant")) throw new Error("Harness 消息无效。 "); return item as unknown as HarnessEvent; }
+  if (item.type === "harness.message_queued") { if (!isMessage(item.message, "user") || (item.priority !== undefined && typeof item.priority !== "boolean")) throw new Error("Harness 排队消息无效。 "); return item as unknown as HarnessEvent; }
+  if (item.type === "harness.message_cancelled" || item.type === "harness.message_dispatched") { if (typeof item.messageId !== "string" || !item.messageId.trim()) throw new Error("Harness 队列消息身份无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.turn_started") { if (typeof item.userMessageId !== "string" || !item.userMessageId.trim()||item.summaryKey!==undefined&&(typeof item.summaryKey!=="string"||!/^[a-f0-9]{64}$/.test(item.summaryKey))) throw new Error("Harness turn_started 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.tool_activity") { if (typeof item.messageId !== "string" || !item.messageId.trim() || !Array.isArray(item.activities) || item.activities.length === 0 || item.activities.some((activity) => !isToolActivity(activity))) throw new Error("Harness tool_activity 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.entry_started") { if (!isConversationEntry(item.entry, "open")) throw new Error("Harness entry_started 无效。 "); return item as unknown as HarnessEvent; }
@@ -443,6 +484,7 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.completed") {if(item.abandonImpactSummaries!==undefined&&typeof item.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return item as unknown as HarnessEvent;}
   if (item.type === "workflow.revision_proposed" && isWorkflowRevision(item.revision)) {
     const revision=item.revision;
+    if(revision.updateReason!==undefined&&!["save-template","save-local","generate-plan","modify-plan","modify-parameters","modify-configuration"].includes(revision.updateReason))throw new Error("方案更新原因无效。");
     if(revision.localOrigin!==undefined){
       const origin=revision.localOrigin;
       if(!origin||typeof origin.path!=="string"||!origin.path.startsWith("/")||origin.sourceHash!==revision.sourceHash||!isJsonObject(origin.inputSchema)||!isJsonObject(origin.meta)||!isJsonObject(revision.input))throw new Error("本地版本来源或输入无效。");
@@ -475,8 +517,22 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   throw new Error("Harness 事件类型或字段无效。 ");
 }
 
-function isTaskMetadata(value: unknown): boolean { return plain(value) && (value.workflowContract === undefined || value.workflowContract === "single-workflow-v1") && (value.template===undefined||isTemplateSelection(value.template)) && typeof value.clientRequestId === "string" && /^[a-f0-9-]{36}$/i.test(value.clientRequestId) && /^[a-f0-9]{64}$/.test(String(value.payloadHash)) && typeof value.title === "string" && !!value.title.trim() && !/[\r\n]/.test(value.title) && Array.from(value.title).length <= 120 && typeof value.initialGoal === "string" && !!value.initialGoal.trim() && value.initialGoal.length <= 20000; }
-function isMessage(value: unknown, role: HarnessMessage["role"]): value is HarnessMessage { return plain(value) && value.role === role && (value.summaryKey===undefined||typeof value.summaryKey==="string"&&/^[a-f0-9]{64}$/.test(value.summaryKey)) && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)); }
+function isTaskMetadata(value: unknown): boolean { return plain(value) && validInitialAttachmentMetadata(value) && (value.workflowContract === undefined || value.workflowContract === "single-workflow-v1") && (value.template===undefined||isTemplateSelection(value.template)) && typeof value.clientRequestId === "string" && /^[a-f0-9-]{36}$/i.test(value.clientRequestId) && /^[a-f0-9]{64}$/.test(String(value.payloadHash)) && typeof value.title === "string" && !!value.title.trim() && !/[\r\n]/.test(value.title) && Array.from(value.title).length <= 120 && typeof value.initialGoal === "string" && !!value.initialGoal.trim() && value.initialGoal.length <= 20000; }
+/** 初始附件创建标记必须绑定非空唯一UUID列表，不能借标记绕过初始消息完整性。 */
+function validInitialAttachmentMetadata(value: Record<string, unknown>): boolean {
+  if(value.initialAttachmentsPending===undefined&&value.initialAttachmentIds===undefined)return true;
+  return value.initialAttachmentsPending===true&&value.template===undefined&&Array.isArray(value.initialAttachmentIds)&&value.initialAttachmentIds.length>0&&value.initialAttachmentIds.length<=5&&value.initialAttachmentIds.every(id=>typeof id==="string"&&/^[a-f0-9-]{36}$/i.test(id))&&new Set(value.initialAttachmentIds).size===value.initialAttachmentIds.length;
+}
+function isMessageAttachment(value: unknown, messageId: string): value is import("./types").HarnessMessageAttachment {
+  if (!plain(value)) return false;
+  return typeof value.id === "string" && /^[a-f0-9-]{36}$/i.test(value.id)
+    && typeof value.name === "string" && value.name.trim() !== "" && value.name.length <= 255
+    && typeof value.mimeType === "string" && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(value.mimeType)
+    && Number.isInteger(value.sizeBytes) && (value.sizeBytes as number) > 0 && (value.sizeBytes as number) <= 10 * 1024 * 1024
+    && typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256)
+    && value.file === `attachments/${messageId}/${value.id}`;
+}
+function isMessage(value: unknown, role: HarnessMessage["role"]): value is HarnessMessage { return plain(value) && value.role === role && (value.summaryKey===undefined||typeof value.summaryKey==="string"&&/^[a-f0-9]{64}$/.test(value.summaryKey)) && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && (value.attachments === undefined || (role === "user" && Array.isArray(value.attachments) && value.attachments.length > 0 && value.attachments.length <= 5 && value.attachments.every((item) => isMessageAttachment(item, (value as { id: string }).id)))); }
 /** 对话条目形状校验；open 要求进行中形态，terminal 要求终态且身份字段齐全。 */
 function isConversationEntry(value: unknown, phase: "open" | "terminal"): value is HarnessConversationEntry {
   if (!plain(value) || typeof value.entryId !== "string" || !value.entryId.trim() || typeof value.turnId !== "string" || !value.turnId.trim() || !Number.isInteger(value.seq) || (value.seq as number) < 1 || typeof value.legacy !== "boolean" || typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt)) || (value.finishedAt !== null && (typeof value.finishedAt !== "string" || Number.isNaN(Date.parse(value.finishedAt)))) || (phase === "open" && value.finishedAt !== null) || (phase === "terminal" && typeof value.finishedAt !== "string")) return false;

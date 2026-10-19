@@ -69,8 +69,11 @@ test("已执行模板参数修订沿用冻结来源同卡，迟到基础版本�
   await service.recordExecutionFinished(id,executionId,"completed",null,{},1);
   for(let n=0;n<100;n++){if((await service.snapshot(id)).impactSummaries?.[0]?.status==="completed")break;await Bun.sleep(5);}
   const original=(await service.snapshot(id)).workflowRevisions[0];
+  expect(original.updateReason).toBe('save-template');
   const revised=await service.saveTemplate(id,crypto.randomUUID(),{...selection,input:{...selection.input,target:"test/"}},original.cardId,undefined,1);
   expect(revised.workflowRevisions[1].cardId).toBe(original.cardId);expect(revised.workflowRevisions[1].parentRevision).toBe(1);expect(revised.workflowRevisions[1].sourceHash).toBe(original.sourceHash);expect(revised.workflowRevisions[1].acceptedAt).toBeNull();expect(revised.executions).toHaveLength(1);
+  expect(revised.workflowRevisions[1].updateReason).toBe('modify-parameters');
+  expect((await HarnessJournal.open(id,root)).snapshot.workflowRevisions[1].updateReason).toBe('modify-parameters');
   await expect(service.saveTemplate(id,crypto.randomUUID(),selection,original.cardId,undefined,1)).rejects.toThrow("参数版本已更新");
   expect((await HarnessJournal.open(id,root)).snapshot.workflowRevisions[0]).toEqual(original);
  }finally{service.close();}
@@ -85,6 +88,8 @@ test("CLI-only修改先追加未批准版本，相同请求幂等且原源码输
   await service.recordExecutionCreated(id,{executionId,revision:1,sourceHash:original.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxGates:10,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,diagnostic:null,summary:null});await service.recordExecutionFinished(id,executionId,"completed",null,{},1);
   for(let n=0;n<100;n++){if((await service.snapshot(id)).impactSummaries?.[0]?.status==="completed")break;await Bun.sleep(5);}
   const request=crypto.randomUUID(),next=await service.prepareConfigurationRevision(id,request,1);expect(next.workflowRevisions).toHaveLength(2);
+  expect(original.updateReason).toBe('generate-plan');
+  expect(next.workflowRevisions[1].updateReason).toBe('modify-configuration');
   expect(next.workflowRevisions[1]).toMatchObject({source:original.source,sourceHash:original.sourceHash,cardId:original.cardId,parentRevision:1,acceptedAt:null});expect(next.workflowRevisions[0]).toEqual(original);expect(next.executions).toHaveLength(1);
   expect((await service.prepareConfigurationRevision(id,request,1)).workflowRevisions).toHaveLength(2);
   await expect(service.prepareConfigurationRevision(id,crypto.randomUUID(),1)).rejects.toThrow("当前草案");

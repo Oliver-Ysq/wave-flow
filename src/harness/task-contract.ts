@@ -5,6 +5,7 @@ import { canonicalJson, isTemplateSelection } from "./workflow-templates";
 
 /** 用户明确提交的自动编排或预置任务。 */
 export type TaskCreation = {
+  /** 首条消息的图片暂存身份；默认无附件，最多5个，发送前复核能力和字节。 */ readonly stagedAttachmentIds?: readonly string[];
   /** 预置创建请求；缺省自动编排。有值时保存候选，needsGuidance 才安排主控，永不因此启动 Worker。 */
   readonly template?: TemplateSelection;
   /** 客户端 UUID；重试保持不变。 */
@@ -18,6 +19,8 @@ export type TaskCreation = {
 };
 /** 创建事实；hash 用于冲突检测，不作为授权。 */
 export type TaskMetadata = {
+  /** 首条图片消息等待完整附件校验；true时创建不得补造纯文本初始消息。 */ readonly initialAttachmentsPending?: boolean;
+  /** 首条创建请求冻结的暂存身份；只用于未投递初始消息的显式重试，失效时拒绝，不重新读原文件。 */ readonly initialAttachmentIds?: readonly string[];
   /** 创建时冻结的单链契约；缺省为已实现多卡模式，不能在重开时自动迁移。 */
   readonly workflowContract?: "single-workflow-v1";
   /** 原始预置创建载荷，恢复部分创建时继续同一候选；历史缺省为自动编排。 */
@@ -51,15 +54,16 @@ export function taskIdForRequest(requestId: string): string {
 }
 /** 验证并规范化创建，不接受未来来源占位字段。 */
 export function normalizeTaskCreation(raw: TaskCreation): TaskCreation & { title: string; payloadHash: string } {
-  if (!raw || typeof raw !== "object" || Object.keys(raw).some(key => !["clientRequestId", "projectId", "text", "title", "template"].includes(key))) throw new Error("任务创建字段无效。");
+  if (!raw || typeof raw !== "object" || Object.keys(raw).some(key => !["clientRequestId", "projectId", "text", "title", "template", "stagedAttachmentIds"].includes(key))) throw new Error("任务创建字段无效。");
+  if (raw.stagedAttachmentIds !== undefined && (!Array.isArray(raw.stagedAttachmentIds) || raw.stagedAttachmentIds.length > 5 || raw.stagedAttachmentIds.some(id => typeof id !== "string" || !id.trim()) || new Set(raw.stagedAttachmentIds).size !== raw.stagedAttachmentIds.length || raw.template !== undefined)) throw new Error("首条消息附件身份无效，预置任务不接受附件。");
   if (typeof raw.clientRequestId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(raw.clientRequestId)) throw new Error("任务请求标识必须是 UUID。");
   if (typeof raw.projectId !== "string" || !raw.projectId.trim() || typeof raw.text !== "string" || !raw.text.trim() || raw.text.length > 20000) throw new Error("任务项目或目标无效。");
   const text = raw.text.trim();
   if(raw.template!==undefined&&!isTemplateSelection(raw.template))throw new Error("模板选择字段无效。");
   const title = raw.title === undefined ? Array.from(text.split(/\r?\n/)[0]).slice(0, 120).join("") : raw.title;
   if (typeof title !== "string" || !title.trim() || /[\r\n]/.test(title) || Array.from(title.trim()).length > 120) throw new Error("任务标题必须为 1–120 个单行字符。");
-  const value = { clientRequestId: raw.clientRequestId.toLowerCase(), projectId: raw.projectId, text, title: title.trim(), ...(raw.template ? {template: raw.template} : {}) };
-  const payload={projectId:value.projectId,text:value.text,title:value.title,...(value.template?{template:value.template}:{})};
+  const value = { clientRequestId: raw.clientRequestId.toLowerCase(), projectId: raw.projectId, text, title: title.trim(), ...(raw.template ? {template: raw.template} : {}), ...(raw.stagedAttachmentIds?.length ? {stagedAttachmentIds: [...raw.stagedAttachmentIds]} : {}) };
+  const payload={projectId:value.projectId,text:value.text,title:value.title,...(value.template?{template:value.template}:{}),...(value.stagedAttachmentIds?{stagedAttachmentIds:value.stagedAttachmentIds}:{})};
   return { ...value, payloadHash: createHash("sha256").update(value.template?canonicalJson(payload):JSON.stringify(payload)).digest("hex") };
 }
 /** 最新未执行且未放弃的候选；拒绝版本仍允许同卡修改。 */

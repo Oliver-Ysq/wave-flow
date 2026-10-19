@@ -153,7 +153,7 @@ export class AcpSessionClient {
   }
 
   /** 发起一个 prompt。连接在请求完成前中断时，一律抛投递不确定，禁止上层自动重发。 */
-  async prompt(text: string, signal: AbortSignal): Promise<acp.PromptResponse> {
+  async prompt(text: string, signal: AbortSignal, images: readonly { readonly data: string; readonly mimeType: string }[] = []): Promise<acp.PromptResponse> {
     const binding = this.requireBinding();
     if (!text.trim()) throw new Error("ACP prompt 不能为空。 ");
     if (this.#permissionTurn) throw new Error("ACP回合仍在运行，不能覆盖权限等待身份。");
@@ -161,9 +161,10 @@ export class AcpSessionClient {
     this.#permissionTurn = turn;
     this.#permissionSignal = AbortSignal.any([signal, turn.signal, this.#permissionAbort.signal]);
     try {
+      const prompt: acp.ContentBlock[] = [{ type: "text", text }, ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))];
       return await this.requireConnection().agent.request(acp.methods.agent.session.prompt, {
         sessionId: binding.sessionId,
-        prompt: [{ type: "text", text }],
+        prompt,
       }, { cancellationSignal: signal });
     } catch (error) {
       if (signal.aborted || this.#closed) throw new AcpAmbiguousPromptError(`ACP prompt 投递结果不确定：${messageOf(error)}`);

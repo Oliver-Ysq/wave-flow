@@ -18,6 +18,7 @@ import { HarnessService } from "../harness/service";
 import { assertStartable, type TaskCreation } from "../harness/task-contract";
 import { canonicalJson, isTemplateSelection, listWorkflowTemplates, validateTemplateInput } from "../harness/workflow-templates";
 import { HarnessProjectStore } from "../harness/projects";
+import { readProjectContext } from "./project-context";
 import { HarnessExecutionService } from "../harness/executions";
 import { repairHarnessHomePermissions } from "../harness/journal";
 import { CliRuntimeRegistry } from "../runtimes/registry";
@@ -321,6 +322,8 @@ export class DesktopExecutionEngine {
       catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
     }
     await this.#harness.convergeStaleTurns();
+    await this.#harness.resumeMessageQueues();
+    await this.#harness.resetAttachmentStaging();
   }
 
   /** 注册一个真实 Run 的 ControlServer；必须与当前 Engine 中的同一 Run 绑定。 */
@@ -480,9 +483,16 @@ export class DesktopExecutionEngine {
   private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: (await this.#harness.list()).map(task=>this.taskPresentation(task)) }; }
   private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as HarnessMessageRequest).text !== "string") throw new EngineActionError(400, "Harness 消息请求无效。 ");
-    await this.#harness.send(harnessRunId, (value as HarnessMessageRequest).text);
+    const request = value as HarnessMessageRequest;
+    if (request.clientMessageId !== undefined && typeof request.clientMessageId !== "string") throw new EngineActionError(400, "消息标识必须是字符串 UUID。 ");
+    if (request.immediate !== undefined && typeof request.immediate !== "boolean") throw new EngineActionError(400, "立即发送标识无效。 ");
+    if (request.stagedAttachmentIds !== undefined && (!Array.isArray(request.stagedAttachmentIds) || request.stagedAttachmentIds.some((item) => typeof item !== "string"))) throw new EngineActionError(400, "附件暂存身份列表无效。 ");
+    await this.#harness.submit(harnessRunId, request.text, { ...(request.clientMessageId !== undefined ? { clientMessageId: request.clientMessageId } : {}), ...(request.immediate !== undefined ? { immediate: request.immediate } : {}), ...(request.stagedAttachmentIds?.length ? { stagedAttachmentIds: request.stagedAttachmentIds } : {}) });
     return { harness: await this.#harness.snapshot(harnessRunId) };
   }
+  private async cancelQueuedHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { return { harness: await this.#harness.cancelQueued(harnessRunId, requiredString(value, "messageId")) }; }
+  private async stageHarnessAttachment(value: unknown): Promise<import("../harness/attachments").StagedAttachment> { return this.#harness.stageAttachment(requiredString(value, "path")); }
+  private async harnessAttachmentData(harnessRunId: string, value: unknown): Promise<{ readonly dataUrl: string }> { return this.#harness.attachmentData(harnessRunId, requiredString(value, "messageId"), requiredString(value, "attachmentId")); }
   private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
   private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value as CompleteHarnessRequest)) throw new EngineActionError(400, "Harness complete 不接受请求字段。 "); try { return { harness: await this.#harness.complete(harnessRunId) }; } catch (error) { throw this.executionError(error); } }
   private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
@@ -710,6 +720,7 @@ export class DesktopExecutionEngine {
       case "runtimes.select": return this.selectCliRuntime(requiredString(value, "runtimeId"), {});
       case "runtimes.delete": return this.deleteCliRuntime(requiredString(value, "runtimeId"));
       case "projects.list": return this.listProjects();
+      case "projects.context": return readProjectContext((await this.#projects.get(requiredString(value, "projectId"))).cwd);
       case "projects.create": return this.createProject(value);
       case "templates.list": return {templates:listWorkflowTemplates()};
       case "templates.save": {
@@ -726,6 +737,9 @@ export class DesktopExecutionEngine {
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
       case "harnesses.get": return this.harnessSnapshot(requiredString(value, "harnessRunId"));
       case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
+      case "harnesses.cancelQueued": return this.cancelQueuedHarnessMessage(requiredString(value, "harnessRunId"), value);
+      case "harnesses.stageAttachment": return this.stageHarnessAttachment(value);
+      case "harnesses.attachmentData": return this.harnessAttachmentData(requiredString(value, "harnessRunId"), value);
       case "harnesses.retryImpactSummary": return {harness:await this.#harness.retryImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"))};
       case "harnesses.stopImpactSummary": return {harness:await this.#harness.stopImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"),requiredString(value,"turnId"))};
       case "harnesses.recoverController": return {harness:await this.#harness.recoverController(requiredString(value,"harnessRunId"))};

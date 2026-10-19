@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { assertImpactSummariesComplete, boundedEvidence, ImpactSupplementRequiredError } from "./impact-summary";
-import { readdir, realpath } from "node:fs/promises";
+import { readdir, realpath, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, validateDecisionAnswer, validateDecisionSchema, type HarnessManifest } from "./journal";
 import { TurnConversationRecorder, type EngineToolStart } from "./conversation-recorder";
 import type { HarnessSession } from "./session";
-import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
+import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessMessageAttachment, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
 import { harnessRunsRoot, validateRunId } from "../journal/paths";
 import {isJsonObject,type JsonObject} from "../shared/json";
 import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks } from "./action-tools";
@@ -18,6 +19,7 @@ import { TaskLifecycle } from "./task-lifecycle";
 import { assertStartable, candidateRevision, normalizeTaskCreation, taskIdForRequest, type TaskCreation, type TaskMetadata } from "./task-contract";
 import { canonicalJson, isTemplateSelection, resolveWorkflowTemplate, validateTemplateInput } from "./workflow-templates";
 import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
+import { withAttachmentSubmission, consumeStagedAttachments, readAttachmentBase64, resetAttachmentStaging, resolveStagedAttachments, stageAttachment as stageAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, type StagedAttachment } from "./attachments";
 
 /** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
@@ -212,14 +214,14 @@ export class HarnessService {
         if (recovered.task?.payloadHash !== value.payloadHash || recovered.projectId !== value.projectId) throw new Error("任务请求载荷与耐久档案冲突。");
       } else {
         if(value.template){const template=resolveWorkflowTemplate(value.template.id,value.template.version,value.template.sourceHash);if(!value.template.needsGuidance)validateTemplateInput(template.inputSchema,value.template.input);}
-        await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text, ...(value.template ? {template:value.template} : {}), ...(this.singleWorkflowForAcceptance ? { workflowContract: "single-workflow-v1" as const } : {}) });
+        await this.create(cwd, value.projectId, { clientRequestId: value.clientRequestId, payloadHash: value.payloadHash, title: value.title, initialGoal: value.text, ...(value.stagedAttachmentIds?.length ? {initialAttachmentsPending:true,initialAttachmentIds:[...value.stagedAttachmentIds]} : {}), ...(value.template ? {template:value.template} : {}), ...(this.singleWorkflowForAcceptance ? { workflowContract: "single-workflow-v1" as const } : {}) });
       }
       const entry = await this.entry(id);
       if(entry.projection.snapshot().status==="completed")return entry.projection.snapshot();
       if (value.template) return this.prepareTemplate(id, value.clientRequestId, value.template);
       const opened = await HarnessJournal.open(id, this.root);
       if (!opened.events.some(event => event.type === "harness.turn_started")) {
-        try { await this.send(id, value.text, true); }
+        try { if(value.stagedAttachmentIds?.length) await this.submit(id,value.text,{clientMessageId:value.clientRequestId,stagedAttachmentIds:value.stagedAttachmentIds}); else await this.send(id, value.text, true); }
         catch (error) {
           const event = { type: "harness.initialization_failed" as const, at: new Date().toISOString(), harnessRunId: id, diagnostic: `任务已创建，主控启动失败：${error instanceof Error ? error.message : String(error)}` };
           await entry.journal.append(event); entry.projection.apply(event);
@@ -252,7 +254,7 @@ export class HarnessService {
       const extracted=extractAgentWorkers(checked.source);
       const {source,...origin}=checked;
       const revision:import("./types").WorkflowRevision={revision:1,cardId:crypto.randomUUID(),parentRevision:null,goal:checked.meta.description,scope:"受信任本地文件；只在确认后执行",turnId:request.clientRequestId,source,sourceHash:checked.sourceHash,localOrigin:{path:origin.path,sourceHash:origin.sourceHash,meta:origin.meta,inputSchema:origin.inputSchema},input:structuredClone(request.input),createdAt:new Date().toISOString(),acceptedAt:null,rejectedAt:null,abandonedAt:null,preview:{previewVersion:REVISION_PREVIEW_VERSION,sourceHash:checked.sourceHash,phaseTitles:checked.meta.phases.map(p=>p.title),previewAgents:extracted.previewAgents}};
-      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision:{...revision,updateReason:"save-local" as const}};
       await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
     });
   }
@@ -269,7 +271,7 @@ export class HarnessService {
       if(snapshot.task?.workflowContract!=="single-workflow-v1"||snapshot.status!=="idle"||entry.turn||prior?.revision!==baseRevision||prior.localOrigin||prior.abandonedAt||!snapshot.executions.some(item=>item.revision===baseRevision)||snapshot.executions.some(item=>item.finishedAt===null))throw new Error("只能为最新已执行非本地方案准备CLI配置新版本，不能覆盖当前草案。");
       assertImpactSummariesComplete(snapshot);
       const revision={...prior,revision:baseRevision+1,parentRevision:baseRevision,acceptedAt:null,rejectedAt:null,abandonedAt:null,createdAt:new Date().toISOString(),turnId:requestId,saveRequestId:requestId,savePayloadHash:hash,scope:`${prior.scope??"原工作范围"}\n仅准备CLI配置修订，保留源码/输入与当前现场；实际CLI须在新版确认时明确选择，全部节点重新工作。`};
-      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision:{...revision,updateReason:"modify-configuration" as const}};await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
     });
   }
 
@@ -292,7 +294,7 @@ export class HarnessService {
       if(checked.sourceHash!==request.sourceHash)throw new Error("本地文件已变化，请重新预检。");
       validateLocalInput(checked.inputSchema,request.input);
       const revision:import("./types").WorkflowRevision={revision:prior.revision+1,cardId:prior.cardId,parentRevision:prior.revision,goal:checked.meta.description,scope:"受信任本地文件；只在确认后执行",source:checked.source,sourceHash:checked.sourceHash,localOrigin:{path:checked.path,sourceHash:checked.sourceHash,meta:checked.meta,inputSchema:checked.inputSchema},input:structuredClone(request.input),acceptedAt:null,rejectedAt:null,abandonedAt:null,createdAt:new Date().toISOString(),turnId:request.clientRequestId,preview:{previewVersion:REVISION_PREVIEW_VERSION,sourceHash:checked.sourceHash,phaseTitles:checked.meta.phases.map(p=>p.title),previewAgents:extractAgentWorkers(checked.source).previewAgents}};
-      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision:{...revision,updateReason:request.path?"save-local" as const:prior.sourceHash!==revision.sourceHash?"modify-plan" as const:"modify-parameters" as const}};await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
     });
   }
 
@@ -330,7 +332,7 @@ export class HarnessService {
     if(pending?.parametersPending&&pending.templateOrigin&&pending.saveRequestId){
       return this.mutate(id,async()=>this.startSavedTemplateGuidance(id,pending.saveRequestId!,await this.snapshot(id)));
     }
-    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title, ...(snapshot.task.template ? {template:snapshot.task.template} : {}) });
+    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title, ...(snapshot.task.initialAttachmentIds?.length?{stagedAttachmentIds:snapshot.task.initialAttachmentIds}:{}), ...(snapshot.task.template ? {template:snapshot.task.template} : {}) });
   }
 
   /** 目录来源的唯一保存入口；不接受客户端源码，不批准或创建执行。baseRevision 缺省兼容内部旧请求，有值时必须为当前候选正整数版本，并参与重试载荷指纹。 */
@@ -368,7 +370,7 @@ export class HarnessService {
         templateOrigin, input:structuredClone(selection.input), ...(selection.needsGuidance?{parametersPending:true}:{}), saveRequestId:requestId, savePayloadHash:payloadHash,
         preview:this.buildRevisionPreview(source), createdAt:new Date().toISOString(), acceptedAt:null, rejectedAt:null, abandonedAt:null,
       };
-      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision};
+      const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision:{...revision,updateReason:candidate?"modify-parameters" as const:"save-template" as const}};
       await entry.journal.append(event);entry.projection.apply(event);
       return entry.projection.snapshot();
     });
@@ -444,7 +446,7 @@ export class HarnessService {
     }
   }
 
-  async send(harnessRunId: string, text: string, reuseInitial = false, userMessageId?:string, summaryKey?: string): Promise<void> {
+  async send(harnessRunId: string, text: string, reuseInitial = false, userMessageId?:string, summaryKey?: string, fromQueue = false, directAttachments?: readonly HarnessMessageAttachment[]): Promise<void> {
     if (!text.trim() || text.length > (summaryKey ? 60_000 : 20_000)) throw new Error("Harness 消息超出长度限制。 ");
     const entry = await this.entry(harnessRunId);
     await this.mutate(harnessRunId, async () => {
@@ -458,18 +460,28 @@ export class HarnessService {
     const turnToken = crypto.randomUUID();
     const actions = this.actionCallbacks(harnessRunId);
     const snapshotBefore=entry.projection.snapshot();
-    const prior = reuseInitial ? [] : snapshotBefore.messages.filter(message=>!message.summaryKey||snapshotBefore.impactSummaries?.some(item=>item.status==="completed"&&item.messageId===message.id));
-    if(entry.projection.snapshot().task&&!entry.projection.snapshot().runtime){
-      const identity=await this.resolveSessionIdentity();
-      if(identity.runtime){const event={type:"harness.runtime_initialized" as const,at:new Date().toISOString(),harnessRunId,runtime:identity.runtime};await entry.journal.append(event);entry.projection.apply(event);}
-    }
-    const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
-    entry.session = session;
-    const recorded=userMessageId?entry.projection.snapshot().messages.find(message=>message.id===userMessageId):undefined;
+    const prior = reuseInitial ? [] : snapshotBefore.messages.filter(message=>message.id!==userMessageId&&(!message.summaryKey||snapshotBefore.impactSummaries?.some(item=>item.status==="completed"&&item.messageId===message.id)));
+    const session = await this.ensureSession(harnessRunId, entry, prior, actions);
+    // 成员与载荷校验必须先于任何消息事实落盘；fromQueue 的消息此时仍在队列中。
+    const queued = fromQueue ? snapshotBefore.messageQueue.find((item) => item.message.id === userMessageId) : undefined;
+    if (fromQueue && (!userMessageId || !queued || queued.message.text !== text)) throw new QueueMessageGoneError("排队消息已被取消或派发，未重复投递。 ");
+    const recorded=userMessageId?snapshotBefore.messages.find(message=>message.id===userMessageId):undefined;
     if(recorded&&(recorded.role!=="user"||recorded.text!==text))throw new Error("引导消息请求载荷冲突。");
-    const user: HarnessMessage = reuseInitial ? entry.projection.snapshot().messages[0] : recorded??{ id: summaryKey ? `summary:${summaryKey}:${turnToken}` : userMessageId??crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString() };
+    const attachmentMeta = queued?.message.attachments ?? recorded?.attachments ?? (directAttachments?.length ? directAttachments : undefined);
+    // 附件 fail closed：能力未协商或不支持时，在任何用户消息/出队事实落盘前拒绝。
+    if (attachmentMeta?.length) {
+      await session.prepare?.();
+      if (session.promptImageCapable !== true) throw new Error("当前主控 CLI 未验证支持图片附件；消息未发送。 ");
+    }
+    if (fromQueue && userMessageId) {
+      // 出队与成为时间线消息是同一耐久事件；不存在“已出队但未成为消息”的中间态档案。
+      const dispatched = { type: "harness.message_dispatched" as const, at: new Date().toISOString(), harnessRunId, messageId: userMessageId };
+      await entry.journal.append(dispatched); entry.projection.apply(dispatched);
+      this.emit(entry, harnessRunId, { type: "queue_changed" });
+    }
+    const user: HarnessMessage = reuseInitial ? entry.projection.snapshot().messages[0] : recorded??queued?.message??{ id: summaryKey ? `summary:${summaryKey}:${turnToken}` : userMessageId??crypto.randomUUID(), role: "user", text, createdAt: new Date().toISOString(), ...(directAttachments?.length ? { attachments: directAttachments } : {}) };
     const userEvent = { type: "harness.user_message" as const, at: user.createdAt, harnessRunId, message: user };
-    if (!reuseInitial&&!recorded&&!summaryKey) { await entry.journal.append(userEvent); entry.projection.apply(userEvent); }
+    if (!reuseInitial&&!recorded&&!queued&&!summaryKey) { await entry.journal.append(userEvent); entry.projection.apply(userEvent); }
     const started = { type: "harness.turn_started" as const, at: new Date().toISOString(), harnessRunId, userMessageId: user.id, ...(summaryKey ? {summaryKey} : {}) };
     await entry.journal.append(started); entry.projection.apply(started);
     entry.turnToken = turnToken;
@@ -479,7 +491,8 @@ export class HarnessService {
     const unsubscribe = session.subscribe((event) => { if(entry.turnToken!==turnToken)return;recorder.handleStreamEvent(event); for (const listener of entry.listeners) listener(event); });
     entry.turn = this.lifecycle.outside(async () => {
       try {
-        const answer = await session.prompt(text);
+        const promptAttachments = attachmentMeta?.length ? await Promise.all(attachmentMeta.map((item) => readAttachmentBase64(entry.journal.directory, item))) : undefined;
+        const answer = await session.prompt(text, promptAttachments);
         await this.mutate(harnessRunId,async()=>{
         // 退出或异常收敛可能已在 prompt 等待期间写入 turn_interrupted。迟到的
         // provider 回答不能再追加 assistant_message，否则 Journal 状态顺序损坏。
@@ -522,14 +535,133 @@ export class HarnessService {
         unsubscribe();
         if(entry.turnToken===turnToken){entry.recorder = null;entry.turn = null;}
         this.scheduleImpactSummary(harnessRunId);
+        // 回合正常结束（idle）后立即按耐久 FIFO 继续投递；用户停止/错误中断保持队列不自动派发。
+        if (!this.exiting && entry.projection.snapshot().status === "idle" && entry.projection.snapshot().messageQueue.length > 0) void this.dispatchNext(harnessRunId).catch(() => {});
       }
     });
     });
   }
 
   /**
+   * 用户消息统一入口：空闲且队列为空时直接开回合；主控忙碌或队列非空时耐久入队。
+   * immediate 表示“立即发送”：先入队为优先级消息，再中断当前回合并关闭原生会话，
+   * 只有中断事实确认后才优先派发；中断未确认时 fail closed，消息留在队列头部等待。
+   * clientMessageId 为客户端生成的 UUID；重复提交命中已耐久消息或队列时幂等返回现状。
+   */
+  async submit(harnessRunId: string, text: string, options: { readonly clientMessageId?: string; readonly immediate?: boolean; readonly stagedAttachmentIds?: readonly string[] } = {}): Promise<HarnessSnapshot> {
+    return options.stagedAttachmentIds?.length
+      ? withAttachmentSubmission(this.root,()=>this.submitMessage(harnessRunId,text,options))
+      : this.submitMessage(harnessRunId,text,options);
+  }
+
+  private async submitMessage(harnessRunId: string, text: string, options: { readonly clientMessageId?: string; readonly immediate?: boolean; readonly stagedAttachmentIds?: readonly string[] }): Promise<HarnessSnapshot> {
+    if (!text.trim() || text.length > 20_000) throw new Error("Harness 消息超出长度限制。 ");
+    if (options.clientMessageId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(options.clientMessageId)) throw new Error("消息标识必须是 UUID。 ");
+    const stagedIds = options.stagedAttachmentIds ?? [];
+    if (stagedIds.length > MAX_ATTACHMENTS_PER_MESSAGE) throw new Error(`一条消息最多 ${MAX_ATTACHMENTS_PER_MESSAGE} 个附件。 `);
+    const entry = await this.entry(harnessRunId);
+    const before = entry.projection.snapshot();
+    if (options.clientMessageId && (before.messages.some((message) => message.id === options.clientMessageId) || before.messageQueue.some((item) => item.message.id === options.clientMessageId))) return before;
+    if (before.status === "completed") throw new Error("该会话已完成归档；请创建新会话继续。 ");
+    // 先协商图片能力，失败保留暂存以便显式重试；通过后整批复核并复制字节。
+    const messageId = options.clientMessageId ?? crypto.randomUUID();
+    if (stagedIds.length) {
+      try {
+        await this.mutate(harnessRunId, async () => {
+          const session = await this.ensureSession(harnessRunId, entry, before.messages.filter((message) => !message.summaryKey), this.actionCallbacks(harnessRunId));
+          await session.prepare?.();
+          if (session.promptImageCapable !== true) throw new Error("当前主控 CLI 未验证支持图片附件；消息未发送。 ");
+        });
+      } catch (error) {
+        // 能力失败不消费暂存，不以文字替代图片。
+        throw error;
+      }
+    }
+    const attachments = stagedIds.length ? await resolveStagedAttachments(this.root, stagedIds, entry.journal.directory, messageId) : undefined;
+    try {
+    const busy = before.status === "running" || !!entry.turn;
+    if (!busy && before.messageQueue.length === 0 && !options.immediate) {
+      await this.send(harnessRunId, text, false, options.clientMessageId ?? (attachments ? messageId : undefined), undefined, false, attachments);
+      return entry.projection.snapshot();
+    }
+    const message: HarnessMessage = { id: messageId, role: "user", text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    await this.mutate(harnessRunId, async () => {
+      if (this.exiting) throw new Error("应用正在退出，不接受新消息。 ");
+      const current = entry.projection.snapshot();
+      if (current.status === "completed") throw new Error("该会话已完成归档；请创建新会话继续。 ");
+      if (current.messages.some((item) => item.id === message.id) || current.messageQueue.some((item) => item.message.id === message.id)) return;
+      const queued = { type: "harness.message_queued" as const, at: message.createdAt, harnessRunId, message, ...(options.immediate ? { priority: true } : {}) };
+      await entry.journal.append(queued); entry.projection.apply(queued);
+      this.emit(entry, harnessRunId, { type: "queue_changed" });
+    });
+    if (options.immediate) {
+      const current = entry.projection.snapshot();
+      if (current.status === "running" || entry.turn) await this.interruptRunningTurn(harnessRunId, entry, "用户选择立即发送新消息，当前主控回合已中断。 ");
+    }
+    // 不忙碌时入队后继续按 FIFO 投递；忙碌/中断未确认时留在队列，由回合结束或恢复路径接管。
+    await this.dispatchNext(harnessRunId);
+    return entry.projection.snapshot();
+    } finally {
+      // 即便后续回合启动失败，已耐久接受的消息也不能再消费为另一条消息。
+      // 落盘前失败则保留全部暂存，调用方可按原身份显式重试。
+      const current = entry.projection.snapshot();
+      if (attachments && (current.messages.some(item => item.id === messageId) || current.messageQueue.some(item => item.message.id === messageId))) {
+        await consumeStagedAttachments(this.root, stagedIds).catch(() => {});
+      }
+    }
+  }
+
+  /** 取消一条尚未投递的排队消息；已派发或不存在时拒绝且零写入。 */
+  async cancelQueued(harnessRunId: string, messageId: string): Promise<HarnessSnapshot> {
+    const entry = await this.entry(harnessRunId);
+    await this.mutate(harnessRunId, async () => {
+      if (!entry.projection.snapshot().messageQueue.some((item) => item.message.id === messageId)) throw new Error("该消息已投递或不在队列中，未取消。 ");
+      const event = { type: "harness.message_cancelled" as const, at: new Date().toISOString(), harnessRunId, messageId };
+      await entry.journal.append(event); entry.projection.apply(event);
+      this.emit(entry, harnessRunId, { type: "queue_changed" });
+    });
+    return entry.projection.snapshot();
+  }
+
+  /** Engine 重启后恢复从未投递的排队消息；这不是重发——这些消息从未进入任何回合。 */
+  async resumeMessageQueues(): Promise<void> {
+    let ids: string[];
+    try { ids = await readdir(this.root); } catch { return; }
+    for (const harnessRunId of ids) {
+      try {
+        const entry = await this.entry(harnessRunId);
+        const snapshot = entry.projection.snapshot();
+        if (entry.turn || (snapshot.status !== "idle" && snapshot.status !== "interrupted") || snapshot.messageQueue.length === 0) continue;
+        void this.dispatchNext(harnessRunId).catch(() => {});
+      } catch { /* 单个损坏档案不阻断其他 Harness 队列恢复。 */ }
+    }
+  }
+
+  /**
+   * 派发队首（优先级消息按入队序优先于普通消息）。只在 idle/interrupted 且无活跃回合时
+   * 前进；用户显式停止后不自动调用本方法。与取消并发时重选队首，绝不派发已离开队列的消息。
+   */
+  private async dispatchNext(harnessRunId: string): Promise<void> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const entry = await this.entry(harnessRunId);
+      const snapshot = entry.projection.snapshot();
+      if (this.exiting || entry.turn || (snapshot.status !== "idle" && snapshot.status !== "interrupted")) return;
+      const next = snapshot.messageQueue.find((item) => item.priority) ?? snapshot.messageQueue[0];
+      if (!next) return;
+      try {
+        await this.send(harnessRunId, next.message.text, false, next.message.id, undefined, true);
+        return;
+      } catch (error) {
+        if (error instanceof QueueMessageGoneError) continue;
+        throw error;
+      }
+    }
+  }
+
+
+  /**
    * 发送一条消息并等待该回合完全收敛（finished 或 interrupted）后返回最新快照。
-   * 仅供 Engine 内部结构化通道（如分配规则解析）使用；UI 仍走 send + 快照轮询。
+   * 仅供 Engine 内部结构化通道（如分配规则解析）使用；UI 仍走 submit + 快照轮询。
    * 回合中断不抛错——调用方必须自己从快照判断是否存在可用 assistant 回复。
    */
   async sendAndAwait(harnessRunId: string, text: string): Promise<HarnessSnapshot> {
@@ -659,7 +791,7 @@ export class HarnessService {
     const summaryTurn=snapshot.impactSummaries?.find(item=>item.status==="running");
     const revision: import("./types").WorkflowRevision = { revision: snapshot.workflowRevisions.length + 1, ...(snapshot.task ? { cardId: prior?.cardId ?? crypto.randomUUID(), parentRevision: prior?.revision ?? null, goal: goal!.trim(), scope: scope!.trim(), abandonedAt: null, turnId: summaryTurn?`summary:${summaryTurn.key}`:snapshot.messages.filter(item => item.role === "user").at(-1)!.id } : {}), source, sourceHash: preview.sourceHash, preview, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
     const derivedFrom=prior?.templateOrigin??prior?.derivedFrom;
-    const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision: {...revision,...(derivedFrom?{derivedFrom}:{})} };
+    const event = { type: "workflow.revision_proposed" as const, at: revision.createdAt, harnessRunId, revision: {...revision,updateReason:prior?"modify-plan" as const:"generate-plan" as const,...(derivedFrom?{derivedFrom}:{})} };
     await entry.journal.append(event); entry.projection.apply(event);
     return entry.projection.snapshot();
   }
@@ -910,8 +1042,38 @@ export class HarnessService {
     }
     this.#sessions.set(harnessRunId, entry); return entry;
   }
-  private async interruptRunningTurn(harnessRunId: string, entry: HarnessEntry, diagnostic: string): Promise<void> {
-    return this.mutate(harnessRunId,async()=>{
+  /** 复用或创建主控 ACP 会话；Task 首回合前先把已验证 Runtime 来源耐久初始化一次。 */
+  private async ensureSession(harnessRunId: string, entry: HarnessEntry, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks): Promise<HarnessSession> {
+    if(entry.projection.snapshot().task&&!entry.projection.snapshot().runtime){
+      const identity=await this.resolveSessionIdentity();
+      if(identity.runtime){const event={type:"harness.runtime_initialized" as const,at:new Date().toISOString(),harnessRunId,runtime:identity.runtime};await entry.journal.append(event);entry.projection.apply(event);}
+    }
+    const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
+    entry.session = session;
+    return session;
+  }
+
+  /** 把用户显式选择的单个文件复制进 Engine 私有暂存区；选择本身不发送、不授权其他文件。 */
+  async stageAttachment(rawPath: string): Promise<StagedAttachment> {
+    return stageAttachmentFile(this.root, rawPath);
+  }
+
+  /** Engine 重启后清空暂存区；UI 持有的暂存描述随之失效，发送时如实报错。 */
+  async resetAttachmentStaging(): Promise<void> {
+    await resetAttachmentStaging(this.root);
+  }
+
+  /** 读取已耐久附件用于界面渲染；只能读当前 Harness 已绑定消息中的附件。 */
+  async attachmentData(harnessRunId: string, messageId: string, attachmentId: string): Promise<{ readonly dataUrl: string }> {
+    const entry = await this.entry(harnessRunId);
+    const message = entry.projection.snapshot().messages.find((item) => item.id === messageId);
+    const attachment = message?.attachments?.find((item) => item.id === attachmentId);
+    if (!attachment) throw new Error("附件不存在或不属于该消息。 ");
+    const { mimeType, dataBase64 } = await readAttachmentBase64(entry.journal.directory, attachment);
+    return { dataUrl: `data:${mimeType};base64,${dataBase64}` };
+  }
+
+  private async interruptRunningTurn(harnessRunId: string, entry: HarnessEntry, diagnostic: string): Promise<void> {    return this.mutate(harnessRunId,async()=>{
     if (entry.projection.snapshot().status !== "running") return;
     // 与提案、答案和终结共享短事务；模型 prompt 在锁外，退出不等待模型结束。
     // 先终结回合内全部未关闭条目：存活回合走记录器队列；崩溃恢复（记录器已随
@@ -960,6 +1122,9 @@ type HarnessEntry = {
   /** 当前回合的对话事实记录器；回合外为 null，崩溃恢复路径按投影孤儿条目收敛。 */
   recorder: TurnConversationRecorder | null;
 };
+
+/** 派发前排队消息已被取消或派发；调用方重选队首，绝不当成投递失败。 */
+class QueueMessageGoneError extends Error {}
 
 /** 兼容模型把 <think> 内容作为 text 返回；只丢弃其显式 thinking 区段，不记录该内容。 */
 function stripReasoning(text: string): string { return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<\/?think>/gi, "").trim(); }

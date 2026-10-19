@@ -128,6 +128,7 @@ export type CreateHarnessRunRequest = {
 };
 /** 首次发送创建 Harness；草稿文本只在浏览器内存中，Engine 仅在此 action 抵达后创建档案。 */
 export type StartHarnessConversationRequest = {
+  /** 首条消息的图片暂存身份；默认空，沿用每条最多5个与图片能力校验。 */ readonly stagedAttachmentIds?: readonly string[];
   /** Task 创建重试 UUID，必填；重试保持原身份，无字段请求拒绝且不创建档案。 */
   readonly clientRequestId: string;
   /** 固定任务标题；缺省取初始目标首行，1–120 个单行字符。 */
@@ -149,7 +150,7 @@ export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
 /** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
 export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
 /** 发送一条用户消息；响应确认 Engine 已耐久接收，完整消息由后续快照读取。 */
-export type HarnessMessageRequest = { readonly text: string };
+export type HarnessMessageRequest = { readonly text: string; /** 客户端生成的 UUID，用于重试幂等；重复提交不重复入队或开回合。 */ readonly clientMessageId?: string; /** true 表示“立即发送”：中断当前回合后优先投递。 */ readonly immediate?: boolean; /** Engine 暂存区的待发送附件身份；发送时才耐久绑定，不传输路径。 */ readonly stagedAttachmentIds?: string[] };
 /** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
 export type AcceptWorkflowRevisionRequest = { readonly revision: number };
 

@@ -83,7 +83,7 @@ test("接受后修改同卡保留批准，旧版本拒绝启动；放弃保留�
 test("创建 Journal 缺失可修复同一任务，初始回合不重复",async()=>{
   const root=await fixture(), request=crypto.randomUUID(), id=taskIdForRequest(request);
   const state=join(root,"state"), goal="恢复创建";
-  await HarnessJournal.create({harnessRunId:id,projectId:"project",cwd:root,version:8,modelFingerprint:"injected-harness-session",createdAt:new Date().toISOString(),task:{clientRequestId:request,payloadHash:(await import("../../src/harness/task-contract")).normalizeTaskCreation({clientRequestId:request,projectId:"project",text:goal}).payloadHash,title:goal,initialGoal:goal}},state);
+  await HarnessJournal.create({harnessRunId:id,projectId:"project",cwd:root,version:9,modelFingerprint:"injected-harness-session",createdAt:new Date().toISOString(),task:{clientRequestId:request,payloadHash:(await import("../../src/harness/task-contract")).normalizeTaskCreation({clientRequestId:request,projectId:"project",text:goal}).payloadHash,title:goal,initialGoal:goal}},state);
   await writeFile(join(state,id,"journal.jsonl"),"");
   // 模拟创建尚未提交，而不是把已经运行的 Journal 丢失伪装为可重试。
   await unlink(join(state,id,"creation-ready"));
