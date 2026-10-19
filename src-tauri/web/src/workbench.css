@@ -908,14 +908,16 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-free-answer { display:grid; gap:8px; margin-top:8px; }
 .agent-workbench .wf-free-answer input { min-height:34px; padding:0 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-input); color:var(--wf-ink); font:12px ui-monospace, "SF Mono", Menlo, monospace; }
 
+/* 设置高度随窗口变化；空间不足640px时优先保证标题和关闭入口可见。 */
 /* 设置分区 / 原生选择器入口 / 可读性修复 */
-.agent-workbench .settings-panel { width:min(720px, 100%); max-height:calc(100vh - 48px); display:flex; flex-direction:column; }
+.agent-workbench .settings-panel { --settings-window-gap:56px; width:min(720px, 100%); height:max(640px, 80dvh); max-height:calc(100dvh - var(--settings-window-gap)); display:flex; flex-direction:column; overflow:hidden; }
+.agent-workbench .settings-panel > .connection-panel-head { flex-shrink:0; }
 .agent-workbench .settings-layout { display:grid; grid-template-columns:132px minmax(0,1fr); min-height:0; flex:1; }
 .agent-workbench .settings-nav { display:grid; align-content:start; gap:2px; padding:16px 10px; border-right:1px solid var(--wf-line-soft); }
 .agent-workbench .settings-nav button { padding:7px 10px; border:0; border-radius:8px; background:transparent; color:var(--wf-muted); font-size:12px; text-align:left; }
 .agent-workbench .settings-nav button:hover { background:var(--wf-selected); color:var(--wf-text); }
 .agent-workbench .settings-nav button.active { background:var(--wf-selected); color:var(--wf-text); font-weight:650; }
-.agent-workbench .settings-content { min-height:0; overflow-y:auto; padding-bottom:10px; }
+.agent-workbench .settings-content { min-height:0; overflow-y:auto; scrollbar-gutter:stable; padding-bottom:10px; }
 .agent-workbench .settings-section { padding:18px 24px 22px; }
 .agent-workbench .settings-section .runtime-status, .agent-workbench .settings-section .runtime-actions, .agent-workbench .settings-section .runtime-list { padding-left:0; padding-right:0; }
 .agent-workbench .settings-theme { display:flex; gap:18px; margin-top:12px; }
@@ -925,13 +927,15 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .settings-diag-list dd { margin:0; color:var(--wf-text); overflow-wrap:anywhere; }
 .agent-workbench .settings-note { color:var(--wf-text-dim); font-size:12px; }
 @media(max-width:760px){
-  .agent-workbench .settings-panel { max-height:calc(100vh - 28px); }
   .agent-workbench .settings-layout { grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); }
   .agent-workbench .settings-nav { display:flex; gap:4px; padding:10px 14px; border-right:0; border-bottom:1px solid var(--wf-line-soft); }
   .agent-workbench .settings-nav button { flex:1; text-align:center; }
   .agent-workbench .settings-content { min-width:0; }
   .agent-workbench .runtime-list article { align-items:stretch; flex-direction:column; }
   .agent-workbench .runtime-list article > button { align-self:flex-start; }
+}
+@media(max-width:640px){
+  .agent-workbench .settings-panel { --settings-window-gap:28px; }
 }
 
 .agent-workbench .wf-copyable-path { display:flex; align-items:flex-start; gap:8px; margin-top:3px; }
