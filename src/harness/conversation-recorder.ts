@@ -324,7 +324,7 @@ function stringifyRaw(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   try {
     const seen = new WeakSet();
-    const text = JSON.stringify(value, (key, item: unknown) => {
+    const text = JSON.stringify(value, (_key, item: unknown) => {
       if (typeof item === "string" && item.length > 500) return `${item.slice(0, 500)}…`;
       if (item && typeof item === "object") { if (seen.has(item)) return "[循环引用]"; seen.add(item); }
       return item;

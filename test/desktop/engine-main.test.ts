@@ -12,7 +12,6 @@ import type { CliRuntimeRecord } from "../../src/runtimes/types";
 import type { HarnessSession } from "../../src/harness/session";
 import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager";
-import { GitRepository } from "../../src/workspace/git-repository";
 import { HarnessService } from "../../src/harness/service";
 import { HarnessExecutionService } from "../../src/harness/executions";
 import { mkdir, realpath } from "node:fs/promises";

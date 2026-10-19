@@ -7,14 +7,14 @@ import { HarnessJournal } from "../../src/harness/journal";
 import { RunJournal } from "../../src/journal/run-journal";
 import { HarnessService } from "../../src/harness/service";
 import type { ResolvedHarnessModelConfig } from "../../src/harness/config";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import { DeterministicExecutor } from "../../src/runtime/deterministic-executor";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 const model: ResolvedHarnessModelConfig = { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" };
-const createPi = (): HarnessPiSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
+const createPi = (): HarnessSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
 
 async function fixture(): Promise<{ harness: HarnessService; executions: HarnessExecutionService; harnessRunId: string; root: string }> {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-execution-"));

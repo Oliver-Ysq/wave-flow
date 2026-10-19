@@ -423,9 +423,6 @@ function cloneAgent(agent: AgentNodeSnapshot): AgentNodeSnapshot {
   return { ...agent, request: { ...agent.request, input: agent.request.input ? { ...agent.request.input } : undefined } };
 }
 
-function cloneVisit(visit: PhaseVisitSnapshot): PhaseVisitSnapshot {
-  return { ...visit, batches: visit.batches.map((batch) => ({ ...batch, agents: batch.agents.map(cloneAgent) })) };
-}
 
 function groupedBatches(agents: readonly AgentNodeSnapshot[]): ExecutionBatchSnapshot[] {
   const batches = new Map<number, ExecutionBatchSnapshot>();

@@ -273,7 +273,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
 
   /** stop 时拒绝全部 pending 决策门，让 Workflow 调用栈随节点一起收敛。 */
   rejectPendingGates(diagnostic: string): void {
-    for (const [gateId, waiter] of this.#gateWaiters) waiter.reject(new Error(diagnostic));
+    for (const waiter of this.#gateWaiters.values()) waiter.reject(new Error(diagnostic));
     this.#gateWaiters.clear();
   }
 

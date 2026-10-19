@@ -1,6 +1,5 @@
 import { realpath, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import type { WorkflowModule } from "../shared/workflow-types";
 import { validateWorkflowMeta } from "./validate-meta";

@@ -13,12 +13,25 @@ const requiredDirectories = [
   "src/control",
   "src/journal",
   "src/desktop",
-  "src/desktop",
   "src-tauri",
   "src/shared",
 ] as const;
 
 describe("新架构目录与历史实现边界", () => {
+  test("关窗只隐藏，托盘打开复用原窗口而不创建第二Engine", async () => {
+    const desktop = await Bun.file(join(projectRoot, "src-tauri/src/main.rs")).text();
+    const show = desktop.slice(desktop.indexOf("fn show_main_window("), desktop.indexOf("fn main()"));
+    expect(show).toContain('get_webview_window("main")');
+    expect(show).toContain("window.show()?");
+    expect(show).toContain("window.set_focus()?");
+    expect(show).not.toContain("ensure_engine");
+    const tray = desktop.slice(desktop.indexOf('TrayIconBuilder::with_id("wave-flow-tray")'), desktop.indexOf('}).on_window_event'));
+    expect(tray).toContain('"open" => { let _ = show_main_window(app); }');
+    const close = desktop.slice(desktop.indexOf('}).on_window_event'), desktop.indexOf('.invoke_handler'));
+    expect(close).toContain("api.prevent_close()");
+    expect(close).toContain("window.hide()");
+    expect(close).not.toContain("shutdown_engine");
+  });
   test("为每个职责提供唯一且可追踪的目录落点", async () => {
     await Promise.all(requiredDirectories.map(async (directory) => {
       const path = join(projectRoot, directory);

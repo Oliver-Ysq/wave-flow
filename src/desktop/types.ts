@@ -1,5 +1,5 @@
 import type { JsonObject } from "../shared/json";
-import type { HarnessMessage, HarnessSnapshot, HarnessStatus, WorkflowExecutionRecord } from "../harness/types";
+import type { HarnessSnapshot, WorkflowExecutionRecord } from "../harness/types";
 import type { HarnessProject } from "../harness/projects";
 import type { CliRuntimeView, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";

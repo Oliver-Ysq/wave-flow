@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { lstat } from "node:fs/promises";
 import { HarnessJournal } from "../../src/harness/journal";
 import { HarnessService } from "../../src/harness/service";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import type { HarnessPromptAttachment } from "../../src/harness/session";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { harnessRunsRoot } from "../../src/journal/paths";
@@ -18,7 +18,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52]);
 
 /** 能力可配的主控会话；记录每次 prompt 收到的附件。 */
-class AttachmentPi implements HarnessPiSession {
+class AttachmentPi implements HarnessSession {
   constructor(readonly promptImageCapable: boolean | undefined) {}
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   #resolve: ((value: string) => void) | null = null;

@@ -101,7 +101,6 @@ function isSafeRg(args: readonly string[]): boolean {
 }
 
 function isSafeLs(args: readonly string[]): boolean { return args.length <= 2 && args.every(arg => arg === "-la" || arg === "-l" || arg === "."); }
-function isRelativePath(value: string): boolean { return !!value && !isAbsolute(value) && !value.split("/").includes("..") && !/[|;&`$<>]/.test(value); }
 async function projectRoot(cwd: string): Promise<string> { const root = await realpath(cwd).catch(() => { throw new Error("Harness cwd 不可验证。 "); }); const info = await lstat(root); if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Harness cwd 必须是常规目录。 "); return root; }
 function within(root: string, value: string): boolean { const fromRoot = relative(root, value); return !fromRoot.startsWith("..") && !isAbsolute(fromRoot); }
 async function readLimited(stream: ReadableStream<Uint8Array>): Promise<string> { const reader = stream.getReader(); const chunks: Uint8Array[] = []; let size = 0; while (true) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > MAX_OUTPUT_BYTES) { reader.cancel(); throw new Error(`主控只读查询输出超过 ${MAX_OUTPUT_BYTES} 字节。 `); } chunks.push(next.value); } return new TextDecoder().decode(concat(chunks, size)); }

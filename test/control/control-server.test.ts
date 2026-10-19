@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlServer, type CompletionSubmission } from "../../src/control/control-server";
 import { RunJournal } from "../../src/journal/run-journal";
-import { nodeDirectoryName, runsRoot } from "../../src/journal/paths";
+import { runsRoot } from "../../src/journal/paths";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
 import type { JsonSchema } from "../../src/shared/workflow-types";

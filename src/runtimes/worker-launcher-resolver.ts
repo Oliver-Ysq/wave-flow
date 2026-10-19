@@ -15,11 +15,6 @@ export function resolveHarnessLauncher(runtime: VerifiedCliRuntime): AcpLauncher
   return resolveWorkerLauncher(runtime);
 }
 
-/** 旧名保留以避免扩散 diff；语义同 resolveHarnessLauncher，已不再限定 Codex。 */
-export function resolveCodexAcpLauncher(runtime: VerifiedCliRuntime): AcpLauncher {
-  return resolveHarnessLauncher(runtime);
-}
-
 /** 写入 Journal 的安全来源信息；不含文件身份、PATH 或任何环境变量。 */
 export function runtimeProvenance(runtime: VerifiedCliRuntime): RuntimeProvenance {
   return { runtimeId: runtime.runtimeId, cli: runtime.cli, executablePath: runtime.executablePath, version: runtime.version, adapterId: runtime.verifiedAdapter.adapterId, adapterVersion: runtime.verifiedAdapter.adapterVersion, verifiedAt: runtime.verifiedAt };

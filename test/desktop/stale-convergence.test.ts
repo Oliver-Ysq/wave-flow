@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engine";
 import { HarnessExecutionService } from "../../src/harness/executions";
 import type { ResolvedHarnessModelConfig } from "../../src/harness/config";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import { HarnessService } from "../../src/harness/service";
 import { DeterministicExecutor } from "../../src/runtime/deterministic-executor";
 
@@ -13,7 +13,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 const model: ResolvedHarnessModelConfig = { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" };
-const createPi = (): HarnessPiSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
+const createPi = (): HarnessSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
 
 const GATE_SOURCE = `const meta = { name: "exec-gate", description: "带决策门", phases: [{ title: "工作" }] };
 async function run(args) {

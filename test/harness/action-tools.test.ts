@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarnessActionTools, HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks } from "../../src/harness/action-tools";
-import { isHarnessToolAllowed, type HarnessPiSession } from "../../src/harness/pi-harness";
+import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks } from "../../src/harness/action-tools";
+import type { HarnessSession } from "../../src/harness/session";
 import { HarnessService } from "../../src/harness/service";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { HarnessJournal } from "../../src/harness/journal";
@@ -13,7 +13,7 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 
 const model = { model: "test", baseUrl: "https://example.test/v1", apiKey: "test-key" };
 
-class DecisionPi implements HarnessPiSession {
+class DecisionPi implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   isRunning = false;
   constructor(private readonly actions: HarnessActionCallbacks) {}
@@ -36,22 +36,18 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 }
 
 describe("Harness action tools", () => {
-  test("只注册四个行动窄工具，既没有 complete 也没有节点创建工具", () => {
-    const actions: HarnessActionCallbacks = {
-      proposeWorkflowRevision: async () => ({ revision: 1, sourceHash: "a".repeat(64) }),
-      inspectExecution: async () => [], readRunCapsule: async () => ({}), requestUserDecision: async () => ({ ok: true }),
-    };
-    const tools = createHarnessActionTools(actions);
-    expect(tools.map((tool) => tool.name)).toEqual([...HARNESS_ACTION_TOOL_NAMES]);
-    expect(tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["complete", "create_node", "run_workflow"]));
-  });
-
-  test("beforeToolCall 白名单只允许已注册工具", () => {
-    expect(isHarnessToolAllowed("read_project_file", false)).toBe(false);
-    expect(isHarnessToolAllowed("propose_workflow_revision", true)).toBe(true);
-    expect(isHarnessToolAllowed("propose_workflow_revision", false)).toBe(false);
-    expect(isHarnessToolAllowed("complete", true)).toBe(false);
-    expect(isHarnessToolAllowed("create_node", true)).toBe(false);
+  test("生产 MCP 声明与硬门保持四工具一致，拒绝旧入口且零耐久写入", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-tools-"));
+    directories.push(cwd);
+    const service = new HarnessService(cwd, async () => model, (_config, _cwd, _prior, actions) => new DecisionPi(actions));
+    const created = await service.create(cwd);
+    const listed = await service.mcpTools(created.harnessRunId, { operation: "list", value: {} }) as { tools: { name: string }[] };
+    expect(listed.tools.map(tool => tool.name)).toEqual([...HARNESS_ACTION_TOOL_NAMES]);
+    const before = (await HarnessJournal.open(created.harnessRunId, cwd)).events.length;
+    for (const name of ["read_project_file", "complete", "create_node", "run_workflow", "create_worker", "write_file"]) {
+      await expect(service.mcpTools(created.harnessRunId, { operation: "call", value: { name, arguments: {} } })).rejects.toThrow("未获授权");
+    }
+    expect((await HarnessJournal.open(created.harnessRunId, cwd)).events.length).toBe(before);
   });
 
   test("主控回合等待决策时，独立答题路径可耐久并唤醒回合", async () => {

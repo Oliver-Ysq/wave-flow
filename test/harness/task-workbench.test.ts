@@ -8,7 +8,7 @@ import { DeterministicHarnessSession } from "../../src/harness/deterministic-ses
 import { assertStartable,normalizeTaskCreation } from "../../src/harness/task-contract";
 import { TaskLifecycle } from "../../src/harness/task-lifecycle";
 import { taskIdForRequest } from "../../src/harness/task-contract";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 const source = `const meta = { name: 'task-test', description: '检查', phases: [{ title: '检查' }] }; async function run(args) { phase('检查'); return {}; }`;

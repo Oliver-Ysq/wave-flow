@@ -5,7 +5,7 @@ import { HarnessJournal } from "../../src/harness/journal";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessService } from "../../src/harness/service";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { harnessRunsRoot } from "../../src/journal/paths";
 
@@ -58,7 +58,7 @@ test("旧源码不再满足编译规则时只降级预览，不阻断聊天重�
 });
 const testModel = { model: "test", baseUrl: "https://example.test/v1", apiKey: "test-key" };
 
-class FakePi implements HarnessPiSession {
+class FakePi implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   isRunning = false;
   subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -66,7 +66,7 @@ class FakePi implements HarnessPiSession {
   abort() { this.isRunning = false; }
 }
 
-class InterruptedPi implements HarnessPiSession {
+class InterruptedPi implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   isRunning = false;
   subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -74,21 +74,21 @@ class InterruptedPi implements HarnessPiSession {
   abort() { this.isRunning = false; }
 }
 
-class EmptyPi implements HarnessPiSession {
+class EmptyPi implements HarnessSession {
   isRunning = false;
   subscribe(_listener: (event: HarnessStreamEvent) => void) { return () => {}; }
   async prompt(_text: string): Promise<string> { return ""; }
   abort() { this.isRunning = false; }
 }
 
-class UnverifiedProjectPi implements HarnessPiSession {
+class UnverifiedProjectPi implements HarnessSession {
   isRunning = false;
   subscribe(_listener: (event: HarnessStreamEvent) => void) { return () => {}; }
   async prompt(_text: string): Promise<string> { throw new Error("主控未执行任何已验证只读工具，拒绝耐久项目事实结论。 "); }
   abort() { this.isRunning = false; }
 }
 
-class DeferredPi implements HarnessPiSession {
+class DeferredPi implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   isRunning = false;
   #resolve: ((value: string) => void) | null = null;
@@ -174,7 +174,7 @@ describe("HarnessService", () => {
   test("主控回合的工具事实以颗粒化条目耐久，重开会话仍可恢复", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-tool-summary-")); directories.push(cwd);
     let service!: HarnessService;
-    const pi: HarnessPiSession = {
+    const pi: HarnessSession = {
       isRunning: false,
       subscribe: () => () => {},
       async prompt() {
@@ -330,7 +330,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-action-revision-")); directories.push(cwd);
     let actions: import("../../src/harness/action-tools").HarnessActionCallbacks | null = null;
     let running = false;
-    const pi: HarnessPiSession = {
+    const pi: HarnessSession = {
       get isRunning() { return running; },
       subscribe: () => () => {},
       async prompt() {
@@ -370,7 +370,7 @@ describe("HarnessService", () => {
 
   test("思考被正文/工具切断时分段为独立条目", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-thought-segments-")); directories.push(cwd);
-    class SegmentedPi implements HarnessPiSession {
+    class SegmentedPi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -396,7 +396,7 @@ describe("HarnessService", () => {
   test("正文被工具/思考切断时另建条目，回放顺序与真实流一致", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-body-segments-")); directories.push(cwd);
     let service!: HarnessService;
-    class BodySegmentPi implements HarnessPiSession {
+    class BodySegmentPi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -431,7 +431,7 @@ describe("HarnessService", () => {
   test("工具调用在回合进行中已耐久可见：运行中条目先于回合结束出现", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-live-tool-")); directories.push(cwd);
     let service!: HarnessService;
-    const pi: HarnessPiSession = {
+    const pi: HarnessSession = {
       isRunning: false,
       subscribe: () => () => {},
       async prompt() {
@@ -464,7 +464,7 @@ describe("HarnessService", () => {
   test("工具输出遮蔽已知凭据形态，超限时标记截断", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-redact-")); directories.push(cwd);
     let service!: HarnessService;
-    const pi: HarnessPiSession = {
+    const pi: HarnessSession = {
       isRunning: false,
       subscribe: () => () => {},
       async prompt() {
@@ -487,7 +487,7 @@ describe("HarnessService", () => {
 
   test("中断回合保留未完成正文与 interrupted 条目，重开如实回放", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-interrupt-entries-")); directories.push(cwd);
-    class HangingPi implements HarnessPiSession {
+    class HangingPi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -509,7 +509,7 @@ describe("HarnessService", () => {
   });
 
   test("崩溃恢复：旧进程遗留的未终结条目在重启收敛时补写 interrupted", async () => {    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-orphan-entries-")); directories.push(cwd);
-    class DeltaThenHangPi implements HarnessPiSession {
+    class DeltaThenHangPi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -533,7 +533,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-acp-dedupe-")); directories.push(cwd);
     await writeFile(join(cwd, "package.json"), '{"name":"dedupe"}', "utf8");
     let service!: HarnessService;
-    class DedupePi implements HarnessPiSession {
+    class DedupePi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
@@ -560,7 +560,7 @@ describe("HarnessService", () => {
 
   test("ACP 原生工具的 content 更新按替换语义记录，终态保留最新快照", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-acp-replace-")); directories.push(cwd);
-    class NativeToolPi implements HarnessPiSession {
+    class NativeToolPi implements HarnessSession {
       #listeners = new Set<(event: HarnessStreamEvent) => void>();
       isRunning = false;
       subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }

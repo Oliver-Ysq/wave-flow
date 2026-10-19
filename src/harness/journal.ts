@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import Ajv from "ajv";
 import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } from "../journal/paths";

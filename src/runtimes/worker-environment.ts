@@ -5,9 +5,7 @@ import { nodeRuntimeDirectory } from "./node-runtime";
 export function createWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
   const node = runtime.nodeExecutable;
   if (!node) throw new Error("Codex Worker 缺少已验证的 node 依赖，需要重新验证。 ");
-  const result: Record<string, string> = {};
-  for (const key of ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"] as const) if (inherited[key]) result[key] = inherited[key]!;
-  for (const [key, value] of Object.entries(inherited)) if ((key.startsWith("LC_") || proxyOrCertificateKey(key)) && value) result[key] = value;
+  const result = inheritedWorkerEnvironment(inherited);
   result.PATH = normalizedPath(inherited.PATH, nodeRuntimeDirectory({ executablePath: node.path, executableIdentity: node.identity }));
   result.CODEX_PATH = runtime.executablePath;
   result.INITIAL_AGENT_MODE = "agent-full-access";
@@ -16,12 +14,18 @@ export function createWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: 
 }
 
 /** Kimi CLI 自身即 ACP server；环境只有用户与证书白名单，不含 CODEX_PATH、node 或 Codex 会话模式。 */
-export function createKimiWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+export function createKimiWorkerEnvironment(_runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+  const result = inheritedWorkerEnvironment(inherited);
+  result.PATH = normalizedPath(inherited.PATH, null);
+  result.NO_BROWSER = "1";
+  return result;
+}
+
+/** 两种 CLI 共用继承白名单；CLI 专属变量仍由各自构造器添加，不扩大权限。 */
+function inheritedWorkerEnvironment(inherited: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const key of ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"] as const) if (inherited[key]) result[key] = inherited[key]!;
   for (const [key, value] of Object.entries(inherited)) if ((key.startsWith("LC_") || proxyOrCertificateKey(key)) && value) result[key] = value;
-  result.PATH = normalizedPath(inherited.PATH, null);
-  result.NO_BROWSER = "1";
   return result;
 }
 

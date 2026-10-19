@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessJournal } from "../../src/harness/journal";
 import { HarnessService } from "../../src/harness/service";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { harnessRunsRoot } from "../../src/journal/paths";
 
@@ -12,7 +12,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 /** 完全受控的主控会话：prompt 挂起直到测试显式 finish/fail；abort 不解决 promise，模拟无响应 provider。 */
-class ControllablePi implements HarnessPiSession {
+class ControllableSession implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   #resolve: ((value: string) => void) | null = null;
   #reject: ((error: Error) => void) | null = null;
@@ -32,15 +32,15 @@ class ControllablePi implements HarnessPiSession {
   close() { this.closed = true; }
 }
 
-type Rig = { service: HarnessService; sessions: ControllablePi[]; root: string; events: HarnessStreamEvent[] };
+type Rig = { service: HarnessService; sessions: ControllableSession[]; root: string; events: HarnessStreamEvent[] };
 
 async function makeRig(): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-queue-"));
   directories.push(cwd);
   const root = harnessRunsRoot(cwd);
-  const sessions: ControllablePi[] = [];
+  const sessions: ControllableSession[] = [];
   const events: HarnessStreamEvent[] = [];
-  const service = new HarnessService(root, async () => { const session = new ControllablePi(); sessions.push(session); return session; });
+  const service = new HarnessService(root, async () => { const session = new ControllableSession(); sessions.push(session); return session; });
   service.addEventListener((_id, event) => events.push(event));
   const created = await service.create(cwd);
   return { service, sessions, root, events, ...{ harnessRunId: created.harnessRunId } } as Rig & { harnessRunId: string };
@@ -223,8 +223,8 @@ describe("Harness 耐久消息队列", () => {
     await service.submit(harnessRunId, "queued-2");
 
     // 模拟 Engine 重启：全新服务实例，旧回合永不 resolve。
-    const restarted: ControllablePi[] = [];
-    const service2 = new HarnessService(root, async () => { const session = new ControllablePi(); restarted.push(session); return session; });
+    const restarted: ControllableSession[] = [];
+    const service2 = new HarnessService(root, async () => { const session = new ControllableSession(); restarted.push(session); return session; });
     await service2.convergeStaleTurns();
     const converged = await service2.snapshot(harnessRunId);
     expect(converged.status).toBe("interrupted");

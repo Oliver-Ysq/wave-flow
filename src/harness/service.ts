@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto";
 import { assertImpactSummariesComplete, boundedEvidence, ImpactSupplementRequiredError } from "./impact-summary";
-import { readdir, realpath, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
 import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, validateDecisionAnswer, validateDecisionSchema, type HarnessManifest } from "./journal";
 import { TurnConversationRecorder, type EngineToolStart } from "./conversation-recorder";
 import type { HarnessSession } from "./session";
-import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessMessageAttachment, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
+import type { HarnessDecision, HarnessMessage, HarnessMessageAttachment, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
 import { harnessRunsRoot, validateRunId } from "../journal/paths";
 import {isJsonObject,type JsonObject} from "../shared/json";
 import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks } from "./action-tools";
 import { executeReadOnlyProjectQuery } from "./shell-policy";
-import { type HarnessPiSession } from "./pi-harness";
 import type { ResolvedHarnessModelConfig } from "./config";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
@@ -169,7 +167,7 @@ export class HarnessService {
   constructor(
     private readonly root = harnessRunsRoot(),
     factoryOrResolve: ((harnessRunId: string, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks, runtime?: import("../runtimes/types").RuntimeProvenance) => Promise<HarnessSession>) | (() => Promise<ResolvedHarnessModelConfig | null>),
-    legacyCreate?: (config: ResolvedHarnessModelConfig, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks) => HarnessPiSession,
+    legacyCreate?: (config: ResolvedHarnessModelConfig, cwd: string, prior: readonly HarnessMessage[], actions: HarnessActionCallbacks) => HarnessSession,
     private readonly resolveSessionIdentity: () => Promise<{ readonly fingerprint: string; readonly runtime?: import("../runtimes/types").RuntimeProvenance }> = async () => ({ fingerprint: "injected-harness-session" }),
     /** 新建Task契约由Engine启用；独立服务测试缺省旧规则，存量manifest不迁移。 */
     private readonly singleWorkflowForAcceptance = false,

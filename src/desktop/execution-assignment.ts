@@ -1,5 +1,5 @@
 import type { ExecutionConfigSnapshot, WorkerAssignment } from "../harness/types";
-import type { CliRuntimeView, RuntimeCli } from "../runtimes/types";
+import type { CliRuntimeView } from "../runtimes/types";
 import type { ExtractedAgentWorker } from "../workflow/restricted/extract-agents";
 import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 import { adapterById } from "../runtimes/adapter-catalog";

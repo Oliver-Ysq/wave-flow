@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessJournal } from "../../src/harness/journal";
 import { HarnessService } from "../../src/harness/service";
-import type { HarnessPiSession } from "../../src/harness/pi-harness";
+import type { HarnessSession } from "../../src/harness/session";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 import { harnessRunsRoot } from "../../src/journal/paths";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
-class ImmediatePi implements HarnessPiSession {
+class ImmediatePi implements HarnessSession {
   #listeners = new Set<(event: HarnessStreamEvent) => void>();
   isRunning = false;
   readonly prompts: string[] = [];
