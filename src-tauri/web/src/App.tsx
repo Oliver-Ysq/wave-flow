@@ -2,18 +2,17 @@ import {
   Component,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {getCurrentWindow} from "@tauri-apps/api/window";
 import { api } from "./api";
+import { ProjectCreateDialog } from "./project-create-dialog";
+import { useProjectExpanded } from "./project-navigation";
 import {userFacingText} from "./user-facing-text";
 import {
   RAIL_WIDTH_DEFAULT,
@@ -25,7 +24,7 @@ import {summaryBodyStartedAt} from "./conversation/harness-event-merge";
 import { Markdown as MessageBody } from "./conversation/markdown";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
-import { WorkflowProposalSummary, WorkflowExecutionSummary, proposalTitle } from "./conversation/workflow-summary";
+import { WorkflowExecutionSummary, proposalTitle } from "./conversation/workflow-summary";
 import {AbandonedPlan} from "./conversation/abandoned-plan";
 import { hasActiveExecutionQuestions, interruptedSummaryObligations, summaryWorkLabel, TaskActivity } from "./conversation/task-activity";
 import {PreviousRecords} from "./execution/previous-records";
@@ -34,7 +33,6 @@ import {WorkflowVersions} from "./conversation/workflow-versions";
 import { workflowCells, editableRevision, readingAttempt, type WorkbenchRoute } from "./workbench-navigation";
 import { routeMatchesTask, newerTaskSnapshot, OperationTracker, RequestFence, UnreadTracker } from "./workbench-state";
 import { ViewCache } from "./workbench-state";
-const taskExpansions=new ViewCache<boolean>();
 const detailPositions=new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
@@ -51,17 +49,13 @@ import {
 import type {
   CliRuntime,
   CliRuntimeListResponse,
-  CurrentAttemptResponse,
   DesktopStatusResponse,
   ExecutionResponse,
   HarnessDecision,
   HarnessProject,
   HarnessSnapshot,
   PhaseVisit,
-  RunListItem,
-  RunResponse,
   RunSnapshot,
-  WorkflowExecution,
 } from "./types";
 
 const terminal = new Set(["completed", "cancelled", "interrupted"]);
@@ -86,13 +80,11 @@ function syncNativeWindowTheme(theme: ColorTheme) {
 
 
 export function App() {
-  const [runs, setRuns] = useState<RunListItem[]>([]);
   const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
   const [projects, setProjects] = useState<HarnessProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyOperations,setBusyOperations]=useState<Record<string,string>>({});
@@ -119,6 +111,7 @@ export function App() {
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
+  const [projectsExpanded, setProjectsExpanded] = useProjectExpanded("section");
   const [route, setRoute] = useState<WorkbenchRoute>({ kind: "conversation" });
   const [navOpen, setNavOpen] = useState(false);
   const navigationButton=useRef<HTMLButtonElement|null>(null);
@@ -245,7 +238,7 @@ export function App() {
     workflowLocations.current.set(key, route);
     if (workflowLocations.current.size > 64) workflowLocations.current.delete(workflowLocations.current.keys().next().value!);
   }, [route, harness?.harnessRunId, draftProjectId]);
-  const workflowPanelOpen = route.kind === "workflow" || selectedId !== null;
+  const workflowPanelOpen = route.kind === "workflow";
   const workflowTitle=useRef<HTMLElement>(null);
   const workflowReturn=useRef<{taskId:string|null;button:HTMLElement}|null>(null);
   const wasWorkflowOpen=useRef(false);
@@ -271,7 +264,7 @@ export function App() {
   function setWorkflowPanelOpen(open: boolean) { if (!open) setRoute({ kind: "conversation" }); }
   function openWorkflow(task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) {
     setTemplatePicker(false);
-    setHarness(task); setSelectedId(null); setDraftProjectId(null);
+    setHarness(task); setDraftProjectId(null);
     const cardId = revision.cardId ?? `legacy:${revision.revision}`;
     const saved = harnessRef.current?.harnessRunId === task.harnessRunId ? workflowLocations.current.get(`${task.harnessRunId}:${cardId}`) : undefined;
     const linked = task.executions.find(item => item.revision === revision.revision);
@@ -281,8 +274,6 @@ export function App() {
     setNavOpen(false);
     setSelectedExecutionId(next.executionId ?? null); setExecutionDetail(null);
   }
-  const [projectCwd, setProjectCwd] = useState("");
-  const [projectTitle, setProjectTitle] = useState("");
   const [harnessText, setHarnessText] = useState("");
   /** 最近一次 Harness 条目事件到达时间；切换会话或重读快照时重置。 */
   const [lastEventAt, setLastEventAt] = useState<number | null>(null);
@@ -350,14 +341,12 @@ export function App() {
   const refresh = useCallback(async () => {
     const valid=requestFence.current.begin("task-list");
     try {
-      const [next, harnessList, projectList, runtimes] = await Promise.all([
-        api.listRuns(),
+      const [harnessList, projectList, runtimes] = await Promise.all([
         api.listHarnesses(),
         api.projects(),
         api.cliRuntimes(),
       ]);
       if(!valid())return;
-      setRuns(next);
       setHarnesses(current=>harnessList.harnesses.map(next=>{const old=current.find(item=>item.harnessRunId===next.harnessRunId);return old?newerTaskSnapshot(old,next):next;}));
       setProjects(projectList.projects);
       setRuntimeState(runtimes);
@@ -366,9 +355,6 @@ export function App() {
         projectList.projects.some((project) => project.projectId === current)
           ? current
           : (projectList.projects[0]?.projectId ?? null),
-      );
-      setSelectedId((current) =>
-        current && next.some((run) => run.runId === current) ? current : null,
       );
       // Desktop 没有 HTTP/SSE 控制面；轮询只读取 Engine 的耐久完整快照。未完成
       // reasoning 与 delta 不进入 Journal，因此页面不会把半条模型输出误当结果。
@@ -428,10 +414,8 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const selected = runs.find((run) => run.runId === selectedId) ?? null;
   const taskBusy=harness?busyOperations[`task:${harness.harnessRunId}`]??null:null;
   const executionBusy=selectedExecutionId?busyOperations[`execution:${selectedExecutionId}`]??null:null;
-  const runBusy=selectedId?busyOperations[`run:${selectedId}`]??null:null;
   useEffect(() => {
     if (!harness?.harnessRunId) return;
     let active = true;
@@ -509,42 +493,6 @@ export function App() {
     };
   }, [harness?.harnessRunId]);
 
-  async function control(action: "pause" | "recover" | "stop" | "resume") {
-    if (!selected) return;
-    const finishBusy=beginBusy(`run:${selected.runId}`,action);
-    try {
-      const response = await api[action](selected.runId);
-      setRuns((current) =>
-        current.map((run) =>
-          run.runId === response.runId ? toRunListItem(response) : run,
-        ),
-      );
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      finishBusy();
-    }
-  }
-
-
-  async function createProject() {    try {
-      const response = await api.createProject(projectCwd, projectTitle);
-      setProjects((current) => [
-        response.project,
-        ...current.filter(
-          (project) => project.projectId !== response.project.projectId,
-        ),
-      ]);
-      setSelectedProjectId(response.project.projectId);
-      setProjectCwd("");
-      setProjectTitle("");
-      setCreatingProject(false);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
   function beginHarnessDraft(projectId = selectedProjectId) {
     setHarnessView("active");
     if (!projectId) return;
@@ -552,7 +500,7 @@ export function App() {
     setDraftProjectId(projectId);
     setHarness(null);
     setHarnessText("");
-    createRequest.current = null; setTaskTitle(""); setSelectedId(null);
+    createRequest.current = null; setTaskTitle("");
     setWorkflowPanelOpen(false);
     setError(null);
   }
@@ -686,7 +634,7 @@ export function App() {
       className={`agent-workbench theme-${theme} ${navOpen ? "nav-open" : ""} ${"__TAURI_INTERNALS__" in window&&/Mac/.test(navigator.platform)?"native-titlebar":""}`}
       style={{ "--wf-rail-width": `${railWidth}px` } as CSSProperties}
     >
-      {"__TAURI_INTERNALS__" in window&&/Mac/.test(navigator.platform)&&<div className="desktop-titlebar" onMouseDown={event=>{if(event.button===0)void getCurrentWindow().startDragging();}}><div title={harness?`${harness.cwd.split('/').filter(Boolean).at(-1)} / ${conversationTitle(harness)}`:"Wave Flow"}>{harness?<><span>{harness.cwd.split('/').filter(Boolean).at(-1)}</span><span className="title-divider">/</span><strong>{conversationTitle(harness)}</strong></>:<strong>Wave Flow</strong>}</div></div>}
+      {"__TAURI_INTERNALS__" in window&&/Mac/.test(navigator.platform)&&<div className="desktop-titlebar" data-tauri-drag-region="deep"><div title={harness?`${harness.cwd.split('/').filter(Boolean).at(-1)} / ${conversationTitle(harness)}`:"Wave Flow"}>{harness?<><span>{harness.cwd.split('/').filter(Boolean).at(-1)}</span><span className="title-divider">/</span><strong>{conversationTitle(harness)}</strong></>:<strong>Wave Flow</strong>}</div></div>}
       <button ref={navigationButton} className="navigation-toggle" aria-label={navOpen?"关闭任务导航":"打开任务导航"} aria-expanded={navOpen} aria-controls="task-navigation" onClick={()=>setNavOpen(value=>!value)}>☰</button>
       {navOpen&&<button className="navigation-scrim" aria-label="关闭任务导航" onClick={()=>{setNavOpen(false);navigationButton.current?.focus();}} />}
       {error && (
@@ -752,14 +700,16 @@ export function App() {
             if (selectedProjectId) beginHarnessDraft();
             else {
               setCreatingProject(true);
-              setProjectCwd("");
-              setProjectTitle("");
             }
           }}
         >
-          ⊕ {selectedProjectId ? "新建任务" : "新建项目"}
+          ⊕ 新建任务
         </button>
-        <div className="task-section-title">
+        <div className="projects-section-header">
+          <button className="projects-toggle" aria-expanded={projectsExpanded} aria-controls="project-list" onClick={() => setProjectsExpanded(!projectsExpanded)}>项目 <span aria-hidden="true">{projectsExpanded ? "⌄" : "›"}</span></button>
+          <button className="project-add" aria-label="创建项目" onClick={() => setCreatingProject(true)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg></button>
+        </div>
+        <div className="task-section-title" hidden={!projectsExpanded}>
           <div className="harness-tabs" role="tablist" aria-label="会话状态">
             <button className={harnessView === "active" ? "active" : ""} onClick={() => setHarnessView("active")} role="tab" aria-selected={harnessView === "active"}>进行中</button>
             <button className={harnessView === "completed" ? "active" : ""} onClick={() => setHarnessView("completed")} role="tab" aria-selected={harnessView === "completed"}>已完成</button>
@@ -768,8 +718,7 @@ export function App() {
             ↻
           </button>
         </div>
-        <nav className="task-list">
-          {runs.length > 0 && <details><summary>独立运行历史</summary>{runs.map(run => <button key={run.runId} onClick={()=>{setHarness(null);setDraftProjectId(null);setRoute({kind:"conversation"});setSelectedId(run.runId);setNavOpen(false);}}>{run.workflow.name} · {localeTime(run.createdAt)} · {run.runId.slice(0,8)}</button>)}</details>}
+        <nav className="task-list" id="project-list" hidden={!projectsExpanded}>
           {projects.map((project) => (
             <ProjectGroup
               key={project.projectId}
@@ -782,16 +731,10 @@ export function App() {
               activeHarnessId={harness?.harnessRunId ?? null}
               unreadCounts={unreadCounts}
               showNewSession={harnessView === "active"}
-              onSelectProject={() => {
-                setSelectedProjectId(project.projectId);
-                setHarness(null);
-                setDraftProjectId(null);
-                setRoute({kind:"conversation"}); setSelectedId(null);
-              }}
               onNewSession={() => beginHarnessDraft(project.projectId)}
               onSelectHarness={(item) => {
                 setSelectedProjectId(project.projectId);
-                setHarness(item); setSelectedId(null); setRoute({kind:"conversation"}); setNavOpen(false);
+                setHarness(item); setRoute({kind:"conversation"}); setNavOpen(false);
                 setDraftProjectId(null);
               }}
             />
@@ -905,7 +848,7 @@ export function App() {
             onAnswerDecision={async (decisionId, answer) => {
               const finishBusy=beginBusy(`task:${harness.harnessRunId}`,`decision:${decisionId}`);
               try {
-                const response = await taskMutation(harness.harnessRunId,()=>api.answerHarnessDecision(
+                await taskMutation(harness.harnessRunId,()=>api.answerHarnessDecision(
                   harness.harnessRunId,
                   decisionId,
                   answer,
@@ -948,10 +891,10 @@ export function App() {
           <header className="workflow-page-header">
           <div>
             <span>
-              {harness && route.kind === "workflow" ? `${conversationTitle(harness)} / 工作流` : "独立运行记录"}
+              {harness ? `${conversationTitle(harness)} / 工作流` : "工作流详情"}
             </span>
             <strong ref={workflowTitle} tabIndex={-1} role="heading" aria-level={1}>
-              {(() => { const headerRevision = route.kind === "workflow" ? harness?.workflowRevisions.find(item=>item.revision === route.revision) : undefined; return headerRevision ? proposalTitle(headerRevision) : selected?.workflow.name ?? "工作流详情"; })()}
+              {(() => { const headerRevision = route.kind === "workflow" ? harness?.workflowRevisions.find(item=>item.revision === route.revision) : undefined; return headerRevision ? proposalTitle(headerRevision) : "工作流详情"; })()}
             </strong>
           </div>
           <button
@@ -1032,67 +975,14 @@ export function App() {
               }}
             />
           </div>
-          ) : route.kind === "workflow" ? null : !selected ? (
-          <div className="workflow-empty">
-            <div>◇</div>
-            <strong>等待 Wave Flow 准备工作流</strong>
-            <p>
-              已接受的草案会在对话中显示“创建执行”；Execution 启动后这里展示
-              revision、attempt、Phase、Agent 与决策门。
-            </p>
-            {runs.length > 0 && (
-              <>
-                <span>当前独立运行记录</span>
-                <div className="workflow-run-picker">
-                  {runs.map((run) => (
-                    <article key={run.runId}>
-                      <button onClick={() => setSelectedId(run.runId)}>
-                        <i className={`dot ${run.status}`} />
-                        <div>
-                          <strong>{run.workflow.name}</strong>
-                          <small>{localeTime(run.createdAt)}</small>
-                        </div>
-                      </button>
-                      <details>
-                        <summary>诊断</summary>
-                        <code>{run.runId}</code>
-                      </details>
-                    </article>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-          ) : (
-          <div className="workflow-detail-scroll">
-            <RunDetail
-              run={selected}
-              busy={runBusy}
-              onControl={control}
-              onAnswer={async (blockId, answer) => {
-                const finishBusy=beginBusy(`run:${selected.runId}`,`answer:${blockId}`);
-                try {
-                  await api.answer(blockId, answer);
-                  await refresh();
-                } finally {
-                  finishBusy();
-                }
-              }}
-            />
-          </div>
-          )}
+          ) : null}
         </WorkflowPanelErrorBoundary>
       </aside>
-      {creatingProject && (
-        <ProjectCreateModal
-          cwd={projectCwd}
-          title={projectTitle}
-          onCwd={setProjectCwd}
-          onTitle={setProjectTitle}
-          onClose={() => setCreatingProject(false)}
-          onCreate={() => void createProject()}
-        />
-      )}
+      {creatingProject && <ProjectCreateDialog onClose={() => setCreatingProject(false)} onCreated={project => {
+        setProjects(current => [project, ...current.filter(item => item.projectId !== project.projectId)]);
+        setProjectsExpanded(true); setCreatingProject(false); setError(null);
+        beginHarnessDraft(project.projectId);
+      }} />}
       {settingsOpen && runtimeState?.harnessRuntimeId && (
         <RuntimeConnectionPanel
           runtimeState={runtimeState}
@@ -1212,12 +1102,6 @@ function DesktopExitModal({
           </div>
         </header>
         <section className="connection-form">
-          <div className="restart-notice">
-            <span>提示</span>
-            <p>
-              只是关闭窗口不会停止任务。确认退出后，任务会标记为已取消；下次可显式恢复。
-            </p>
-          </div>
           <footer className="modal-actions">
             <button
               ref={cancel}
@@ -1884,7 +1768,6 @@ function ProjectGroup({
   route, onSelectWorkflow,
   onArchive, busyOperations,
   showNewSession,
-  onSelectProject,
   onNewSession,
   onSelectHarness,
 }: {
@@ -1900,14 +1783,14 @@ function ProjectGroup({
   busyOperations: Record<string,string>;
   onSelectWorkflow: (task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) => void;
   showNewSession: boolean;
-  onSelectProject: () => void;
   onNewSession: () => void;
   onSelectHarness: (harness: HarnessSnapshot) => void;
 }) {
+  const [expanded, setExpanded] = useProjectExpanded(`project:${project.projectId}`);
   return (
     <section className="project-group">
       <header>
-        <button onClick={onSelectProject}>
+        <button title={project.title} aria-expanded={expanded} aria-controls={`project-tasks-${project.projectId}`} onClick={() => setExpanded(!expanded)}>
           <span className="folder-glyph" aria-hidden="true">
             ⌑
           </span>
@@ -1925,93 +1808,16 @@ function ProjectGroup({
           </button>
         )}
       </header>
-      {harnesses.length > 0 ? (
-        <div className="project-conversations">
+      {(
+        <div className="project-conversations" id={`project-tasks-${project.projectId}`} hidden={!expanded}>
           {harnesses.map((item) => (
             <div key={item.harnessRunId} className={`task-row ${item.harnessRunId===activeHarnessId?'selected':''}`}><TaskTreeItem item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={revision=>onSelectWorkflow(item,revision)} />{item.status!=="completed"&&<button className="task-archive" data-archive-task={item.harnessRunId} aria-label={`归档任务：${conversationTitle(item)}`} title={item.status==='running'||item.executions.some(execution=>!execution.finishedAt)?'处理中，结束后可归档':'归档任务'} disabled={!!busyOperations[`task:${item.harnessRunId}`]||item.status==='running'||item.executions.some(execution=>!execution.finishedAt)} onClick={()=>onArchive(item)}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v3H3zM4 7v9h12V7M8 10h4"/></svg></button>}</div>
           ))}
         </div>
-      ) : null}
+      )}
     </section>
   );
 }
-function ProjectCreateModal({
-  cwd,
-  title,
-  onCwd,
-  onTitle,
-  onClose,
-  onCreate,
-}: {
-  cwd: string;
-  title: string;
-  onCwd: (value: string) => void;
-  onTitle: (value: string) => void;
-  onClose: () => void;
-  onCreate: () => void;
-}) {
-  return (
-    <div
-      className="settings-backdrop connection-backdrop"
-      onMouseDown={onClose}
-    >
-      <section
-        className="connection-panel project-create"
-        aria-label="添加本地项目"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="connection-panel-head">
-          <div>
-            <span className="modal-kicker">侧边栏项目</span>
-            <strong>添加本地项目</strong>
-            <p>选择项目目录，之后可在这个项目中持续创建任务。</p>
-          </div>
-          <button
-            className="modal-close"
-            onClick={onClose}
-            aria-label="关闭创建项目"
-          >
-            ×
-          </button>
-        </header>
-        <section className="connection-form project-fields">
-          <label className="connection-field">
-            <span>项目路径</span>
-            <input
-              value={cwd}
-              onChange={(event) => onCwd(event.target.value)}
-              placeholder="/绝对路径/项目目录"
-              autoFocus
-            />
-          </label>
-          <label className="connection-field">
-            <span>
-              显示名称 <i>可选</i>
-            </span>
-            <input
-              value={title}
-              onChange={(event) => onTitle(event.target.value)}
-              placeholder="默认使用目录名"
-            />
-          </label>
-        </section>
-        <footer className="modal-actions">
-          <button className="button-secondary" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="button-primary"
-            disabled={!cwd.trim()}
-            onClick={onCreate}
-          >
-            创建项目
-          </button>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
 /** 仅由浏览器维护的新会话草稿；首次发送前不会创建 Harness、目录或 Journal。 */
 function DraftConversation({
   project,
@@ -2254,32 +2060,6 @@ function shouldSubmitComposer(
   return conversationShouldSubmitComposer(event);
 }
 
-function ExecutionAction({
-  execution,
-  onSelect,
-}: {
-  execution: WorkflowExecution;
-  onSelect: () => void;
-}) {
-  return (
-    <article className="conversation-action execution-action">
-      <span>Execution · revision v{execution.revision}</span>
-      <code>
-        {execution.executionId.slice(0, 12)} · attempt 由详情 Journal 记录
-      </code>
-      <p>
-        <Status status={execution.status} />{" "}
-        {execution.finishedAt
-          ? `结束于 ${localeTime(execution.finishedAt)}`
-          : "正在或等待执行"}
-      </p>
-      {execution.diagnostic && (
-        <p className="diagnostic">{userFacingText(execution.diagnostic)}</p>
-      )}
-      <button onClick={onSelect}>查看执行详情</button>
-    </article>
-  );
-}
 
 function HarnessDecisionCard({
   decision,
@@ -2635,277 +2415,6 @@ function conversationTitle(harness: HarnessSnapshot): string {
 }
 
 
-function Metric({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: string;
-}) {
-  return (
-    <div className={`metric ${tone}`}>
-      <span>{label}</span>
-      <strong>{String(value).padStart(2, "0")}</strong>
-    </div>
-  );
-}
-function toRunListItem(response: RunResponse): RunListItem {
-  const snapshot = response.snapshot;
-  return {
-    runId: response.runId,
-    workflow: {
-      name: snapshot.workflow.name,
-      description: snapshot.workflow.description,
-    },
-    status: snapshot.status,
-    cwd: snapshot.cwd,
-    createdAt: snapshot.createdAt,
-    endedAt: snapshot.endedAt,
-    diagnostic: snapshot.diagnostic,
-    hasBlockedAgent: snapshot.phases.some((phase) =>
-      phase.agents.some((agent) => agent.status === "blocked"),
-    ),
-  };
-}
-function RunItem({
-  run,
-  active,
-  onClick,
-}: {
-  run: RunListItem;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`run-item ${active ? "selected" : ""}`}
-    >
-      <span className={`dot ${run.status}`} />
-      <div>
-        <strong>{run.workflow.name}</strong>
-        <small>
-          {run.runId.slice(0, 8)} / {localeTime(run.createdAt)}
-        </small>
-      </div>
-      <Status status={run.status} />
-    </button>
-  );
-}
-
-function RunDetail({
-  run,
-  busy,
-  onControl,
-  onAnswer,
-}: {
-  run: RunListItem;
-  busy: string | null;
-  onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
-}) {
-  const active = ["running", "pausing", "recovering"].includes(run.status);
-  const [attempt, setAttempt] = useState<CurrentAttemptResponse | null>(null);
-  const [history, setHistory] = useState<PhaseVisit[] | null>(null);
-  const [historyCursor, setHistoryCursor] = useState<number | null>(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [includeEmpty, setIncludeEmpty] = useState(false);
-  const [attemptIds, setAttemptIds] = useState<number[] | null>(null);
-  const [historyAttempt, setHistoryAttempt] = useState<number | null>(null);
-  useEffect(() => {
-    let activeRequest = true;
-    setAttempt(null);
-    setHistory(null);
-    setHistoryCursor(null);
-    setAttemptIds(null);
-    setHistoryAttempt(null);
-    void api
-      .currentAttempt(run.runId)
-      .then((value) => {
-        if (activeRequest) setAttempt(value);
-      })
-      .catch(() => {
-        if (activeRequest) setAttempt(null);
-      });
-    return () => {
-      activeRequest = false;
-    };
-  }, [run.runId, run.status]);
-  // Desktop 不再有 Run SSE；活动 Run 只通过 Engine action 刷新权威当前尝试。
-  // 这使 Worker 从 running → blocked/continued/completed 的状态变更能在详情中
-  // 显示，而不会让 WebView 从 ACP 文本或本地计时推断任何业务状态。
-  useEffect(() => {
-    if (!active) return;
-    let activeRequest = true;
-    const reload = () => {
-      void api.currentAttempt(run.runId).then(
-        (value) => { if (activeRequest) setAttempt(value); },
-        () => { if (activeRequest) setAttempt(null); },
-      );
-    };
-    const timer = window.setInterval(reload, 1_000);
-    return () => { activeRequest = false; window.clearInterval(timer); };
-  }, [active, run.runId]);
-  return (
-    <>
-      <div className="run-header">
-        <div>
-          <div className="eyebrow">当前工作流</div>
-          <h1>{run.workflow.name}</h1>
-          <p>{run.workflow.description}</p>
-          <code>{run.runId}</code>
-        </div>
-        <div className="actions">
-          {run.status === "running" && (
-            <Action
-              label="暂停"
-              icon="Ⅱ"
-              tone="secondary"
-              loading={busy === "pause"}
-              onClick={() => void onControl("pause")}
-            />
-          )}
-          {run.status === "paused" && (
-            <Action
-              label="恢复执行"
-              icon="▶"
-              tone="primary"
-              loading={busy === "recover"}
-              onClick={() => void onControl("recover")}
-            />
-          )}
-          {(run.status === "interrupted" || run.status === "cancelled") && (
-            <Action
-              label={run.status === "cancelled" ? "恢复已停止 Run" : "重新执行"}
-              icon="↻"
-              tone="primary"
-              loading={busy === "resume"}
-              onClick={() => void onControl("resume")}
-            />
-          )}
-          {(active || run.status === "paused") && (
-            <Action
-              label="停止 Run"
-              icon="■"
-              tone="danger"
-              loading={busy === "stop"}
-              onClick={() => void onControl("stop")}
-            />
-          )}
-        </div>
-      </div>
-      <div className="run-meta">
-        <Status status={run.status} />
-        <span>创建于 {localeTime(run.createdAt)}</span>
-        <span>结束于 {localeTime(run.endedAt)}</span>
-        <span className="path">{run.cwd}</span>
-      </div>
-      {run.diagnostic && <div className="diagnostic">{userFacingText(run.diagnostic)}</div>}
-      <div className="phase-list">
-        {attempt ? (
-          <>
-            <div className="attempt-label">
-              当前运行进度
-            </div>
-            <TeamPanel
-              runId={run.runId}
-              currentExecutionAttemptId={attempt.summary.executionAttemptId}
-              phaseTitles={attempt.summary.phases.map((phase) => phase.title)}
-              busy={busy}
-              onAnswer={onAnswer}
-            />
-            <section className="history-panel">
-              <div>
-                <strong>执行记录</strong>
-                <span>
-                  {includeEmpty
-                    ? "包含没有创建 Agent 的阶段切换"
-                    : "仅显示包含 Agent 的阶段轮次"}
-                </span>
-              </div>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={includeEmpty}
-                  onChange={(event) => {
-                    setIncludeEmpty(event.target.checked);
-                    setHistory(null);
-                    setHistoryCursor(null);
-                  }}
-                />{" "}
-                显示没有 Agent 的阶段切换
-              </label>
-              <PreviousRecords current={attempt.summary.executionAttemptId} selected={historyAttempt??attempt.summary.executionAttemptId} records={(history??[]).map(visit=>({id:visit.executionAttemptId,at:visit.createdAt}))} onSelect={id=>{setHistoryAttempt(id);setHistory(null);setHistoryCursor(null);}}/>
-              <button
-                disabled={historyLoading}
-                onClick={async () => {
-                  setHistoryLoading(true);
-                  try {
-                    const attempts =
-                      attemptIds ??
-                      (await api.executionAttempts(run.runId))
-                        .executionAttemptIds;
-                    if (!attemptIds) setAttemptIds(attempts);
-                    const selectedAttempt =
-                      historyAttempt ?? attempt.summary.executionAttemptId;
-                    const page = await api.phaseVisits(
-                      run.runId,
-                      history === null
-                        ? { includeEmpty, attempt: selectedAttempt }
-                        : {
-                            cursor: historyCursor ?? undefined,
-                            includeEmpty,
-                            attempt: selectedAttempt,
-                          },
-                    );
-                    setHistory((current) => [
-                      ...(current ?? []),
-                      ...page.items,
-                    ]);
-                    setHistoryCursor(page.nextCursor);
-                  } finally {
-                    setHistoryLoading(false);
-                  }
-                }}
-              >
-                {history === null
-                  ? "查看执行记录"
-                  : historyLoading
-                    ? "正在加载…"
-                    : historyCursor === null
-                      ? "没有更多记录"
-                      : "加载更早记录"}
-              </button>
-              {history && (
-                <ol>
-                  {history.map((item) => (
-                    <li key={`${item.executionAttemptId}:${item.phaseVisitId}`}>
-                      {item.title} · 第 {item.occurrence} 轮{" "}
-                      <small>
-                        {item.batches.reduce(
-                          (count, batch) => count + batch.agents.length,
-                          0,
-                        )}{" "}
-                        名 Agent
-                      </small>
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </section>
-          </>
-        ) : (
-          <div className="empty-phase">正在读取当前执行摘要…</div>
-        )}
-      </div>
-    </>
-  );
-}
-function Status({ status }: { status: string }) {
-  return <span className={`status ${status}`}>{statusLabel(status)}</span>;
-}
 function Action({
   label,
   icon,
@@ -2924,23 +2433,6 @@ function Action({
       <span>{loading ? "…" : icon}</span>
       {label}
     </button>
-  );
-}
-function statusLabel(status: string): string {
-  return (
-    (
-      {
-        queued: "排队中",
-        running: "工作中",
-        blocked: "需要协助",
-        pausing: "暂停中",
-        paused: "已暂停",
-        recovering: "恢复中",
-        completed: "已交付",
-        cancelled: "已停止",
-        interrupted: "已中断",
-      } as Record<string, string>
-    )[status] ?? status
   );
 }
 import { GitReviewPanel } from "./git-review";

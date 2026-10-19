@@ -1,5 +1,22 @@
 import {expect,test} from 'bun:test';
 
+test('工作台只从所属Task访问执行，不提供独立Run历史或控制旁路',async()=>{
+ const app=await Bun.file('src-tauri/web/src/App.tsx').text();
+ const css=await Bun.file('src-tauri/web/src/workbench.css').text();
+ const api=await Bun.file('src-tauri/web/src/api.ts').text();
+ for(const removed of ['独立运行历史','独立运行记录','workflow-run-picker','selectedId','setSelectedId','RunDetail','toRunListItem','api.listRuns()','api[action](selected.runId)'])expect(app).not.toContain(removed);
+ expect(css).not.toContain('workflow-run-picker');
+ for(const action of ['runs.list','runs.create','runs.pause','runs.recover','runs.stop','runs.resume','runs.currentAttempt','runs.executionAttempts'])expect(api).not.toContain(`"${action}"`);
+ expect(api).toContain('"executions.resume"');
+ expect(api).toContain('"executions.get"');
+ expect(api).toContain('"runs.phaseVisits"');
+ expect(app).toContain('const workflowPanelOpen = route.kind === "workflow";');
+ expect(app).toContain('routeMatchesTask(harness,route)');
+ expect(app).toContain('api.resumeExecution(');
+ expect(app).toContain('<HistoricalResults');
+ expect(app).toContain('<PreviousRecords');
+});
+
 test('窄窗导航独占顶部安全行，归档动作复用紧凑按钮',async()=>{
  const css=await Bun.file('src-tauri/web/src/workbench.css').text();
  const app=await Bun.file('src-tauri/web/src/App.tsx').text();
@@ -30,7 +47,9 @@ test('macOS保留原生窗口装饰与安全拖动区，归档独立于任务导
  expect(config.app.windows[0].titleBarStyle).toBe('Overlay');
  expect(config.app.windows[0].hiddenTitle).toBe(true);
  expect(config.app.windows[0].decorations).not.toBe(false);
- expect(app).toContain('getCurrentWindow().startDragging()');
+ expect(app).toContain('data-tauri-drag-region="deep"');
+ expect(app).not.toContain('getCurrentWindow().startDragging()');
+ expect(app).not.toContain('onMouseDown={event=>{if(event.button===0)');
  expect(app).toContain('onClick={()=>onArchive(item)}');
  expect(app).toContain('item.executions.some(execution=>!execution.finishedAt)');
  expect(app).toContain('background.forEach(item=>item.inert=true)');

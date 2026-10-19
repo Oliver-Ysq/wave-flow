@@ -1,4 +1,4 @@
-import { Component, StrictMode, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, StrictMode, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { App } from "./App";

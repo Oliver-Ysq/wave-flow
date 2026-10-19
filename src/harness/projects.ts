@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, open, readFile, rename } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { waveFlowHome } from "../journal/paths";
 
@@ -24,9 +24,9 @@ export class HarnessProjectStore {
     const value = await this.read();
     return [...value].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
-  /** 路径 realpath 后按 cwd 去重；同一目录不会产生两个项目实体。 */
+  /** 只接纳现有绝对目录，realpath后按cwd去重；文件或无效路径零落盘，不创建目录。 */
   async create(cwd: string, title?: string): Promise<HarnessProject> {
-    const resolved = await realpath(cwd).catch(() => { throw new Error("项目路径不可验证。 "); });
+    const resolved = await validateProjectDirectory(cwd);
     const projects = await this.read();
     const existing = projects.find((project) => project.cwd === resolved);
     if (existing) return existing;
@@ -62,6 +62,15 @@ export class HarnessProjectStore {
     try { await handle.writeFile(`${JSON.stringify(projects, null, 2)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
     await rename(temporary, destination); await chmod(destination, 0o600);
   }
+}
+
+/** 只读核验项目绝对目录并返回canonical cwd；不登记项目、不创建目录或扫描内容。 */
+export async function validateProjectDirectory(cwd: string): Promise<string> {
+  if (!isAbsolute(cwd)) throw new Error("项目路径必须是绝对路径。");
+  const resolved = await realpath(cwd).catch(() => { throw new Error("项目路径不可验证。 "); });
+  const info = await lstat(resolved);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("项目路径必须是文件夹，不能使用普通文件。");
+  return resolved;
 }
 
 function normalizeTitle(title: string | undefined, cwd: string): string { const value = title?.trim() || basename(cwd); if (!value || value.length > 120 || /[\r\n]/.test(value)) throw new Error("项目名称必须是 1-120 个单行字符。 "); return value; }

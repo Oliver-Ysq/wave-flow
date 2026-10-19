@@ -6,27 +6,11 @@ import { SchemaForm } from "../forms/schema-form";
 import { ViewCache } from "../workbench-state";
 import {PersistedDetails} from "../persisted-details";
 import {userFacingText} from "../user-facing-text";
+import { statusLabel } from "./status-label";
 const agentExpansion=new ViewCache<boolean>(256);
 const AnswerAllowed=createContext(true);
 
 /** 节点状态文案（与工作台既有措辞一致）。 */
-function statusLabel(status: string): string {
-  return (
-    (
-      {
-        queued: "排队中",
-        running: "工作中",
-        blocked: "需要协助",
-        pausing: "暂停中",
-        paused: "已暂停",
-        recovering: "恢复中",
-        completed: "已交付",
-        cancelled: "已停止",
-        interrupted: "已中断",
-      } as Record<string, string>
-    )[status] ?? status
-  );
-}
 
 /** 非终态集合：用于从耐久数据判定一次 phaseVisit 是否仍在进行。 */
 const ACTIVE_STATUSES = new Set([

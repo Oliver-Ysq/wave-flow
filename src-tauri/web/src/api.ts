@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CliRuntime, CliRuntimeListResponse, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionAttemptsResponse, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, RunListItem, RunResponse, ScanCliRuntimesResponse } from "./types";
+import type { CliRuntime, CliRuntimeListResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, ScanCliRuntimesResponse } from "./types";
 
 /** WebView 只能调用当前 Tauri 持有的 Engine；没有浏览器 HTTP fallback。 */
 async function action<T>(name: string, args: Record<string, unknown> = {}, timeoutSecs?: number): Promise<T> {
@@ -9,6 +9,8 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 拖入/选目录后只读验证现有绝对文件夹，返回canonical cwd；不登记或启动任务。 */
+  validateProjectPath: (cwd: string) => action<{ /** 已核验的真实目录绝对路径。 */ cwd: string }>("projects.validatePath", { cwd }),
   /** 首次发送携带已暂存图片；请求身份与附件列表一起绑定，仍不启动Worker。 */
   startConversationWithAttachments: (projectId:string,text:string,clientRequestId:string,title:string|undefined,stagedAttachmentIds:string[]) => action<HarnessRunResponse>("harnesses.startConversation",{projectId,text,clientRequestId,...(title?{title}:{}),...(stagedAttachmentIds.length?{stagedAttachmentIds}:{})}),
   /** 读取已登记项目当前分支，仅用于展示，不批准或启动执行。 */
@@ -54,8 +56,6 @@ export const api = {
   /** 显式重新核验现场；变化只追加补充义务，既不恢复也不启动Execution。 */
   checkExecutionScene:(harnessRunId:string,executionId:string)=>action<{harness:import("./types").HarnessSnapshot}>("executions.checkScene",{harnessRunId,executionId}),
   desktopStatus: () => action<DesktopStatusResponse>("status"),
-  createRun: (request: CreateRunRequest) => action<RunResponse>("runs.create", request),
-  listRuns: () => action<RunListItem[]>("runs.list"),
   listHarnesses: () => action<HarnessRunListResponse>("harnesses.list"),
   cliRuntimes: () => action<CliRuntimeListResponse>("runtimes.list"),
   discoverCliRuntimes: () => action<{ candidates: DiscoveredCliCandidate[] }>("runtimes.discover"),
@@ -63,9 +63,6 @@ export const api = {
   validateCliRuntime: (executablePath: string, cli: "codex" | "kimi", discoveredFrom: "shell-path" | "gui-path" | "manual" = "manual", discoveredShell: string | null = null) => action<{ runtime: CliRuntime }>("runtimes.validate", { executablePath, cli, discoveredFrom, discoveredShell }),
   selectCliRuntime: (runtimeId: string) => action<{ runtime: CliRuntime }>("runtimes.select", { runtimeId }),
   deleteCliRuntime: (runtimeId: string) => action<{ deleted: true }>("runtimes.delete", { runtimeId }),
-  currentAttempt: (runId: string) => action<CurrentAttemptResponse>("runs.currentAttempt", { runId }),
-  executionAttempts: (runId: string) => action<ExecutionAttemptsResponse>("runs.executionAttempts", { runId }),
-  phaseVisit: (runId: string, phaseVisitId: number) => action<PhaseVisitResponse>("runs.phaseVisit", { runId, phaseVisitId }),
   phaseVisits: (runId: string, options: { cursor?: number; includeEmpty?: boolean; attempt?: number } = {}) => {
     return action<PhaseVisitPageResponse>("runs.phaseVisits", { runId, ...options });
   },
@@ -73,7 +70,7 @@ export const api = {
   executionPhaseVisits: (harnessRunId: string, executionId: string, options: { cursor?: number; includeEmpty?: boolean; attempt?: number } = {}) => {
     return action<ExecutionPhaseVisitPageResponse>("executions.phaseVisits", { harnessRunId, executionId, ...options });
   },
-  pause: (runId: string) => action<RunResponse>("runs.pause", { runId }), recover: (runId: string) => action<RunResponse>("runs.recover", { runId }), stop: (runId: string) => action<RunResponse>("runs.stop", { runId }), resume: (runId: string) => action<RunResponse>("runs.resume", { runId }), answer: (blockRequestId: string, answer: Record<string, unknown>) => action("blocks.answer", { blockRequestId, answer }),
+  answer: (blockRequestId: string, answer: Record<string, unknown>) => action("blocks.answer", { blockRequestId, answer }),
   projects: () => action<HarnessProjectListResponse>("projects.list"), createProject: (cwd: string, title?: string) => action<HarnessProjectResponse>("projects.create", { cwd, ...(title?.trim() ? { title } : {}) }), startHarnessConversation: (projectId: string, text: string, clientRequestId: string = crypto.randomUUID(), title?: string) => action<HarnessRunResponse>("harnesses.startConversation", { projectId, text, clientRequestId, ...(title ? { title } : {}) }), createHarness: (projectId: string) => action<HarnessRunResponse>("harnesses.create", { projectId }), harness: (harnessRunId: string) => action<HarnessRunResponse>("harnesses.get", { harnessRunId }), sendHarnessMessage: (harnessRunId: string, text: string, options: { clientMessageId?: string; immediate?: boolean; stagedAttachmentIds?: string[] } = {}) => action<HarnessRunResponse>("harnesses.send", { harnessRunId, text, ...options }), cancelQueuedMessage: (harnessRunId: string, messageId: string) => action<HarnessRunResponse>("harnesses.cancelQueued", { harnessRunId, messageId }), stageAttachment: (path: string) => action<import("./types").StagedAttachment>("harnesses.stageAttachment", { path }), attachmentData: (harnessRunId: string, messageId: string, attachmentId: string) => action<{ dataUrl: string }>("harnesses.attachmentData", { harnessRunId, messageId, attachmentId }), abortHarness: (harnessRunId: string) => action<HarnessRunResponse>("harnesses.abort", { harnessRunId }), completeHarness: (harnessRunId: string) => action<HarnessRunResponse>("harnesses.complete", { harnessRunId }), retryInitialization: (harnessRunId: string) => action<HarnessRunResponse>("harnesses.retryInitialization", { harnessRunId }), abandonCard: (harnessRunId: string, cardId: string) => action<HarnessRunResponse>("harnesses.abandonCard", { harnessRunId, cardId }), acceptWorkflowRevision: (harnessRunId: string, revision: number) => action<HarnessRunResponse>("harnesses.acceptRevision", { harnessRunId, revision }), rejectWorkflowRevision: (harnessRunId: string, revision: number) => action<HarnessRunResponse>("harnesses.rejectRevision", { harnessRunId, revision }), createExecution: (harnessRunId: string, revision: number, config: ExecutionConfigSnapshot, input: Record<string, unknown> = {}) => action<ExecutionResponse>("executions.create", { harnessRunId, revision, input, config }), planExecution: (harnessRunId: string, revision: number) => action<ExecutionPlanResponse>("executions.plan", { harnessRunId, revision }), executions: (harnessRunId: string) => action<ExecutionListResponse>("executions.list", { harnessRunId }), execution: (harnessRunId: string, executionId: string) => action<ExecutionResponse>("executions.get", { harnessRunId, executionId }), executionControl: (harnessRunId: string, executionId: string, actionName: "pause" | "recover" | "stop") => action<ExecutionResponse>("executions.control", { harnessRunId, executionId, action: actionName }), resumeExecution: (harnessRunId: string, executionId: string) => action<ExecutionResponse>("executions.resume", { harnessRunId, executionId }), answerExecutionGate: (harnessRunId: string, executionId: string, gateId: string, answer: Record<string, unknown>) => action<ExecutionResponse>("executions.answerGate", { harnessRunId, executionId, gateId, answer }), answerHarnessDecision: (harnessRunId: string, decisionId: string, answer: Record<string, unknown>) => action<HarnessRunResponse>("harnesses.answerDecision", { harnessRunId, decisionId, answer }),
   /** 订阅 Engine 事件帧；generation 变化表示 Engine 重启，调用方必须重读快照对齐序号。 */
   listenEngineEvents: (handler: (envelope: EngineEventEnvelope) => void) => listen<EngineEventEnvelope>("engine-event", (event) => handler(event.payload)),

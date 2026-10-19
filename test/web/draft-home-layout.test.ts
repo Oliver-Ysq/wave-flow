@@ -8,8 +8,7 @@ test("侧栏不再展示或维护任务搜索，项目列表直接呈现",async(
   expect(app).not.toContain("const [search, setSearch]");
   expect(app).not.toContain("revision.goal?.includes(search)");
   expect(css).not.toContain(".task-search");
-  expect(css).toContain("grid-template-rows: auto auto auto minmax(0, 1fr) auto");
-  expect(css).not.toContain("grid-template-rows: auto auto auto auto minmax(0, 1fr) auto");
+  expect(css).toContain("grid-template-rows: auto auto auto auto minmax(0, 1fr) auto");
 });
 
 test("预置与本地工作流复用居中弹窗，不回退主网格或伪切换入口",async()=>{

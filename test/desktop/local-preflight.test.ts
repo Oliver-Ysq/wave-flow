@@ -6,6 +6,21 @@ import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engi
 
 const roots:string[]=[];
 afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
+test("项目目录只读验证IPC拒绝文件且不登记；创建同样复核目录",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-project-path-ipc-"));roots.push(root);
+ const engine=new DesktopExecutionEngine({harnessRoot:join(root,"state","harness-runs"),storeRoot:join(root,"state","runs"),deterministicForTest:true});
+ try{
+  const path=join(root,"ordinary-file");await writeFile(path,"not a directory");
+  await expect(engine.handleDesktopAction("projects.validatePath",{cwd:path})).rejects.toThrow("文件夹");
+  await expect(engine.handleDesktopAction("projects.create",{cwd:path})).rejects.toThrow("文件夹");
+  await expect(engine.handleDesktopAction("projects.validatePath",{cwd:"relative"})).rejects.toThrow("绝对路径");
+  expect(await engine.handleDesktopAction("projects.list",{})).toEqual({projects:[]});
+  const valid=await engine.handleDesktopAction("projects.validatePath",{cwd:root}) as {cwd:string};
+  expect(valid.cwd).toMatch(/wave-flow-project-path-ipc-/);
+  expect(await engine.handleDesktopAction("projects.list",{})).toEqual({projects:[]});
+  expect(await engine.handleDesktopAction("runs.list",{})).toEqual([]);
+ }finally{engine.shutdown();}
+});
 test("本地预检IPC只读取Project指定文件，不创建Task/Run或返回源码",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-preflight-ipc-"));roots.push(root);
  const engine=new DesktopExecutionEngine({harnessRoot:join(root,"state","harness-runs"),storeRoot:join(root,"state","runs"),deterministicForTest:true,singleWorkflowForAcceptance:true});

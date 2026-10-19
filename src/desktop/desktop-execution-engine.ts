@@ -4,7 +4,7 @@ import { loadWorkflow } from "../workflow/load-workflow";
 import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
-import type { AcceptWorkflowRevisionRequest, AnswerDecisionRequest, CliRuntimeListResponse, CompleteHarnessRequest, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { ImpactSupplementRequiredError } from "../harness/impact-summary";
 import type { ControlServer } from "../control/control-server";
@@ -17,7 +17,7 @@ import { AgentStartLimiter, LimitedAgentExecutor } from "../runtime/agent-start-
 import { HarnessService } from "../harness/service";
 import { assertStartable, type TaskCreation } from "../harness/task-contract";
 import { canonicalJson, isTemplateSelection, listWorkflowTemplates, validateTemplateInput } from "../harness/workflow-templates";
-import { HarnessProjectStore } from "../harness/projects";
+import { HarnessProjectStore, validateProjectDirectory } from "../harness/projects";
 import { readProjectContext } from "./project-context";
 import { HarnessExecutionService } from "../harness/executions";
 import { repairHarnessHomePermissions } from "../harness/journal";
@@ -494,7 +494,6 @@ export class DesktopExecutionEngine {
   private async stageHarnessAttachment(value: unknown): Promise<import("../harness/attachments").StagedAttachment> { return this.#harness.stageAttachment(requiredString(value, "path")); }
   private async harnessAttachmentData(harnessRunId: string, value: unknown): Promise<{ readonly dataUrl: string }> { return this.#harness.attachmentData(harnessRunId, requiredString(value, "messageId"), requiredString(value, "attachmentId")); }
   private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
-  private async completeHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value as CompleteHarnessRequest)) throw new EngineActionError(400, "Harness complete 不接受请求字段。 "); try { return { harness: await this.#harness.complete(harnessRunId) }; } catch (error) { throw this.executionError(error); } }
   private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
   /** 拒绝最新未接受草案；拒绝是不可逆耐久事实。 */
   private async rejectWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "拒绝 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.rejectWorkflowRevision(harnessRunId, revision) }; }
@@ -722,6 +721,7 @@ export class DesktopExecutionEngine {
       case "projects.list": return this.listProjects();
       case "projects.context": return readProjectContext((await this.#projects.get(requiredString(value, "projectId"))).cwd);
       case "projects.create": return this.createProject(value);
+      case "projects.validatePath": return { cwd: await validateProjectDirectory(requiredString(value, "cwd")) };
       case "templates.list": return {templates:listWorkflowTemplates()};
       case "templates.save": {
         const request=object(value);

@@ -196,7 +196,7 @@
 /* Project rail */
 .agent-workbench .task-rail {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   border-right: 1px solid var(--wf-line);
   background: var(--wf-rail);
@@ -221,6 +221,20 @@
 .agent-workbench .task-section-title .harness-tabs button:hover { background:var(--wf-accent-wash); color:var(--wf-ink); }
 .agent-workbench .task-section-title .harness-tabs button.active { background:var(--wf-accent-wash); color:var(--wf-accent); }
 .agent-workbench .task-list { display:flex; flex-direction:column; align-items:stretch; gap:3px; min-width:0; overflow:auto; padding:0 9px 10px; }
+.agent-workbench .task-list[hidden], .agent-workbench .task-section-title[hidden], .agent-workbench .project-conversations[hidden] { display:none; }
+.projects-section-header { display:flex; align-items:center; justify-content:space-between; margin:14px 18px 0; }
+.projects-section-header button { border:0; background:transparent; color:var(--wf-muted); cursor:pointer; border-radius:6px; }
+.projects-toggle { display:flex; align-items:center; gap:8px; padding:8px 4px; font-family:inherit; font-size:13px; font-weight:600; }
+.agent-workbench .task-rail > footer { grid-row:6; }
+.agent-workbench .task-rail > .task-list { grid-row:5; }
+.project-add { display:grid; place-items:center; width:28px; height:28px; }
+.project-add svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.5; }
+.projects-section-header button:hover { color:var(--wf-ink); background:var(--wf-accent-wash); }
+.project-folder-drop { display:flex; flex-direction:column; align-items:center; gap:12px; padding:24px 16px; border:1px dashed var(--wf-line); border-radius:10px; color:var(--wf-muted); text-align:center; }
+.project-folder-drop.hovering { border-color:var(--wf-accent); background:var(--wf-accent-wash); }
+.project-folder-drop svg { width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:1.5; }
+.project-create-error { color:var(--wf-danger-ink); margin:0; overflow-wrap:anywhere; }
+.project-create h2 { margin:0; font-size:20px; }
 .agent-workbench .task-unread { display:inline-block; margin-top:4px; padding:2px 6px; border-radius:5px; background:var(--wf-accent-wash); color:var(--wf-accent); font-size:11px; }
 .agent-workbench .workflow-timeline-item .wf-chat-summary { max-width:620px; margin-left:34px; }
 @media(max-width:900px){.agent-workbench .workflow-timeline-item .wf-chat-summary{margin-left:0;}}
@@ -942,16 +956,6 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .create-picked-path { display:flex; align-items:flex-start; gap:10px; }
 .agent-workbench .create-picked-path code { flex:1 1 auto; min-width:0; padding:8px 10px; border:1px solid var(--wf-line); border-radius:8px; background:var(--wf-input); color:var(--wf-ink); font:11px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:normal; overflow-wrap:anywhere; }
 .agent-workbench .create-picked-path button { flex:0 0 auto; padding:7px 10px; border:1px solid var(--wf-line); border-radius:8px; background:var(--wf-panel-raised); color:var(--wf-ink); font-size:11px; }
-
-.agent-workbench .workflow-run-picker { display:grid; gap:8px; width:100%; max-width:360px; }
-.agent-workbench .workflow-run-picker article { border:1px solid var(--wf-line-soft); border-radius:10px; background:var(--wf-panel-raised); }
-.agent-workbench .workflow-run-picker article > button { display:flex; align-items:center; gap:10px; width:100%; padding:10px 12px; border:0; background:transparent; color:var(--wf-ink); text-align:left; }
-.agent-workbench .workflow-run-picker article > button:hover { background:var(--wf-selected); }
-.agent-workbench .workflow-run-picker strong { display:block; font-size:12px; line-height:1.5; white-space:normal; overflow-wrap:anywhere; }
-.agent-workbench .workflow-run-picker small { display:block; margin-top:2px; color:var(--wf-muted); font-size:10px; }
-.agent-workbench .workflow-run-picker details { padding:0 12px 8px; }
-.agent-workbench .workflow-run-picker summary { color:var(--wf-faint); font-size:10px; cursor:pointer; }
-.agent-workbench .workflow-run-picker details code { display:block; margin-top:4px; color:var(--wf-muted); font:10px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:normal; overflow-wrap:anywhere; }
 
 /* 中央详情独立页面：不继承旧聊天卡的嵌套背景或浏览器默认字体。 */
 .agent-workbench { font-family:-apple-system, "PingFang SC", "Helvetica Neue", sans-serif; font-size:14px; line-height:1.5; }

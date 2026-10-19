@@ -95,7 +95,8 @@ test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅
   expect(source).toContain('manual-runtime-error');
   expect(source).toContain('setManualError(message)');
   expect(source).toContain('agent-workbench theme-${theme}');
-  expect(source).toContain('className="connection-panel project-create"');
+  const projectDialog = await Bun.file("src-tauri/web/src/project-create-dialog.tsx").text();
+  expect(projectDialog).toContain('className="connection-panel project-create"');
   expect(source).not.toContain('className="workflow-draft project-create"');
   expect(css).toContain(".agent-workbench .connection-panel");
   expect(css).toContain(":root[data-theme=\"light\"]");
@@ -199,13 +200,6 @@ test("Execution 详情读取失败时说明 Desktop Engine 重连，而不是误
   expect(source).toContain("Desktop Engine (已退出|请求超时|管道错误|未运行)");
 });
 
-test("退出取消的 Run 与中断 Run 都提供显式恢复入口", async () => {
-  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
-  expect(source).toContain('run.status === "interrupted" || run.status === "cancelled"');
-  expect(source).toContain('label={run.status === "cancelled" ? "恢复已停止 Run" : "重新执行"}');
-  expect(source).toContain('onClick={() => void onControl("resume")}');
-});
-
 test("取消或中断的 Execution 都提供同一冻结 revision 的显式恢复入口", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain('detail.snapshot.status === "interrupted" || detail.snapshot.status === "cancelled"');
@@ -213,10 +207,10 @@ test("取消或中断的 Execution 都提供同一冻结 revision 的显式恢�
   expect(source).toContain('onClick={() => void onControl("resume")}');
 });
 
-test("活动 Run 仅通过 Engine action 轮询当前尝试，不回退 SSE", async () => {
+test("Task 执行仅通过 Engine action 刷新，不回退独立 Run 详情或 SSE", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
-  expect(source).toContain("Desktop 不再有 Run SSE");
   expect(source).toContain("window.setInterval(reload, 1_000)");
-  expect(source).toContain("api.currentAttempt(run.runId)");
+  expect(source).toContain(".execution(harness.harnessRunId, selectedExecutionId)");
+  expect(source).not.toContain("api.currentAttempt(");
   expect(source).not.toContain("EventSource(");
 });
