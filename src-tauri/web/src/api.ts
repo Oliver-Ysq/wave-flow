@@ -9,6 +9,8 @@ async function action<T>(name: string, args: Record<string, unknown> = {}, timeo
 }
 
 export const api = {
+  /** 手动保存1–120字单行标题；归档拒绝，不影响主控或执行。 */
+  renameTitle: (harnessRunId: string, title: string) => action<HarnessRunResponse>("harnesses.renameTitle", {harnessRunId, title}),
   /** 拖入/选目录后只读验证现有绝对文件夹，返回canonical cwd；不登记或启动任务。 */
   validateProjectPath: (cwd: string) => action<{ /** 已核验的真实目录绝对路径。 */ cwd: string }>("projects.validatePath", { cwd }),
   /** 首次发送携带已暂存图片；请求身份与附件列表一起绑定，仍不启动Worker。 */

@@ -69,6 +69,10 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       const selection={id:template.id,version:template.version,sourceHash:template.sourceHash,input:{target:"src/",focus:["正确性"],maxFindings:3,context:""},needsGuidance:true};
       const created=await engine.handleDesktopAction("harnesses.startConversation",{projectId:projects.projects[0]!.projectId,text:template.meta.description,clientRequestId:crypto.randomUUID(),template:selection}) as {harness:import("../../src/harness/types").HarnessSnapshot};
       const id=created.harness.harnessRunId;
+      const renamed=await engine.handleDesktopAction("harnesses.renameTitle",{harnessRunId:id,title:"人工任务名称"}) as {harness:import("../../src/harness/types").HarnessSnapshot};
+      expect(renamed.harness.task?.title).toBe("人工任务名称");
+      expect(renamed.harness.task?.titleSource).toBe("manual");
+      await expect(engine.handleDesktopAction("harnesses.renameTitle",{harnessRunId:id,title:"\n"})).rejects.toThrow();
       expect(created.harness.workflowRevisions[0]!.acceptedAt).toBeNull();expect(created.harness.executions).toHaveLength(0);
       expect(created.harness.workflowRevisions[0]!.parametersPending).toBe(true);
       // 引导按钮现在由 Engine 原子安排普通主控回合，计划/确认须等待真实回合结束。

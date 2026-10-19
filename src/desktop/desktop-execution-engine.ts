@@ -33,6 +33,7 @@ import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
 import { WorkerControlPipe } from "../runtime/worker-control-pipe";
 import { HarnessControlPipe } from "../harness/harness-control-pipe";
 import { createIsolatedHarness } from "../harness/isolated-harness";
+import { generateAcpTaskTitle } from "../harness/acp-task-naming";
 import { prepareSessionScratch } from "../workspace/session-scratch";
 import { adapterById } from "../runtimes/adapter-catalog";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
@@ -81,6 +82,8 @@ export type DesktopExecutionEngineOptions = {
   readonly maxActiveAgents?: number;
   /** 自动测试注入；生产省略时使用 selected ACP CLI Harness。 */
   readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks, runtime?:import("../runtimes/types").RuntimeProvenance) => Promise<import("../harness/session").HarnessSession>;
+  /** 测试注入独立命名器；生产省略使用所选主控ACP，无业务工具。 */
+  readonly generateTaskTitle?: (context:import("../harness/task-naming").TaskNamingContext,snapshot:import("../harness/types").HarnessSnapshot,signal:AbortSignal)=>Promise<string>;
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
   /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
@@ -180,6 +183,11 @@ export class DesktopExecutionEngine {
       const runtime = await this.#cliRuntimes.resolveSelectedHarness();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
     }, this.singleWorkflowForAcceptance);
+    if(normalized.generateTaskTitle)this.#harness.setNamingGenerator(normalized.generateTaskTitle);
+    else if(!this.hasCustomHarnessSession)this.#harness.setNamingGenerator(async(context,snapshot,signal)=>{
+      const runtime=snapshot.runtime ? await this.#cliRuntimes.resolveByIdHarness(snapshot.runtime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
+      return generateAcpTaskTitle({launcher:resolveHarnessLauncher(runtime),isolation:adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation,projectCwd:snapshot.cwd,scratchRoot:join(dirname(harnessRoot),"naming-scratch"),context,signal});
+    });
     // 事件总线：只把耐久事实派生的事件推给订阅者；瞬时 reasoning/assistant delta 不上帧，
     // Web 实时展示与重开回放因此始终同源（Journal → 投影/事件帧）。
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
@@ -235,7 +243,7 @@ export class DesktopExecutionEngine {
   /** 只发布耐久事实派生的事件；瞬时 delta 与 ACP 原始通知不上帧（已由条目事件承载）。 */
   private publishHarnessEvent(harnessRunId: string, event: import("../harness/types").HarnessStreamEvent): void {
     if (this.#eventSinks.size === 0) return;
-    if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed") return;
+    if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed" && event.type !== "title_changed") return;
     const seq = (this.#harnessEventSeq.get(harnessRunId) ?? 0) + 1;
     this.#harnessEventSeq.set(harnessRunId, seq);
     const frame: EngineEventFrame = { type: "event", protocolVersion: 1, stream: "harness", harnessRunId, seq, event };
@@ -736,6 +744,7 @@ export class DesktopExecutionEngine {
       case "harnesses.create": return this.createHarness(value);
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
       case "harnesses.get": return this.harnessSnapshot(requiredString(value, "harnessRunId"));
+      case "harnesses.renameTitle": return {harness:await this.#harness.renameTitle(requiredString(value,"harnessRunId"),requiredString(value,"title"))};
       case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
       case "harnesses.cancelQueued": return this.cancelQueuedHarnessMessage(requiredString(value, "harnessRunId"), value);
       case "harnesses.stageAttachment": return this.stageHarnessAttachment(value);

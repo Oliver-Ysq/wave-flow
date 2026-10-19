@@ -407,6 +407,7 @@ export type HarnessDecision = {
 
 /** Pi adapter 向 HarnessService 公开的最小流事件；不暴露 Pi 原始对象。 */
 export type HarnessStreamEvent = (
+  | { /** 最终标题耐久后通知UI重读，不携带生成过程。 */ readonly type:"title_changed" }
   | { readonly type: "reasoning_delta"; readonly delta: string }
   | { readonly type: "assistant_delta"; readonly delta: string }
   /** 当前回合中 MCP 窄工具开始执行；仅供瞬时过程展示，不写入 Harness Journal。 */

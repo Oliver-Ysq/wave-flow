@@ -142,6 +142,7 @@ export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; ca
 export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
 /** Engine 事件帧中的会话事件（耐久派生子集）。 */
 export type HarnessStreamEvent = (
+  | { /** 最终标题耐久后重读快照。 */ type:"title_changed" }
   | { type: "entry_started"; entry: HarnessConversationEntry }
   | { type: "entry_appended"; entryId: string; text: string; truncated: boolean }
   | { type: "entry_finished"; entry: HarnessConversationEntry }
@@ -251,6 +252,10 @@ export type HarnessSnapshot = {
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
   executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
   task?: {
+    /** 人工名称已耐久保存；缺省无人工覆盖，自动命名不得覆盖manual。 */
+    titleSource?: "manual";
+    /** 本Task已消费后台一次性命名尝试，不因重开而补跑。 */
+    namingAttempted?: boolean;
     /** 创建时冻结的模式；旧Task缺省多卡，不能由验收开关推断。 */
     workflowContract?:"single-workflow-v1";
     clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; messageQueue: HarnessQueuedMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };

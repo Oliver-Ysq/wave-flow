@@ -29,8 +29,12 @@ export type TaskMetadata = {
   readonly clientRequestId: string;
   /** 规范化 payload 的 SHA-256。 */
   readonly payloadHash: string;
-  /** 固定标题。 */
+  /** 当前标题；人工修改通过Journal投影，不修改创建指纹。 */
   readonly title: string;
+  /** 用户已手动保存标题；缺省没有人工覆盖，后台命名不得覆盖manual。 */
+  readonly titleSource?: "manual";
+  /** 本Task已消费一次后台命名尝试；历史缺省false，重开不补跑。 */
+  readonly namingAttempted?: boolean;
   /** 初始目标。 */
   readonly initialGoal: string;
 };

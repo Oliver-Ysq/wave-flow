@@ -14,9 +14,10 @@ import {canonicalJson} from "./workflow-templates";
 import { impactSummaryKey, assertImpactSummariesComplete } from "./impact-summary";
 import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 import { verifyMessageAttachments } from "./attachments";
+import { normalizeTaskTitle } from "../shared/task-title";
 
-/** 当前Harness档案格式；只读取本格式，不迁移或兼容旧开发档案。 */
-export const HARNESS_JOURNAL_VERSION = 9;
+/** 新建Harness档案格式；兼容读取v8/v9，低于v8拒绝，不迁移创建事实。 */
+export const HARNESS_JOURNAL_VERSION = 10;
 
 export type HarnessManifest = {
   /** v7 创建身份与固定标题；历史缺省。 */
@@ -34,6 +35,23 @@ export type HarnessManifest = {
 
 /** Harness 档案的全部耐久事件类型；导出供记录器等内部写路径复用同一形状。 */
 export type HarnessEvent =
+  | {
+      /** 一次性尝试收据，不保存生成过程。 */ readonly type:"harness.naming_attempted";
+      /** 收据ISO时间。 */ readonly at:string;
+      /** 所属Task UUID。 */ readonly harnessRunId:string;
+    }
+  | {
+      /** 合法自动标题最终结果，不改变业务状态。 */ readonly type:"harness.title_generated";
+      /** 结果保存ISO时间。 */ readonly at:string;
+      /** 所属Task UUID。 */ readonly harnessRunId:string;
+      /** 最多30字的单行标题。 */ readonly title:string;
+    }
+  | {
+      /** 用户显式改名，不改变运行状态。 */ readonly type: "harness.title_renamed";
+      /** 保存时间，ISO格式。 */ readonly at: string;
+      /** 被改名Task的UUID，不使用页面当前选择。 */ readonly harnessRunId: string;
+      /** 已规范化的1–120字单行名称。 */ readonly title: string;
+    }
   /** 准备版本前冻结用户确认；不启动Execution。 */
   | {
       /** 固定确认收据事件类型。 */ readonly type:"workflow.execution_confirmation";
@@ -221,6 +239,10 @@ export class HarnessProjection {
   #openEntries = new Map<string, number>();
   /** 当前回合已用的最大条目序号；条目 seq 必须严格递增。 */
   #turnEntrySeq = 0;
+  /** 人工标题仅从耐久事件投影；创建manifest保持不变。 */
+  #manualTitle: string | null = null;
+  #generatedTitle: string | null = null;
+  #namingAttempted = false;
   constructor(private readonly manifest: HarnessManifest) {}
   apply(event: HarnessEvent): void {
     this.#snapshotSequence++;
@@ -235,6 +257,18 @@ export class HarnessProjection {
       this.#executionConfirmations.push({...event.confirmation});return;
     }
     if (event.type === "harness.created") { if (this.#created) throw new Error("Harness created 重复。 "); this.#created = true; return; }
+    if (event.type === "harness.title_renamed") {
+      if (!this.manifest.task) throw new Error("旧会话没有Task元数据，不能改名。");
+      this.#manualTitle = normalizeTaskTitle(event.title); return;
+    }
+    if(event.type === "harness.naming_attempted") {
+      if(!this.manifest.task || this.#namingAttempted) throw new Error("命名尝试重复或没有Task。");
+      this.#namingAttempted=true;return;
+    }
+    if(event.type === "harness.title_generated") {
+      if(!this.#namingAttempted || this.#manualTitle !== null || this.#generatedTitle !== null || !this.manifest.task) throw new Error("自动标题已失效。");
+      this.#generatedTitle=event.title;return;
+    }
     if(event.type==="harness.controller_recovered"){if(this.#status!=="interrupted")throw new Error("只能恢复已中断主控。");this.#status="idle";this.#diagnostic=null;return;}
     if(event.type === "harness.summary_evidence") {
       const index = this.#impactSummaries.findIndex(item => item.key === event.key);
@@ -425,7 +459,7 @@ export class HarnessProjection {
       return;
     }
   }
-snapshot(): HarnessSnapshot { return structuredClone({ executionConfirmations:this.#executionConfirmations, impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: this.manifest.task } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], messageQueue: this.#queue.map((item) => ({ ...item })), toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }); }
+snapshot(): HarnessSnapshot { return structuredClone({ executionConfirmations:this.#executionConfirmations, impactSummaries:this.#impactSummaries.map(item=>({...item})), executionHistory:this.#executionHistory.map(item=>({...item})), snapshotSequence:this.#snapshotSequence, ...(this.manifest.task ? { task: {...this.manifest.task, namingAttempted:this.#namingAttempted, ...(this.#generatedTitle === null ? {} : {title:this.#generatedTitle}), ...(this.#manualTitle === null ? {} : {title:this.#manualTitle,titleSource:"manual" as const})} } : {}), harnessRunId: this.manifest.harnessRunId, projectId: this.manifest.projectId ?? null, cwd: this.manifest.cwd, runtime: this.#initializedRuntime ?? this.manifest.runtime ?? null, status: this.#status, diagnostic: this.#diagnostic, completedAt: this.#completedAt, createdAt: this.manifest.createdAt, messages: [...this.#messages], messageQueue: this.#queue.map((item) => ({ ...item })), toolActivitiesByMessageId: Object.fromEntries(Object.entries(this.#toolActivitiesByMessageId).map(([messageId, activities]) => [messageId, activities.map((item) => ({ ...item }))])), conversationEntries: this.#entries.map((entry) => ({ ...entry })), workflowRevisions: [...this.#workflowRevisions], executions: this.#executions.map((execution) => ({ ...execution })), decisions: this.#decisions.map((decision) => ({ ...decision })) }); }
   /** 条目事件只能属于当前运行中回合；重放乱序即 fail closed。 */
   private assertEntryTurn(turnId: string): void {
     if (this.#status !== "running" || this.#turnUserMessageId !== turnId) throw new Error("Harness 对话条目必须属于当前运行中回合。 ");
@@ -451,10 +485,10 @@ function validateManifest(value: unknown): HarnessManifest {
   if (typeof item.harnessRunId !== "string") throw new Error("Harness manifest 缺少 id。 ");
   validateRunId(item.harnessRunId);
   if (item.task !== undefined && !isTaskMetadata(item.task)) throw new Error("Task manifest 无效。");
-  if (plain(item.task) && item.task.workflowContract !== undefined && item.version !== HARNESS_JOURNAL_VERSION && item.version !== 8) throw new Error("单链契约必须由当前档案版本显式保存，不能修改旧manifest迁移。");
-  // v9 相对 v8 只新增事件与可选字段：v8 档案按空队列、无附件兼容读取并继续追加；
+  if (plain(item.task) && item.task.workflowContract !== undefined && ![HARNESS_JOURNAL_VERSION, 9, 8].includes(item.version as number)) throw new Error("单链契约必须由兼容档案版本显式保存。");
+  // v10增加人工标题事件；v8/v9按原创建标题读取并继续追加，不改manifest。
   // v1-v7 结构与字段约定不同，仍 fail closed 拒绝，不猜测迁移。
-  if(item.version!==HARNESS_JOURNAL_VERSION&&item.version!==8)throw new Error("不支持旧版Harness档案；请清空旧开发记录后创建新任务。");
+  if(![HARNESS_JOURNAL_VERSION,9,8].includes(item.version as number))throw new Error("不支持旧版Harness档案；请清空旧开发记录后创建新任务。");
   if ((item.projectId !== undefined && (typeof item.projectId !== "string" || !item.projectId.trim())) || typeof item.cwd !== "string" || !item.cwd.startsWith("/") || typeof item.modelFingerprint !== "string" || !item.modelFingerprint || typeof item.createdAt !== "string" || Number.isNaN(Date.parse(item.createdAt)) || (item.runtime !== undefined && !isRuntimeProvenance(item.runtime))) throw new Error("Harness manifest 无效。 ");
   return item as unknown as HarnessManifest;
 }
@@ -462,6 +496,15 @@ function validateManifest(value: unknown): HarnessManifest {
 function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (!plain(value) || typeof value.type !== "string" || value.harnessRunId !== harnessRunId || typeof value.at !== "string" || Number.isNaN(Date.parse(value.at))) throw new Error("Harness 事件身份或时间无效。 ");
   const item = value as Record<string, unknown>;
+  if (item.type === "harness.title_renamed") {
+    if (normalizeTaskTitle(item.title) !== item.title) throw new Error("耐久标题未规范化。");
+    return item as unknown as HarnessEvent;
+  }
+  if(item.type === "harness.naming_attempted") return item as unknown as HarnessEvent;
+  if(item.type === "harness.title_generated") {
+    if(normalizeTaskTitle(item.title)!==item.title || Array.from(item.title as string).length>30) throw new Error("自动标题无效。");
+    return item as unknown as HarnessEvent;
+  }
   if(item.type==="workflow.execution_confirmation"&&plain(item.confirmation)&&typeof item.confirmation.requestId==="string"&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(item.confirmation.requestId)&&Number.isInteger(item.confirmation.revision)&&(item.confirmation.revision as number)>0&&typeof item.confirmation.payloadHash==="string"&&/^[a-f0-9]{64}$/.test(item.confirmation.payloadHash))return item as unknown as HarnessEvent;
   if(item.type==="harness.runtime_initialized"&&isRuntimeProvenance(item.runtime))return item as unknown as HarnessEvent;
   if (item.type === "harness.created") return item as unknown as HarnessEvent;

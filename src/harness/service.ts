@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { normalizeTaskTitle } from "../shared/task-title";
+import { parseTaskNamingResult, type TaskNamingContext } from "./task-naming";
 import { assertImpactSummariesComplete, boundedEvidence, ImpactSupplementRequiredError } from "./impact-summary";
 import { readdir, realpath } from "node:fs/promises";
 import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, validateDecisionAnswer, validateDecisionSchema, type HarnessManifest } from "./journal";
@@ -21,6 +23,33 @@ import { withAttachmentSubmission, consumeStagedAttachments, readAttachmentBase6
 
 /** Engine 内 Harness 服务；不导入 Runtime、Control、Executor 或 Adapter。受限编译器仅用于草案落盘前的预检。 */
 export class HarnessService {
+  private namingGenerator?: (context:TaskNamingContext, snapshot:HarnessSnapshot, signal:AbortSignal)=>Promise<string>;
+  private namingActive = new Map<string,AbortController>();
+  /** 接入独立命名器；默认无，生产Engine注入。只允许一个后台命名进程，超额保留兜底。 */
+  setNamingGenerator(generator:(context:TaskNamingContext,snapshot:HarnessSnapshot,signal:AbortSignal)=>Promise<string>):void {this.namingGenerator=generator;}
+  private async scheduleNaming(id:string, context:TaskNamingContext):Promise<void> {
+    if(!this.namingGenerator || this.exiting)return;
+    const entry=await this.entry(id),snapshot=entry.projection.snapshot();
+    if(!snapshot.task || snapshot.task.namingAttempted || snapshot.status==="completed")return;
+    const event={type:"harness.naming_attempted" as const,at:new Date().toISOString(),harnessRunId:id};
+    await entry.journal.append(event);entry.projection.apply(event);
+    if(this.namingActive.size || snapshot.task.titleSource==="manual")return;
+    const controller=new AbortController();this.namingActive.set(id,controller);
+    const signal=AbortSignal.any([controller.signal,AbortSignal.timeout(60_000)]),generator=this.namingGenerator;
+    this.lifecycle.outside(()=>void (async()=>{
+      try {
+        const title=parseTaskNamingResult(await generator(structuredClone(context),snapshot,signal));
+        await this.mutate(id,async()=>{
+          const current=entry.projection.snapshot();
+          if(this.exiting || signal.aborted || current.status==="completed" || current.task?.titleSource==="manual")return;
+          const result={type:"harness.title_generated" as const,at:new Date().toISOString(),harnessRunId:id,title};
+          await entry.journal.append(result);entry.projection.apply(result);
+          this.emit(entry,id,{type:"title_changed"});
+        });
+      } catch { /* 一次性辅助任务失败保留兜底，不写生成过程、不重试、不影响主控。 */ }
+      finally {this.namingActive.delete(id);}
+    })());
+  }
   private summaryRequests=new Map<string,Promise<HarnessSnapshot>>();
   private exiting = false;
   private summaryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -216,7 +245,11 @@ export class HarnessService {
       }
       const entry = await this.entry(id);
       if(entry.projection.snapshot().status==="completed")return entry.projection.snapshot();
-      if (value.template) return this.prepareTemplate(id, value.clientRequestId, value.template);
+      if (value.template) {
+        const prepared=await this.prepareTemplate(id,value.clientRequestId,value.template);
+        if(!recovered){const template=resolveWorkflowTemplate(value.template.id,value.template.version,value.template.sourceHash);await this.scheduleNaming(id,{source:"preset",userIntent:value.text,workflowName:template.meta.name,workflowDescription:template.meta.description}).catch(()=>{});}
+        return prepared;
+      }
       const opened = await HarnessJournal.open(id, this.root);
       if (!opened.events.some(event => event.type === "harness.turn_started")) {
         try { if(value.stagedAttachmentIds?.length) await this.submit(id,value.text,{clientMessageId:value.clientRequestId,stagedAttachmentIds:value.stagedAttachmentIds}); else await this.send(id, value.text, true); }
@@ -225,6 +258,7 @@ export class HarnessService {
           await entry.journal.append(event); entry.projection.apply(event);
         }
       }
+      if(!recovered)await this.scheduleNaming(id,{source:"auto",userIntent:value.text}).catch(()=>{});
       return entry.projection.snapshot();
     });
     this.creations.set(value.clientRequestId, { hash: value.payloadHash, promise });
@@ -253,7 +287,9 @@ export class HarnessService {
       const {source,...origin}=checked;
       const revision:import("./types").WorkflowRevision={revision:1,cardId:crypto.randomUUID(),parentRevision:null,goal:checked.meta.description,scope:"受信任本地文件；只在确认后执行",turnId:request.clientRequestId,source,sourceHash:checked.sourceHash,localOrigin:{path:origin.path,sourceHash:origin.sourceHash,meta:origin.meta,inputSchema:origin.inputSchema},input:structuredClone(request.input),createdAt:new Date().toISOString(),acceptedAt:null,rejectedAt:null,abandonedAt:null,preview:{previewVersion:REVISION_PREVIEW_VERSION,sourceHash:checked.sourceHash,phaseTitles:checked.meta.phases.map(p=>p.title),previewAgents:extracted.previewAgents}};
       const event={type:"workflow.revision_proposed" as const,at:revision.createdAt,harnessRunId:id,revision:{...revision,updateReason:"save-local" as const}};
-      await entry.journal.append(event);entry.projection.apply(event);return entry.projection.snapshot();
+      await entry.journal.append(event);entry.projection.apply(event);
+      if(!recovered)await this.scheduleNaming(id,{source:"local",userIntent:checked.meta.description,workflowName:checked.meta.name,workflowDescription:checked.meta.description}).catch(()=>{});
+      return entry.projection.snapshot();
     });
   }
 
@@ -330,7 +366,8 @@ export class HarnessService {
     if(pending?.parametersPending&&pending.templateOrigin&&pending.saveRequestId){
       return this.mutate(id,async()=>this.startSavedTemplateGuidance(id,pending.saveRequestId!,await this.snapshot(id)));
     }
-    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: snapshot.task.title, ...(snapshot.task.initialAttachmentIds?.length?{stagedAttachmentIds:snapshot.task.initialAttachmentIds}:{}), ...(snapshot.task.template ? {template:snapshot.task.template} : {}) });
+    const originalTitle = (await this.entry(id)).journal.manifest.task!.title;
+    return this.startTask(snapshot.cwd, { clientRequestId: snapshot.task.clientRequestId, projectId: snapshot.projectId, text: snapshot.task.initialGoal, title: originalTitle, ...(snapshot.task.initialAttachmentIds?.length?{stagedAttachmentIds:snapshot.task.initialAttachmentIds}:{}), ...(snapshot.task.template ? {template:snapshot.task.template} : {}) });
   }
 
   /** 目录来源的唯一保存入口；不接受客户端源码，不批准或创建执行。baseRevision 缺省兼容内部旧请求，有值时必须为当前候选正整数版本，并参与重试载荷指纹。 */
@@ -422,7 +459,7 @@ export class HarnessService {
   }
 
   /** 在取消执行前先关闭总结调度，退出不创建模型回合。 */
-  beginExit(): void { this.exiting=true;for(const timer of this.summaryTimers.values())clearTimeout(timer);this.summaryTimers.clear(); }
+  beginExit(): void { this.exiting=true;for(const controller of this.namingActive.values())controller.abort();for(const timer of this.summaryTimers.values())clearTimeout(timer);this.summaryTimers.clear(); }
 
   /** 独立恢复主控只回idle，不发prompt、切CLI或清除总结义务；必须原回合已中断。 */
   async recoverController(taskId: string): Promise<HarnessSnapshot> {
@@ -686,6 +723,20 @@ export class HarnessService {
       const entry=await this.entry(taskId),obligation=entry.projection.snapshot().impactSummaries?.find(item=>item.key===key);
       if(!obligation||obligation.status!=="running"||entry.projection.snapshot().status!=="running"||typeof turnId!=="string"||!turnId.trim()||obligation.turnId!==turnId)throw new Error("所选总结已结束或回合身份已过期，未停止其他回合。");
       await this.interruptRunningTurn(taskId,entry,"用户已停止影响面总结。");return entry.projection.snapshot();
+    });
+  }
+
+  /** 用户手动改名；1–120个单行字符，运行中允许，归档或无Task元数据时拒绝。不派发模型。 */
+  async renameTitle(harnessRunId: string, rawTitle: string): Promise<HarnessSnapshot> {
+    const title = normalizeTaskTitle(rawTitle);
+    return this.mutate(harnessRunId, async () => {
+      const entry = await this.entry(harnessRunId), snapshot = entry.projection.snapshot();
+      if (snapshot.status === "completed") throw new Error("已归档对话不能改名。");
+      if (!snapshot.task) throw new Error("旧会话没有Task元数据，不能改名。");
+      if (snapshot.task.title === title && snapshot.task.titleSource === "manual") return snapshot;
+      const event = {type:"harness.title_renamed" as const, at:new Date().toISOString(), harnessRunId, title};
+      await entry.journal.append(event); entry.projection.apply(event);
+      return entry.projection.snapshot();
     });
   }
 
