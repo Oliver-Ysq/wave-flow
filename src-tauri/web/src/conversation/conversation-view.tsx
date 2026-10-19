@@ -26,6 +26,7 @@ import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
 import {TimelineRecords,type TimelineItem} from './plan-updates';
+import { AutoGrowTextarea } from "./auto-grow-textarea";
 
 /** 会话内有界阅读位置；不落盘正文或参数。 */
 const conversationPositions = new Map<string, { top: number; stuck: boolean }>();
@@ -281,6 +282,16 @@ export function ConversationView({
   const scrollRef = useRef<HTMLDivElement>(null);
   /** 贴底状态同时保存在 ref（滚动回调内读取）与 state（驱动"回到最新"按钮）。 */
   const stuckRef = useRef(true);
+  const historyTop = useRef(0);
+  const historySize = useRef({ width: 0, height: 0 });
+  const maintainHistoryLayout = () => {
+    const el = scrollRef.current;
+    if (!el || !el.getClientRects().length) return;
+    // 布局改变不代表用户离开底部；复用最近一次真实滚动保存的状态。
+    el.scrollTop = stuckRef.current ? el.scrollHeight : historyTop.current;
+    historyTop.current = el.scrollTop;
+    historySize.current = { width: el.clientWidth, height: el.clientHeight };
+  };
   const [stuck, setStuck] = useState(true);
   const [pendingNew, setPendingNew] = useState(false);
   useEffect(()=>{
@@ -297,6 +308,7 @@ export function ConversationView({
     const saved = conversationPositions.get(harness.harnessRunId);
     if (saved && scrollRef.current) {
       scrollRef.current.scrollTop = saved.top;
+      historyTop.current = saved.top;
       stuckRef.current = saved.stuck;
       setStuck(saved.stuck);
     }
@@ -309,7 +321,10 @@ export function ConversationView({
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    // 浏览器滚动锚定也会发 scroll；尺寸改变期间不能覆盖布局前的贴底意图。
+    if (el.clientWidth !== historySize.current.width || el.clientHeight !== historySize.current.height) return;
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    historyTop.current = el.scrollTop;
     stuckRef.current = near;
     setStuck(near);
     conversationPositions.delete(harness.harnessRunId);
@@ -451,10 +466,10 @@ export function ConversationView({
               ))}
             </ul>
           )}
-          <textarea
+          <AutoGrowTextarea
+            onLayout={maintainHistoryLayout}
             value={draft}
             aria-label="补充要求或反馈"
-            style={{height: `${Math.min(200, 68 + Math.max(0, draft.split("\n").length - 1) * 22)}px`}}
             onChange={(event) => onDraft(event.target.value)}
             placeholder={running ? "可以补充要求 · 消息将排队发送" : harness.status === "interrupted" ? "回合已中断 · 发送消息继续" : "补充要求，或反馈执行结果…"}
             onKeyDown={(event) => {

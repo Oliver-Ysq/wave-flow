@@ -24,6 +24,7 @@ import {
 import {summaryBodyStartedAt} from "./conversation/harness-event-merge";
 import { Markdown as MessageBody } from "./conversation/markdown";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
+import { AutoGrowTextarea } from "./conversation/auto-grow-textarea";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
 import { WorkflowProposalSummary, WorkflowExecutionSummary, proposalTitle } from "./conversation/workflow-summary";
 import {AbandonedPlan} from "./conversation/abandoned-plan";
@@ -2068,10 +2069,9 @@ function DraftConversation({
       <div className="conversation-composer">
         {attachmentError&&<div className="attachment-error" role="alert"><span>{attachmentError}</span><button type="button" aria-label="关闭附件错误" onClick={()=>{onDismissAttachmentError?.();requestAnimationFrame(()=>attachmentButton.current?.focus());}}>×</button></div>}
         {pendingAttachments.length>0&&<ul className="pending-attachments" aria-label="待发送附件">{pendingAttachments.map(item=><li key={item.stagedId}>{item.previewDataUrl&&<img src={item.previewDataUrl} alt={item.name}/>}<span className="attachment-meta"><strong>{item.name}</strong><small>待发送</small></span><button type="button" aria-label={`移除附件 ${item.name}`} onClick={()=>onRemoveAttachment(item.stagedId)}>×</button></li>)}</ul>}
-        <textarea
+        <AutoGrowTextarea
           autoFocus
           aria-label="描述任务目标"
-          style={{height: `${Math.min(220, 84 + Math.max(0, text.split("\n").length - 1) * 22)}px`}}
           value={text}
           disabled={!ready}
           onChange={(event) => onText(event.target.value)}
