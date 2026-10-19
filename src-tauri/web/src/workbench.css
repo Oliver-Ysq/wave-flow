@@ -222,14 +222,15 @@
 .agent-workbench .task-section-title .harness-tabs button.active { background:var(--wf-accent-wash); color:var(--wf-accent); }
 .agent-workbench .task-list { display:flex; flex-direction:column; align-items:stretch; gap:3px; min-width:0; overflow:auto; padding:0 9px 10px; }
 .agent-workbench .task-list[hidden], .agent-workbench .task-section-title[hidden], .agent-workbench .project-conversations[hidden] { display:none; }
-.projects-section-header { display:flex; align-items:center; justify-content:space-between; margin:14px 18px 0; }
+.projects-section-header { display:flex; align-items:center; justify-content:space-between; margin:14px 18px 0; border-radius:6px; }
 .projects-section-header button { border:0; background:transparent; color:var(--wf-muted); cursor:pointer; border-radius:6px; }
 .projects-toggle { display:flex; align-items:center; gap:8px; padding:8px 4px; font-family:inherit; font-size:13px; font-weight:600; }
 .agent-workbench .task-rail > footer { grid-row:6; }
 .agent-workbench .task-rail > .task-list { grid-row:5; }
 .project-add { display:grid; place-items:center; width:28px; height:28px; }
 .project-add svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.5; }
-.projects-section-header button:hover { color:var(--wf-ink); background:var(--wf-accent-wash); }
+.projects-section-header:hover { background:var(--wf-accent-wash); }
+.projects-section-header button:hover { color:var(--wf-ink); }
 .project-folder-drop { display:flex; flex-direction:column; align-items:center; gap:12px; padding:24px 16px; border:1px dashed var(--wf-line); border-radius:10px; color:var(--wf-muted); text-align:center; }
 .project-folder-drop.hovering { border-color:var(--wf-accent); background:var(--wf-accent-wash); }
 .project-folder-drop svg { width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:1.5; }

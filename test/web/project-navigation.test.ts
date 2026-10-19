@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
 import { droppedProjectPath } from "../../src-tauri/web/src/project-navigation";
+test("项目标题整行 hover 高亮，侧栏移除手动刷新但保留自动刷新", async () => {
+  const app = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
+  expect(app).not.toContain('aria-label="刷新项目与会话"');
+  expect(app).toContain("window.setInterval(() => void refresh(), 4_000)");
+  expect(css).toContain(".projects-section-header:hover { background:var(--wf-accent-wash); }");
+  expect(css).toContain(".projects-section-header button:hover { color:var(--wf-ink); }");
+});
 test("生产组件回调在受控宿主下拒绝重入/提前创建，失败恢复且迟到目录不覆盖手输", async () => {
   const child = Bun.spawn([process.execPath, "test/fixtures/project-dialog-harness.ts"], { stdout: "pipe", stderr: "pipe" });
   const output = await new Response(child.stdout).text();

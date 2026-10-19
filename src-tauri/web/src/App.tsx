@@ -715,9 +715,6 @@ export function App() {
             <button className={harnessView === "active" ? "active" : ""} onClick={() => setHarnessView("active")} role="tab" aria-selected={harnessView === "active"}>进行中</button>
             <button className={harnessView === "completed" ? "active" : ""} onClick={() => setHarnessView("completed")} role="tab" aria-selected={harnessView === "completed"}>已完成</button>
           </div>
-          <button onClick={() => void refresh()} aria-label="刷新项目与会话">
-            ↻
-          </button>
         </div>
         <nav className="task-list" id="project-list" hidden={!projectsExpanded}>
           {projects.map((project) => (
