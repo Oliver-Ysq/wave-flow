@@ -12,6 +12,8 @@ export class RunStateMachine {
   #diagnostic: string | null = null;
   #endedAt: string | null = null;
   #agents = new Map<string, AgentNodeSnapshot>();
+  /** 重启前节点的只读历史投影，按attempt/node定位；不用于调度或授权。 */
+  #historicalAgents = new Map<string, AgentNodeSnapshot>();
   #gates = new Map<string, DecisionGateSnapshot>();
   #logicalSequences = new Map<string, number>();
   #recordedSessions = new Set<string>();
@@ -39,6 +41,7 @@ export class RunStateMachine {
     copy.#diagnostic = this.#diagnostic;
     copy.#endedAt = this.#endedAt;
     copy.#agents = new Map(this.#agents);
+    copy.#historicalAgents = new Map(this.#historicalAgents);
     copy.#gates = new Map(this.#gates);
     copy.#logicalSequences = new Map(this.#logicalSequences);
     copy.#recordedSessions = new Set(this.#recordedSessions);
@@ -178,14 +181,14 @@ export class RunStateMachine {
   phaseVisitDetail(phaseVisitId: number, executionAttemptId = this.#currentExecutionAttemptId): PhaseVisitSnapshot | null {
     const visit = this.#phaseVisits.get(visitKey(executionAttemptId, phaseVisitId));
     if (!visit) return null;
-    const agents = [...this.#agents.values()].filter((agent) => agent.executionAttemptId === executionAttemptId && agent.phaseVisitId === phaseVisitId).sort((left, right) => left.sequence - right.sequence).map(cloneAgent);
+    const agents = [...this.#historicalAgents.values(), ...this.#agents.values()].filter((agent) => agent.executionAttemptId === executionAttemptId && agent.phaseVisitId === phaseVisitId).sort((left, right) => left.sequence - right.sequence).map(cloneAgent);
     return { ...visit, batches: groupedBatches(agents) };
   }
 
   /** 稳定按尝试 / visit id 分页；cursor 是上次返回的 phaseVisitId。 */
   listPhaseVisits(executionAttemptId = this.#currentExecutionAttemptId, cursor: number | null = null, limit = 20, includeEmpty = false): { readonly items: readonly PhaseVisitSnapshot[]; readonly nextCursor: number | null } {
     const visits = [...this.#phaseVisits.values()].filter((visit) => visit.executionAttemptId === executionAttemptId && (cursor === null || visit.phaseVisitId > cursor)).sort((left, right) => left.phaseVisitId - right.phaseVisitId);
-    const visible = includeEmpty ? visits : visits.filter((visit) => [...this.#agents.values()].some((agent) => agent.executionAttemptId === executionAttemptId && agent.phaseVisitId === visit.phaseVisitId));
+    const visible = includeEmpty ? visits : visits.filter((visit) => this.phaseVisitDetail(visit.phaseVisitId, executionAttemptId)!.batches.some(batch=>batch.agents.length>0));
     const items = visible.slice(0, limit).map((visit) => this.phaseVisitDetail(visit.phaseVisitId, executionAttemptId)!);
     return { items, nextCursor: visible.length > items.length ? items.at(-1)!.phaseVisitId : null };
   }
@@ -296,6 +299,7 @@ export class RunStateMachine {
     const executionAttemptId = event.executionAttemptId ?? agent.executionAttemptId;
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
+    if (executionAttemptId !== agent.executionAttemptId) this.#historicalAgents.set(`${agent.executionAttemptId}:${agent.id}`, cloneAgent(agent));
     this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null });
   }
 

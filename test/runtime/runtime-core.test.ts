@@ -34,6 +34,9 @@ describe("RunRuntime ACP-neutral core", () => {
     const restarted = events.filter(event => event.type === "agent.restarted");
     expect(restarted.map(event => [event.nodeId, event.invalidatedByPriorRestart])).toEqual([["a", false], ["b", true]]);
     expect(events.filter(event => event.type === "execution-attempt.started" && event.executionAttemptId === 2)).toHaveLength(1);
+    const previous = resumed.state.listPhaseVisits(1).items.flatMap(visit=>visit.batches.flatMap(batch=>batch.agents));
+    expect(previous.map(node=>[node.id,node.status,node.result])).toEqual([["a","interrupted",null],["b","completed",{version:"old",id:"b"}]]);
+    expect(resumed.state.listPhaseVisits(2).items.flatMap(visit=>visit.batches.flatMap(batch=>batch.agents)).map(node=>node.result)).toEqual([{version:"new",id:"a"},{version:"new",id:"b"}]);
   });
   test("并行resume只初始化一个attempt，两个分支均启动而不丢下游", async () => {
     const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a",{id:"a",cli:"codex"}),agent("b",{id:"b",cli:"kimi"})]); } };
@@ -303,6 +306,11 @@ describe("RunRuntime ACP-neutral core", () => {
     const resumed = await RunRuntime.resume(initial.snapshot().id, { execute: async () => ({ resumed: true }) }, join(initial.journal.directory, ".."));
     await expect(resumed.run(workflow)).resolves.toEqual({ resumed: true });
     expect(resumed.snapshot()).toMatchObject({ status: "completed", currentExecutionAttemptId: 2, phases: [{ agents: [{ status: "completed", result: { resumed: true } }] }] });
+    const prior=resumed.state.listPhaseVisits(1).items[0]!.batches[0]!.agents[0]!;
+    expect(prior.status).toBe("interrupted");expect(prior.result).toBeNull();
+    const reopened=await RunRuntime.open(initial.snapshot().id,{execute:async()=>{throw new Error("只读查询不得执行");}},join(initial.journal.directory,".."));
+    expect(reopened.state.listPhaseVisits(1).items[0]!.batches[0]!.agents[0]!.status).toBe("interrupted");
+    expect(reopened.state.listPhaseVisits(2).items[0]!.batches[0]!.agents[0]!.result).toEqual({resumed:true});
   });
   test("显式 resume 拒绝调用指纹不匹配的 Workflow，且不写入任何新事实", async () => {
     const initial = await create({ execute: async () => null });
