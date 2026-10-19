@@ -56,12 +56,15 @@ test("缺失预览不伪造步骤，结果有界且完成不等于验收",()=>{
   expect(executionResultExcerpt({text:"x".repeat(1000)})!.length).toBeLessThan(280);
   const execution={revision:2,status:"completed",summary:{ok:true}} as WorkflowExecution;
   const result=renderToStaticMarkup(<WorkflowExecutionSummary execution={execution} revision={revision(2)} onOpen={()=>{}} />);
-  expect(result).toContain("执行已完成"); expect(result).toContain("不代表任务目标已验收");
+  expect(result).toContain("执行结束"); expect(result).toContain("历史记录："); expect(result).toContain('class="task-event"'); expect(result).not.toContain('wf-chat-summary');
+  const stopped=renderToStaticMarkup(<WorkflowExecutionSummary execution={{...execution,status:"cancelled"}} revision={revision(2)} attempt={2} onOpen={()=>{}}/>);
+  expect(stopped).toContain("历史记录：已停止");
+  expect(stopped).not.toContain("第 2 次");
 });
 
 test("中央旧版显示取代而不是冻结，禁止审批与启动且保留声明阶段",()=>{
   const html=renderToStaticMarkup(<WorkflowRevisionCard revision={{...revision(1),acceptedAt:"2026-10-15T08:00:00Z"}} harness={task} onAssignmentCreated={()=>{}} />);
-  expect(html).toContain("历史方案"); expect(html).toContain("已被第 2 版替代");
+  expect(html).toContain("历史版本 · 第 1 版"); expect(html).toContain("已被第 2 版替代");
   expect(html).not.toContain("已冻结"); expect(html).not.toContain("配置并运行");
   expect(html).toContain("Workflow 设计"); expect(html).toContain("只读核验算术结果");
   expect(html).not.toContain("确认并运行");

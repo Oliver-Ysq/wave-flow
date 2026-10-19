@@ -107,7 +107,12 @@ export type DesktopStatusResponse = { protocolVersion: number; activeRuns: numbe
 /** 独立主控会话状态；不等同于 Workflow Run 状态。 */
 export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
 /** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
-export type HarnessMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string };
+export type HarnessMessageAttachment = { id: string; name: string; mimeType: string; sizeBytes: number; sha256: string; file: string };
+export type HarnessMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string; /** 与消息耐久绑定的附件；发送前经 Adapter 能力验证。 */ attachments?: HarnessMessageAttachment[] };
+/** Engine 暂存区的待发送附件描述；选择只创建暂存，不自动发送。 */
+export type StagedAttachment = { stagedId: string; name: string; mimeType: string; sizeBytes: number; sha256: string; previewDataUrl?: string };
+/** 主控忙碌时耐久排队的用户消息；priority 表示“立即发送”等待优先投递。 */
+export type HarnessQueuedMessage = { message: HarnessMessage; priority: boolean; queuedAt: string };
 /** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
 export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 /** 工具动作分类；与来源分开，经 MCP 执行的文件读取仍保留 MCP 徽标。 */
@@ -142,10 +147,13 @@ export type HarnessStreamEvent = (
   | { type: "entry_finished"; entry: HarnessConversationEntry }
   | { type: "turn_finished"; messageId: string; text: string }
   | { type: "turn_interrupted"; diagnostic: string }
+  | { type: "queue_changed" }
   | { type: "execution_changed"; executionId: string }) & {/** 已耐久档案序号；旧帧缺省。 */snapshotSequence?:number};
 /** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
 export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
 export type WorkflowRevision = {
+  /** 保存时确定的更新原因；缺省为未知旧记录，仅展示，不影响批准或执行。 */
+  updateReason?: "save-template" | "save-local" | "generate-plan" | "modify-plan" | "modify-parameters" | "modify-configuration";
   /** Engine预检保存的本地来源快照，不能由主控或表单提交源码伪造。 */
   localOrigin?:import("../../../src/harness/types").WorkflowRevision["localOrigin"];
   /** 参数待补齐，不能直接批准运行。 */
@@ -245,7 +253,7 @@ export type HarnessSnapshot = {
   task?: {
     /** 创建时冻结的模式；旧Task缺省多卡，不能由验收开关推断。 */
     workflowContract?:"single-workflow-v1";
-    clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
+    clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; messageQueue: HarnessQueuedMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */

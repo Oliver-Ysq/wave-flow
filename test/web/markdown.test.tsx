@@ -2,6 +2,15 @@ import {expect,test} from "bun:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {MarkdownRenderer} from "../../src-tauri/web/src/conversation/markdown-renderer";
 import {createSharedRendererLoader,rendererRequestUrl} from "../../src-tauri/web/src/conversation/renderer-loader";
+test("正文不做产品角色替换，代码与链接地址保持原文",async()=>{
+ const text='主控设计说明\n\n`主控配置.json`\n\n```text\n主控配置.json\n```\n\n[配置](https://example.com/主控配置)';
+ const html=renderToStaticMarkup(<MarkdownRenderer text={text}/>);
+ expect(html).toContain('主控设计说明');
+ expect(html).toContain('主控配置.json');
+ expect(html).toContain(`https://example.com/${encodeURIComponent('主控配置')}`);
+ const loader=await Bun.file('src-tauri/web/src/conversation/markdown.tsx').text();
+ expect(loader).not.toContain('userFacingText');
+});
 test("完整渲染保留GFM表格和多语言高亮，链接图片安全边界不改变",()=>{
  const html=renderToStaticMarkup(<MarkdownRenderer text={'| 名称 | 值 |\n| --- | --- |\n| a | 1 |\n\n```typescript\nconst x: number = 1;\n```\n\n```swift\nlet x = 1\n```\n\n![图片](https://example.com/a.png)\n\n[安全](https://example.com) [危险](javascript:alert%281%29)\n\n<script>alert(1)</script>'}/>);
  expect(html).toContain("<table>");expect(html).toContain("hljs-keyword");expect(html).toContain("language-swift");expect(html).toContain('href="https://example.com"');expect(html).not.toContain('href="javascript:');expect(html).not.toContain("<img");expect(html).not.toContain("<script>");

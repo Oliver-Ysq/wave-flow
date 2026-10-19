@@ -28,6 +28,7 @@ function makeSnapshot(
     completedAt: null,
     createdAt: "2026-10-15T08:00:00Z",
     messages: [],
+    messageQueue: [],
     toolActivitiesByMessageId: {},
     conversationEntries: [],
     workflowRevisions: [],

@@ -1,11 +1,95 @@
 import { expect, test } from "bun:test";
 
+test("退出确认锁定背景并默认聚焦取消，快捷键与菜单都进入确认而非直接退出",async()=>{
+ const app=await Bun.file("src-tauri/web/src/App.tsx").text();
+ const modal=app.slice(app.indexOf('function DesktopExitModal('),app.indexOf('type SettingsSection'));
+ expect(modal).toContain('sibling.inert=true');
+ expect(modal).toContain('cancel.current?.focus()');
+ expect(modal).toContain("event.key==='Tab'");
+ expect(modal).toContain('if(!busyRef.current)closeRef.current()');
+ const source=await Bun.file('src-tauri/src/main.rs').text();
+ expect(source).toContain('Some("CmdOrCtrl+Q")');
+ expect(source).not.toContain('CmdOrMeta+Q');
+ expect(source).toContain('matches!(event.id().as_ref(), "settings" | "shutdown")');
+});
+test("CLI安装项数量不冒充可用数量，默认与其他安装项显示真实验证状态",async()=>{
+ const source=await Bun.file('src-tauri/web/src/App.tsx').text();
+ expect(source).toContain('`${otherRuntimes.length} 个安装项`');
+ expect(source).not.toContain('`${otherRuntimes.length} 个可用项`');
+ expect(source).toContain('selected.status==="needs-revalidation"?"需重新验证":"验证失败"');
+ expect(source).toContain('runtime.status==="invalid"?"验证失败":"仅可用于执行"');
+ expect(source).toContain('当前默认 CLI 暂不可用，请重新扫描或手动验证。');
+});
+test("手动CLI验证绑定当前输入，修改后清旧错误，关闭不冒充取消验证",async()=>{
+ const source=await Bun.file('src-tauri/web/src/App.tsx').text();
+ expect(source).toContain('if (runtimeBusy || !manualPath.trim()) return');
+ expect(source).toContain('setManualPath(event.target.value);setManualError(null);');
+ expect(source).toContain('关闭窗口不会取消验证');
+ expect(source).toContain('{runtimeBusy?"关闭窗口":"取消"}');
+ expect(source).toContain('manualErrorRef.current?.focus()');
+ expect(source).toContain('ref={manualErrorRef} tabIndex={-1}');
+ expect(source).toContain('!manualOpen&&manualError');
+ expect(source).toContain('请重新打开手动添加，检查路径后重试。');
+ expect(source).toContain('onClick={() => setManualOpen(false)}');
+ expect(source).toContain('setRuntimeOperation("validate");\n    setManualError(null);');
+});
+test("扫描、验证、切换的状态文案只对应当前动作",async()=>{
+ const source=await Bun.file('src-tauri/web/src/App.tsx').text();
+ expect(source).toContain('runtimeOperation==="scan" || scanning ? "正在扫描…"');
+ expect(source).toContain('!manualOpen&&runtimeOperation==="validate"');
+ expect(source).toContain('runtimeOperation==="select"');
+ expect(source).not.toContain('!manualOpen&&runtimeBusy&&<p role="status">正在验证 CLI');
+});
+test("工作流阅读导航聚焦标题，返回保留原任务入口且后台更新不抢焦点",async()=>{
+ const source=await Bun.file('src-tauri/web/src/App.tsx').text();
+ expect(source).toContain('workflowPanelOpen&&!wasWorkflowOpen.current');
+ expect(source).toContain('workflowTitle.current?.focus({preventScroll:true})');
+ expect(source).toContain('if(prior?.taskId===(harness?.harnessRunId??null))');
+ expect(source).toContain('const target=prior.button.isConnected?prior.button:');
+ expect(source).toContain('ref={workflowTitle} tabIndex={-1} role="heading" aria-level={1}');
+});
+
+test("原生设置菜单使用当前菜单库支持的跨平台快捷键名称",async()=>{
+ const source=await Bun.file("src-tauri/src/main.rs").text();
+ expect(source).toContain('"settings", "设置…", true, Some("CmdOrCtrl+,")');
+ expect(source).not.toContain('"settings", "设置…", true, Some("CmdOrMeta+,")');
+});
+test("设置在应用最小宽度附近改用顶部导航，CLI动作不挤压正文",async()=>{
+ const css=await Bun.file("src-tauri/web/src/workbench.css").text();
+ expect(css).toContain('@media(max-width:760px)');
+ expect(css).toContain('.settings-layout { grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); }');
+ expect(css).toContain('.settings-nav { display:flex;');
+ expect(css).toContain('.runtime-list article { align-items:stretch; flex-direction:column; }');
+});
+
+test("设置与手动添加只锁定当前弹窗，支持Esc及原入口焦点恢复",async()=>{
+ const source=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(source).toContain('const activePanel=manualOpen?manualPanel.current:settingsPanel.current');
+ expect(source).toContain('sibling.inert=true');
+ expect(source).toContain('element.inert=inert');
+ expect(source).toContain("document.addEventListener('keydown',keydown,true)");
+ expect(source).toContain('else if(!gateMode)settingsClose.current?.()');
+ expect(source).toContain("querySelector<HTMLElement>('.add-runtime')?.focus()");
+ expect(source).toContain("querySelector<HTMLElement>('[aria-label=\"打开任务导航\"]')");
+});
+
+test("CLI设置默认项只在顶部展示，其他项保留技术详情与二次确认",async()=>{
+ const source=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(source).toContain('const otherRuntimes=runtimeState.runtimes.filter(runtime=>runtime.runtimeId!==selected?.runtimeId)');
+ expect(source).toContain('otherRuntimes.map');
+ expect(source).toContain('当前默认 CLI');
+ expect(source).toContain('["cli", "CLI 设置"]');
+ expect(source).toContain('<summary>技术信息</summary>');
+ expect(source).toContain('confirmSwitchId !== runtime.runtimeId');
+ expect(source).toContain('runtime.verifiedAdapter.harnessTools ? (');
+});
+
 test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅色表单", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain('runtime-settings--gate');
   expect(source).toContain('api.scanCliRuntimes()');
-  expect(source).toContain('选择主控 CLI');
+  expect(source).toContain('选择 Wave Flow CLI');
   expect(source).toContain('手动添加 CLI');
   expect(source).toContain('connection-panel--nested');
   expect(source).toContain('manual-runtime-error');
@@ -75,7 +159,7 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(source).toContain("<WorkflowPanelErrorBoundary");
   expect(css).toContain("white-space:pre-wrap");
   expect(css).toContain(".workflow-render-error");
-  expect(css).toContain("grid-template-columns: 260px minmax(0, 1fr)");
+  expect(css).toContain("grid-template-columns: var(--wf-rail-width, 260px) minmax(0, 1fr)");
   expect(source).toContain('className="central-workflow"');
   expect(source).not.toContain('className="workflow-peek"');
 });

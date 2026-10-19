@@ -2,6 +2,7 @@ import type { HarnessSnapshot, WorkflowExecution, WorkflowRevision } from "../ty
 import {PersistedDetails} from "../persisted-details";
 import {AbandonedPlan} from "./abandoned-plan";
 import {useId,useState} from "react";
+import {visibleVersion} from './workflow-versions';
 
 /** 不把完整业务目标当标题；不调用模型，也不截取片段冒充语义摘要。 */
 export function proposalTitle(revision:WorkflowRevision):string {
@@ -16,7 +17,7 @@ export function proposalTitle(revision:WorkflowRevision):string {
 export function revisionSummaryState(task: HarnessSnapshot, revision: WorkflowRevision): { status: string; supersededBy?: number } {
   const newer = revision.cardId ? task.workflowRevisions.filter(item => item.cardId === revision.cardId && item.revision > revision.revision).at(-1) : undefined;
   if (revision.abandonedAt) return { status: "已放弃" };
-  if (newer) return { status: `已被第 ${newer.revision} 版替代`, supersededBy: newer.revision };
+  if (newer) return { status: `已被第 ${visibleVersion(task,newer)} 版替代`, supersededBy: newer.revision };
   if (task.executions.some(item => item.revision === revision.revision)) return { status: "已执行" };
   if (revision.rejectedAt) return { status: "已拒绝，等待修改" };
   return { status: revision.acceptedAt ? "已接受，尚未运行" : "待确认" };
@@ -52,12 +53,12 @@ export function WorkflowProposalSummary({ task, revision, onOpen, onAdjust, onTe
       <small>源码示意，实际执行以运行时为准</small>
     </> : <small>历史预览不可用</small>}
   </div>;
-  return <article className={`wf-chat-summary proposal ${state.supersededBy ? "historical" : ""}`} aria-label={`工作流方案第 ${revision.revision} 版`}>
-    <header><span>{revision.parentRevision ? "方案已更新" : "方案已生成"}</span><span>第 {revision.revision} 版</span></header>
+  return <article className={`wf-chat-summary proposal ${state.supersededBy ? "historical" : ""}`} aria-label={visibleVersion(task,revision)?`工作流方案第 ${visibleVersion(task,revision)} 版`:'工作流方案'}>
+    <header><span>{revision.parentRevision ? "方案已更新" : "方案已生成"}</span>{visibleVersion(task,revision)&&<span>第 {visibleVersion(task,revision)} 版</span>}</header>
     <h3>{title}</h3>
     {state.supersededBy||abandoned ? <PersistedDetails identity={`${task.harnessRunId}:${revision.cardId}:${revision.revision}:${abandoned?"abandoned":"summary"}`}><summary>{abandoned?"展开已放弃方案摘要":"展开历史方案摘要"}</summary>{content}</PersistedDetails> : content}
     {!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<small>可直接对话调整方案</small>}
-    <footer><span>{state.status}</span>{!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<button type="button" onClick={onAdjust} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}>通过对话调整</button>}<button onClick={onOpen} aria-label={`查看第 ${revision.revision} 版方案`}>{state.supersededBy||abandoned ? "查看原方案" : "查看方案"}<span aria-hidden="true"> ↗</span></button></footer>
+    <footer><span>{state.status}</span>{!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<button type="button" onClick={onAdjust} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}>通过对话调整</button>}<button onClick={onOpen} className={state.status==="待确认"||state.status==="已接受，尚未运行" ? "button-primary" : undefined} aria-label={visibleVersion(task,revision)?`查看第 ${visibleVersion(task,revision)} 版方案`:'查看方案'}>{state.supersededBy||abandoned ? "查看原方案" : state.status==="待确认"||state.status==="已接受，尚未运行" ? "去确认方案" : "查看方案"}<span aria-hidden="true"> ↗</span></button></footer>
     {abandoned&&latest&&onAdjust&&task.status!=="completed"&&<AbandonedPlan onRedesign={onAdjust} onTemplate={!task.executions.length?onTemplate:undefined} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}/>}
   </article>;
 }
@@ -80,13 +81,6 @@ export function WorkflowExecutionSummary({ execution, revision, onOpen,attempt }
   /** 原历史事件尝试号；未知不推断。 */
   attempt?:number;
 }) {
-  const labels: Record<WorkflowExecution["status"], string> = { running:"正在执行", paused:"已暂停", pausing:"正在暂停", recovering:"正在恢复", completed:"执行已完成", cancelled:"执行已停止", interrupted:"执行已中断" };
-  const excerpt = executionResultExcerpt(execution.summary);
-  return <article className="wf-chat-summary execution" aria-label="工作流执行摘要">
-    <header><span>{execution.status==="running"?"工作流已启动":"执行记录"}</span><span>基于第 {execution.revision} 版{attempt?` · 第 ${attempt} 次尝试`:""}</span></header>
-    <h3>{revision?.goal || "历史工作流执行"}</h3>
-    {excerpt ? <p className="wf-summary-result">{excerpt}</p> : <p>{execution.diagnostic || "尚无结果摘要，可查看执行进度与记录。"}</p>}
-    <footer><span>{labels[execution.status]}</span><button onClick={onOpen}>查看执行<span aria-hidden="true"> ↗</span></button></footer>
-    {execution.status === "completed" && <small>执行完成不代表任务目标已验收</small>}
-  </article>;
+  const labels: Record<WorkflowExecution["status"], string> = { running:"已启动", paused:"已暂停", pausing:"正在暂停", recovering:"正在恢复", completed:"执行结束", cancelled:"已停止", interrupted:"已中断" };
+  return <p className="task-event">历史记录：{labels[execution.status]} · <button onClick={onOpen}>{revision ? proposalTitle(revision) : "查看执行"}</button></p>;
 }

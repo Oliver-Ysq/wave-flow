@@ -5,14 +5,15 @@ test("中断诊断在对话内可见并提供显式重试提示", async () => {
   expect(conversation).toContain('harness.status === "interrupted"');
   expect(conversation).toContain('className="conversation-interruption" role="alert"');
   expect(conversation).toContain("harness.diagnostic");
-  expect(conversation).toContain('主控暂时无法启动');
+  expect(conversation).toContain('Wave Flow 暂时无法启动');
   expect(conversation).toContain('主控启动失败');
   const source=await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain('onRetryInitialization={()=>taskMutation(');
-  expect(source).toContain('正在检查 CLI 并启动主控');
-  expect(source).toContain('执行底座设置');
+  expect(source).toContain('正在检查 CLI 并连接');
+  expect(source).toContain('执行环境设置');
   expect(source).toContain('setRetryError(error instanceof Error');
-  expect(conversation).toContain("可直接发送下一条消息重试");
+  expect(conversation).toContain("回合已中断 · 发送消息继续");
+  expect(conversation).toContain("仅恢复待命");
 });
 
 test("用户手工源码提案弹窗移除，方案只在中央详情展示", async () => {

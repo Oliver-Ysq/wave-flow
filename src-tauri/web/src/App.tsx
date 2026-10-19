@@ -5,26 +5,40 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {getCurrentWindow} from "@tauri-apps/api/window";
 import { api } from "./api";
+import {userFacingText} from "./user-facing-text";
+import {
+  RAIL_WIDTH_DEFAULT,
+  loadRailWidth,
+  persistRailWidth,
+  railWidthFromDrag,
+} from "./rail-width";
 import {summaryBodyStartedAt} from "./conversation/harness-event-merge";
 import { Markdown as MessageBody } from "./conversation/markdown";
 import { ConversationView, shouldSubmitComposer as conversationShouldSubmitComposer } from "./conversation/conversation-view";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
-import { WorkflowProposalSummary, WorkflowExecutionSummary } from "./conversation/workflow-summary";
+import { WorkflowProposalSummary, WorkflowExecutionSummary, proposalTitle } from "./conversation/workflow-summary";
 import {AbandonedPlan} from "./conversation/abandoned-plan";
-import { workflowCells, editableRevision, type WorkbenchRoute } from "./workbench-navigation";
+import { hasActiveExecutionQuestions, interruptedSummaryObligations, summaryWorkLabel, TaskActivity } from "./conversation/task-activity";
+import {PreviousRecords} from "./execution/previous-records";
+import {planUpdateLabel} from './conversation/plan-updates';
+import {WorkflowVersions} from "./conversation/workflow-versions";
+import { workflowCells, editableRevision, readingAttempt, type WorkbenchRoute } from "./workbench-navigation";
 import { routeMatchesTask, newerTaskSnapshot, OperationTracker, RequestFence, UnreadTracker } from "./workbench-state";
 import { ViewCache } from "./workbench-state";
 const taskExpansions=new ViewCache<boolean>();
 const detailPositions=new ViewCache<number>();
-const resultAttempts=new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
+import { ExecutionDiagnostics } from "./execution/execution-diagnostics";
 import { SchemaForm } from "./forms/schema-form";
 import {TemplatePicker} from "./template-picker";
 import {LocalWorkflowPreview} from "./local-workflow-preview";
@@ -90,6 +104,17 @@ export function App() {
   };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
   const [archiveConfirmation,setArchiveConfirmation]=useState<{harnessRunId:string;count:number}|null>(null);
+  const [archiveTarget,setArchiveTarget]=useState<HarnessSnapshot|null>(null);
+  /** 普通归档不确认、不放弃总结或候选；后端门禁仍是权威。 */
+  async function archiveTask(target:HarnessSnapshot){
+    if(target.impactSummaries?.some(item=>!item.supersededBy&&item.status!=="completed")){setArchiveTarget(target);return;}
+    const id=target.harnessRunId,finishBusy=beginBusy(`task:${id}`,"complete-harness");
+    try{
+      await taskMutation(id,()=>api.completeHarness(id));
+      if(harnessRef.current?.harnessRunId!==id)return;
+      setHarness(null);setDraftProjectId(target.projectId);setSelectedProjectId(target.projectId);setRoute({kind:"conversation"});setHarnessText("");setWorkflowPanelOpen(false);setHarnessView("active");
+    }catch(cause){setError(String(cause));}finally{finishBusy();}
+  }
   useEffect(()=>setArchiveConfirmation(null),[harness?.harnessRunId]);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
@@ -113,7 +138,6 @@ export function App() {
     window.addEventListener("keydown",keydown);
     return()=>window.removeEventListener("keydown",keydown);
   },[navOpen]);
-  const [search, setSearch] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [templatePicker,setTemplatePicker]=useState(false);
   const [localPreview,setLocalPreview]=useState(false);
@@ -123,6 +147,75 @@ export function App() {
   const [localRevision,setLocalRevision]=useState<null|{harnessRunId:string;baseRevision:number;path:string;input:Record<string,unknown>}>(null);
   const createRequest = useRef<string | null>(null);
   const sending = useRef(false);
+  /** 已提交但尚未在快照中确认的消息身份；用于重试幂等，文本变化即作废。 */
+  const pendingMessage = useRef<{ id: string; text: string; owner:string; attachmentIds:string } | null>(null);
+  /** 待发送图片按任务/项目草稿隔离；切换保留，成功只清除本次已接受的图片。 */
+  const attachmentOwner=harness?.harnessRunId??`draft:${draftProjectId??selectedProjectId??"none"}`;
+  const [attachmentDrafts,setAttachmentDrafts]=useState<Map<string,import("./types").StagedAttachment[]>>(()=>new Map());
+  const pendingAttachments=attachmentDrafts.get(attachmentOwner)??[];
+  const setPendingAttachments=(update:import("./types").StagedAttachment[]|((current:import("./types").StagedAttachment[])=>import("./types").StagedAttachment[]))=>{
+    setAttachmentDrafts(current=>{const next=new Map(current);const items=typeof update==="function"?update(current.get(attachmentOwner)??[]):update;if(items.length)next.set(attachmentOwner,items);else next.delete(attachmentOwner);return next;});
+  };
+  const stagingAttachments = useRef(false);
+  const [stagingOwner,setStagingOwner]=useState<string|null>(null);
+  const [attachmentErrors,setAttachmentErrors]=useState<Map<string,string>>(()=>new Map());
+  const attachmentError=attachmentErrors.get(attachmentOwner)??null;
+  const setAttachmentError=(message:string|null)=>setAttachmentErrors(current=>{const next=new Map(current);if(message)next.set(attachmentOwner,message);else next.delete(attachmentOwner);return next;});
+  const attachmentDraftsRef=useRef(attachmentDrafts);attachmentDraftsRef.current=attachmentDrafts;
+  // 左侧任务/对话记录栏宽度：窗口层级耐久偏好；拖动过程平滑更新，落指针后才保存。
+  const [railWidth, setRailWidth] = useState(() =>
+    typeof window === "undefined" ? RAIL_WIDTH_DEFAULT : loadRailWidth(window.localStorage),
+  );
+  const railWidthRef = useRef(railWidth);
+  railWidthRef.current = railWidth;
+  const [railDragging, setRailDragging] = useState(false);
+  const startRailDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = railWidthRef.current;
+    setRailDragging(true);
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* window 监听仍完整工作。 */ }
+    const onMove = (move: PointerEvent) => {
+      setRailWidth(railWidthFromDrag(startWidth, startX, move.clientX));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      setRailDragging(false);
+      persistRailWidth(railWidthRef.current, window.localStorage);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
+  };
+  async function addAttachments() {
+    if (stagingAttachments.current) return;
+    stagingAttachments.current = true;
+    const owner=attachmentOwner;
+    setStagingOwner(owner);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ multiple: true, filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }] });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const existing=attachmentDraftsRef.current.get(owner)?.length??0;
+      if(existing+paths.length>5){setAttachmentError(`一条消息最多添加 5 张图片，当前已有 ${existing} 张，本次选择 ${paths.length} 张。请减少选择或先移除图片。`);return;}
+      const failures: string[] = [];
+      for (const path of paths) {
+        try {
+          const staged = await api.stageAttachment(path);
+          setPendingAttachments((current) => current.some((item) => item.stagedId === staged.stagedId) ? current : [...current, staged]);
+        } catch (cause) {
+          failures.push(`${path.split("/").pop() ?? path}：${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+      }
+      setAttachmentError(failures.length?`部分附件未接受：${failures.join("；")}`:null);
+    } catch(cause) {
+      setAttachmentError(cause instanceof Error?cause.message:String(cause));
+    } finally {
+      stagingAttachments.current = false;
+      setStagingOwner(null);
+    }
+  }
   const routeRef = useRef(route); routeRef.current = route;
   const harnessRef = useRef(harness); harnessRef.current = harness;
   const detailToken = useRef(0);
@@ -130,7 +223,7 @@ export function App() {
   const unreadTracker=useRef(new UnreadTracker());
   const prepareRevisionDraft=(task:HarnessSnapshot,revision:import("./types").WorkflowRevision,abandoned:boolean)=>{
     setAdjustContext({taskId:task.harnessRunId,revision:revision.revision,abandoned});
-    if(!harnessText.trim())updateHarnessText(abandoned?`第 ${revision.revision} 版方案已放弃，我希望新方案……`:"我希望调整……");
+    if(!harnessText.trim())updateHarnessText(abandoned?"原方案已放弃，我希望新方案……":"我希望调整……");
     setRoute({kind:"conversation"});setAdjustFocus(value=>value+1);
   };
   const [,refreshRead]=useState(0);
@@ -153,6 +246,21 @@ export function App() {
     if (workflowLocations.current.size > 64) workflowLocations.current.delete(workflowLocations.current.keys().next().value!);
   }, [route, harness?.harnessRunId, draftProjectId]);
   const workflowPanelOpen = route.kind === "workflow" || selectedId !== null;
+  const workflowTitle=useRef<HTMLElement>(null);
+  const workflowReturn=useRef<{taskId:string|null;button:HTMLElement}|null>(null);
+  const wasWorkflowOpen=useRef(false);
+  useEffect(()=>{
+    if(workflowPanelOpen&&!wasWorkflowOpen.current)workflowTitle.current?.focus({preventScroll:true});
+    else if(!workflowPanelOpen&&wasWorkflowOpen.current){
+      const prior=workflowReturn.current;
+      if(document.querySelector('.history-sidebar')){wasWorkflowOpen.current=workflowPanelOpen;return;}
+      if(prior?.taskId===(harness?.harnessRunId??null)){
+        const target=prior.button.isConnected?prior.button:document.querySelector<HTMLElement>('.task-current-actions button');
+        target?.focus({preventScroll:true});
+      }
+    }
+    wasWorkflowOpen.current=workflowPanelOpen;
+  },[workflowPanelOpen,harness?.harnessRunId]);
   const centralScroll=useRef<HTMLElement|null>(null);
   const pageKey=route.kind==="workflow"?`${route.taskId}:${route.cardId}:${route.revision}:${route.section}:${route.executionId??""}:${route.attempt??"current"}`:"conversation";
   useEffect(()=>{
@@ -306,7 +414,7 @@ export function App() {
           status.activeRuns > 0
             ? `${status.activeRuns} 个运行中${status.blockedRuns ? `，${status.blockedRuns} 个等待决定` : ""}`
             : status.activeHarnesses > 0
-              ? `${status.activeHarnesses} 个主控回合进行中`
+              ? `${status.activeHarnesses} 个 Wave Flow 会话进行中`
               : "后台服务待命";
         await invoke("update_tray_summary", { summary });
       } catch {
@@ -381,7 +489,8 @@ export function App() {
       if (
         event.type === "turn_finished" ||
         event.type === "turn_interrupted" ||
-        event.type === "execution_changed"
+        event.type === "execution_changed" ||
+        event.type === "queue_changed"
       ) {
         // 这些事件不携带条目增量；重读一次获取 assistant 消息与最新状态。
         resync();
@@ -447,15 +556,21 @@ export function App() {
     setWorkflowPanelOpen(false);
     setError(null);
   }
-  async function sendHarness() {
-    if (!harnessText.trim() || sending.current) return;
+  async function sendHarness(immediate = false) {
+    if (!harnessText.trim() || sending.current || stagingOwner===attachmentOwner) return;
     sending.current = true; const owner = harness?.harnessRunId; const text = harnessText;
     const context=adjustContext?.taskId===owner?adjustContext:null;
     const message=context?`${context.abandoned?"第 "+context.revision+" 版方案已放弃，请按以下要求重新设计":"请调整工作流第 "+context.revision+" 版"}：\n${text}`:text;
     const pageToken = navigationToken.current;
     try {
       if (harness) {
-        await api.sendHarnessMessage(harness.harnessRunId, message);
+        // 同一份未确认草稿重试复用同一消息 id：Engine 幂等去重，重复点击/重试不产生第二条。
+        const attachmentIds=pendingAttachments.map(item=>item.stagedId).join(",");
+        if (!pendingMessage.current || pendingMessage.current.text !== message || pendingMessage.current.owner!==owner || pendingMessage.current.attachmentIds!==attachmentIds) pendingMessage.current = { id: crypto.randomUUID(), text: message,owner:owner!,attachmentIds };
+        const clientMessageId = pendingMessage.current.id;
+        const stagedIds = pendingAttachments.map((item) => item.stagedId);
+        const sent = await api.sendHarnessMessage(harness.harnessRunId, message, { clientMessageId, ...(immediate ? { immediate: true } : {}), ...(stagedIds.length ? { stagedAttachmentIds: stagedIds } : {}) });
+        if (sent.harness.messages.some((item) => item.id === clientMessageId) || sent.harness.messageQueue.some((item) => item.message.id === clientMessageId)) { if(pendingMessage.current?.id===clientMessageId)pendingMessage.current = null; setPendingAttachments(current=>current.filter(item=>!stagedIds.includes(item.stagedId))); }
         if(context)setAdjustContext(null);
         if(draftCacheRef.current.get(owner!)===text)draftCacheRef.current.set(owner!, "");
         const next = (await api.harness(owner!)).harness;
@@ -463,14 +578,19 @@ export function App() {
       } else {
         const projectId = draftProjectId ?? selectedProjectId;
         if (!projectId) return;
-        const response = await api.startHarnessConversation(
+        const stagedIds=pendingAttachments.map(item=>item.stagedId);
+        const response = await api.startConversationWithAttachments(
           projectId,
           text,
           createRequest.current ?? (createRequest.current = crypto.randomUUID()),
           taskTitle || undefined,
+          stagedIds,
         );
         setHarnesses((current) => [response.harness, ...current.filter(item=>item.harnessRunId !== response.harness.harnessRunId)]);
+        if(response.harness.messages.some(item=>item.role==="user"&&item.attachments?.length))setPendingAttachments(current=>current.filter(item=>!stagedIds.includes(item.stagedId)));
         if (navigationToken.current === pageToken && !harnessRef.current) {
+          // 创建失败保留原图预览到原任务，后续显式重试使用manifest冻结的原身份。
+          setAttachmentDrafts(current=>{const next=new Map(current),remaining=next.get(attachmentOwner);if(remaining?.length)next.set(response.harness.harnessRunId,remaining);next.delete(attachmentOwner);return next;});
           setHarness(response.harness); updateHarnessText(""); setDraftProjectId(null);
         }
       }
@@ -563,28 +683,39 @@ export function App() {
 
   return (
     <main
-      className={`agent-workbench theme-${theme} ${navOpen ? "nav-open" : ""}`}
+      className={`agent-workbench theme-${theme} ${navOpen ? "nav-open" : ""} ${"__TAURI_INTERNALS__" in window&&/Mac/.test(navigator.platform)?"native-titlebar":""}`}
+      style={{ "--wf-rail-width": `${railWidth}px` } as CSSProperties}
     >
+      {"__TAURI_INTERNALS__" in window&&/Mac/.test(navigator.platform)&&<div className="desktop-titlebar" onMouseDown={event=>{if(event.button===0)void getCurrentWindow().startDragging();}}><div title={harness?`${harness.cwd.split('/').filter(Boolean).at(-1)} / ${conversationTitle(harness)}`:"Wave Flow"}>{harness?<><span>{harness.cwd.split('/').filter(Boolean).at(-1)}</span><span className="title-divider">/</span><strong>{conversationTitle(harness)}</strong></>:<strong>Wave Flow</strong>}</div></div>}
       <button ref={navigationButton} className="navigation-toggle" aria-label={navOpen?"关闭任务导航":"打开任务导航"} aria-expanded={navOpen} aria-controls="task-navigation" onClick={()=>setNavOpen(value=>!value)}>☰</button>
       {navOpen&&<button className="navigation-scrim" aria-label="关闭任务导航" onClick={()=>{setNavOpen(false);navigationButton.current?.focus();}} />}
       {error && (
         <div className="toast-layer" role="status" aria-live="polite">
           <div className="notice">
             <span>!</span>
-            <div>{error}</div>
+            <div>{userFacingText(error)}</div>
             <button aria-label="关闭错误提示" onClick={() => setError(null)}>
               ×
             </button>
           </div>
         </div>
       )}
+      {archiveTarget&&<ArchiveTaskConfirmation task={archiveTarget} onClose={()=>setArchiveTarget(null)} onConfirm={()=>{
+        const target=archiveTarget,id=target.harnessRunId;
+        const unfinished=target.impactSummaries?.some(item=>!item.supersededBy&&item.status!=="completed");
+        const finishBusy=beginBusy(`task:${id}`,"complete-harness");setArchiveTarget(null);
+        void taskMutation(id,()=>unfinished?api.archiveAbandoningSummaries(id):api.completeHarness(id)).then(()=>{
+          if(harnessRef.current?.harnessRunId!==id)return;
+          setHarness(null);setDraftProjectId(target.projectId);setSelectedProjectId(target.projectId);setRoute({kind:"conversation"});setHarnessText("");setWorkflowPanelOpen(false);setHarnessView("active");
+        }).catch(cause=>setError(String(cause))).finally(finishBusy);
+      }}/>}
       <aside id="task-navigation" ref={navigationPanel} className="task-rail">
         <header>
           <div className="brand">
             <span className="brand-mark">W</span>
             <div>
               <strong>Wave Flow</strong>
-              <span>本地主控工作台</span>
+              <span>本地 AI 工作台</span>
             </div>
           </div>
           <div className="rail-actions">
@@ -603,7 +734,7 @@ export function App() {
             <button
               className="settings-button"
               onClick={() => setSettingsOpen(true)}
-              aria-label="主控与执行底座设置"
+              aria-label="执行环境设置"
             >
               ⚙
             </button>
@@ -637,16 +768,17 @@ export function App() {
             ↻
           </button>
         </div>
-        <label className="task-search"><span>搜索任务</span><input value={search} onChange={event=>setSearch(event.target.value)} /></label>
         <nav className="task-list">
           {runs.length > 0 && <details><summary>独立运行历史</summary>{runs.map(run => <button key={run.runId} onClick={()=>{setHarness(null);setDraftProjectId(null);setRoute({kind:"conversation"});setSelectedId(run.runId);setNavOpen(false);}}>{run.workflow.name} · {localeTime(run.createdAt)} · {run.runId.slice(0,8)}</button>)}</details>}
           {projects.map((project) => (
             <ProjectGroup
               key={project.projectId}
               project={project}
-              harnesses={harnesses.filter((item) => item.projectId === project.projectId && (!search || conversationTitle(item).includes(search) || item.workflowRevisions.some(revision=>revision.goal?.includes(search))) && (harnessView === "completed" ? item.status === "completed" : item.status !== "completed"))}
+              harnesses={harnesses.filter((item) => item.projectId === project.projectId && (harnessView === "completed" ? item.status === "completed" : item.status !== "completed"))}
               route={route}
               onSelectWorkflow={openWorkflow}
+              onArchive={target=>void archiveTask(target)}
+              busyOperations={busyOperations}
               activeHarnessId={harness?.harnessRunId ?? null}
               unreadCounts={unreadCounts}
               showNewSession={harnessView === "active"}
@@ -672,10 +804,16 @@ export function App() {
             {connected ? "Desktop Engine 已连接" : "Desktop Engine 未连接"}
           </small>
         </footer>
+        <div
+          className={`rail-width-handle${railDragging ? " dragging" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调整任务栏宽度"
+          title="拖动调整任务栏宽度"
+          onPointerDown={startRailDrag}
+        />
       </aside>
-      <section className="conversation-pane" hidden={workflowPanelOpen}>
-        {harness?.status==="interrupted"&&<button onClick={()=>void api.recoverController(harness.harnessRunId).catch(error=>setError(String(error)))}>恢复主控待命（不重发任务）</button>}
-        {harness?.impactSummaries?.filter(item=>!item.supersededBy&&(item.status==="interrupted"||item.status==="cancelled")).map(item=><ImpactSummaryPanel key={item.key} summaryKey={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/>)}
+      <section className="conversation-pane" hidden={workflowPanelOpen} onClickCapture={event=>{const button=(event.target as HTMLElement).closest<HTMLElement>('button');if(button)workflowReturn.current={taskId:harness?.harnessRunId??null,button};}}>
         {!harness ? (
           <DraftConversation
             project={
@@ -690,6 +828,11 @@ export function App() {
             title={taskTitle} onTitle={setTaskTitle}
             onTemplate={()=>setTemplatePicker(true)}
             onLocal={()=>setLocalPreview(true)}
+            pendingAttachments={pendingAttachments}
+            attachmentBusy={stagingOwner===attachmentOwner}
+            attachmentError={attachmentError} onDismissAttachmentError={()=>setAttachmentError(null)}
+            onAddAttachments={()=>void addAttachments()}
+            onRemoveAttachment={id=>setPendingAttachments(current=>current.filter(item=>item.stagedId!==id))}
           />
         ) : (
           <HarnessConversation
@@ -697,6 +840,14 @@ export function App() {
             text={harnessText}
             onText={updateHarnessText}
             onSend={() => void sendHarness()}
+            onSendImmediate={() => void sendHarness(true)}
+            onCancelQueued={(messageId) => void taskMutation(harness.harnessRunId, () => api.cancelQueuedMessage(harness.harnessRunId, messageId)).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
+            onRecover={() => void api.recoverController(harness.harnessRunId).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
+            pendingAttachments={pendingAttachments}
+            attachmentBusy={stagingOwner===attachmentOwner}
+            attachmentError={attachmentError} onDismissAttachmentError={()=>setAttachmentError(null)}
+            onAddAttachments={() => void addAttachments()}
+            onRemoveAttachment={(stagedId) => setPendingAttachments((current) => current.filter((item) => item.stagedId !== stagedId))}
             onAbort={() => void api.abortHarness(harness.harnessRunId)}
             onComplete={() => {
               const unfinished=harness.impactSummaries?.filter(item=>!item.supersededBy&&item.status!=="completed")??[];
@@ -745,6 +896,7 @@ export function App() {
             }}
             onAssignmentCreated={(detail) => void finishAssignment(detail)}
             onSelectRevision={(revision) => openWorkflow(harness, revision, "plan")}
+            onSelectResults={executionId=>{const execution=harness.executions.find(item=>item.executionId===executionId);const revision=execution&&harness.workflowRevisions.find(item=>item.revision===execution.revision);if(revision)openWorkflow(harness,revision,"results",executionId);}}
             draftContext={adjustContext?.taskId===harness.harnessRunId?`针对${adjustContext.abandoned?"已放弃的":""}第 ${adjustContext.revision} 版方案`:undefined}
             onAdjustRevision={revision=>prepareRevisionDraft(harness,revision,!!revision.abandonedAt)}
             onSelectExecution={(executionId,attempt) =>
@@ -773,7 +925,7 @@ export function App() {
           />
         )}
         {archiveConfirmation&&harness?.harnessRunId===archiveConfirmation.harnessRunId&&<ArchiveImpactConfirmation count={archiveConfirmation.count} onClose={()=>setArchiveConfirmation(null)} onConfirm={()=>{const id=archiveConfirmation.harnessRunId,pageToken=navigationToken.current,finishBusy=beginBusy(`task:${id}`,"archive-abandon-summary");setArchiveConfirmation(null);void taskMutation(id,()=>api.archiveAbandoningSummaries(id)).then(()=>{if(pageToken!==navigationToken.current||harnessRef.current?.harnessRunId!==id)return;setHarnessView("active");setDraftProjectId(projects[0]?.projectId??null);setHarness(null);setHarnessText("");setWorkflowPanelOpen(false);setError(null);}).catch(error=>{if(pageToken===navigationToken.current&&harnessRef.current?.harnessRunId===id)setError(String(error));}).finally(finishBusy);}}/>}
-        {templatePicker&&<TemplatePicker key={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} identity={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} blockedReason={harness&&(harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null))?"主控或执行仍在处理中；参数保留，结束后才能保存。":undefined} onClose={()=>setTemplatePicker(false)} onSave={async(selection,requestId)=>{
+        {templatePicker&&<TemplatePicker key={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} identity={harness?.harnessRunId??`project:${draftProjectId??selectedProjectId}`} blockedReason={harness&&(harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null))?"Wave Flow 或执行仍在处理中；参数保留，结束后才能保存。":undefined} onClose={()=>setTemplatePicker(false)} onSave={async(selection,requestId)=>{
           const owner=harnessRef.current,token=navigationToken.current;
           const response=owner?await taskMutation(owner.harnessRunId,()=>api.saveTemplate(owner.harnessRunId,requestId,selection)):await api.createTemplateTask(draftProjectId??selectedProjectId!,"只读代码审查与独立复核",requestId,selection,taskTitle||undefined);
           setHarnesses(current=>[response.harness,...current.filter(item=>item.harnessRunId!==response.harness.harnessRunId)]);
@@ -798,41 +950,41 @@ export function App() {
             <span>
               {harness && route.kind === "workflow" ? `${conversationTitle(harness)} / 工作流` : "独立运行记录"}
             </span>
-            <strong>
-              {(route.kind === "workflow" ? harness?.workflowRevisions.find(item=>item.revision === route.revision)?.goal : null) ?? selected?.workflow.name ?? "工作流详情"}
+            <strong ref={workflowTitle} tabIndex={-1} role="heading" aria-level={1}>
+              {(() => { const headerRevision = route.kind === "workflow" ? harness?.workflowRevisions.find(item=>item.revision === route.revision) : undefined; return headerRevision ? proposalTitle(headerRevision) : selected?.workflow.name ?? "工作流详情"; })()}
             </strong>
           </div>
           <button
             onClick={() => setWorkflowPanelOpen(false)}
-            aria-label="返回主控对话"
+            aria-label="返回对话"
           >
-            返回主控对话
+            返回对话{harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0 ? `（${unreadCounts.get(harness.harnessRunId)} 条未读）` : ""}
           </button>
           </header>
-          {harness && route.kind === "workflow" && !routeMatchesTask(harness,route) && <p role="alert">所选工作流记录已失效，请返回主控对话重新选择。</p>}
+          {harness && route.kind === "workflow" && !routeMatchesTask(harness,route) && <p role="alert">所选工作流记录已失效，请返回对话重新选择。</p>}
           {harness && route.kind === "workflow" && routeMatchesTask(harness,route) && (
             <div className="central-plan">
               <div className="workflow-page-tabs" role="tablist" aria-label="工作流详情" onKeyDown={event=>{if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;const buttons=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=buttons.indexOf(document.activeElement as HTMLButtonElement);const next=event.key==="Home"?0:event.key==="End"?buttons.length-1:(index+(event.key==="ArrowRight"?1:-1)+buttons.length)%buttons.length;event.preventDefault();buttons[next]?.focus();buttons[next]?.click();}}>
               <button role="tab" aria-selected={route.section === "plan"} onClick={()=>setRoute({...route,section:"plan"})}>方案</button>
-              <button role="tab" aria-selected={route.section === "execution"} disabled={!harness.executions.some(item=>item.revision === route.revision)} onClick={()=> { const ex = harness.executions.find(item=>item.revision === route.revision); if(ex) setSelectedExecutionId(ex.executionId); setRoute({...route,section:"execution",executionId:ex?.executionId,attempt:undefined}); }}>执行</button>
+              <button role="tab" aria-selected={route.section === "execution"} disabled={!harness.executions.some(item=>item.revision === route.revision)} onClick={()=> { const ex = harness.executions.find(item=>item.revision === route.revision); if(ex) setSelectedExecutionId(ex.executionId); setRoute({...route,section:"execution",executionId:ex?.executionId}); }}>执行</button>
               <button role="tab" aria-selected={route.section === "results"} disabled={!harness.executions.some(item=>item.revision === route.revision)} onClick={()=>{const ex=harness.executions.find(item=>item.revision===route.revision);if(ex)setSelectedExecutionId(ex.executionId);setRoute({...route,section:"results",executionId:ex?.executionId});}}>结果</button>
               </div>
-              {harness.status === "running" && <button onClick={()=>setRoute({kind:"conversation"})}>{harness.decisions.some(item=>!item.answer) ? "主控需要回答" : "主控正在处理"} · 返回对话</button>}
-              {(unreadCounts.get(harness.harnessRunId)??0)>0&&<button onClick={()=>setRoute({kind:"conversation"})}>{unreadCounts.get(harness.harnessRunId)} 条未读 · 返回主控对话</button>}
-              {harness.executions.filter(execution=>{const attention=harnesses.find(task=>task.harnessRunId===harness.harnessRunId)?.executionAttention?.[execution.executionId];return attention&&(attention.workerRequests>0||attention.scriptGates>0);}).map(execution=><button key={execution.executionId} onClick={()=>void selectExecution(execution.executionId)}>执行需要回答 · 前往所属执行</button>)}
+              {harness.status === "running" && <button onClick={()=>setRoute({kind:"conversation"})}>{harness.decisions.some(item=>!item.answer) ? "需要你的回答" : "Wave Flow 正在处理"} · 返回对话</button>}
+              {harness.executions.filter(execution=>{const attention=harnesses.find(task=>task.harnessRunId===harness.harnessRunId)?.executionAttention?.[execution.executionId];return execution.finishedAt===null&&attention&&(attention.workerRequests>0||attention.scriptGates>0);}).map(execution=><button key={execution.executionId} onClick={()=>void selectExecution(execution.executionId)}>执行需要回答 · 前往所属执行</button>)}
               {route.section === "plan" && (()=> {
                 const revisions=harness.workflowRevisions.filter(item=>(item.cardId ?? `legacy:${item.revision}`) === route.cardId);
                 const revision=revisions.find(item=>item.revision === route.revision);
                 if(!revision) return <p>方案不存在，请返回对话。</p>;
-                return <><div className="workflow-version-toolbar"><label>方案版本<select value={revision.revision} onChange={event=>{setSelectedExecutionId(null);setExecutionDetail(null);setRoute({...route,revision:Number(event.target.value),executionId:undefined,attempt:undefined});}}>{revisions.map(item=><option key={item.revision} value={item.revision}>第 {item.revision} 版</option>)}</select></label><small>每次修改保留原方案，批准仅对当时的版本生效</small></div>
-                  <WorkflowRevisionCard key={`${route.taskId}:${revision.revision}`} revision={revision} harness={harness} hideGoal
+                return <div className="workflow-plan-content"><div className="workflow-version-tools"><WorkflowVersions versions={revisions} selected={revision.revision} onSelect={selected=>{setSelectedExecutionId(null);setExecutionDetail(null);setRoute({...route,revision:selected,executionId:undefined,attempt:undefined});}}/></div>
+                  <WorkflowRevisionCard key={`${route.taskId}:${revision.revision}`} revision={revision} harness={harness}
                     onLocalRevision={revision.localOrigin?()=>{setLocalRevision({harnessRunId:harness.harnessRunId,baseRevision:revision.revision,path:revision.localOrigin!.path,input:revision.input??{}});setLocalPreview(true);}:undefined}
                     onSaved={next=>{setHarnesses(current=>current.map(item=>item.harnessRunId===next.harnessRunId?newerTaskSnapshot(item,next):item));if(harnessRef.current?.harnessRunId===next.harnessRunId&&routeRef.current.kind==="workflow"&&routeRef.current.cardId===revision.cardId&&routeRef.current.revision===revision.revision)openWorkflow(next,next.workflowRevisions.at(-1)!,"plan");}}
-                    onAssignmentCreated={detail=>void finishAssignment(detail)} />
-                  {editableRevision(harness,revision) && <>{!revision.localOrigin&&<button onClick={()=>prepareRevisionDraft(harness,revision,false)}>通过对话调整</button>}<button onClick={async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }}>放弃此方案</button></>}
-                  {revision.abandonedAt&&harness.workflowRevisions.at(-1)?.revision===revision.revision&&harness.status!=="completed"&&<AbandonedPlan onRedesign={()=>prepareRevisionDraft(harness,revision,true)} onTemplate={!harness.executions.length?()=>setTemplatePicker(true):undefined} disabled={harness.status!=="idle"||harness.executions.some(item=>!item.finishedAt)}/>}</>;
+                    onAssignmentCreated={detail=>void finishAssignment(detail)}
+                    onAdjustViaChat={!revision.localOrigin?()=>prepareRevisionDraft(harness,revision,false):undefined}
+                    onAbandonCard={editableRevision(harness,revision)?async()=>{ await taskMutation(harness.harnessRunId,()=>api.abandonCard(harness.harnessRunId,revision.cardId!)); }:undefined} />
+                  {revision.abandonedAt&&harness.workflowRevisions.at(-1)?.revision===revision.revision&&harness.status!=="completed"&&<AbandonedPlan onRedesign={()=>prepareRevisionDraft(harness,revision,true)} onTemplate={!harness.executions.length?()=>setTemplatePicker(true):undefined} disabled={harness.status!=="idle"||harness.executions.some(item=>!item.finishedAt)}/>}</div>;
               })()}
-              {route.section === "results" && executionDetail && <HistoricalResults key={executionDetail.execution.executionId} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} harness={harness} />}
+              {route.section === "results" && executionDetail && <HistoricalResults key={`${harness.harnessRunId}:${executionDetail.execution.executionId}`} taskId={harness.harnessRunId} executionId={executionDetail.execution.executionId} currentAttempt={executionDetail.snapshot.currentExecutionAttemptId} selectedAttempt={route.attempt} onSelectAttempt={attempt=>setRoute({...route,attempt})} harness={harness} />}
             </div>
           )}
           {executionDetail && harness && route.kind === "workflow" && routeMatchesTask(harness,route) && route.section === "execution" ? (
@@ -845,6 +997,7 @@ export function App() {
               busy={executionBusy}
               dynamicCount={executionDynamicCount}
               harnessRunId={harness.harnessRunId}
+              previousRecords={(harness.executionHistory??[]).filter(item=>item.executionId===executionDetail.execution.executionId&&item.kind==='finished').map(item=>({id:item.attempt??1,at:item.at,status:item.status}))}
               onControl={controlExecution}
               onSavePartial={async()=>{const owner=harness.harnessRunId,id=executionDetail.execution.executionId;const valid=requestFence.current.begin(`execution:${owner}:${id}`);const finishBusy=beginBusy(`execution:${id}`,"save-partial");try{const next=await api.savePartial(owner,id);if(valid()&&harnessRef.current?.harnessRunId===owner)setExecutionDetail(next);}finally{finishBusy();}}}
               onCleanupWorkspaces={async()=>{const owner=harness.harnessRunId,id=executionDetail.execution.executionId;const valid=requestFence.current.begin(`execution:${owner}:${id}`);const finishBusy=beginBusy(`execution:${id}`,"cleanup-workspaces");try{const next=await api.cleanupWorkspaces(owner,id);if(valid()&&harnessRef.current?.harnessRunId===owner)setExecutionDetail(next);}finally{finishBusy();}}}
@@ -882,7 +1035,7 @@ export function App() {
           ) : route.kind === "workflow" ? null : !selected ? (
           <div className="workflow-empty">
             <div>◇</div>
-            <strong>等待主控发起 Workflow</strong>
+            <strong>等待 Wave Flow 准备工作流</strong>
             <p>
               已接受的草案会在对话中显示“创建执行”；Execution 启动后这里展示
               revision、attempt、Phase、Agent 与决策门。
@@ -989,6 +1142,47 @@ function DesktopExitModal({
   onError: (value: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const panel=useRef<HTMLElement>(null),cancel=useRef<HTMLButtonElement>(null);
+  const closeRef=useRef(onClose),busyRef=useRef(busy);closeRef.current=onClose;busyRef.current=busy;
+  useEffect(()=>{
+    const activePanel=panel.current;
+    if(!activePanel)return;
+    const prior=document.activeElement as HTMLElement|null;
+    const background:Array<{element:HTMLElement;inert:boolean}>=[];
+    let branch:HTMLElement=activePanel;
+    while(branch.parentElement){
+      for(const sibling of branch.parentElement.children){
+        if(sibling!==branch&&sibling instanceof HTMLElement){background.push({element:sibling,inert:sibling.inert});sibling.inert=true;}
+      }
+      if(branch.parentElement===document.body)break;
+      branch=branch.parentElement;
+    }
+    cancel.current?.focus();
+    const keydown=(event:KeyboardEvent)=>{
+      if(event.isComposing)return;
+      if(event.key==='Escape'){
+        event.preventDefault();event.stopPropagation();
+        if(!busyRef.current)closeRef.current();
+      }
+      if(event.key==='Tab'){
+        const items=[...activePanel.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')],first=items[0],last=items.at(-1);
+        if(!items.length){event.preventDefault();activePanel.focus();}
+        else if(!activePanel.contains(document.activeElement)){event.preventDefault();first?.focus();}
+        else if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+      }
+    };
+    document.addEventListener('keydown',keydown,true);
+    return()=>{
+      document.removeEventListener('keydown',keydown,true);
+      background.forEach(({element,inert})=>{element.inert=inert;});
+      requestAnimationFrame(()=>{
+        const navigation=document.querySelector<HTMLElement>('[aria-label="打开任务导航"]');
+        const target=[prior,navigation,document.querySelector<HTMLElement>('[aria-label="执行环境设置"]')].find(item=>item?.isConnected&&item!==document.body&&item!==document.documentElement&&item.getClientRects().length>0&&!item.closest('[inert]'));
+        target?.focus();
+      });
+    };
+  },[]);
   const shutdown = async () => {
     setBusy(true);
     try {
@@ -1001,6 +1195,8 @@ function DesktopExitModal({
   return (
     <div className="restart-backdrop" role="presentation">
       <section
+        ref={panel}
+        tabIndex={-1}
         className="connection-panel restart-modal"
         role="dialog"
         aria-modal="true"
@@ -1024,6 +1220,7 @@ function DesktopExitModal({
           </div>
           <footer className="modal-actions">
             <button
+              ref={cancel}
               className="button-secondary"
               disabled={busy}
               onClick={onClose}
@@ -1044,7 +1241,7 @@ function DesktopExitModal({
   );
 }
 
-/** 设置分区标识：通用 / Agent CLI / 诊断。 */
+/** 设置分区标识：通用 / CLI 设置 / 诊断。 */
 type SettingsSection = "general" | "cli" | "diagnostics";
 
 /** 完整显示的长路径 + 点击复制（就地"已复制"反馈）。 */
@@ -1104,9 +1301,54 @@ function RuntimeConnectionPanel({
   const [manualPath, setManualPath] = useState("");
   const [manualCli, setManualCli] = useState<"codex" | "kimi">("codex");
   const [manualOpen, setManualOpen] = useState(false);
+  const settingsPanel=useRef<HTMLElement>(null),manualPanel=useRef<HTMLElement>(null),manualErrorRef=useRef<HTMLDivElement>(null);
+  const settingsClose=useRef(onClose);settingsClose.current=onClose;
+  useEffect(()=>{
+    const prior=document.activeElement as HTMLElement|null;
+    return()=>{requestAnimationFrame(()=>{
+      const settings=document.querySelector<HTMLElement>('[aria-label="执行环境设置"]');
+      const navigation=document.querySelector<HTMLElement>('[aria-label="打开任务导航"]');
+      const target=[settings,navigation,prior].find(item=>item?.isConnected&&item.getClientRects().length>0);
+      target?.focus();
+    });};
+  },[]);
+  useEffect(()=>{
+    const activePanel=manualOpen?manualPanel.current:settingsPanel.current;
+    if(!activePanel)return;
+    // 沿弹窗祖先只禁用兄弟区域，内层弹窗不会把包含自身的外层设为inert。
+    const background:Array<{element:HTMLElement;inert:boolean}>=[];
+    let branch:HTMLElement=activePanel;
+    while(branch.parentElement&&branch.parentElement!==document.body){
+      for(const sibling of branch.parentElement.children){
+        if(sibling!==branch&&sibling instanceof HTMLElement){background.push({element:sibling,inert:sibling.inert});sibling.inert=true;}
+      }
+      branch=branch.parentElement;
+    }
+    const controls=()=>[...activePanel.querySelectorAll<HTMLElement>('a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]')].filter(item=>!item.closest('[inert]')&&item.getClientRects().length>0);
+    (manualOpen?activePanel.querySelector<HTMLInputElement>('input'):activePanel.querySelector<HTMLElement>('.modal-close')??controls()[0])?.focus();
+    const keydown=(event:KeyboardEvent)=>{
+      if(event.isComposing)return;
+      if(event.key==='Escape'){
+        event.preventDefault();event.stopPropagation();
+        if(manualOpen)setManualOpen(false);
+        else if(!gateMode)settingsClose.current?.();
+      }
+      if(event.key==='Tab'){
+        const items=controls(),first=items[0],last=items.at(-1);
+        if(!items.length){event.preventDefault();return;}
+        if(!activePanel.contains(document.activeElement)){event.preventDefault();first?.focus();}
+        else if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+      }
+    };
+    document.addEventListener('keydown',keydown,true);
+    return()=>{document.removeEventListener('keydown',keydown,true);background.forEach(({element,inert})=>{element.inert=inert;});if(manualOpen)requestAnimationFrame(()=>settingsPanel.current?.querySelector<HTMLElement>('.add-runtime')?.focus());};
+  },[manualOpen,gateMode]);
   /** 手动验证失败必须在二级弹窗内可见；全局 toast 只是补充，不作为唯一反馈。 */
   const [manualError, setManualError] = useState<string | null>(null);
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  useEffect(()=>{if(manualError)manualErrorRef.current?.focus();},[manualError]);
+  const [runtimeOperation, setRuntimeOperation] = useState<"scan"|"validate"|"select"|null>(null);
+  const runtimeBusy=runtimeOperation!==null;
   /** WKWebView 不支持 window.confirm；切换主控用两段式按钮确认，timer 只负责超时复位。 */
   const [confirmSwitchId, setConfirmSwitchId] = useState<string | null>(null);
   const confirmSwitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1117,6 +1359,7 @@ function RuntimeConnectionPanel({
     runtimeState.runtimes.find(
       (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
     ) ?? null;
+  const otherRuntimes=runtimeState.runtimes.filter(runtime=>runtime.runtimeId!==selected?.runtimeId);
   const reloadRuntimes = useCallback(async () => {
     onRuntimeState(await api.cliRuntimes());
   }, [onRuntimeState]);
@@ -1135,18 +1378,18 @@ function RuntimeConnectionPanel({
     // PATH 扫描护栏：进行中禁止重复触发；结果写回 App 级 runtimeState，
     // 扫描期间切换分区不会丢弃返回结果。
     if (runtimeBusy || scanning) return;
-    setRuntimeBusy(true);
+    setRuntimeOperation("scan");
     try {
       onRuntimeState((await api.scanCliRuntimes()).runtimes);
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setRuntimeBusy(false);
+      setRuntimeOperation(null);
     }
   }
   async function validate() {
-    if (!manualPath.trim()) return;
-    setRuntimeBusy(true);
+    if (runtimeBusy || !manualPath.trim()) return;
+    setRuntimeOperation("validate");
     setManualError(null);
     try {
       await api.validateCliRuntime(manualPath.trim(), manualCli);
@@ -1158,10 +1401,11 @@ function RuntimeConnectionPanel({
       setManualError(message);
       onError(message);
     } finally {
-      setRuntimeBusy(false);
+      setRuntimeOperation(null);
     }
   }
   async function selectRuntime(runtime: CliRuntime) {
+    if(runtimeBusy||scanning)return;
     if (selected && selected.runtimeId !== runtime.runtimeId && confirmSwitchId !== runtime.runtimeId) {
       // 第一次点击只进入待确认态；4 秒内再次点击才执行切换。
       setConfirmSwitchId(runtime.runtimeId);
@@ -1170,14 +1414,14 @@ function RuntimeConnectionPanel({
       return;
     }
     setConfirmSwitchId(null);
-    setRuntimeBusy(true);
+    setRuntimeOperation("select");
     try {
       await api.selectCliRuntime(runtime.runtimeId);
       await reloadRuntimes();
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setRuntimeBusy(false);
+      setRuntimeOperation(null);
     }
   }
 
@@ -1186,19 +1430,20 @@ function RuntimeConnectionPanel({
       <section className="runtime-status" aria-live="polite">
         {selected ? (
           <>
-            <div className="status-mark verified">✓</div>
+            <div className={`status-mark ${selected.status==="verified"?"verified":""}`}>{selected.status==="verified"?"✓":"!"}</div>
             <div>
-              <span>当前主控 CLI</span>
+              <span>当前默认 CLI</span>
               <strong>
                 {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
               </strong>
-              <CopyablePath path={selected.executablePath} />
-              <small>
-                {selected.version} · ACP adapter{" "}
-                {selected.verifiedAdapter.adapterVersion}
-              </small>
+              <small className="runtime-version">{selected.version}</small>
+              <details className="runtime-technical"><summary>技术信息</summary>
+                <CopyablePath path={selected.executablePath} />
+                <small>ACP adapter {selected.verifiedAdapter.adapterVersion}</small>
+              </details>
             </div>
-            <em>已验证</em>
+            <em>{selected.status==="verified"?"已验证":selected.status==="needs-revalidation"?"需重新验证":"验证失败"}</em>
+            {selected.status!=="verified"&&<p role="alert">{selected.diagnostic?userFacingText(selected.diagnostic):"当前默认 CLI 暂不可用，请重新扫描或手动验证。"}</p>}
           </>
         ) : (
           <>
@@ -1207,7 +1452,7 @@ function RuntimeConnectionPanel({
             </div>
             <div>
               <span>
-                {scanning ? "正在检查本机 CLI" : "尚未设置主控 CLI"}
+                {scanning ? "正在检查本机 CLI" : "尚未设置 Wave Flow CLI"}
               </span>
               <strong>
                 {scanning ? "发现并验证可用候选" : "请选择一个已验证候选"}
@@ -1215,7 +1460,7 @@ function RuntimeConnectionPanel({
               <small>
                 {scanning
                   ? "正在安全验证 PATH 中的候选；不会修改默认项。"
-                  : "设置后才可进入工作台；手动添加不会自动设为主控。"}
+                  : "设置后才可进入工作台；手动添加不会自动设为默认。"}
               </small>
             </div>
           </>
@@ -1224,10 +1469,10 @@ function RuntimeConnectionPanel({
       <section className="connection-form runtime-actions">
         <div className="section-row">
           <div>
-            <strong>{selected ? "可用 CLI" : "已验证候选"}</strong>
+            <strong>{selected ? "其他 CLI 安装项" : "CLI 安装项"}</strong>
             <span>
               {selected
-                ? "切换主控只影响新会话；进行中的主控回合会阻止切换。"
+                ? "切换 CLI 只影响新会话；正在处理的会话会阻止切换。"
                 : "从 PATH 自动发现，或手动添加一个绝对路径。"}
             </span>
           </div>
@@ -1237,7 +1482,7 @@ function RuntimeConnectionPanel({
               disabled={runtimeBusy || scanning}
               onClick={() => void scan()}
             >
-              {runtimeBusy || scanning ? "正在扫描…" : "重新扫描"}
+              {runtimeOperation==="scan" || scanning ? "正在扫描…" : "重新扫描"}
             </button>
           )}
         </div>
@@ -1251,16 +1496,19 @@ function RuntimeConnectionPanel({
         >
           手动添加 CLI
         </button>
+        {!manualOpen&&manualError&&<p role="alert" className="manual-validation-feedback">验证未通过：{manualError} 请重新打开手动添加，检查路径后重试。</p>}
+        {!manualOpen&&runtimeOperation==="validate"&&<p role="status">正在验证 CLI，结束后结果会显示在这里；不会自动设为默认。</p>}
+        {runtimeOperation==="select"&&<p role="status">正在切换默认 CLI…</p>}
       </section>
       <section className="runtime-list">
         <span className="list-caption">
-          {runtimeState.runtimes.length
-            ? "已验证 Runtime"
+          {otherRuntimes.length
+            ? `${otherRuntimes.length} 个安装项`
             : scanning
               ? "正在验证候选…"
-              : "尚未发现可用 CLI"}
+              : selected?"没有其他可用 CLI，可重新扫描或手动添加。":"尚未发现可用 CLI"}
         </span>
-        {runtimeState.runtimes.map((runtime) => (
+        {otherRuntimes.map((runtime) => (
           <article
             key={runtime.runtimeId}
             className={
@@ -1272,17 +1520,16 @@ function RuntimeConnectionPanel({
             <div>
               <strong>
                 {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
-                <span className="runtime-cli-badge">{runtime.cli}</span>
               </strong>
-              <CopyablePath path={runtime.executablePath} />
-              <small>
-                {runtime.version} · {discoveredFromLabel(runtime.discoveredFrom)} · adapter {runtime.verifiedAdapter.adapterId} ·{" "}
-                {runtime.verifiedAdapter.harnessTools ? "主控 + Worker" : "Worker"}
-              </small>
-              {runtime.diagnostic && <p>{runtime.diagnostic}</p>}
+              <small className="runtime-version">{runtime.version} · {discoveredFromLabel(runtime.discoveredFrom)}</small>
+              <details className="runtime-technical"><summary>技术信息</summary>
+                <CopyablePath path={runtime.executablePath} />
+                <small>adapter {runtime.verifiedAdapter.adapterId} · {runtime.verifiedAdapter.harnessTools ? "对话与执行" : "仅执行"}</small>
+              </details>
+              {runtime.diagnostic && <p>{userFacingText(runtime.diagnostic)}</p>}
             </div>
             {runtimeState.harnessRuntimeId === runtime.runtimeId ? (
-              <span className="runtime-selected">当前主控</span>
+              <span className="runtime-selected">当前默认</span>
             ) : runtime.status === "verified" &&
               runtime.verifiedAdapter.harnessTools ? (
               <button
@@ -1291,11 +1538,11 @@ function RuntimeConnectionPanel({
                 onClick={() => void selectRuntime(runtime)}
               >
                 {confirmSwitchId === runtime.runtimeId
-                  ? "确认切换主控？"
-                  : "设为主控"}
+                  ? "确认切换默认 CLI？"
+                  : "设为默认"}
               </button>
             ) : (
-              <span className="runtime-passive">可用候选</span>
+              <span className="runtime-passive">{runtime.status==="needs-revalidation"?"需重新验证":runtime.status==="invalid"?"验证失败":"仅可用于执行"}</span>
             )}
           </article>
         ))}
@@ -1306,6 +1553,7 @@ function RuntimeConnectionPanel({
           onMouseDown={() => setManualOpen(false)}
         >
           <section
+            ref={manualPanel}
             className="connection-panel connection-panel--nested"
             aria-label="手动添加 CLI"
             role="dialog"
@@ -1334,10 +1582,12 @@ function RuntimeConnectionPanel({
               <label className="connection-field">
                 <span>CLI 种类</span>
                 <select
+                  disabled={runtimeBusy}
                   value={manualCli}
-                  onChange={(event) =>
-                    setManualCli(event.target.value as "codex" | "kimi")
-                  }
+                  onChange={(event) => {
+                    setManualCli(event.target.value as "codex" | "kimi");
+                    setManualError(null);
+                  }}
                 >
                   <option value="codex">Codex CLI</option>
                   <option value="kimi">Kimi CLI</option>
@@ -1347,8 +1597,9 @@ function RuntimeConnectionPanel({
                 <span>CLI 绝对路径</span>
                 <input
                   autoFocus
+                  disabled={runtimeBusy}
                   value={manualPath}
-                  onChange={(event) => setManualPath(event.target.value)}
+                  onChange={(event) => {setManualPath(event.target.value);setManualError(null);}}
                   placeholder={
                     manualCli === "kimi"
                       ? "/Users/you/.kimi-code/bin/kimi"
@@ -1358,17 +1609,18 @@ function RuntimeConnectionPanel({
                 />
               </label>
               {manualError && (
-                <div className="manual-runtime-error" role="alert">
+                <div ref={manualErrorRef} tabIndex={-1} className="manual-runtime-error" role="alert">
                   <span>!</span>
                   <p>{manualError}</p>
                 </div>
               )}
+              {runtimeBusy&&<p role="status">正在验证所选 CLI。关闭窗口不会取消验证，结果会更新到设置中；不会自动设为默认。</p>}
               <footer className="modal-actions">
                 <button
                   className="button-secondary"
                   onClick={() => setManualOpen(false)}
                 >
-                  取消
+                  {runtimeBusy?"关闭窗口":"取消"}
                 </button>
                 <button
                   className="button-primary"
@@ -1389,8 +1641,9 @@ function RuntimeConnectionPanel({
     return (
       <div className="settings-backdrop connection-backdrop connection-backdrop--gate">
         <section
+          ref={settingsPanel}
           className="connection-panel runtime-settings runtime-settings--gate"
-          aria-label="选择主控 CLI"
+          aria-label="选择 Wave Flow CLI"
           aria-modal="true"
           role="dialog"
           onMouseDown={(event) => event.stopPropagation()}
@@ -1398,9 +1651,9 @@ function RuntimeConnectionPanel({
           <header className="connection-panel-head">
             <div>
               <span className="modal-kicker">本机执行底座</span>
-              <strong>选择主控 CLI</strong>
+              <strong>选择 Wave Flow CLI</strong>
               <p>
-                Wave Flow 需要一个已验证的本机 CLI 才能开始主控会话。扫描只会发现候选，默认项始终由你明确设定。
+                选择一个已验证的本机 CLI，让 Wave Flow 帮你处理任务。扫描不会自动修改默认项。
               </p>
             </div>
           </header>
@@ -1416,6 +1669,7 @@ function RuntimeConnectionPanel({
       onMouseDown={onClose}
     >
       <section
+        ref={settingsPanel}
         className="connection-panel runtime-settings settings-panel"
         aria-label="设置"
         aria-modal="true"
@@ -1441,7 +1695,7 @@ function RuntimeConnectionPanel({
             {(
               [
                 ["general", "通用"],
-                ["cli", "Agent CLI"],
+                ["cli", "CLI 设置"],
                 ["diagnostics", "诊断"],
               ] as Array<[SettingsSection, string]>
             ).map(([key, label]) => (
@@ -1510,7 +1764,7 @@ function RuntimeConnectionPanel({
                     <dd>{engineStatus.activeRuns}</dd>
                     <dt>等待决定的 Run</dt>
                     <dd>{engineStatus.blockedRuns}</dd>
-                    <dt>进行中的主控回合</dt>
+                    <dt>正在处理的会话</dt>
                     <dd>{engineStatus.activeHarnesses}</dd>
                     <dt>待恢复的 ACP Worker</dt>
                     <dd>{engineStatus.acpWorkersNeedingResume}</dd>
@@ -1522,7 +1776,7 @@ function RuntimeConnectionPanel({
                 )}
                 <div className="section-row">
                   <div>
-                    <strong>当前主控 Runtime 来源</strong>
+                    <strong>当前默认 CLI 来源</strong>
                     <span>用于审计本机执行底座的真实落点。</span>
                   </div>
                 </div>
@@ -1542,7 +1796,7 @@ function RuntimeConnectionPanel({
                     <dd>{localeTime(selected.verifiedAt)}</dd>
                   </dl>
                 ) : (
-                  <p className="settings-note">尚未设置主控 CLI。</p>
+                  <p className="settings-note">尚未设置 Wave Flow CLI。</p>
                 )}
               </section>
             )}
@@ -1609,20 +1863,18 @@ function HarnessListItem({
               ? "已中断"
               : item.status === "completed"
                 ? "已完成"
-              : "待命"}{" "}
+              : item.executions.some(execution=>execution.finishedAt===null) ? "执行中" : interruptedSummaryObligations(item).length ? "总结待重试" : "可继续"}{" "}
           · {localeTime(item.completedAt ?? item.createdAt)}
           {item.executions.some(execution=>execution.finishedAt === null) && " · 工作流运行中"}
-          {item.decisions.some(decision=>decision.answer === null) && item.status === "running" && " · 主控需要回答"}
-          {Object.values(item.executionAttention ?? {}).some(value=>value.workerRequests>0||value.scriptGates>0) && " · 执行需要回答"}
+          {item.decisions.some(decision=>decision.answer === null) && item.status === "running" && " · 需要你的回答"}
+          {hasActiveExecutionQuestions(item) && " · 执行需要回答"}
         </small>
       </div>
     </button>
   );
 }
 function TaskTreeItem({item,active,route,unread,onClick,onWorkflow}:{item:HarnessSnapshot;unread:number;active:boolean;route:WorkbenchRoute;onClick:()=>void;onWorkflow:(revision:import("./types").WorkflowRevision)=>void}) {
-  const [expanded,setExpanded]=useState(()=>taskExpansions.get(item.harnessRunId)??false);
-  useEffect(()=>{if(route.kind==="workflow" && route.taskId===item.harnessRunId)setExpanded(true);},[route.kind==="workflow" ? route.cardId : null]);
-  return <div className="task-tree-item"><div className="task-tree-row"><button aria-label={`${expanded?"收起":"展开"} ${conversationTitle(item)} 工作流`} aria-expanded={expanded} onClick={()=>setExpanded(value=>{taskExpansions.set(item.harnessRunId,!value);return !value;})}>{expanded?"⌄":"›"}</button><HarnessListItem item={item} unread={unread} active={active && route.kind==="conversation"} onClick={onClick}/></div>{expanded && <ul>{workflowCells(item).map(revision=>{const execution=item.executions.find(ex=>ex.revision===revision.revision);const attention=execution?item.executionAttention?.[execution.executionId]:undefined;const help=attention&&attention.workerRequests+attention.scriptGates>0;return <li key={revision.cardId ?? revision.revision}><button aria-current={active && route.kind==="workflow" && route.cardId===(revision.cardId ?? `legacy:${revision.revision}`) ? "page":undefined} onClick={()=>onWorkflow(revision)}><strong>{revision.goal ?? `历史方案 ${revision.revision}`}</strong><small>{help?`需要回答 · ${attention!.workerRequests} 个 Worker / ${attention!.scriptGates} 个确认`:revision.abandonedAt?"已放弃":execution?"执行记录":revision.acceptedAt?"待运行":revision.rejectedAt?"需修改":"待确认"}</small></button></li>;})}</ul>}</div>;
+  return <div className="task-tree-item"><HarnessListItem item={item} unread={unread} active={active} onClick={onClick}/></div>;
 }
 function ProjectGroup({
   project,
@@ -1630,6 +1882,7 @@ function ProjectGroup({
   activeHarnessId,
   unreadCounts,
   route, onSelectWorkflow,
+  onArchive, busyOperations,
   showNewSession,
   onSelectProject,
   onNewSession,
@@ -1641,6 +1894,10 @@ function ProjectGroup({
   /** 各 Task 的本地阅读计数；不构成业务状态。 */
   unreadCounts: Map<string,number>;
   route: WorkbenchRoute;
+  /** 点击任务行归档入口，先确认，不切换阅读任务。 */
+  onArchive: (task:HarnessSnapshot)=>void;
+  /** 任务级操作状态，用于防止重复归档。 */
+  busyOperations: Record<string,string>;
   onSelectWorkflow: (task: HarnessSnapshot, revision: import("./types").WorkflowRevision, section?: "plan" | "execution" | "results", executionId?: string) => void;
   showNewSession: boolean;
   onSelectProject: () => void;
@@ -1671,7 +1928,7 @@ function ProjectGroup({
       {harnesses.length > 0 ? (
         <div className="project-conversations">
           {harnesses.map((item) => (
-            <TaskTreeItem key={item.harnessRunId} item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={revision=>onSelectWorkflow(item,revision)} />
+            <div key={item.harnessRunId} className={`task-row ${item.harnessRunId===activeHarnessId?'selected':''}`}><TaskTreeItem item={item} unread={unreadCounts.get(item.harnessRunId)??0} active={item.harnessRunId === activeHarnessId} route={route} onClick={()=>onSelectHarness(item)} onWorkflow={revision=>onSelectWorkflow(item,revision)} />{item.status!=="completed"&&<button className="task-archive" data-archive-task={item.harnessRunId} aria-label={`归档任务：${conversationTitle(item)}`} title={item.status==='running'||item.executions.some(execution=>!execution.finishedAt)?'处理中，结束后可归档':'归档任务'} disabled={!!busyOperations[`task:${item.harnessRunId}`]||item.status==='running'||item.executions.some(execution=>!execution.finishedAt)} onClick={()=>onArchive(item)}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v3H3zM4 7v9h12V7M8 10h4"/></svg></button>}</div>
           ))}
         </div>
       ) : null}
@@ -1707,7 +1964,7 @@ function ProjectCreateModal({
           <div>
             <span className="modal-kicker">侧边栏项目</span>
             <strong>添加本地项目</strong>
-            <p>项目路径只在这里登记。之后可在同一项目下持续创建主控会话。</p>
+            <p>选择项目目录，之后可在这个项目中持续创建任务。</p>
           </div>
           <button
             className="modal-close"
@@ -1764,6 +2021,7 @@ function DraftConversation({
   title, onTitle,
   onTemplate,
   onLocal,
+  pendingAttachments, onAddAttachments, onRemoveAttachment,attachmentBusy=false,attachmentError,onDismissAttachmentError,
 }: {
   project: HarnessProject | null;
   text: string;
@@ -1772,62 +2030,75 @@ function DraftConversation({
   title: string; onTitle: (value: string) => void;
   /** 打开预置来源；不创建任务。 */ onTemplate:()=>void;
   /** 打开零执行的项目内本地Workflow预检。 */ onLocal?:()=>void;
+  /** 首条消息待发送的图片暂存描述；选择不发送。 */ pendingAttachments: import("./types").StagedAttachment[];
+  /** 当前草稿正在选图/暂存，防止重复打开。 */ attachmentBusy?:boolean;
+  /** 原草稿的选图错误，不随后台轮询清除。 */ attachmentError?:string|null;
+  /** 仅关闭原草稿错误提示。 */ onDismissAttachmentError?:()=>void;
+  /** 打开已有系统图片选择器。 */ onAddAttachments:()=>void;
+  /** 仅移除尚未发送的指定附件。 */ onRemoveAttachment:(id:string)=>void;
 }) {
   const ready = project !== null;
+  const attachmentButton=useRef<HTMLButtonElement>(null);
+  const [branch, setBranch] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    let request = 0;
+    setBranch(null);
+    const refresh = () => { const token = ++request; if (project) void api.projectContext(project.projectId).then(value => { if (active && request === token) setBranch(value.branch ?? (value.status === "detached" ? "游离 HEAD" : null)); }).catch(() => { if (active && request === token) setBranch(null); }); };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => { active = false; window.removeEventListener("focus", refresh); };
+  }, [project?.projectId]);
   return (
     <div className="conversation draft-conversation">
-      <header>
-        <div>
-          <span className="task-presence" />
-          <div>
-            <strong>新建任务</strong>
-            <small>{project?.title ?? "未选择项目"}</small>
-          </div>
-        </div>
-        <div className="conversation-actions">
-        </div>
-      </header>
       <div className="conversation-scroll">
-        <div className="conversation-intro">
-          <span>自动编排</span>
-          <div className="task-source-options"><button aria-pressed="true">自动编排</button><button onClick={onTemplate} disabled={!ready}>预置工作流</button><button onClick={onLocal} disabled={!ready||!onLocal}>本地工作流</button></div>
-          <label>任务标题（可选）<input value={title} maxLength={120} onChange={event=>onTitle(event.target.value)} /></label>
-          <h2>你想完成什么任务？</h2>
-          <p>
-            先告诉我目标和约束。发送第一条消息后，这条会话才会保存到当前项目。
-          </p>
+        <div className="draft-welcome">
+          <h2>{ready ? `你想在 ${project.title} 中完成什么？` : "选择一个项目，开始任务"}</h2>
+          {!ready && <p>从左侧选择或创建本地项目。</p>}
         </div>
       </div>
+      <div className="draft-input-region">
+        <div className="draft-quick-actions" role="group" aria-label="任务快捷入口">
+          <span className="draft-project-name" title={project?.cwd}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7V5h6l2 2h10v13H3zM3 10h18"/></svg>{project?.title ?? "未选择项目"}</span>
+          {branch && <span className="draft-project-branch" aria-label={`当前分支 ${branch}`}><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10M18 7v3c0 4-12 0-12 6"/></svg>{branch}</span>}
+          <button data-workflow-source="template" type="button" className="draft-source-link" onClick={onTemplate} disabled={!ready}>预置工作流</button>
+          <button data-workflow-source="local" type="button" className="draft-source-link" onClick={onLocal} disabled={!ready||!onLocal}>本地工作流</button>
+          <details className="draft-name" onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary>任务标题{title ? " · 已填写" : ""}</summary><label><span>任务标题（可选）</span><input value={title} maxLength={120} placeholder="默认取目标的第一句" onChange={event=>onTitle(event.target.value)} /></label></details>
+        </div>
       <div className="conversation-composer">
+        {attachmentError&&<div className="attachment-error" role="alert"><span>{attachmentError}</span><button type="button" aria-label="关闭附件错误" onClick={()=>{onDismissAttachmentError?.();requestAnimationFrame(()=>attachmentButton.current?.focus());}}>×</button></div>}
+        {pendingAttachments.length>0&&<ul className="pending-attachments" aria-label="待发送附件">{pendingAttachments.map(item=><li key={item.stagedId}>{item.previewDataUrl&&<img src={item.previewDataUrl} alt={item.name}/>}<span className="attachment-meta"><strong>{item.name}</strong><small>待发送</small></span><button type="button" aria-label={`移除附件 ${item.name}`} onClick={()=>onRemoveAttachment(item.stagedId)}>×</button></li>)}</ul>}
         <textarea
           autoFocus
+          aria-label="描述任务目标"
+          style={{height: `${Math.min(220, 84 + Math.max(0, text.split("\n").length - 1) * 22)}px`}}
           value={text}
           disabled={!ready}
           onChange={(event) => onText(event.target.value)}
-          placeholder={ready ? "给主控发送消息" : "请先选择项目"}
+          placeholder={ready ? "描述目标和要求…" : "请先选择项目"}
           onKeyDown={(event) => {
             if (shouldSubmitComposer(event)) {
               event.preventDefault();
-              if (text.trim() && ready) onSend();
+              if (text.trim() && ready && !attachmentBusy) onSend();
             }
           }}
         />
         <div className="composer-footer">
           <div className="composer-guidance">
-            <span aria-hidden="true">＋</span>
-            <small>
-              ⌘/Ctrl + Enter 发送 · Enter 换行 · 未发送内容不会创建会话
-            </small>
+            <button ref={attachmentButton} type="button" className="add-attachment" aria-label="添加图片附件" title="添加图片附件（最多5张，选择后不会自动发送）" disabled={!ready||attachmentBusy} aria-busy={attachmentBusy} onClick={onAddAttachments}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg></button>
+            {attachmentBusy&&<small role="status">正在添加图片…</small>}
+            <small>⌘/Ctrl + Enter 发送 · Enter 换行</small>
           </div>
           <button
             className="send-message"
             aria-label="发送消息"
-            disabled={!ready || !text.trim()}
+            disabled={!ready || !text.trim() || attachmentBusy}
             onClick={onSend}
           >
             ↑
           </button>
         </div>
+      </div>
       </div>
 
     </div>
@@ -1839,6 +2110,14 @@ function HarnessConversation({
   text,
   onText,
   onSend,
+  onSendImmediate,
+  onCancelQueued,
+  onRecover,
+  pendingAttachments,
+  onAddAttachments,
+  onRemoveAttachment,
+  attachmentBusy=false,
+  attachmentError,onDismissAttachmentError,
   onAbort,
   onOpenWorkflow,
   hasWorkflow,
@@ -1850,6 +2129,7 @@ function HarnessConversation({
   onReject,
   onAssignmentCreated,
   onSelectExecution,
+  onSelectResults,
   onSelectRevision,
   onAdjustRevision,
   onAnswerDecision,
@@ -1864,6 +2144,21 @@ function HarnessConversation({
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
+  /** 立即发送：Engine 中断当前回合后优先投递。 */
+  onSendImmediate: () => void;
+  /** 取消尚未投递的排队消息。 */
+  onCancelQueued: (messageId: string) => void;
+  /** 恢复已中断主控到待命；不重发任务。 */
+  onRecover: () => void;
+  /** 待发送附件（Engine 暂存描述）；选择只创建暂存，不自动发送。 */
+  pendingAttachments: import("./types").StagedAttachment[];
+  /** 当前草稿正在选图/暂存；仅展示加载，不改变消息状态。 */ attachmentBusy?:boolean;
+  /** 原草稿选图失败原因。 */ attachmentError?:string|null;
+  /** 关闭当前草稿附件错误。 */ onDismissAttachmentError?:()=>void;
+  /** 打开系统文件选择并暂存所选图片。 */
+  onAddAttachments: () => void;
+  /** 移除一个待发送附件；不移除已发送消息的附件。 */
+  onRemoveAttachment: (stagedId: string) => void;
   onAbort: () => void;
   onOpenWorkflow: () => void;
   hasWorkflow: boolean;
@@ -1876,6 +2171,7 @@ function HarnessConversation({
   onReject: (revision: number) => Promise<void>;
   onAssignmentCreated: (detail: ExecutionResponse) => void;
   onSelectExecution: (executionId: string,attempt?:number) => void;
+  /** 打开原执行结果，不借用当前方案身份。 */ onSelectResults: (executionId: string) => void;
   onSelectRevision: (revision: import("./types").WorkflowRevision) => void;
   /** 只准备原版本修改上下文并聚焦输入，不发送消息。 */
   onAdjustRevision: (revision: import("./types").WorkflowRevision) => void;
@@ -1903,6 +2199,14 @@ function HarnessConversation({
       draft={text}
       onDraft={onText}
       onSend={onSend}
+      onSendImmediate={onSendImmediate}
+      onCancelQueued={onCancelQueued}
+      onRecover={onRecover}
+      pendingAttachments={pendingAttachments}
+      attachmentBusy={attachmentBusy}
+      attachmentError={attachmentError} onDismissAttachmentError={onDismissAttachmentError}
+      onAddAttachments={onAddAttachments}
+      onRemoveAttachment={onRemoveAttachment}
       onAbort={onAbort}
       onComplete={onComplete}
       onOpenWorkflow={onOpenWorkflow}
@@ -1912,16 +2216,17 @@ function HarnessConversation({
       visible={visible}
       onRead={onRead}
       draftContext={draftContext}
+      activity={<div className="task-activity-region"><TaskActivity task={harness} visible={visible} onPlan={onSelectRevision} onExecution={onSelectExecution} onResults={onSelectResults} onAdjust={onAdjustRevision} onTemplate={onTemplate}/>{interruptedSummaryObligations(harness).map(item=><div className="task-summary-notice" key={item.key}><ImpactSummaryPanel compact summaryKey={item.key} harness={harness} executionId={item.executionId} attempt={item.attempt}/></div>)}</div>}
       timelineEvents={[
-        ...harness.workflowRevisions.map(revision => ({ key: `revision:${revision.revision}`, at: revision.createdAt, content: <WorkflowProposalSummary task={harness} revision={revision} onOpen={()=>onSelectRevision(revision)} onAdjust={()=>onAdjustRevision(revision)} onTemplate={onTemplate} /> })),
+        ...harness.workflowRevisions.map(revision => ({ key: `revision:${revision.revision}`, at: revision.createdAt, planUpdate:planUpdateLabel(revision), content: <p className="task-event">方案更新：{planUpdateLabel(revision)} · <button onClick={()=>onSelectRevision(revision)}>{proposalTitle(revision)}</button></p> })),
         ...(harness.executionHistory?.length?harness.executionHistory.flatMap(item=>{const execution=harness.executions.find(execution=>execution.executionId===item.executionId);const obligation=item.kind==="finished"?harness.impactSummaries?.find(summary=>summary.executionId===item.executionId&&summary.attempt===item.attempt):undefined;const firstBody=obligation?summaryBodyStartedAt(harness,obligation.key):null;if(obligation&&!firstBody)return [];const body=obligation?harness.conversationEntries.find(entry=>entry.kind==="body"&&entry.text.trim()&&(entry.turnId===`summary:${obligation.key}`||entry.turnId.startsWith(`summary:${obligation.key}:`))):undefined;return [{key:item.key,at:firstBody??item.at,beforeTurnId:obligation?(body?.turnId??obligation.turnId??`summary:${obligation.key}`):undefined,content:execution?<WorkflowExecutionSummary attempt={item.attempt} execution={{...execution,status:item.status,diagnostic:item.diagnostic,summary:item.summary}} revision={harness.workflowRevisions.find(revision=>revision.revision===item.revision)} onOpen={()=>onSelectExecution(item.executionId,item.attempt)} />:null}];}):harness.executions.map(execution => ({ key: `execution:${execution.executionId}`, at: execution.createdAt, content: <WorkflowExecutionSummary execution={execution} revision={harness.workflowRevisions.find(revision=>revision.revision===execution.revision)} onOpen={()=>onSelectExecution(execution.executionId)} /> }))),
       ]}
     >
       <div className="conversation-actions">
-      {harness.task && harness.diagnostic?.includes("主控启动失败") && <><button disabled={retrying||!!busy} onClick={async()=>{setRetrying(true);setRetryError(null);try{const result=await onRetryInitialization();if(result.harness.diagnostic)setRetryError(result.harness.diagnostic);}catch(error){setRetryError(error instanceof Error?error.message:String(error));}finally{setRetrying(false);}}}>{retrying?"正在检查 CLI 并启动主控…":"重试启动主控（不重复创建任务）"}</button><button disabled={retrying} onClick={onRuntimeSettings}>执行底座设置</button></>}
+      {harness.task && harness.diagnostic?.includes("主控启动失败") && <><button disabled={retrying||!!busy} onClick={async()=>{setRetrying(true);setRetryError(null);try{const result=await onRetryInitialization();if(result.harness.diagnostic)setRetryError(result.harness.diagnostic);}catch(error){setRetryError(error instanceof Error?error.message:String(error));}finally{setRetrying(false);}}}>{retrying?"正在检查 CLI 并连接…":"重试连接（不重复创建任务）"}</button><button disabled={retrying} onClick={onRuntimeSettings}>执行环境设置</button></>}
       </div>
       {retrying&&<p role="status">正在检查当前 CLI，成功后继续原任务，不创建新任务。</p>}
-      {retryError&&harness.status!=="running"&&harness.diagnostic&&<p role="alert">{retryError}</p>}
+      {retryError&&harness.status!=="running"&&harness.diagnostic&&<p role="alert">{userFacingText(retryError)}</p>}
         {harness.decisions
           .filter((decision) => decision.answer === null && harness.status === "running")
           .map((decision) => (
@@ -1969,7 +2274,7 @@ function ExecutionAction({
           : "正在或等待执行"}
       </p>
       {execution.diagnostic && (
-        <p className="diagnostic">{execution.diagnostic}</p>
+        <p className="diagnostic">{userFacingText(execution.diagnostic)}</p>
       )}
       <button onClick={onSelect}>查看执行详情</button>
     </article>
@@ -1987,7 +2292,7 @@ function HarnessDecisionCard({
 }) {
   return (
     <article className="conversation-action harness-decision">
-      <span>主控需要你的决定</span>
+      <span>Wave Flow 需要你的决定</span>
       <p>{decision.question}</p>
       {decision.answerSchema ? (
         <SchemaForm
@@ -2004,42 +2309,67 @@ function HarnessDecisionCard({
 }
 
 /** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
+function ArchiveTaskConfirmation({task,onClose,onConfirm}:{task:HarnessSnapshot;onClose:()=>void;onConfirm:()=>void}){
+  const dialog=useRef<HTMLElement>(null);
+  const count=task.impactSummaries?.filter(item=>!item.supersededBy&&item.status!=="completed").length??0;
+  useEffect(()=>{
+    const previous=[...document.querySelectorAll<HTMLButtonElement>('[data-archive-task]')].find(item=>item.dataset.archiveTask===task.harnessRunId)??document.activeElement as HTMLElement|null;
+    const background=[...document.querySelectorAll<HTMLElement>('.agent-workbench > :not(.archive-backdrop)')];
+    const original=background.map(item=>item.inert);background.forEach(item=>item.inert=true);
+    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    return()=>{background.forEach((item,index)=>item.inert=original[index]!);requestAnimationFrame(()=>{if(previous?.isConnected)previous.focus();});};
+  },[]);
+  return <div className="connection-backdrop archive-backdrop" onClick={event=>{if(event.target===event.currentTarget)onClose();}}><section ref={dialog} className="connection-panel" role="dialog" aria-modal="true" aria-labelledby="archive-task-title" onKeyDown={event=>{
+    if(event.key==='Escape'){event.preventDefault();event.stopPropagation();onClose();}
+    if(event.key==='Tab'){const buttons=dialog.current?.querySelectorAll<HTMLButtonElement>('button');if(!buttons?.length)return;const first=buttons[0]!,last=buttons[buttons.length-1]!;if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}
+  }}><div className="connection-panel-head"><h2 id="archive-task-title">仍有未完成总结</h2></div><div className="connection-form"><strong>{conversationTitle(task)}</strong><p>仍有 {count} 份影响面总结未完成。你可以返回处理，或明确放弃总结并归档。归档后可在“已完成”中查看历史，不能继续执行。</p></div><div className="modal-actions"><button className="button-secondary" onClick={onClose}>返回处理</button><button className="button-danger" onClick={onConfirm}>放弃总结并归档</button></div></section></div>;
+}
 function ArchiveImpactConfirmation({count,onClose,onConfirm}:{count:number;onClose:()=>void;onConfirm:()=>void}) {
   const dialog=useRef<HTMLElement|null>(null);
   useEffect(()=>{const previous=document.querySelector<HTMLButtonElement>('[data-archive-task]')??document.activeElement as HTMLElement|null;dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();return()=>{if(previous?.isConnected)previous.focus();};},[]);
-  return <div className="connection-backdrop" onClick={event=>{if(event.target===event.currentTarget)onClose();}}><section ref={dialog} role="dialog" aria-modal="true" aria-labelledby="archive-impact-title" className="connection-panel" onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();onClose();}if(event.key==="Tab"){const buttons=dialog.current?.querySelectorAll<HTMLButtonElement>("button");if(!buttons?.length)return;const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}}}><div className="connection-panel-head"><h2 id="archive-impact-title">放弃总结并归档？</h2></div><div className="connection-form"><p>仍有 {count} 份影响面总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。</p></div><div className="modal-actions"><button onClick={onClose}>返回处理</button><button className="danger" onClick={onConfirm}>明确放弃并归档</button></div></section></div>;
+  return <div className="connection-backdrop" onClick={event=>{if(event.target===event.currentTarget)onClose();}}><section ref={dialog} role="dialog" aria-modal="true" aria-labelledby="archive-impact-title" className="connection-panel" onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();onClose();}if(event.key==="Tab"){const buttons=dialog.current?.querySelectorAll<HTMLButtonElement>("button");if(!buttons?.length)return;const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}}}><div className="connection-panel-head"><h2 id="archive-impact-title">放弃总结并归档？</h2></div><div className="connection-form"><p>仍有 {count} 份影响面总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。</p></div><div className="modal-actions"><button className="button-secondary" onClick={onClose}>返回处理</button><button className="button-danger" onClick={onConfirm}>明确放弃并归档</button></div></section></div>;
 }
 
 /** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
-function HistoricalResults({taskId,executionId,currentAttempt,harness}:{taskId:string;executionId:string;currentAttempt:number;harness:HarnessSnapshot}) {
-  const resultKey=`${taskId}:${executionId}`;
-  const [attempt,setAttempt]=useState(()=>{const saved=resultAttempts.get(resultKey);return saved&&saved<=currentAttempt?saved:currentAttempt;});
-  useEffect(()=>resultAttempts.set(resultKey,attempt),[resultKey,attempt]);
-  const [value,setValue]=useState<Awaited<ReturnType<typeof api.attemptResults>>|null>(null);
+function HistoricalResults({taskId,executionId,currentAttempt,selectedAttempt,onSelectAttempt,harness}:{taskId:string;executionId:string;currentAttempt:number;/** 路由指定的历史尝试，缺省跟随最新。 */selectedAttempt?:number;/** 更新阅读路由，不启动执行。 */onSelectAttempt:(attempt:number)=>void;harness:HarnessSnapshot}) {
+  const attempt=readingAttempt(selectedAttempt,currentAttempt);
+  const resultIdentity=`${taskId}:${executionId}:${attempt}`;
+  const [loaded,setLoaded]=useState<{identity:string;value:Awaited<ReturnType<typeof api.attemptResults>>}|null>(null);
+  const value=loaded?.identity===resultIdentity?loaded.value:null;
   const [error,setError]=useState<string|null>(null);
   const terminalVersion=harness.executions.find(item=>item.executionId===executionId)?.finishedAt;
-  useEffect(()=>{let active=true;setValue(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setValue(value);}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt,terminalVersion]);
-  return <section className="workflow-results"><h2>执行结果</h2><p>仅展示所选执行尝试的耐久证据；工作流返回值与Schema通过不代表目标已验收。</p><label>执行尝试<select value={attempt} onChange={event=>setAttempt(Number(event.target.value))}>{Array.from({length:currentAttempt},(_,index)=><option key={index+1} value={index+1}>attempt #{index+1}{index+1===currentAttempt?"（当前）":"（历史）"}</option>)}</select></label><ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt}/>{error&&<p role="alert">{error}</p>}{!value&&!error&&<p>正在读取原执行结果…</p>}{value&&<><p>原终态：{value.status??"未保存终态"}。该视图只读，不恢复执行。</p><h2>工作流返回结果</h2>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>该尝试未保存工作流返回结果。</p>}<h2>节点交付</h2>{value.nodes.length===0&&<p>该尝试没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}</>}</section>;
+  useEffect(()=>{let active=true;setLoaded(null);setError(null);void api.attemptResults(taskId,executionId,attempt).then(value=>{if(active)setLoaded({identity:resultIdentity,value});}).catch(error=>{if(active)setError(String(error));});return()=>{active=false;};},[taskId,executionId,attempt,terminalVersion]);
+  return <section className="workflow-results">
+    <h2>执行结果</h2><p>查看已保存的总结与交付，不会重新执行。执行结束不等于目标已验收。</p>
+    <PreviousRecords part="notice" current={currentAttempt} selected={attempt} onSelect={onSelectAttempt} records={[]}/>
+    {value&&<p role="status">{value.status?({completed:"执行结束",cancelled:"已停止",interrupted:"已中断",running:"执行中",paused:"已暂停",pausing:"正在暂停",recovering:"正在恢复"} as Record<string,string>)[value.status]??value.status:"未保存结束状态"}</p>}
+    <ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt}/>
+    {error&&<p role="alert">{userFacingText(error)}</p>}{!value&&!error&&<p>正在读取结果…</p>}
+    {value&&<><h2>节点交付</h2>{value.nodes.length===0&&<p>这份记录没有已完成节点。</p>}{value.nodes.map(node=><PersistedDetails identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`} key={node.id}><summary>{node.label}</summary><pre>{JSON.stringify(node.result,null,2)}</pre></PersistedDetails>)}<details className="execution-diagnostics"><summary>高级 / 诊断信息 · 原始返回 JSON</summary>{value.summary?<pre>{JSON.stringify(value.summary,null,2)}</pre>:<p>这份记录未保存工作流返回结果。</p>}</details></>}
+    <PreviousRecords part="list" current={currentAttempt} selected={attempt} onSelect={onSelectAttempt} records={(harness.executionHistory??[]).filter(item=>item.executionId===executionId&&item.kind==='finished').map(item=>({id:item.attempt??1,at:item.at,status:item.status}))}/>
+  </section>;
 }
 
 /** 义务与完整回答均来自原Task快照；重试不重跑业务执行。 */
-function ImpactSummaryPanel({harness,executionId,attempt,summaryKey}:{harness:HarnessSnapshot;executionId:string;attempt:number;summaryKey?:string}) {
+function ImpactSummaryPanel({harness,executionId,attempt,summaryKey,compact=false}:{harness:HarnessSnapshot;executionId:string;attempt:number;summaryKey?:string;compact?:boolean}) {
   const summaries=harness.impactSummaries?.filter(item=>item.executionId===executionId&&item.attempt===attempt)??[];
   const obligation=summaryKey?summaries.find(item=>item.key===summaryKey):summaries[0];
   const [busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
-  if(!obligation)return <p>此尝试未保存影响面总结义务；不补造历史结论。</p>;
+  if(!obligation)return <p>此执行未保存总结；请查看下方已保存的结果。</p>;
+  if(compact)return <div className="summary-compact"><span>{summaryWorkLabel(harness,executionId)}：总结未完成，暂不能启动或恢复执行。</span><button disabled={busy||harness.status==="running"||harness.status==="completed"} onClick={async()=>{setBusy(true);setError(null);try{await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在重试…":"重试总结"}</button><small>不会重新执行工作流</small><details><summary>查看原因</summary><p>{userFacingText(obligation.diagnostic??"总结回合已中断。")}</p></details>{error&&<p role="alert">{userFacingText(error)}</p>}</div>;
   if(!summaryKey)return <section aria-label="原总结与现场补充">{summaries.map(item=><div key={item.key}>{item.supplementOf&&<h3>现场影响面补充</h3>}<ImpactSummaryPanel harness={harness} executionId={executionId} attempt={attempt} summaryKey={item.key}/></div>)}{error&&<p role="alert">{error}</p>}{harness.status!=="completed"&&<button disabled={busy||harness.status!=="idle"||harness.executions.some(item=>item.finishedAt===null)} onClick={async()=>{setBusy(true);setError(null);try{await api.checkExecutionScene(harness.harnessRunId,executionId);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在检查现场…":"检查当前现场（不执行）"}</button>}</section>;
   if(obligation.supersededBy)return <p>此现场补充已被新的证据版本替代；保留历史，不再阻塞恢复。请查看最新现场补充。</p>;
-  if(obligation.supplementOf&&obligation.status==="interrupted"&&harness.status!=="completed")return <section><p role="alert">{obligation.diagnostic??"现场补充已中断"}</p>{error&&<p role="alert">{error}</p>}<button disabled={busy||harness.status==="running"} onClick={async()=>{setBusy(true);setError(null);try{const checked=await api.checkExecutionScene(harness.harnessRunId,executionId);const current=checked.harness.impactSummaries?.find(item=>item.executionId===executionId&&!item.supersededBy&&item.status==="interrupted");if(current)await api.retryImpactSummary(harness.harnessRunId,current.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>重新检查现场并重试补充</button></section>;
+  if(obligation.supplementOf&&obligation.status==="interrupted"&&harness.status!=="completed")return <section><p role="alert">{userFacingText(obligation.diagnostic??"现场补充已中断")}</p>{error&&<p role="alert">{userFacingText(error)}</p>}<button disabled={busy||harness.status==="running"} onClick={async()=>{setBusy(true);setError(null);try{const checked=await api.checkExecutionScene(harness.harnessRunId,executionId);const current=checked.harness.impactSummaries?.find(item=>item.executionId===executionId&&!item.supersededBy&&item.status==="interrupted");if(current)await api.retryImpactSummary(harness.harnessRunId,current.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>重新检查现场并重试补充</button></section>;
   const message=harness.messages.find(item=>item.id===obligation.messageId);
   const gitLimitation=harness.executions.find(item=>item.executionId===executionId)?.config?.workspaces
     ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已合入主工作区或外部系统已回滚。"
     : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
   if(obligation.status==="cancelled")return <article aria-label="影响面总结"><h2>影响面总结</h2><p>用户已放弃总结并只读归档；影响面未完成，不再开放执行。</p></article>;
-  return <article aria-label="影响面总结"><h2>影响面总结</h2><p role="status">{{pending:"准备总结",running:"正在总结",interrupted:"总结中断，须重试",completed:"总结已完整保存"}[obligation.status]}</p>{obligation.status!=="completed"&&<p>完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。</p>}{obligation.diagnostic&&<p role="alert">{obligation.diagnostic}</p>}{error&&<p role="alert">{error}</p>}{obligation.status==="completed"&&message&&<MessageBody text={message.text}/>}<p>{gitLimitation}</p>{harness.status!=="completed"&&obligation.status!=="completed"&&<button disabled={busy||(obligation.status==="running"&&!obligation.turnId)||(harness.status==="running"&&obligation.status!=="running")} onClick={async()=>{setBusy(true);setError(null);try{if(obligation.status==="running")await api.stopImpactSummary(harness.harnessRunId,obligation.key,obligation.turnId!);else await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在处理…":obligation.status==="running"?"停止影响面总结":"重试影响面总结"}</button>}</article>;
+  return <article aria-label="影响面总结"><h2>影响面总结</h2><p role="status">{{pending:"准备总结",running:"正在总结",interrupted:"总结中断，须重试",completed:"总结已保存"}[obligation.status]}</p>{obligation.status!=="completed"&&<p>完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。</p>}{obligation.diagnostic&&<p role="alert">{userFacingText(obligation.diagnostic)}</p>}{error&&<p role="alert">{userFacingText(error)}</p>}{obligation.status==="completed"&&message&&<MessageBody text={message.text}/>}<details className="summary-evidence-limits"><summary>证据范围与限制</summary><p>{gitLimitation}</p></details>{harness.status!=="completed"&&obligation.status!=="completed"&&<button disabled={busy||(obligation.status==="running"&&!obligation.turnId)||(harness.status==="running"&&obligation.status!=="running")} onClick={async()=>{setBusy(true);setError(null);try{if(obligation.status==="running")await api.stopImpactSummary(harness.harnessRunId,obligation.key,obligation.turnId!);else await api.retryImpactSummary(harness.harnessRunId,obligation.key);}catch(error){setError(String(error));}finally{setBusy(false);}}}>{busy?"正在处理…":obligation.status==="running"?"停止影响面总结":"重试影响面总结"}</button>}</article>;
 }
 
 function ExecutionDetail({
+  previousRecords=[],
   readOnly=false,
   detail,
   selectedAttempt,
@@ -2053,6 +2383,8 @@ function ExecutionDetail({
   onSavePartial,
   onCleanupWorkspaces,
 }: {
+  /** 原终态记录时间和状态；与结果页同源，缺失不按阶段时间推断。 */
+  previousRecords?:readonly {id:number;at?:string;status?:string}[];
   /** 归档或旧Execution只读，隐藏所有副作用入口；diff与历史证据仍可读。 */
   readOnly?:boolean;
   detail: ExecutionResponse;
@@ -2075,6 +2407,8 @@ function ExecutionDetail({
 }) {
   const executionId = detail.execution.executionId;
   const [allVisits, setAllVisits] = useState<PhaseVisit[]>([]);
+  const [visitsLoading,setVisitsLoading]=useState(true);
+  const [visitsError,setVisitsError]=useState<string|null>(null);
   const [partialError,setPartialError]=useState<string|null>(null);
   const [confirmCleanup,setConfirmCleanup]=useState(false);
   /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
@@ -2096,24 +2430,26 @@ function ExecutionDetail({
   }, [harnessRunId, executionId]);
   useEffect(() => {
     let active = true;
-    void loadAllVisits().then(items => { if (active) setAllVisits(items); }).catch(() => {});
+    setVisitsLoading(true);setVisitsError(null);setAllVisits([]);
+    void loadAllVisits().then(items => { if (active) setAllVisits(items); }).catch(error => {if(active)setVisitsError(error instanceof Error?error.message:String(error));}).finally(()=>{if(active)setVisitsLoading(false);});
     return () => { active = false; };
   }, [loadAllVisits, detail.snapshot.currentExecutionAttemptId, detail.snapshot.status]);
-  const attemptIds = [...new Set([detail.snapshot.currentExecutionAttemptId, ...allVisits.map(visit=>visit.executionAttemptId)])].sort((a,b)=>a-b);
+  // attempt由执行计数登记，不以Phase访问存在推断；早期取消也有合法尝试。
+  const attemptIds = Array.from({length:detail.snapshot.currentExecutionAttemptId},(_,index)=>index+1);
   const readingAttempt = selectedAttempt ?? detail.snapshot.currentExecutionAttemptId;
   const historical = readingAttempt !== detail.snapshot.currentExecutionAttemptId;
   if(selectedAttempt&&!attemptIds.includes(selectedAttempt))return <p role="alert">所选执行尝试不存在或尚未读取，请选择当前执行查看。</p>;
   return (
     <>
-      <label>执行尝试<select value={readingAttempt} onChange={event=>onSelectAttempt?.(Number(event.target.value))}>{attemptIds.map(attempt=><option key={attempt} value={attempt}>attempt #{attempt}{attempt === detail.snapshot.currentExecutionAttemptId ? "（当前）" : "（历史只读）"}</option>)}</select></label>
-      {detail.workspaceDiagnostic&&<p role="alert">{detail.workspaceDiagnostic}</p>}
-      {detail.sourceDiagnostic&&<p role="alert">尚未形成完整成果来源：{detail.sourceDiagnostic}</p>}
+      <PreviousRecords part="notice" current={detail.snapshot.currentExecutionAttemptId} selected={readingAttempt} onSelect={id=>onSelectAttempt?.(id)} records={[]}/>
+      {detail.workspaceDiagnostic&&<p role="alert">{userFacingText(detail.workspaceDiagnostic)}</p>}
+      {detail.sourceDiagnostic&&<p role="alert">尚未形成完整成果来源：{userFacingText(detail.sourceDiagnostic)}</p>}
       {!readOnly&&!historical&&detail.snapshot.status==="completed"&&detail.execution.config?.workspaces&&(!detail.sourceEvidence||detail.sourceDiagnostic)&&<button disabled={!!busy} onClick={()=>void onControl("resume")}>重试 Git 成果收尾（不重跑业务）</button>}
       {detail.sourceEvidence&&<GitReviewPanel key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`} taskId={harnessRunId} executionId={executionId} sourceCommit={detail.sourceEvidence.sourceCommit} writable={!readOnly&&Boolean(onCleanupWorkspaces)&&!historical}/>}
       {partialError&&<p role="alert">{partialError}</p>}
       {!readOnly&&!historical&&detail.workspaceEvidence?.some(item=>item.lease)&&["cancelled","interrupted"].includes(detail.snapshot.status)&&<><button disabled={!!busy} onClick={()=>{setPartialError(null);void onSavePartial?.().catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>保存停止现场（partial，不代表交付）</button>{partialError&&<p role="alert">{partialError}</p>}</>}
       {!readOnly&&!historical&&detail.workspaceEvidence?.length&&!detail.controllable&&<><button disabled={!!busy} onClick={()=>{if(!confirmCleanup){setConfirmCleanup(true);return;}setPartialError(null);void onCleanupWorkspaces?.().then(()=>setConfirmCleanup(false)).catch(error=>setPartialError(error instanceof Error?error.message:String(error)));}}>{confirmCleanup?"确认移除干净 checkout？分支和 commit 将保留":"清理受管 checkout"}</button>{confirmCleanup&&<button onClick={()=>setConfirmCleanup(false)}>取消清理</button>}{partialError&&<p role="alert">{partialError}</p>}</>}
-      {historical ? <><p>历史访问证据，只读；控制原执行请切回当前 attempt。</p><TeamPanel readOnly key={`${executionId}:${readingAttempt}`} runId={executionId} currentExecutionAttemptId={readingAttempt} phaseTitles={detail.snapshot.phases.map(phase=>phase.title)} visits={allVisits.filter(visit=>visit.executionAttemptId === readingAttempt)} busy={null} onAnswer={async()=>{throw new Error("历史 attempt 不能回答。");}} /></> : <>
+      {historical ? <><p>历史过程，只读；此页面不会恢复执行。</p>{visitsLoading?<p role="status">正在读取历史过程…</p>:visitsError?<p role="alert">历史过程暂时无法读取：{visitsError}。可切到结果查看已保存的交付。</p>:allVisits.some(visit=>visit.executionAttemptId===readingAttempt)?<TeamPanel readOnly key={`${executionId}:${readingAttempt}`} runId={executionId} currentExecutionAttemptId={readingAttempt} phaseTitles={detail.snapshot.phases.map(phase=>phase.title)} visits={allVisits.filter(visit=>visit.executionAttemptId === readingAttempt)} busy={null} onAnswer={async()=>{throw new Error("历史 attempt 不能回答。");}} />:<p>此尝试未保存阶段过程记录，不代表没有执行。可切到结果查看原终态与交付。</p>}</> : <>
       <ExecutionProgressCard
         snapshot={detail.snapshot}
         dynamicCount={dynamicCount}
@@ -2122,21 +2458,21 @@ function ExecutionDetail({
       />
       <div className="execution-summary">
         <span>冻结 revision v{detail.execution.revision}</span>
-        <code>{detail.execution.sourceHash}</code>
-        <small>
-          Runtime v{detail.execution.runtimeVersion} · 当前 attempt #
-          {detail.snapshot.currentExecutionAttemptId}
-        </small>
         {detail.execution.config && (
           <small>
             分配：{detail.execution.config.assignments.length} 名 Worker
             {detail.execution.config.ruleText
               ? ` · 规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
               : ""}
-            {" · 回退到主控 Runtime "}
-            {detail.execution.config.fallbackRuntimeId.slice(0, 8)}
           </small>
         )}
+        <ExecutionDiagnostics
+          executionId={detail.execution.executionId}
+          sourceHash={detail.execution.sourceHash}
+          runtimeVersion={detail.execution.runtimeVersion}
+          currentAttempt={detail.snapshot.currentExecutionAttemptId}
+          fallbackRuntimeId={detail.execution.config?.fallbackRuntimeId ?? null}
+        />
       </div>
       {detail.workspaceEvidence&&<details className="execution-workspace-evidence"><summary>内部 Git 检查点与诊断详情</summary>{detail.workspaceEvidence.map(item=><article key={item.nodeId}><strong>{item.nodeId}</strong><code>{item.branch}</code>{item.lease&&<span role="status">writer / Git 收尾锁仍保留 · attempt #{item.lease.attempt}</span>}{item.results.length===0&&!item.lease&&<small>尚无保存成果</small>}{item.results.map(result=><div key={`${result.attempt}:${result.commit}`}><span>{result.ready?"成果 ready":"partial，未交付"} · attempt #{result.attempt}{result.unchanged?" · 无文件变化":""}</span><code title={result.commit}>{result.commit.slice(0,12)}</code><small>{result.paths.length?result.paths.join("、"):"没有提交文件"}{result.mergeParents.length?` · 集成 ${result.mergeParents.length} 个来源`:" · 未集成其他分支"}</small></div>)}</article>) }<p>Git 证据只覆盖受管Git文件与已执行验证，不证明外部系统已回滚。</p></details>}
       {!readOnly&&<div className="actions">
@@ -2186,7 +2522,7 @@ function ExecutionDetail({
         </div>
       )}
       {detail.snapshot.diagnostic && (
-        <div className="diagnostic">{detail.snapshot.diagnostic}</div>
+        <div className="diagnostic">{userFacingText(detail.snapshot.diagnostic)}</div>
       )}
       {detail.snapshot.gates
         .filter((gate) => gate.answer === null && detail.controllable && detail.snapshot.status === "running")
@@ -2211,6 +2547,7 @@ function ExecutionDetail({
         waitingVisitId={detail.snapshot.gates.find(gate=>gate.answer === null && gate.executionAttemptId === detail.snapshot.currentExecutionAttemptId)?.phaseVisitId??undefined}
       />
       </>}
+      <PreviousRecords part="list" current={detail.snapshot.currentExecutionAttemptId} selected={readingAttempt} onSelect={id=>onSelectAttempt?.(id)} records={previousRecords}/>
     </>
   );
 }
@@ -2465,12 +2802,12 @@ function RunDetail({
         <span>结束于 {localeTime(run.endedAt)}</span>
         <span className="path">{run.cwd}</span>
       </div>
-      {run.diagnostic && <div className="diagnostic">{run.diagnostic}</div>}
+      {run.diagnostic && <div className="diagnostic">{userFacingText(run.diagnostic)}</div>}
       <div className="phase-list">
         {attempt ? (
           <>
             <div className="attempt-label">
-              当前执行尝试 #{attempt.summary.executionAttemptId}
+              当前运行进度
             </div>
             <TeamPanel
               runId={run.runId}
@@ -2500,27 +2837,7 @@ function RunDetail({
                 />{" "}
                 显示没有 Agent 的阶段切换
               </label>
-              {attemptIds && (
-                <label>
-                  执行尝试{" "}
-                  <select
-                    value={historyAttempt ?? attempt.summary.executionAttemptId}
-                    onChange={(event) => {
-                      setHistoryAttempt(Number(event.target.value));
-                      setHistory(null);
-                      setHistoryCursor(null);
-                    }}
-                  >
-                    {attemptIds.map((attemptId) => (
-                      <option key={attemptId} value={attemptId}>
-                        {attemptId === attempt.summary.executionAttemptId
-                          ? `当前尝试 #${attemptId}`
-                          : `历史尝试 #${attemptId}`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
+              <PreviousRecords current={attempt.summary.executionAttemptId} selected={historyAttempt??attempt.summary.executionAttemptId} records={(history??[]).map(visit=>({id:visit.executionAttemptId,at:visit.createdAt}))} onSelect={id=>{setHistoryAttempt(id);setHistory(null);setHistoryCursor(null);}}/>
               <button
                 disabled={historyLoading}
                 onClick={async () => {

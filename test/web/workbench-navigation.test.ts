@@ -1,7 +1,30 @@
 import { expect, test } from "bun:test";
-import { workflowCells, editableRevision } from "../../src-tauri/web/src/workbench-navigation";
+import { workflowCells, editableRevision, readingAttempt } from "../../src-tauri/web/src/workbench-navigation";
 import type { HarnessSnapshot, WorkflowRevision } from "../../src-tauri/web/src/types";
 const revision = (n:number, cardId?:string):WorkflowRevision=>({revision:n,cardId,source:"",sourceHash:"x",createdAt:"",acceptedAt:null});
+
+test("执行与结果共用所选尝试：历史保持，未指定随最新，非法值回退",()=>{
+ expect(readingAttempt(1,3)).toBe(1);
+ expect(readingAttempt(2,4)).toBe(2);
+ expect(readingAttempt(undefined,4)).toBe(4);
+ for(const invalid of [0,-1,5,1.5,NaN])expect(readingAttempt(invalid,4)).toBe(4);
+});
+
+test("结果选择更新路由，不读取另一份缓存；切回执行保留尝试",async()=>{
+ const source=await Bun.file("src-tauri/web/src/App.tsx").text();
+ expect(source).not.toContain("resultAttempts");
+ expect(source).toContain("loaded?.identity===resultIdentity?loaded.value:null");
+ expect(source).toContain("const attempt=readingAttempt(selectedAttempt,currentAttempt)");
+ expect(source).toContain("selectedAttempt={route.attempt} onSelectAttempt={attempt=>setRoute({...route,attempt})}");
+ expect(source).not.toContain('section:"execution",executionId:ex?.executionId,attempt:undefined');
+ expect(source).toContain('Array.from({length:detail.snapshot.currentExecutionAttemptId},(_,index)=>index+1)');
+ expect(source).toContain('此尝试未保存阶段过程记录，不代表没有执行');
+ expect(source).toContain('历史过程暂时无法读取');
+ expect(source).toContain('正在读取历史过程…');
+ expect(source).toContain('查看已保存的总结与交付，不会重新执行。执行结束不等于目标已验收。');
+ expect(source).toContain('<summary>证据范围与限制</summary>');
+ expect(source).not.toContain('原终态：');
+});
 test("每卡一个子项，历史无卡独立投影；旧版本与已运行方案不可编辑",()=>{
   const first=revision(1,"card"), second=revision(2,"card"), legacy=revision(3);
   const task={task:{title:"固定"},status:"idle",workflowRevisions:[first,second,legacy],executions:[]} as unknown as HarnessSnapshot;

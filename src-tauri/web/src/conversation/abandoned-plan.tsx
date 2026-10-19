@@ -6,7 +6,7 @@ export function AbandonedPlan({onRedesign,onTemplate,disabled=false}:{
 }){
  return <section className="abandoned-plan" aria-label="方案已放弃后的下一步">
   <p role="status">此方案已放弃，任务和对话仍保留。</p>
-  <small>告诉主控哪里不合适，可以重新设计方案。</small>
+  <small>告诉 Wave Flow 哪里不合适，可以重新设计方案。</small>
   <div><button type="button" disabled={disabled} onClick={onRedesign}>通过对话重新设计</button>{onTemplate&&<button type="button" className="abandoned-plan-secondary" disabled={disabled} onClick={onTemplate}>选择预置方案</button>}</div>
  </section>;
 }

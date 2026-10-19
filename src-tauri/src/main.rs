@@ -193,11 +193,11 @@ fn show_main_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> { let wi
 
 fn main() {
   tauri::Builder::default().plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init()).setup(|app| {
-    let open = MenuItem::with_id(app, "open", "打开 Wave Flow", true, None::<&str>)?; let summary = MenuItem::with_id(app, "summary", "桌面执行环境启动中…", false, None::<&str>)?; let shutdown = MenuItem::with_id(app, "shutdown", "退出 Wave Flow", true, Some("CmdOrMeta+Q"))?; let separator = PredefinedMenuItem::separator(app)?; let menu = Menu::with_items(app, &[&open, &summary, &separator, &shutdown])?;
+    let open = MenuItem::with_id(app, "open", "打开 Wave Flow", true, None::<&str>)?; let summary = MenuItem::with_id(app, "summary", "桌面执行环境启动中…", false, None::<&str>)?; let shutdown = MenuItem::with_id(app, "shutdown", "退出 Wave Flow", true, Some("CmdOrCtrl+Q"))?; let separator = PredefinedMenuItem::separator(app)?; let menu = Menu::with_items(app, &[&open, &summary, &separator, &shutdown])?;
     // macOS 主菜单的退出也只能进入应用内确认，不使用系统默认 Quit 直接终止
     // 进程，确保用户明确退出时总会先完成 Engine 的 durable-first cancelled。
     // “设置… ⌘,”与左栏按钮共用同一个 PendingMenuAction 通道，隐藏窗口也会被唤起。
-    let settings = MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrMeta+,"))?;
+    let settings = MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrCtrl+,"))?;
     let app_menu = Submenu::with_items(app, "Wave Flow", true, &[&open, &settings, &separator, &shutdown])?;
     // macOS WKWebView 的 ⌘X/⌘C/⌘V/⌘A 依赖原生“编辑”菜单项存在才会派发到输入框；
     // 缺少该菜单时 WebView 内所有编辑快捷键静默失效。
@@ -213,8 +213,8 @@ fn main() {
     app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu])?)?;
     // 应用菜单事件统一走 PendingMenuAction 通道；Web 经 take_menu_action 轮询消费。
     app.on_menu_event(|app, event| {
-      if event.id().as_ref() == "settings" {
-        if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("settings"); }
+      if matches!(event.id().as_ref(), "settings" | "shutdown") {
+        if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some(if event.id().as_ref() == "settings" { "settings" } else { "shutdown" }); }
         let _ = show_main_window(app);
       }
     });

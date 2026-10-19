@@ -5,6 +5,7 @@ import { computeReusedAgents, type ReusedAgentGroup } from "./reused-agents";
 import { SchemaForm } from "../forms/schema-form";
 import { ViewCache } from "../workbench-state";
 import {PersistedDetails} from "../persisted-details";
+import {userFacingText} from "../user-facing-text";
 const agentExpansion=new ViewCache<boolean>(256);
 const AnswerAllowed=createContext(true);
 
@@ -155,7 +156,7 @@ function AgentRow({
           {agent.diagnostic && (
             <div className="wf-agent-line">
               <span>最新汇报</span>
-              <p>{agent.diagnostic}</p>
+              <p>{userFacingText(agent.diagnostic)}</p>
             </div>
           )}
           {agent.result && (

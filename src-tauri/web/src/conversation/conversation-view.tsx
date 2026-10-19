@@ -9,9 +9,14 @@ import {
 } from "react";
 import type {
   HarnessBodyEntry,
+  HarnessMessageAttachment,
+  HarnessQueuedMessage,
   HarnessSnapshot,
   HarnessToolActivity as HarnessToolActivitySummary,
+  StagedAttachment,
 } from "../types";
+import { api } from "../api";
+import {userFacingText} from "../user-facing-text";
 import {
   composeConversationTurns,
   turnNeedsAssistantFallback,
@@ -20,9 +25,58 @@ import {
 import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
+import {TimelineRecords,type TimelineItem} from './plan-updates';
 
 /** 会话内有界阅读位置；不落盘正文或参数。 */
 const conversationPositions = new Map<string, { top: number; stuck: boolean }>();
+
+/** 已发送附件的 data URL 会话内缓存；附件耐久不可变，按消息身份缓存安全。 */
+const attachmentDataCache = new Map<string, string>();
+
+/** 已发送消息中的图片附件：按需从 Engine 读取耐久字节渲染缩略图。 */
+function MessageAttachmentView({
+  harnessRunId,
+  messageId,
+  attachment,
+}: {
+  harnessRunId: string;
+  messageId: string;
+  attachment: HarnessMessageAttachment;
+}) {
+  const key = `${harnessRunId}:${messageId}:${attachment.id}`;
+  const [dataUrl, setDataUrl] = useState<string | null>(() => attachmentDataCache.get(key) ?? null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (dataUrl || failed) return;
+    let active = true;
+    api.attachmentData(harnessRunId, messageId, attachment.id)
+      .then((response) => {
+        attachmentDataCache.set(key, response.dataUrl);
+        if (attachmentDataCache.size > 128) attachmentDataCache.delete(attachmentDataCache.keys().next().value!);
+        if (active) setDataUrl(response.dataUrl);
+      })
+      .catch(() => { if (active) setFailed(true); });
+    return () => { active = false; };
+  }, [harnessRunId, messageId, attachment.id, dataUrl, failed, key]);
+  return (
+    <figure className="message-attachment">
+      {dataUrl ? (
+        <a href={dataUrl} target="_blank" rel="noreferrer" title={`${attachment.name}（新窗口查看原图）`}>
+          <img src={dataUrl} alt={attachment.name} />
+        </a>
+      ) : (
+        <span className="attachment-placeholder">{failed ? "附件读取失败" : "正在读取附件…"}</span>
+      )}
+      <figcaption>{attachment.name} · {formatAttachmentSize(attachment.sizeBytes)}</figcaption>
+    </figure>
+  );
+}
+
+/** 附件大小的人类可读格式。 */
+function formatAttachmentSize(sizeBytes: number): string {
+  if (sizeBytes >= 1024 * 1024) return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+}
 
 /**
  * 裸 Enter 始终留给 textarea 与 IME：它可确认中文候选、切换输入状态或换行。
@@ -49,7 +103,7 @@ function BodyBlock({ entry }: { entry: HarnessBodyEntry }) {
     >
       <div className="chat-avatar">W</div>
       <div>
-        <span>主控 Agent</span>
+        <span>Wave Flow</span>
         {entry.legacy ? (
           <p className="wf-entry-note">历史记录未保存</p>
         ) : (
@@ -92,12 +146,20 @@ function HarnessToolActivity({
 function ConversationTurnView({
   turn,
   harness,
+  records=[],
 }: {
   /** 已组装的回合数据。 */
   turn: ConversationTurn;
   /** 当前会话快照，用于 legacy 回合的工具尾注。 */
   harness: HarnessSnapshot;
+  /** 此回合发生的原更新/执行记录，按时间插入回复之间。 */
+  records?:TimelineItem[];
 }) {
+  const entries:TimelineItem[]=groupToolEntries(turn.entries).map(item=>{
+    if(item.kind==='tool-group')return {key:`entry:${item.entries[0]!.entryId}`,at:item.entries[0]!.startedAt,content:<ToolGroupBlock entries={item.entries}/>};
+    return {key:`entry:${item.entryId}`,at:item.startedAt,content:item.kind==='body'?<BodyBlock entry={item}/>:item.kind==='thought'?<ThoughtBlock entry={item}/>:<ToolBlock entry={item}/>};
+  });
+  if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">W</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(harness.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><HarnessToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
   return (
     <Fragment>
       {!turn.user.summaryKey&&<article className="chat-message user">
@@ -105,41 +167,33 @@ function ConversationTurnView({
         <div>
           <span>{turn.user.summaryKey?"系统 · 影响面总结":"你"}</span>
           <p>{turn.user.text}</p>
+          {turn.user.attachments?.map((attachment) => (
+            <MessageAttachmentView
+              key={attachment.id}
+              harnessRunId={harness.harnessRunId}
+              messageId={turn.user.id}
+              attachment={attachment}
+            />
+          ))}
         </div>
       </article>}
-      {groupToolEntries(turn.entries).map((item) => {
-        if (item.kind === "tool-group") {
-          return (
-            <ToolGroupBlock key={item.entries[0].entryId} entries={item.entries} />
-          );
-        }
-        if (item.kind === "body")
-          return <BodyBlock key={item.entryId} entry={item} />;
-        if (item.kind === "thought")
-          return <ThoughtBlock key={item.entryId} entry={item} />;
-        return <ToolBlock key={item.entryId} entry={item} />;
-      })}
-      {turnNeedsAssistantFallback(turn) && turn.assistant && (
-        <Fragment>
-          <article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}>
-            <div className="chat-avatar">W</div>
-            <div>
-              <span>主控 Agent</span>
-              <Markdown text={turn.assistant.text} />
-            </div>
-          </article>
-          {(harness.toolActivitiesByMessageId[turn.assistant.id] ?? []).map(
-            (activity, index) => (
-              <HarnessToolActivity
-                key={`${turn.assistant!.id}:tool:${index}`}
-                activity={activity}
-              />
-            ),
-          )}
-        </Fragment>
-      )}
+      <TimelineRecords items={[...entries.map(item=>({...item,conversationContent:true})),...records].sort((a,b)=>a.at.localeCompare(b.at))}/>
     </Fragment>
   );
+}
+
+/** 排队消息的真实状态文案；只从耐久快照推导，不用模糊 loading。 */
+function queueStateLabel(
+  item: HarnessQueuedMessage,
+  running: boolean,
+  interrupted: boolean,
+  position: number,
+): string {
+  if (item.priority) {
+    return running ? "优先 · 等待当前回合中断或结束" : "优先 · 即将投递";
+  }
+  if (running) return `排队中 · 第 ${position} 位`;
+  return interrupted ? "排队中 · 回合已中断，发送新消息继续投递" : "排队中 · 即将投递";
 }
 
 /**
@@ -151,6 +205,14 @@ export function ConversationView({
   draft,
   onDraft,
   onSend,
+  onSendImmediate,
+  onCancelQueued,
+  onRecover,
+  pendingAttachments,
+  onAddAttachments,
+  onRemoveAttachment,
+  attachmentBusy=false,
+  attachmentError,onDismissAttachmentError,
   onAbort,
   onComplete,
   onOpenWorkflow,
@@ -162,6 +224,7 @@ export function ConversationView({
   onRead,
   visible=true,
   draftContext,
+  activity,
 }: {
   /** 当前 Harness 会话权威快照。 */
   harness: HarnessSnapshot;
@@ -169,8 +232,24 @@ export function ConversationView({
   draft: string;
   /** 更新输入框草稿。 */
   onDraft: (text: string) => void;
-  /** 发送当前草稿。 */
+  /** 发送当前草稿；忙碌时由 Engine 耐久排队。 */
   onSend: () => void;
+  /** 立即发送：Engine 先中断当前回合再优先投递；未提供时不展示入口。 */
+  onSendImmediate?: () => void;
+  /** 取消一条尚未投递的排队消息。 */
+  onCancelQueued?: (messageId: string) => void;
+  /** 恢复已中断主控到待命；不重发任务、不创建新回合。 */
+  onRecover?: () => void;
+  /** 待发送附件（Engine 暂存描述）；未提供时不展示附件入口。 */
+  pendingAttachments?: StagedAttachment[];
+  /** 当前草稿正在选图/暂存；禁用重复选择并提供反馈。 */
+  attachmentBusy?:boolean;
+  /** 当前草稿选图错误，不随后台快照刷新消失。 */ attachmentError?:string|null;
+  /** 仅关闭附件错误，不删除附件。 */ onDismissAttachmentError?:()=>void;
+  /** 打开系统文件选择并暂存所选图片；选择不自动发送。 */
+  onAddAttachments?: () => void;
+  /** 移除一个待发送附件。 */
+  onRemoveAttachment?: (stagedId: string) => void;
   /** 中断当前进行中的回合。 */
   onAbort: () => void;
   /** 归档完成会话。 */
@@ -186,15 +265,18 @@ export function ConversationView({
   /** 时间线之后的行动点（草案卡、Execution、决策卡）。 */
   children?: ReactNode;
   /** 耐久行动点，按保存时间插入对应回合；key 绑定原版本或执行。 */
-  timelineEvents?: Array<{ key: string; at: string; content: ReactNode; /** 绑定总结回合，结果卡在正文前与首片段一起呈现。 */ beforeTurnId?:string }>;
+  timelineEvents?: TimelineItem[];
   /** 视口内耐久正文/原消息/版本阅读标记，不按 delta 计数。 */
   onRead?: (taskId:string,ids:string[])=>void;
   /** 隐藏页面不更新已读标记。 */
   visible?: boolean;
   /** 当前草稿绑定的方案版本提示；不修改输入内容或自动发送。 */ draftContext?:string;
+  /** 当前工作与历史入口；位于滚动对话外，不改变运行权限。 */ activity?: ReactNode;
 }) {
+  const attachmentButton=useRef<HTMLButtonElement>(null);
   const running = harness.status === "running";
   const turns = composeConversationTurns(harness);
+  const messageTimes=[...harness.messages.map(message=>message.createdAt),...harness.conversationEntries.filter(entry=>entry.kind==='body'&&entry.text.trim()).map(entry=>entry.startedAt)];
 
   const scrollRef = useRef<HTMLDivElement>(null);
   /** 贴底状态同时保存在 ref（滚动回调内读取）与 state（驱动"回到最新"按钮）。 */
@@ -257,40 +339,23 @@ export function ConversationView({
     running && Number.isFinite(waitingBase) && Date.now() - waitingBase > 3_000;
 
   return (
-    <div className="conversation">
+    <div
+      className="conversation"
+    >
       <header>
         <div>
           <span className={`task-presence ${harness.status}`} />
           <div>
             <strong>{conversationTitle(harness)}</strong>
-            <small>{harness.cwd}</small>
+            <small title={harness.cwd}>{harness.cwd.split("/").filter(Boolean).at(-1)}</small>
           </div>
         </div>
-        <div className="conversation-actions">
-          {harness.status !== "completed" && (
-            <>
-              <button
-                disabled={
-                  busy === "complete-harness" ||
-                  running ||
-                  harness.executions.some((item) => item.finishedAt === null)
-                }
-                onClick={onComplete}
-                data-archive-task={harness.harnessRunId}
-              >
-                {busy === "complete-harness" ? "正在归档…" : "归档任务"}
-              </button>
-            </>
-          )}
-          <button disabled={!hasWorkflow} onClick={onOpenWorkflow}>
-            查看 Workflow
-          </button>
-        </div>
       </header>
+      {activity}
       <div className="conversation-scroll" ref={scrollRef} onScroll={handleScroll}>
         {harness.messages.length === 0 && (
           <div className="conversation-intro">
-            <span>主控已就绪</span>
+            <span>Wave Flow 已就绪</span>
             <h2>你想完成什么任务？</h2>
             <p>
               先告诉我目标和约束。后续 Workflow
@@ -300,20 +365,19 @@ export function ConversationView({
         )}
         {turns.map((turn, index) => (
           <Fragment key={turn.turnId}>
-          {timelineEvents.filter(event=>event.beforeTurnId===turn.turnId).map(event=><div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
+          <TimelineRecords items={timelineEvents.filter(event=>event.beforeTurnId===turn.turnId)} messageTimes={messageTimes} />
           <ConversationTurnView
             key={turn.turnId}
             turn={turn}
             harness={harness}
+            records={timelineEvents.filter(event => !event.beforeTurnId&&event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt))}
           />
-          {timelineEvents.filter(event => !event.beforeTurnId&&event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt)).sort((a,b)=>a.at.localeCompare(b.at)).map(event => <div className="workflow-timeline-item" data-read-identity={event.key} key={event.key}>{event.content}</div>)}
           </Fragment>
         ))}
-        {(harness.status === "interrupted" || harness.diagnostic?.includes("主控启动失败")) && (
+        {harness.diagnostic?.includes("主控启动失败") && (
           <article className="conversation-interruption" role="alert">
-            <strong>{harness.diagnostic?.includes("主控启动失败")?"主控暂时无法启动":"主控回合已中断"}</strong>
-            <p>{harness.diagnostic || "本回合未能产生完整回答。"}</p>
-            <small>可直接发送下一条消息重试；不会自动重发或执行 Workflow。</small>
+            <strong>Wave Flow 暂时无法启动</strong>
+            <p>{userFacingText(harness.diagnostic)}</p>
           </article>
         )}
         {waiting && <div className="wf-waiting">等待新的输出</div>}
@@ -336,38 +400,158 @@ export function ConversationView({
       )}
       {harness.status !== "completed" && (
         <div className="conversation-composer">
+          {harness.messageQueue.length > 0 && (
+            <ul className="message-queue" aria-label="待发送消息队列">
+              {harness.messageQueue.map((item, index) => (
+                <li key={item.message.id} className={item.priority ? "priority" : ""}>
+                  <span className="queue-state">
+                    {queueStateLabel(item, running, harness.status === "interrupted", index + 1)}
+                  </span>
+                  <span className="queue-text">{item.message.text}</span>
+                  {onCancelQueued && (
+                    <button
+                      type="button"
+                      className="queue-cancel"
+                      aria-label="取消这条排队消息"
+                      onClick={() => onCancelQueued(item.message.id)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
           {draftContext&&<p className="composer-context" role="status">{draftContext}</p>}
+          {attachmentError&&<div className="attachment-error" role="alert"><span>{attachmentError}</span><button type="button" aria-label="关闭附件错误" onClick={()=>{onDismissAttachmentError?.();requestAnimationFrame(()=>attachmentButton.current?.focus());}}>×</button></div>}
+          {pendingAttachments && pendingAttachments.length > 0 && (
+            <ul className="pending-attachments" aria-label="待发送附件">
+              {pendingAttachments.map((attachment) => (
+                <li key={attachment.stagedId}>
+                  {attachment.previewDataUrl ? (
+                    <img src={attachment.previewDataUrl} alt={attachment.name} />
+                  ) : (
+                    <span className="attachment-kind" aria-hidden="true">图</span>
+                  )}
+                  <span className="attachment-meta">
+                    <strong>{attachment.name}</strong>
+                    <small>{attachment.mimeType.replace("image/", "").toUpperCase()} · {formatAttachmentSize(attachment.sizeBytes)} · 待发送</small>
+                  </span>
+                  {onRemoveAttachment && (
+                    <button
+                      type="button"
+                      className="queue-cancel"
+                      aria-label={`移除附件 ${attachment.name}`}
+                      onClick={() => onRemoveAttachment(attachment.stagedId)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
           <textarea
             value={draft}
-            disabled={running}
+            aria-label="补充要求或反馈"
+            style={{height: `${Math.min(200, 68 + Math.max(0, draft.split("\n").length - 1) * 22)}px`}}
             onChange={(event) => onDraft(event.target.value)}
-            placeholder={running ? "主控正在处理当前消息" : "给主控发送消息"}
+            placeholder={running ? "可以补充要求 · 消息将排队发送" : harness.status === "interrupted" ? "回合已中断 · 发送消息继续" : "补充要求，或反馈执行结果…"}
             onKeyDown={(event) => {
+              if (
+                onSendImmediate &&
+                event.key.toLowerCase() === "s" &&
+                event.ctrlKey &&
+                !event.metaKey &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                if (draft.trim()) onSendImmediate();
+                return;
+              }
               if (shouldSubmitComposer(event)) {
                 event.preventDefault();
-                if (draft.trim() && !running) onSend();
+                if (draft.trim()&&!attachmentBusy) onSend();
               }
             }}
           />
           <div className="composer-footer">
             <div className="composer-guidance">
-              <span aria-hidden="true">＋</span>
-              <small>⌘/Ctrl + Enter 发送 · Enter 换行</small>
+              {onAddAttachments ? (
+                <button
+                  ref={attachmentButton}
+                  type="button"
+                  className="add-attachment"
+                  aria-label="添加图片附件"
+                  title="添加图片附件（最多5张，选择后不会自动发送）"
+                  disabled={attachmentBusy}
+                  aria-busy={attachmentBusy}
+                  onClick={onAddAttachments}
+                >
+                  ＋
+                </button>
+              ) : (
+                <span aria-hidden="true">＋</span>
+              )}
+              {attachmentBusy&&<small role="status">正在添加图片…</small>}
+              {harness.status === "interrupted" ? (
+                <small role="status">
+                  回合已中断 · 发送消息继续
+                  {onRecover && (
+                    <>
+                      {" · "}
+                      <button type="button" className="recover-quiet" onClick={onRecover}>
+                        仅恢复待命
+                      </button>
+                    </>
+                  )}
+                </small>
+              ) : (
+                <small>
+                  {running
+                    ? "⌘/Ctrl + Enter 排队发送 · Ctrl + S 立即发送"
+                    : "⌘/Ctrl + Enter 发送 · Enter 换行"}
+                </small>
+              )}
             </div>
-            {running ? (
-              <button className="stop-turn" onClick={onAbort}>
-                停止
-              </button>
-            ) : (
-              <button
-                className="send-message"
-                aria-label="发送消息"
-                disabled={!draft.trim()}
-                onClick={onSend}
-              >
-                ↑
-              </button>
-            )}
+            <div className="composer-actions">
+              {running && onSendImmediate && (
+                <button
+                  type="button"
+                  className="send-immediate"
+                  disabled={!draft.trim()||attachmentBusy}
+                  onClick={onSendImmediate}
+                >
+                  立即发送
+                </button>
+              )}
+              {running ? (
+                <>
+                  <button
+                    className="send-message"
+                    aria-label="排队发送"
+                    title="加入队列"
+                    disabled={!draft.trim()||attachmentBusy}
+                    onClick={onSend}
+                  >
+                    ↑
+                  </button>
+                  <button className="stop-turn" onClick={onAbort}>
+                    停止
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="send-message"
+                  aria-label="发送消息"
+                  disabled={!draft.trim()||attachmentBusy}
+                  onClick={onSend}
+                >
+                  ↑
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
