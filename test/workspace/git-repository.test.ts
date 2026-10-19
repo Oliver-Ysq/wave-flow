@@ -100,6 +100,21 @@ test("额外untracked成果自动保存，无需事先列举文件", async () =>
   await writeFile(join(worker.cwd, "secret.env"), "secret");
   const saved = await worker.save(request); expect(saved.paths).toEqual(["secret.env"]); expect((await worker.inspect()).head).not.toBe(base); expect(await Bun.file(join(worker.cwd, "secret.env")).text()).toBe("secret");
 });
+test("被忽略依赖目录内的 attributes 不判定现场不可核验；被忽略的根部 attributes 仍拒绝", async () => {
+  const { root, repo, request } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", request.baseCommit);
+  await writeFile(join(worker.cwd, ".gitignore"), "node_modules/\n");
+  await mkdir(join(worker.cwd, "node_modules", "fast-json-stringify"), { recursive: true });
+  await writeFile(join(worker.cwd, "node_modules", "fast-json-stringify", ".gitattributes"), "*.js filter=evil\n");
+  await writeFile(join(worker.cwd, "a.txt"), "content\n");
+  const saved = await worker.save(request);
+  expect(saved.paths).toEqual([".gitignore", "a.txt"]);
+
+  const second = await repo.createWorktree(join(root, "worker-root-ignored"), "codex/wf-worker-2", request.baseCommit);
+  await writeFile(join(second.cwd, ".gitignore"), ".gitattributes\n");
+  await writeFile(join(second.cwd, ".gitattributes"), "*.txt filter=evil\n");
+  await expect(second.save(request)).rejects.toThrow("attributes");
+});
 test("禁止主工作区保存、越界路径、符号链接与Git attributes", async () => {
   const { root, cwd, repo, base, request } = await fixture();
   await expect(repo.save(request)).rejects.toThrow("非受管分支");

@@ -388,11 +388,13 @@ export class GitRepository {
     const entries = splitPaths(await git(this.cwd, ["ls-files", "--stage", "-z"]));
     if (entries.some(entry => /^(120000|160000) /.test(entry))) fail("首版不支持 tracked 符号链接或子模块。");
     if (entries.some(entry => /\t(?:.*\/)?\.gitattributes$/.test(entry))) fail("首版不支持仓库 Git attributes/filters。");
-    // 工作区未跟踪的attributes同样影响git add；不能只检查index里的文件。
-    const attributes = await git(this.cwd, ["ls-files", "--others", "--cached", "-z", "--", ".gitattributes", ":(glob)**/.gitattributes"]);
+    // 未跟踪且未被忽略的 attributes 会影响将来 git add 的未跟踪文件，fail closed。
+    const attributes = await git(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--", ".gitattributes", ":(glob)**/.gitattributes"]);
     if (attributes) fail("首版不支持工作区 Git attributes/filters。");
-    const ignoredAttributes = await git(this.cwd, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".gitattributes", ":(glob)**/.gitattributes"]);
-    if (ignoredAttributes) fail("首版不支持被忽略的Git attributes/filters。");
+    // 被忽略目录（如 node_modules）内的 attributes 只作用于永不被收集的文件，不能因此判定现场不可核验；
+    // 但仓库根部的 attributes 即使被忽略也影响全仓库，仍须 fail closed。
+    const ignoredRootAttributes = await git(this.cwd, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".gitattributes"]);
+    if (ignoredRootAttributes) fail("首版不支持被忽略的仓库根部 Git attributes/filters。");
     for (const directory of new Set([this.commonDirectory, await this.gitDirectory()])) {
       try { if ((await lstat(join(directory, "info", "attributes"))).isFile()) fail("首版不支持Git info/attributes。"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
