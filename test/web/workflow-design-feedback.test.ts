@@ -1,5 +1,11 @@
 import {expect,test} from "bun:test";
 
+test("单版本不显示无效版本下拉，多版本保留切换入口",async()=>{
+ const app=await Bun.file('src-tauri/web/src/App.tsx').text();
+ expect(app).toContain('<WorkflowVersions versions={revisions}');
+ expect(app).not.toContain('<label>方案版本<select');
+});
+
 test("结果页逐一显示原总结与现场补充，过时义务不暴露重试按钮或计入归档待办", async () => {
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
  expect(source).toContain('aria-label="原总结与现场补充"');
@@ -19,10 +25,12 @@ test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",as
  expect(app).toContain('{!readOnly&&<div className="actions">');
 });
 
-test("整工作区授权与显式diff合入，内部检查点默认折叠",async()=>{
+test("整工作区授权并入确认运行，显式diff合入，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(design).toContain("授权保存整个 worktree 的实际 Git 改动");
+ expect(design).toContain("同时授权 Engine 在受管 worktree 保存实际 Git 改动");
+ expect(design).not.toContain("我确认以上节点、外部资源与集成来源");
+ expect(design).not.toContain("approveGit");
  expect(design).not.toContain("成果文件路径（每行一个）");
  expect(app).toContain("<GitReviewPanel");
  const review=await Bun.file("src-tauri/web/src/git-review.tsx").text();expect(review).toContain("确认 squash 合入");expect(review).toContain("generation.current === token");
@@ -41,11 +49,11 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
  expect(source).toContain("busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime");
  expect(source).toContain("if(!editable||busy||checking||planError||!plan||!revision.localOrigin&&!plan.harnessRuntime)return");
  expect(source).toContain("setPlanError(local||result.harnessRuntime?null:");
- expect(source).toContain("尚未设置已验证主控 CLI，请在执行底座设置中验证并选择");
+ expect(source).toContain("尚未设置已验证的 Wave Flow CLI，请在执行环境设置中选择");
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
  expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');
- expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,approveGit,plan.continuationPlan)');
+ expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,excludeDirty,plan.continuationPlan)');
  expect(source).toContain('localChoices[worker.id]=runtimeId');
 });
 
@@ -58,12 +66,13 @@ test("本地来源替换明确导航到新方案，目标态已有执行不再�
  expect(source).toContain('<AbandonedPlan');
  expect(source).toContain('onTemplate={!harness.executions.length?');
 });
-test("详情页隐藏重复目标标题且缩短导航留白，保留对话独立卡目标",async()=>{
+test("详情页页头用方案短名称，完整目标在方案正文而非页头",async()=>{
  const source=await Bun.file("src-tauri/web/src/conversation/revision-card.tsx").text();
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  expect(source).toContain("hideGoal=false");
  expect(source).toContain('!hideGoal&&<p className="wf-plan-goal">');
- expect(app).toContain("revision={revision} harness={harness} hideGoal");
+ expect(app).toContain("proposalTitle(headerRevision)");
+ expect(app).not.toContain("revision={revision} harness={harness} hideGoal");
 });
 test("窄窗详情底部为固定导航保留安全空间",async()=>{
  const css=await Bun.file("src-tauri/web/src/workbench.css").text();

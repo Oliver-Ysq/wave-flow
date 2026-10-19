@@ -45,34 +45,34 @@ test("最新现场证据变化使旧确认UUID失效，返回旧现场仍只复�
  expect(changed.id).not.toBe(first.id);
  expect(cache.get("task:card:2",{}, {},{...plan,sceneEvidenceHash:"a".repeat(64)})).toEqual(first);
 });
-test("Git授权必须显式确认dirty与整工作区范围，失败重试复用授权UUID",()=>{
+test("Git授权并入确认运行：dirty须明确排除，失败重试复用授权UUID",()=>{
  const cache=new WorkspaceConfirmationCache();const workspacePlan={nodeIds:["a","integrate"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:["user.txt"],diagnostic:null};
  const drafts={a:{resources:"port:4173",workspaceId:crypto.randomUUID()},integrate:{resources:"",workspaceId:crypto.randomUUID(),sources:"a"}};
- expect(()=>cache.get("task",workspacePlan,drafts,false,true)).toThrow("dirty");expect(()=>cache.get("task",workspacePlan,drafts,true,false)).toThrow("勾选");
- const first=cache.get("task",workspacePlan,drafts,true,true),retry=cache.get("task",workspacePlan,drafts,true,true);expect(retry).toEqual(first);expect(first.bindings[1]?.integrationSources).toEqual({nodeIds:["a"]});expect(first.authorization.nodes[0]?.externalResources).toEqual(["port:4173"]);
+ expect(()=>cache.get("task",workspacePlan,drafts,false)).toThrow("dirty");
+ const first=cache.get("task",workspacePlan,drafts,true),retry=cache.get("task",workspacePlan,drafts,true);expect(retry).toEqual(first);expect(first.bindings[1]?.integrationSources).toEqual({nodeIds:["a"]});expect(first.authorization.nodes[0]?.externalResources).toEqual(["port:4173"]);
  expect(first.version).toBe(2); expect(first.authorization.nodes[0]).not.toHaveProperty("paths");
- expect(cache.get("task",workspacePlan,{...drafts,a:{...drafts.a,resources:"port:9999"}},true,true).authorization.authorizationId).not.toBe(first.authorization.authorizationId);
+ expect(cache.get("task",workspacePlan,{...drafts,a:{...drafts.a,resources:"port:9999"}},true).authorization.authorizationId).not.toBe(first.authorization.authorizationId);
 });
 test("独立工作区不预填文件，相同分组顺序复用允许且不生成第二worktree",()=>{
  const cache=new WorkspaceConfirmationCache(),workspacePlan={nodeIds:["a","b"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
  const drafts={a:{resources:"",workspaceId:crypto.randomUUID()},b:{resources:"",workspaceId:crypto.randomUUID()}};
- expect(cache.get("task",workspacePlan,drafts,false,true).bindings[0]?.workspaceId).not.toBe(drafts.b.workspaceId);
- const value=cache.get("task",workspacePlan,{a:{...drafts.a,workspaceGroup:"chain"},b:{...drafts.b,workspaceGroup:"chain"}},false,true);
+ expect(cache.get("task",workspacePlan,drafts,false).bindings[0]?.workspaceId).not.toBe(drafts.b.workspaceId);
+ const value=cache.get("task",workspacePlan,{a:{...drafts.a,workspaceGroup:"chain"},b:{...drafts.b,workspaceGroup:"chain"}},false);
  expect(value.bindings[0]?.workspaceId).toBe(value.bindings[1]?.workspaceId);
 });
 test("修订写配置须明确继承保存现场，冻结原HEAD且独立新授权",()=>{
  const cache=new WorkspaceConfirmationCache(),workspaceId=crypto.randomUUID(),plan={nodeIds:["repair"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
  const continuation={executionId:crypto.randomUUID(),baseCommit:plan.baseCommit,workspaces:[{workspaceId,commit:"b".repeat(40),nodeIds:["old"],ready:false}]};
- expect(()=>cache.get("task:2",plan,{},false,true,continuation)).toThrow("明确选择");
- const draft={repair:{resources:"",workspaceId}},first=cache.get("task:2",plan,draft,false,true,continuation);
+ expect(()=>cache.get("task:2",plan,{},false,continuation)).toThrow("明确选择");
+ const draft={repair:{resources:"",workspaceId}},first=cache.get("task:2",plan,draft,false,continuation);
  expect(first.continuation).toEqual({executionId:continuation.executionId,heads:[{workspaceId,commit:"b".repeat(40)}]});
- expect(first.bindings[0].nodeId).toBe("repair");expect(cache.get("task:2",plan,draft,false,true,continuation)).toEqual(first);
- expect(cache.get("task:2",plan,draft,false,true,{...continuation,workspaces:[{...continuation.workspaces[0],commit:"c".repeat(40)}]}).authorization.authorizationId).not.toBe(first.authorization.authorizationId);
+ expect(first.bindings[0].nodeId).toBe("repair");expect(cache.get("task:2",plan,draft,false,continuation)).toEqual(first);
+ expect(cache.get("task:2",plan,draft,false,{...continuation,workspaces:[{...continuation.workspaces[0],commit:"c".repeat(40)}]}).authorization.authorizationId).not.toBe(first.authorization.authorizationId);
 });
 test("顺序修订选择完整集成现场仍冻结全部历史分支，由宿主验证覆盖不复制旧节点",()=>{
  const cache=new WorkspaceConfirmationCache(),a=crypto.randomUUID(),integrated=crypto.randomUUID();
  const plan={nodeIds:["repair"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
  const continuation={executionId:crypto.randomUUID(),baseCommit:plan.baseCommit,workspaces:[{workspaceId:a,commit:"b".repeat(40),nodeIds:["old-a"],ready:true},{workspaceId:integrated,commit:"c".repeat(40),nodeIds:["integrate"],ready:true}]};
- const result=cache.get("task:2",plan,{repair:{resources:"",workspaceId:integrated}},false,true,continuation);
+ const result=cache.get("task:2",plan,{repair:{resources:"",workspaceId:integrated}},false,continuation);
  expect(result.bindings).toEqual([{nodeId:"repair",workspaceId:integrated}]);expect(result.continuation?.heads).toHaveLength(2);
 });
