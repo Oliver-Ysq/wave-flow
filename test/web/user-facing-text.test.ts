@@ -13,3 +13,8 @@ test("动态路径和外部错误不被角色措辞替换",()=>{
  expect(userFacingText(`任务已创建，主控启动失败：${details}`)).toBe(`任务已创建，Wave Flow 连接失败：${details}`);
  expect(userFacingText("未知主控错误")).toBe("未知主控错误");
 });
+test("记录缺失不暴露 Run/manifest 内部词，并给出下一步",()=>{
+  expect(userFacingText("指定 Run 不存在或 manifest 不可读取。")).toContain("记录已不存在或无法读取");
+  expect(userFacingText("指定 Run 不存在或 manifest 不可读取。")).not.toContain("manifest");
+  expect(userFacingText("指定 Harness Run 不存在或 manifest 不可读取。 ")).toContain("历史记录已不存在或无法读取");
+});
