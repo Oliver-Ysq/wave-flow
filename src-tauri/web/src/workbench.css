@@ -445,6 +445,8 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .conversation-scroll > * { width:min(860px, 100%); margin-left:auto; margin-right:auto; }
 .agent-workbench .chat-message { display:grid; grid-template-columns:34px minmax(0, 1fr); gap:12px; align-items:start; }
 .agent-workbench .chat-message + .chat-message { margin-top:26px; }
+.agent-workbench .chat-message.wf-body-continuation { margin-top:10px; }
+.agent-workbench .chat-message.wf-body-continuation .chat-avatar { visibility:hidden; }
 .agent-workbench .chat-avatar { width:34px; height:34px; border-radius:11px; box-shadow:inset 0 1px rgb(255 255 255 / 14%); }
 .agent-workbench .chat-message > div:last-child { min-width:0; }
 .agent-workbench .chat-message p { max-width:760px; margin:6px 0 0; font-size:15px; line-height:1.76; letter-spacing:.002em; }
@@ -749,7 +751,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-markdown h1, .agent-workbench .wf-markdown h2, .agent-workbench .wf-markdown h3, .agent-workbench .wf-markdown h4 { margin:16px 0 8px; line-height:1.4; }
 .agent-workbench .wf-markdown h1 { font-size:20px; } .agent-workbench .wf-markdown h2 { font-size:18px; } .agent-workbench .wf-markdown h3, .agent-workbench .wf-markdown h4 { font-size:16px; }
 .agent-workbench .wf-markdown a { color:var(--wf-accent-strong); text-decoration:underline; text-underline-offset:2px; }
-.agent-workbench .wf-markdown code { padding:2px 5px; border:1px solid var(--wf-border); border-radius:5px; background:var(--wf-raised); font:13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+.agent-workbench .wf-markdown code { padding:1px 5px; border:0; border-radius:4px; background:var(--wf-raised); font:0.92em/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
 .agent-workbench .wf-markdown pre { max-width:760px; margin:12px 0; padding:12px 14px; overflow-x:auto; border:1px solid var(--wf-border); border-radius:10px; background:var(--wf-terminal-bg); }
 .agent-workbench .wf-markdown pre code { padding:0; border:0; background:transparent; color:#e8e8ea; font:13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
 .agent-workbench .wf-markdown table { margin:12px 0; border-collapse:collapse; font-size:14px; }
@@ -1125,12 +1127,15 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .workflow-design-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--wf-line-soft); }
 .workflow-design-row select { max-width: 280px; color: var(--wf-ink); background: var(--wf-input); border: 1px solid var(--wf-line); border-radius: 6px; padding: 8px; }
 .workflow-design small { display: block; margin: 10px 0; color: var(--wf-muted); }
-.workflow-workspace-config{display:grid;gap:12px;margin-top:16px;padding:16px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
-.workflow-workspace-config fieldset{display:grid;gap:10px;margin:0;padding:12px;border:1px solid var(--wf-line);border-radius:10px}
-.workflow-workspace-config label{display:grid;gap:6px;font-size:13px}
-.workflow-workspace-config textarea{min-height:64px;resize:vertical}
-.workflow-workspace-config select{max-width:100%;min-height:36px;padding:8px;color:var(--wf-ink);background:var(--wf-input);border:1px solid var(--wf-line);border-radius:6px}
-.workflow-workspace-config .workspace-confirm{display:flex;grid-template-columns:auto 1fr;align-items:flex-start;gap:8px;line-height:1.45}
+.workflow-git-advanced{margin-top:16px;border-top:1px solid var(--wf-line-soft);padding-top:12px}
+.workflow-git-advanced>summary{cursor:pointer;color:var(--wf-muted);font-size:13px;user-select:none}
+.workflow-git-advanced>summary:hover{color:var(--wf-ink)}
+.workflow-git-advanced[open]>summary{margin-bottom:10px}
+.workflow-git-advanced p{margin:0 0 10px;color:var(--wf-muted);font-size:13px}
+.workflow-git-advanced fieldset{display:grid;gap:10px;margin:0 0 10px;padding:12px;border:1px solid var(--wf-line);border-radius:10px}
+.workflow-git-advanced label{display:grid;gap:6px;font-size:13px}
+.workflow-git-advanced textarea{min-height:64px;resize:vertical}
+.workflow-git-advanced select{max-width:100%;min-height:36px;padding:8px;color:var(--wf-ink);background:var(--wf-input);border:1px solid var(--wf-line);border-radius:6px}
 .execution-workspace-evidence{display:grid;gap:10px;margin:16px 0;padding:14px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
 .execution-workspace-evidence code{overflow-wrap:anywhere;white-space:normal}
 .execution-workspace-evidence summary{cursor:pointer}
@@ -1150,8 +1155,7 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .changes-panel .changes-files { width:230px; flex:none; overflow:auto; border-right:1px solid var(--wf-line-soft); padding:8px; display:flex; flex-direction:column; gap:2px; }
 .changes-panel .changes-files button { display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%; padding:8px 10px; border:none; border-radius:8px; background:transparent; color:var(--wf-ink); text-align:left; cursor:pointer; }
 .changes-panel .changes-files button:hover { background:var(--wf-panel-raised); }
-.changes-panel .changes-files button.active { background:var(--wf-accent-wash); }
-.changes-panel .changes-files .changes-file-path { font-size:12px; overflow-wrap:anywhere; }
+.changes-panel .changes-files button.active { background:var(--wf-accent-wash); }.changes-panel .changes-files .changes-file-path { font-size:12px; overflow-wrap:anywhere; }
 .changes-panel .changes-files small { color:var(--wf-muted); }
 .changes-panel .changes-diff { flex:1; min-width:0; overflow:auto; padding:12px 16px; }
 .changes-panel .changes-diff>p[role="status"] { color:var(--wf-muted); }

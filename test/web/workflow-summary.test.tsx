@@ -5,7 +5,7 @@ import type { HarnessSnapshot, WorkflowRevision, WorkflowExecution } from "../..
 import { WorkflowRevisionCard } from "../../src-tauri/web/src/conversation/revision-card";
 
 const revision = (n:number):WorkflowRevision => ({ cardId:"card", parentRevision:n === 1 ? null : 1, revision:n,goal:"验证工作台",scope:"只读核验算术结果",source:"",sourceHash:"hash",acceptedAt:null,createdAt:"2026-10-15",preview:{previewVersion:1,sourceHash:"hash",phaseTitles:["准备","确认"],previewAgents:[]} });
-const task = { workflowRevisions:[revision(1),revision(2)],executions:[] } as unknown as HarnessSnapshot;
+const task = { workflowRevisions:[revision(1),revision(2)],executions:[],messages:[],conversationEntries:[] } as unknown as HarnessSnapshot;
 
 test("旧版只按同卡标被替代，保留批准证据，历史缺卡不猜版本关系",()=>{
   const first = {...revision(1),acceptedAt:"saved"};
@@ -66,6 +66,6 @@ test("中央旧版显示取代而不是冻结，禁止审批与启动且保留�
   const html=renderToStaticMarkup(<WorkflowRevisionCard revision={{...revision(1),acceptedAt:"2026-10-15T08:00:00Z"}} harness={task} onAssignmentCreated={()=>{}} />);
   expect(html).toContain("历史版本 · 第 1 版"); expect(html).toContain("已被第 2 版替代");
   expect(html).not.toContain("已冻结"); expect(html).not.toContain("配置并运行");
-  expect(html).toContain("Workflow 设计"); expect(html).toContain("只读核验算术结果");
+  expect(html).toContain("执行步骤"); expect(html).toContain("只读核验算术结果");
   expect(html).not.toContain("确认并运行");
 });

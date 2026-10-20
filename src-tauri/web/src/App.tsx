@@ -1621,7 +1621,7 @@ export function App() {
             <div>
               <span>
                 {harness
-                  ? `${conversationTitle(harness)} / 工作流`
+                  ? `${conversationTitle(harness)} / 方案`
                   : "工作流详情"}
               </span>
               <strong

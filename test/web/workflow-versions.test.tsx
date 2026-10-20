@@ -21,7 +21,7 @@ test('五个独立工作流不显示任务累计版本，同工作流排序不�
 test('最新版正文标签不是历史，旧版保持历史且不同工作流互不影响',()=>{
  const base={cardId:'one',source:'',sourceHash:'hash',createdAt:'2026-10-18T00:00:00Z',acceptedAt:null,goal:'工作目标',scope:'只读'};
  const old={...base,revision:2},current={...base,revision:7};
- const task={harnessRunId:'task',status:'idle',workflowRevisions:[old,current,{...base,cardId:'other',revision:9}],executions:[],task:{},impactSummaries:[]} as unknown as HarnessSnapshot;
+ const task={harnessRunId:'task',status:'idle',workflowRevisions:[old,current,{...base,cardId:'other',revision:9}],executions:[],task:{},impactSummaries:[],messages:[],conversationEntries:[]} as unknown as HarnessSnapshot;
  const render=(revision:WorkflowRevision)=>renderToStaticMarkup(<WorkflowRevisionCard revision={revision} harness={task} onAssignmentCreated={()=>{}}/>);
  expect(render(current)).toContain('当前版本 · 第 2 版');
  expect(render(current)).not.toContain('历史版本 · 第 2 版');
@@ -30,12 +30,12 @@ test('最新版正文标签不是历史，旧版保持历史且不同工作流�
 test('未执行旧版CLI按原声明展示，不暗示等待后可以选择',()=>{
  const revision={revision:2,cardId:'one',preview:{phaseTitles:['检查'],previewAgents:[{key:'check',nodeId:'check',name:'检查',cli:'codex',phaseTitle:'检查'}]}} as unknown as WorkflowRevision;
  const html=renderToStaticMarkup(<WorkflowDesign taskId="task" revision={revision} editable={false} onCreated={()=>{}}/>);
- expect(html).toContain('源码声明');expect(html).toContain('Codex CLI');
+ expect(html).toContain('Codex CLI');expect(html).not.toContain('源码声明');
  expect(html).not.toContain('处理结束后');expect(html).not.toContain('<select');
 });
 test('单版本正文上方不重复方案标签，多版本仍显示历史版本',()=>{
  const revision={revision:5,cardId:'one',source:'',sourceHash:'hash',createdAt:'2026-10-18T00:00:00Z',acceptedAt:null,rejectedAt:null,goal:'工作目标',scope:'只读'} as WorkflowRevision;
- const task={harnessRunId:'task',status:'idle',workflowRevisions:[revision],executions:[],task:{},impactSummaries:[]} as unknown as HarnessSnapshot;
+ const task={harnessRunId:'task',status:'idle',workflowRevisions:[revision],executions:[],task:{},impactSummaries:[],messages:[],conversationEntries:[]} as unknown as HarnessSnapshot;
  const html=renderToStaticMarkup(<WorkflowRevisionCard revision={revision} harness={task} onAssignmentCreated={()=>{}}/>);
  expect(html).not.toContain('<span>方案</span>');expect(html).not.toContain('第 5 版');
 });

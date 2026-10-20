@@ -94,17 +94,18 @@ export function shouldSubmitComposer(
   );
 }
 
-/** 主控正文条目：Markdown 渲染；流式中显示闪烁光标，中断残留与截断显式标注。 */
-function BodyBlock({ entry }: { entry: HarnessBodyEntry }) {
+/** 主控正文条目：Markdown 渲染；同一回合内被工具/思考打断后的后续正文续排，
+ * 不重复头像与说话人，避免一次回复看起来像两条消息。 */
+function BodyBlock({ entry, continuation = false }: { entry: HarnessBodyEntry; continuation?: boolean }) {
   const streaming = !entry.completed && entry.finishedAt === null;
   return (
     <article
       data-read-identity={entry.completed ? `body:${entry.entryId}` : undefined}
-      className={`chat-message assistant wf-body ${streaming ? "streaming" : ""}`}
+      className={`chat-message assistant wf-body ${streaming ? "streaming" : ""} ${continuation ? "wf-body-continuation" : ""}`}
     >
-      <div className="chat-avatar">W</div>
+      <div className="chat-avatar" aria-hidden={continuation || undefined}>W</div>
       <div>
-        <span>Wave Flow</span>
+        {!continuation && <span>Wave Flow</span>}
         {entry.legacy ? (
           <p className="wf-entry-note">历史记录未保存</p>
         ) : (
@@ -156,9 +157,11 @@ function ConversationTurnView({
   /** 此回合发生的原更新/执行记录，按时间插入回复之间。 */
   records?:TimelineItem[];
 }) {
+  let bodySeen = false;
   const entries:TimelineItem[]=groupToolEntries(turn.entries).map(item=>{
     if(item.kind==='tool-group')return {key:`entry:${item.entries[0]!.entryId}`,at:item.entries[0]!.startedAt,content:<ToolGroupBlock entries={item.entries}/>};
-    return {key:`entry:${item.entryId}`,at:item.startedAt,content:item.kind==='body'?<BodyBlock entry={item}/>:item.kind==='thought'?<ThoughtBlock entry={item}/>:<ToolBlock entry={item}/>};
+    if(item.kind==='body'){const continuation=bodySeen;bodySeen=true;return {key:`entry:${item.entryId}`,at:item.startedAt,content:<BodyBlock entry={item} continuation={continuation}/>};}
+    return {key:`entry:${item.entryId}`,at:item.startedAt,content:item.kind==='thought'?<ThoughtBlock entry={item}/>:<ToolBlock entry={item}/>};
   });
   if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">W</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(harness.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><HarnessToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
   return (

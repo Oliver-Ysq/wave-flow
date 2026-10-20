@@ -29,7 +29,7 @@ test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",as
 test("整工作区授权并入确认运行，显式diff合入，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(design).toContain("同时授权 Engine 在受管 worktree 保存实际 Git 改动");
+ expect(design).toContain("改动保存在受管分支（不改主工作区、不 push）");
  expect(design).not.toContain("我确认以上节点、外部资源与集成来源");
  expect(design).not.toContain("approveGit");
  expect(design).not.toContain("成果文件路径（每行一个）");

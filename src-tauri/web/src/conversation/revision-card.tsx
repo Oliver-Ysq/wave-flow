@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ExecutionResponse,
   HarnessSnapshot,
@@ -66,9 +66,16 @@ export function WorkflowRevisionCard({
   const status = state.status;
   const editable = editableRevision(harness, revision);
   const currentCandidate=!!revision.cardId&&!revision.abandonedAt&&harness.workflowRevisions.filter(item=>item.cardId===revision.cardId).at(-1)?.revision===revision.revision&&!harness.executions.some(item=>harness.task?.workflowContract==="single-workflow-v1"?item.revision===revision.revision:harness.workflowRevisions.find(version=>version.revision===item.revision)?.cardId===revision.cardId);
+  // 主控回合停滞提示：running 且 5 分钟无任何新条目或消息时如实标注，不改变回合
+  // 状态；中断仍只能由用户显式发起（对话区停止按钮）。模型假死已被真实档案证实
+  // 可能发生（社区同类：Codex CLI 无限挂起 openai/codex#14048）。
+  const [now,setNow]=useState(()=>Date.now());
+  useEffect(()=>{if(harness.status!=="running")return;const timer=setInterval(()=>setNow(Date.now()),30_000);return()=>clearInterval(timer);},[harness.status]);
+  const lastActivity=harness.conversationEntries.reduce((latest,entry)=>Math.max(latest,Date.parse(entry.startedAt),entry.finishedAt?Date.parse(entry.finishedAt):0),harness.messages.reduce((latest,message)=>Math.max(latest,Date.parse(message.createdAt)),0));
+  const stalled=harness.status==="running"&&lastActivity>0&&now-lastActivity>=5*60_000;
   // 可确认但被瞬时条件挡住时给出原因，而不是隐藏行动点；拒绝/放弃/已执行/非最新版不算可确认。
   const blockedConfirmReason = editable||rejected||!currentCandidate ? null
-    : harness.status==="running" ? "Wave Flow 正在处理，结束后可确认运行。"
+    : harness.status==="running" ? (stalled?"Wave Flow 已超过 5 分钟没有响应，可能在执行长命令或模型无应答；如确认卡住，可在对话区停止当前回合后重新发送。":"Wave Flow 正在处理，结束后可确认运行。")
     : harness.status==="interrupted" ? "Wave Flow 已中断，恢复或发送消息后可确认运行。"
     : "有执行尚未结束，终结后才能确认新运行。";
   const visibilityKey=`${harness.harnessRunId}:${revision.cardId??"legacy"}:${revision.revision}`;
