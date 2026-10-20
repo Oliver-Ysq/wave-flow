@@ -68,10 +68,13 @@ export function CompactParameterForm({schema,initialValue={},busy=false,blockedR
       pendingErrorFocus.current=null;
       // 同一字段可能同时触发type/enum等多个AJV错误；摘要按字段去重，焦点也须
       // 以实际摘要是否存在为准，否则会尝试聚焦不存在的摘要而遗漏首个错误。
-      if(errorSummary.current){errorSummary.current.focus();return;}
+      // WKWebView 对 <summary> 的程序化聚焦不可靠：必须回读 activeElement，
+      // 没有真正接住焦点时退回首个可见的 aria-invalid 控件。
+      const summary=errorSummary.current;
+      if(summary){summary.focus();if(document.activeElement===summary)return;}
       const controls=[...section.current?.querySelectorAll<HTMLElement>('[aria-invalid="true"]')??[]];
       const control=controls.find(item=>item.getClientRects().length>0);
-      (control??errorSummary.current)?.focus();
+      (control??summary)?.focus();
     });
     return()=>cancelAnimationFrame(frame);
   });
@@ -82,7 +85,13 @@ export function CompactParameterForm({schema,initialValue={},busy=false,blockedR
     setErrors(submitted.current?next:next.filter(error=>touched.current.has(errorKey(error)??"")));
   }
   function message(error:SchemaFieldError){const key=errorKey(error);return parameterErrorMessage(error,key===undefined?undefined:fields[key],key===undefined?error.path:String(fields[key]?.title??labels[key]??key),key===undefined?value:value[key]);}
-  function change(key:string,next:unknown,rawList?:string){const updated={...value};if(next===undefined)delete updated[key];else updated[key]=next;const texts=rawList===undefined?listText:{...listText,[key]:rawList};setValue(updated);setListText(texts);if(identity)editors.set(identity,{value:updated,listText:texts});onDraft?.(updated);}
+  function change(key:string,next:unknown,rawList?:string){const updated={...value};if(next===undefined)delete updated[key];else updated[key]=next;const texts=rawList===undefined?listText:{...listText,[key]:rawList};setValue(updated);setListText(texts);if(identity)editors.set(identity,{value:updated,listText:texts});onDraft?.(updated);
+    // 选择/输入本身就是对该字段的编辑：立刻重算它的错误，而不是等到失焦或再次
+    // 提交，否则已填好的枚举仍显示“必填字段未填写”。
+    touched.current.add(key);
+    const nextErrors=validateAnswer(schema,updated);
+    setErrors(submitted.current?nextErrors:nextErrors.filter(error=>touched.current.has(errorKey(error)??"")));
+  }
   function field(key:string,node:Record<string,unknown>){
     const type=Array.isArray(node.type)?node.type.find(item=>item!=="null"):node.type;
     const label=String(node.title??labels[key]??key),current=value[key];
@@ -104,7 +113,7 @@ export function CompactParameterForm({schema,initialValue={},busy=false,blockedR
   const advancedErrors=issues.filter(error=>optionalKeys.includes(errorKey(error)??"")).length;
   const adjusted=optionalKeys.filter(key=>Object.hasOwn(value,key)&&JSON.stringify(value[key])!==JSON.stringify(fields[key].default)).length;
   return <section ref={section} className="compact-parameters" aria-label="参数"><h3>参数</h3>
-    {(issues.length>1||issues.some(error=>errorTarget(error)===undefined))&&<details className="parameter-error-summary"><summary ref={errorSummary}>还有 {issues.length} 项需要填写或修改 <span>查看</span></summary><ul>{issues.map((error,index)=>{
+    {(issues.length>1||issues.some(error=>errorTarget(error)===undefined))&&<details className="parameter-error-summary"><summary ref={errorSummary} tabIndex={-1}>还有 {issues.length} 项需要填写或修改 <span>查看</span></summary><ul>{issues.map((error,index)=>{
         const key=errorKey(error),target=errorTarget(error),label=key===undefined?error.path:String(fields[key]?.title??labels[key]??key);
         const text=`${label?`${label}：`:""}${message(error)}`;
         return <li key={index}>{target===undefined?<span>{text}</span>:<a href={`#${formId}-${target}`} onClick={event=>{event.preventDefault();goToError(error);}}>{text}</a>}</li>;

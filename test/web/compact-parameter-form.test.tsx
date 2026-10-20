@@ -75,6 +75,8 @@ test("同一字段多个AJV错误只计一项，不建立不存在的多字段�
  expect(html).not.toContain('parameter-error-summary');
  expect(html).toContain('aria-invalid="true"');
  const source=await Bun.file('src-tauri/web/src/forms/compact-parameter-form.tsx').text();
- expect(source).toContain('if(errorSummary.current){errorSummary.current.focus();return;}');
+ expect(source).toContain('const summary=errorSummary.current;');
+ expect(source).toContain('if(document.activeElement===summary)return;');
+ expect(source).toContain('<summary ref={errorSummary} tabIndex={-1}>');
  expect(source).not.toContain('if(next.length>1)');
 });
