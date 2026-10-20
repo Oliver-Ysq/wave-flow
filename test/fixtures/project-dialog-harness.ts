@@ -36,7 +36,7 @@ mock.module("../../src-tauri/web/src/api", () => ({ api: {
 } }));
 Object.assign(globalThis, {
   document: { activeElement: null, querySelectorAll: () => [], addEventListener: () => {}, removeEventListener: () => {} },
-  window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 2 }, requestAnimationFrame: () => 0,
+  window: { __TAURI_INTERNALS__: {} }, requestAnimationFrame: () => 0,
 });
 const { ProjectCreateDialog } = await import("../../src-tauri/web/src/project-create-dialog");
 let accepted = 0;
@@ -54,9 +54,6 @@ const tick = async () => { await Promise.resolve(); await Promise.resolve(); };
 function button(tree: any, text: string): any { return elements(tree).find(el => el.type === "button" && el.props.children === text); }
 function input(tree: any): any { return elements(tree).find(el => el.type === "input"); }
 let tree = render();
-elements(tree).find(el => el.props?.className === "project-folder-drop").props.ref.current = {
-  getBoundingClientRect: () => ({ left: 100, right: 300, top: 100, bottom: 200 }),
-};
 const cleanups = effects.map(effect => effect()).filter(fn => typeof fn === "function");
 input(tree).props.onChange({ target: { value: "/old" } });
 tree = render();
@@ -75,10 +72,8 @@ input(tree).props.onChange({ target: { value: "/manual" } });
 resolveValidation({ cwd: "/chosen" }); await selection;
 tree = render(); assert.equal(input(tree).props.value, "/manual");
 assert.equal(button(tree, "创建项目").props.disabled, false);
-// 生产Tauri回调：坐标为物理像素，区外及多路径零核验，区内单目录仅填值。
-drag({ payload: { type: "drop", position: { x: 50, y: 50 }, paths: ["/outside"] } });
-assert.equal(validateCalls, 1);
-drag({ payload: { type: "drop", position: { x: 400, y: 300 }, paths: ["/a", "/b"] } });
+// 生产Tauri回调：弹窗模态，不按坐标过滤；多路径拒绝，单目录触发核验。
+drag({ payload: { type: "drop", paths: ["/a", "/b"] } });
 assert.equal(validateCalls, 1);
 tree = render();
 assert.ok(elements(tree).some(el => el.props?.role === "alert" && el.props.children === "请一次拖入一个文件夹。"));

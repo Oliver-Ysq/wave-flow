@@ -58,13 +58,13 @@ export function ProjectCreateDialog({ onClose, onCreated }: {
     let disposed = false;
     const unlisten = getCurrentWindow().onDragDropEvent(event => {
       if (disposed || submitting.current || validating.current || selecting.current) return;
-      if (event.payload.type === "leave") { setHover(false); return; }
-      // Tauri坐标为物理像素；DOM矩形为CSS像素，只接纳弹窗明确的拖放区。
-      const rect = dropZone.current?.getBoundingClientRect(), point = event.payload.position;
-      const x = point.x / window.devicePixelRatio, y = point.y / window.devicePixelRatio;
-      const inside = !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-      setHover(inside && event.payload.type !== "drop");
-      if (inside && event.payload.type === "drop") void acceptPaths(event.payload.paths);
+      const kind = event.payload.type;
+      if (kind === "leave") { setHover(false); return; }
+      // 弹窗是模态的，唯一拖放目标就是本区域，直接接受 drop。
+      // 不按 position/devicePixelRatio 做命中判断：Tauri 在多显示器不同缩放时
+      // 可能上报错误的物理坐标（tauri-apps/tauri#7890），会把有效拖入误判为区域外。
+      setHover(kind !== "drop");
+      if (kind === "drop") void acceptPaths(event.payload.paths);
     });
     void unlisten.catch(() => { if (!disposed) setError("文件夹拖入暂不可用，请输入路径或选择文件夹。"); });
     return () => { disposed = true; void unlisten.then(fn => fn()).catch(() => {}); };

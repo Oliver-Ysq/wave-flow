@@ -30,7 +30,8 @@ test("项目两级折叠不导航，创建入口独立且拖入不自动提交",
   expect(app).toContain('aria-controls={`project-tasks-${project.projectId}`}');
   expect(app).toContain('className="project-new-session"');
   expect(dialog).toContain("api.validateProjectPath(path)");
-  expect(dialog).toContain("window.devicePixelRatio");
+  expect(dialog).toContain("tauri-apps/tauri#7890");
+ expect(dialog).not.toContain("window.devicePixelRatio");
   expect(dialog).toContain("serial.current === token");
   expect(dialog).toContain("role=\"dialog\"");
   expect(dialog).toContain("directory: true, multiple: false");
