@@ -20,8 +20,9 @@ async function main(): Promise<void> {
   // provider-process-supervisor.ts 的 ownerGone 检查（reparent 可能落在
   // PID 1 或 subreaper，任何其他父进程都表示 owner 已消失）。
   const stopParentWatchdog = installParentWatchdog(() => {
-    engine.shutdown();
-    process.exit(0);
+    // shutdown 抛错不能吞掉退出：先清定时器再调用，一旦异常没人再兜底，
+    // 会留下永不退出的孤儿 Engine。finally 保证任何路径都 exit。
+    try { engine.shutdown(); } finally { process.exit(0); }
   });
   // Engine 进程重启时绝不认领旧 ACP session。必须在接受任何新 action 前将
   // 上一个进程遗留的活跃事实收敛，避免 UI 短暂展示一个实际上无人持有的 Worker。
@@ -50,8 +51,11 @@ async function main(): Promise<void> {
     await serveEngineRequests(engine, lines(), write);
   } finally {
     stopParentWatchdog();
-    engine.shutdown();
+    try { engine.shutdown(); } catch { /* 关闭失败不阻止退出 */ }
   }
+  // stdin 结束时必须显式退出：shutdown 只关闭控制管道，Agent/ACP 子进程的
+  // stdio 句柄仍会让事件循环保持存活，进程会以“父进程已消失”的孤儿形态挂住。
+  process.exit(0);
 }
 
 function write(value: unknown): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
@@ -64,7 +68,12 @@ function write(value: unknown): void { process.stdout.write(`${JSON.stringify(va
  */
 function installParentWatchdog(onParentGone: () => void): () => void {
   const initialParentPid = process.ppid;
-  if (!Number.isInteger(initialParentPid) || initialParentPid <= 1) return () => {};
+  // 启动时已经没有 owner（ppid 为 1）：不存在可等待的父进程，直接按“父进程已消失”
+  // 处理。旧实现只是不安装定时器，这类 Engine 会永久驻留，任何后续检查都救不回来。
+  if (!Number.isInteger(initialParentPid) || initialParentPid <= 1) {
+    onParentGone();
+    return () => {};
+  }
   const timer = setInterval(() => {
     const parentPidChanged = process.ppid !== initialParentPid;
     let parentMissing = false;

@@ -390,6 +390,60 @@ test("Engine runtimes.validate 走统一验证器入口", async () => {
     expect(listed.runtimes).toHaveLength(1);
   } finally { engine.shutdown(); }
 });
+/** 回归：用户把 Kimi 路径留在“Codex CLI”种类上时，按可执行文件名识别真实种类验证，
+ * 不再把上游适配器的英文进程退出错误（unknown command 'app-server'）暴露给用户。 */
+test("Engine runtimes.validate 按文件名识别真实 CLI 种类", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-detect-")); roots.push(root);
+  const seen: string[] = [];
+  const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executable = await verifyExecutable(executablePath);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async (cli, input) => {
+      seen.push(cli);
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    },
+  });
+  try {
+    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" }) as { runtime: { cli: string } };
+    expect(response.runtime.cli).toBe("kimi");
+    expect(seen).toEqual(["kimi"]);
+  } finally { engine.shutdown(); }
+});
+
+/** 识别不出种类且两种都失败时，仍要把上游进程退出错误翻译成可操作中文，不原样回显。 */
+test("Engine runtimes.validate 翻译上游进程退出错误", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-translate-")); roots.push(root);
+  const executablePath = join(root, "custom-cli"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async () => { throw new Error("Codex process has exited with code 1: unknown command 'app-server'. See 'kimi --help'."); },
+  });
+  try {
+    await expect(engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" })).rejects.toThrow("这个程序不提供 Codex 的 ACP 入口");
+  } finally { engine.shutdown(); }
+});
+
+/** 探测只是排序与诊断：`--version` 失败（例如 node 入口需要 Engine 解析 node）仍要对
+ * 首个候选做完整验证，不能把探测结论当成“未安装”。 */
+test("扫描在探测无结论时仍完整验证首个候选，并清掉失败结论", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-scan-probe-")); roots.push(root);
+  const executablePath = join(root, "codex");
+  await writeFile(executablePath, "#!/bin/sh\nexit 1\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executable = await verifyExecutable(executablePath);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    discoverCliRuntimes: async () => [{ cli: "codex", executablePath: executable.executablePath, discoveredFrom: "shell-path", discoveredShell: "/bin/zsh", aliases: [executablePath] }],
+    validateCliRuntime: async (cli, input) => ({ runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null }),
+  });
+  try {
+    const result = await engine.handleDesktopAction("runtimes.scan", {}) as { verified: number; failures: Record<string, string> };
+    expect(result.verified).toBe(1);
+    expect(result.failures.codex).toBeUndefined();
+    expect(result.failures.kimi).toBe("absent");
+  } finally { engine.shutdown(); }
+});
+
 test("显式partial保存缺授权或跨任务时拒绝，不创建Git工作区", async () => {
   const engine = new DesktopExecutionEngine({ deterministicForTest: true });
   await expect(engine.handleDesktopAction("executions.savePartial", { harnessRunId: crypto.randomUUID(), executionId: crypto.randomUUID() })).rejects.toThrow("明确授权");

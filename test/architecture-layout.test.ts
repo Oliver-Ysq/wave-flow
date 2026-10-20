@@ -106,7 +106,8 @@ describe("新架构目录与历史实现边界", () => {
     expect(harnessMcp).toContain("WF_HARNESS_MCP_REQUEST_FIFO");
     const acpSession = await Bun.file(join(projectRoot, "src", "adapters", "acp-session.ts")).text();
     expect(acpSession).toContain("detached: true");
-    expect(acpSession).toContain("process.kill(-child.pid, \"SIGTERM\")");
+    expect(acpSession).toContain('signalGroup("SIGTERM")');
+    expect(acpSession).toContain('signalGroup("SIGKILL")');
     expect(acpSession).toContain('process.once("exit", onParentExit)');
     expect(desktop).not.toContain("RunJournal");
     expect(desktop).not.toContain("shell:allow-execute");

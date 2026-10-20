@@ -260,6 +260,9 @@ function waitPermission(pending: Promise<acp.RequestPermissionResponse>, signal:
   });
 }
 
+/** SIGTERM 后等待进程组消失的宽限；与 Orca `PROVIDER_SIGTERM_GRACE_MS` 同值。 */
+const ACP_SIGTERM_GRACE_MS = 3_000;
+
 /** Bun 生产 stdio transport；launcher argv 只能来自 Engine 的已验证配置。 */
 export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => {
   if (signal.aborted) throw new Error("ACP 启动已取消。 ");
@@ -282,7 +285,17 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
   const terminateGroup = () => {
     // POSIX 向负 PID 发信号即定向到该独立进程组。若平台或进程已经退出而拒绝，
     // 回退单进程 kill；两者都只是 best-effort，不影响 Journal 的 durable 终态。
-    try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
+    const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
+    const signalGroup = (name: NodeJS.Signals) => {
+      try { process.kill(-child.pid, name); } catch { try { process.kill(child.pid, name); } catch { /* 已退出 */ } }
+    };
+    try { child.stdin.end(); } catch { /* 通道可能已关闭 */ }
+    signalGroup("SIGTERM");
+    // 忽略 SIGTERM 的子进程组不能永久遗留：升级阶梯同 Orca provider supervisor
+    // （SIGTERM → 宽限 → SIGKILL）。定时器 unref，不阻止 Engine 正常退出；
+    // 与上游的差别是这里不先等 stdin 结束宽限，停止动作立刻发 SIGTERM。
+    const escalate = setTimeout(() => { if (groupAlive()) signalGroup("SIGKILL"); }, ACP_SIGTERM_GRACE_MS);
+    escalate.unref?.();
   };
   // Tauri/Engine 私有 stdin 意外断开时，JS finally 不一定有机会逐一关闭 session。
   // 该钩子只清理本进程创建的独立进程组，不写任何 Journal 终态；下次 Engine 启动
