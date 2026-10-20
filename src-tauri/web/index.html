@@ -1,13 +1,33 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Wave Flow</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- 首帧之前确定主题与底色：不依赖 React effect，也不等外部样式表加载。 -->
+    <script>
+      (function () {
+        var theme = "dark";
+        try {
+          theme = localStorage.getItem("wave-flow:color-theme:v1") === "light" ? "light" : "dark";
+        } catch (_) {}
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
+    <style>
+      html, body { margin: 0; height: 100%; background: #141414; }
+      html[data-theme="light"], html[data-theme="light"] body { background: #f7f7fa; }
+      #root { height: 100%; }
+      .wf-boot { display: flex; height: 100%; align-items: center; justify-content: center; gap: 10px; color: #7c7c84; font: 500 13px -apple-system, "PingFang SC", sans-serif; }
+      .wf-boot span { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 10px; background: #9fa9ff; color: #191b22; font: 800 15px ui-sans-serif, system-ui; }
+      html[data-theme="light"] .wf-boot { color: #6e6e78; }
+      html[data-theme="light"] .wf-boot span { background: #6868dc; color: #fff; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="wf-boot"><span>V</span>Wave Flow 正在启动…</div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

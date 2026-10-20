@@ -10,7 +10,7 @@
     "frontendDist": "./web/dist"
   },
   "app": {
-    "windows": [{ "label": "main", "title": "Wave Flow", "titleBarStyle": "Overlay", "hiddenTitle": true, "width": 1280, "height": 860, "minWidth": 700, "minHeight": 700 }],
+    "windows": [{ "label": "main", "title": "Wave Flow", "titleBarStyle": "Overlay", "hiddenTitle": true, "width": 1280, "height": 860, "minWidth": 700, "minHeight": 700, "visible": false }],
     "security": { "csp": null }
   },
   "bundle": {

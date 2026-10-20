@@ -102,6 +102,17 @@ function syncNativeWindowTheme(theme: ColorTheme) {
   void invoke("set_window_theme", { theme }).catch(() => {});
 }
 
+/**
+ * 初始快照（成功或失败）提交后通知入口层显示原生窗口：首帧就带正确的
+ * 连接状态与数据，避免先露出“未连接”空壳再跳成已连接。
+ */
+let firstFrameAnnounced = false;
+function announceFirstFrame(): void {
+  if (firstFrameAnnounced) return;
+  firstFrameAnnounced = true;
+  window.dispatchEvent(new Event("wave-flow:first-frame"));
+}
+
 export function App() {
   const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
   const [projects, setProjects] = useState<HarnessProject[]>([]);
@@ -612,10 +623,13 @@ export function App() {
       // reasoning 与 delta 不进入 Journal，因此页面不会把半条模型输出误当结果。
       setConnected(true);
       setError(null);
+      announceFirstFrame();
     } catch (cause) {
       if (!valid()) return;
       setConnected(false);
       setError(cause instanceof Error ? cause.message : String(cause));
+      // 首次快照失败也要放行窗口：错误页与重试入口必须可见，不能隐藏等待。
+      announceFirstFrame();
     }
   }, []);
 

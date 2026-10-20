@@ -29,9 +29,26 @@ function renderWorkbench(): void {
 const reactRoot = createRoot(document.getElementById("root")!);
 function render(node: ReactNode): void { reactRoot.render(node); }
 
+/**
+ * 原生窗口以 `visible: false` 创建，App 首次快照提交后才显示：WKWebView 尚未
+ * 绘制或状态仍是“未连接”时露出的第一帧会让用户看到一次跳变。双 rAF 等一帧
+ * 布局，定时器兜底隐藏窗口下 rAF 被节流的情况；Rust 侧另有 2.5 秒兜底。
+ */
+let revealSent = false;
+function revealFirstFrame(): void {
+  if (revealSent || !("__TAURI_INTERNALS__" in window)) return;
+  revealSent = true;
+  const reveal = () => { void invoke("reveal_main_window").catch(() => {}); };
+  requestAnimationFrame(() => requestAnimationFrame(reveal));
+  setTimeout(reveal, 120);
+}
+window.addEventListener("wave-flow:first-frame", () => revealFirstFrame());
+// Engine 启动或快照请求悬挂时也要让占位/错误页可见，不能永久隐藏窗口。
+setTimeout(() => revealFirstFrame(), 1800);
+
 /** 脚本回调中的未捕获错误同样显示恢复入口，而不是让根节点保持空白。 */
 function installGlobalRecovery(): void {
-  const recover = (reason: unknown) => render(<RecoveryScreen detail={reason instanceof Error ? reason.message : String(reason)} />);
+  const recover = (reason: unknown) => { render(<RecoveryScreen detail={reason instanceof Error ? reason.message : String(reason)} />); revealFirstFrame(); };
   window.addEventListener("error", event => { event.preventDefault(); recover(event.error ?? event.message); });
   window.addEventListener("unhandledrejection", event => { event.preventDefault(); recover(event.reason); });
 }
@@ -45,4 +62,5 @@ void start().catch((error) => {
   render(
     <main style={{ padding: "32px", fontFamily: "system-ui" }}><h1>Wave Flow Desktop 无法启动执行环境</h1><pre>{error instanceof Error ? error.message : String(error)}</pre></main>,
   );
+  revealFirstFrame();
 });

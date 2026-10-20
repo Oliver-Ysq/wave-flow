@@ -36,6 +36,13 @@ struct ExitState { approved: AtomicBool }
 #[tauri::command]
 async fn ensure_engine(app: tauri::AppHandle) -> Result<(), String> { start_engine(&app).await }
 
+/**
+ * Web 在首帧内容提交后调用；窗口以 `visible: false` 创建，避免 WKWebView
+ * 尚未绘制时先露出一帧空白再跳到工作台。重复调用只做 show/focus。
+ */
+#[tauri::command]
+fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> { show_main_window(&app).map_err(|error| error.to_string()) }
+
 /** React 的私有 Engine action 代理；不通过 TCP、HTTP 或 URL 路由。 */
 #[tauri::command]
 async fn engine_request(app: tauri::AppHandle, action: String, args: Option<serde_json::Value>, timeout_secs: Option<u64>) -> Result<serde_json::Value, String> {
@@ -219,9 +226,18 @@ fn main() {
       }
     });
     app.manage(EngineState { child: Mutex::new(None), generation: AtomicU64::new(0), ready: Mutex::new(false), pending: Mutex::new(HashSet::new()), responses: Mutex::new(HashMap::new()), startup_error: Mutex::new(None), stdout_buffer: Mutex::new(Vec::new()) }); app.manage(TrayState { summary: Mutex::new(summary) }); app.manage(PendingMenuAction { value: Mutex::new(None) }); app.manage(ExitState { approved: AtomicBool::new(false) });
+    // 兜底：Web 因脚本错误或 Engine 握手悬挂没有调用 reveal 时，2.5 秒后仍显示窗口，
+    // 让恢复页/错误页可见，绝不把应用永久留在不可见状态。
+    let fallback = app.handle().clone();
+    std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(2500));
+      if let Some(window) = fallback.get_webview_window("main") {
+        if !window.is_visible().unwrap_or(false) { let _ = show_main_window(&fallback); }
+      }
+    });
     let tray_icon = app.default_window_icon().cloned();
     TrayIconBuilder::with_id("wave-flow-tray").menu(&menu).tooltip("Wave Flow").icon(tray_icon.unwrap_or_else(|| tauri::image::Image::new_owned(vec![0; 4], 1, 1))).on_menu_event(|app, event| match event.id().as_ref() { "open" => { let _ = show_main_window(app); }, "shutdown" => { if let Ok(mut action) = app.state::<PendingMenuAction>().value.lock() { *action = Some("shutdown"); } let _ = show_main_window(app); }, _ => {} }).build(app)?; Ok(())
-  }).on_window_event(|window, event| { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }).invoke_handler(tauri::generate_handler![ensure_engine, engine_request, update_tray_summary, take_menu_action, exit_desktop, set_window_theme]).build(tauri::generate_context!()).expect("创建 Wave Flow Desktop 失败").run(|app: &tauri::AppHandle, event| {
+  }).on_window_event(|window, event| { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }).invoke_handler(tauri::generate_handler![ensure_engine, engine_request, update_tray_summary, take_menu_action, exit_desktop, set_window_theme, reveal_main_window]).build(tauri::generate_context!()).expect("创建 Wave Flow Desktop 失败").run(|app: &tauri::AppHandle, event| {
     if let RunEvent::ExitRequested { api, .. } = event {
       if app.state::<ExitState>().approved.load(Ordering::Acquire) { return; }
       // Cmd+Q、Dock 退出等系统请求不允许绕过 durable-first 取消。保留进程、唤起
