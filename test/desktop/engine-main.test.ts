@@ -6,6 +6,7 @@ import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
 import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engine";
+import { serveEngineRequests } from "../../src/desktop/engine-dispatch";
 import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
@@ -402,4 +403,64 @@ test("已取消的文件批准动作拒绝且不创建权限Store", async () => 
   await expect(engine.handleDesktopAction("executions.decideFilePermission",{approved:true})).rejects.toThrow();
   expect(await Bun.file(join(root,"file-permissions")).exists()).toBe(false);
  }finally{engine.shutdown();}
+});
+
+/** 回归：串行派发曾让亚秒级的方案检查排在分钟级 CLI 扫描之后无限等待（队头阻塞）。
+ * 并发派发下响应按完成顺序写回；shutdown 响应前排空在途请求。 */
+test("Engine 请求并发派发：慢 action 不再阻塞后续请求，shutdown 排空在途", async () => {
+  let releaseSlow: (() => void) | null = null;
+  const slowBarrier = new Promise<void>((resolve) => { releaseSlow = resolve; });
+  const engine = {
+    status: async () => ({ activeRuns: 0 }),
+    cancelForDesktopExit: async () => {},
+    handleDesktopAction: async (action: string) => { if (action === "slow") await slowBarrier; return { action }; },
+  } as unknown as DesktopExecutionEngine;
+  const written: string[] = [];
+  let fastSeen: () => void = () => {};
+  const fastWritten = new Promise<void>((resolve) => { fastSeen = resolve; });
+  const write = (value: unknown) => { const id = (value as { requestId: string }).requestId; written.push(id); if (id === "fast") fastSeen(); };
+  async function* lines(): AsyncGenerator<string> {
+    yield `${JSON.stringify({ requestId: "slow", method: "engine.action", action: "slow", args: {} })}\n`;
+    yield `${JSON.stringify({ requestId: "fast", method: "engine.action", action: "fast", args: {} })}\n`;
+    // slow 尚未放行时 fast 必须先完成；旧串行实现会让这里永远等不到。
+    await fastWritten;
+    releaseSlow!();
+    yield `${JSON.stringify({ requestId: "close", method: "engine.shutdown" })}\n`;
+  }
+  await serveEngineRequests(engine, lines(), write);
+  expect(written[0]).toBe("fast");
+  expect(new Set(written)).toEqual(new Set(["fast", "slow", "close"]));
+});
+
+/** 对抗复现 18.5 分钟挂死档案：主控 prompt 永不返回时，方案检查仍必须立即得到
+ * 回答（不能再被挂死回合拖住），且用户停止必须耐久中断并关闭会话，无需杀 App。 */
+test("主控 prompt 永久挂起时方案检查仍立即响应，用户停止可耐久中断", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-wedged-prompt-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-wedged-project-")); roots.push(cwd);
+  let closed = false;
+  const session: HarnessSession = {
+    isRunning: true,
+    subscribe: () => () => {},
+    abort: () => {},
+    close: () => { closed = true; },
+    // 模型/CLI 无应答：promise 永不 settle，等同于档案中零事件的回合。
+    prompt: () => new Promise<string>(() => {}),
+  };
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), createHarnessSession: async () => session });
+  try {
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "写一篇小说" }) as { harness: { harnessRunId: string; status: string } };
+    expect(started.harness.status).toBe("running");
+    // 回合挂死期间：方案检查必须快速给出回答（此处为“主控必须空闲”的确定性拒绝），
+    // 而不是排队等待一个永不结束的 prompt。
+    const planStartedAt = Date.now();
+    await expect(engine.handleDesktopAction("executions.plan", { harnessRunId: started.harness.harnessRunId, revision: 1 })).rejects.toThrow("主控必须空闲");
+    expect(Date.now() - planStartedAt).toBeLessThan(2_000);
+    // 用户显式停止：耐久事实先落盘，再关闭会话；不依赖 provider 响应 AbortSignal。
+    const aborted = await engine.handleDesktopAction("harnesses.abort", { harnessRunId: started.harness.harnessRunId }) as { harness: { status: string } };
+    expect(aborted.harness.status).toBe("interrupted");
+    expect(closed).toBe(true);
+    // 中断后可继续发送新消息（Engine 未被挂死回合占用）。
+    await expect(engine.handleDesktopAction("harnesses.send", { harnessRunId: started.harness.harnessRunId, text: "继续" })).resolves.toBeDefined();
+  } finally { engine.shutdown(); }
 });

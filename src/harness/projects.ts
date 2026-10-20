@@ -19,7 +19,15 @@ export type HarnessProject = {
 
 /** 项目目录列表的私有 Store；不扫描磁盘，也不从 Harness cwd 反推项目。 */
 export class HarnessProjectStore {
+  /** 写临界区串行链：Engine stdin 派发为并发，读-改-写不串行会丢更新。 */
+  #writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly root = waveFlowHome()) {}
+  /** 串行化读-改-写临界区。 */
+  #writeLocked<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.#writes.then(operation, operation);
+    this.#writes = run.then(() => {}, () => {});
+    return run;
+  }
   async list(): Promise<readonly HarnessProject[]> {
     const value = await this.read();
     return [...value].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -27,13 +35,15 @@ export class HarnessProjectStore {
   /** 只接纳现有绝对目录，realpath后按cwd去重；文件或无效路径零落盘，不创建目录。 */
   async create(cwd: string, title?: string): Promise<HarnessProject> {
     const resolved = await validateProjectDirectory(cwd);
-    const projects = await this.read();
-    const existing = projects.find((project) => project.cwd === resolved);
-    if (existing) return existing;
-    const now = new Date().toISOString();
-    const project: HarnessProject = { projectId: crypto.randomUUID(), cwd: resolved, title: normalizeTitle(title, resolved), createdAt: now, updatedAt: now };
-    await this.write([...projects, project]);
-    return project;
+    return this.#writeLocked(async () => {
+      const projects = await this.read();
+      const existing = projects.find((project) => project.cwd === resolved);
+      if (existing) return existing;
+      const now = new Date().toISOString();
+      const project: HarnessProject = { projectId: crypto.randomUUID(), cwd: resolved, title: normalizeTitle(title, resolved), createdAt: now, updatedAt: now };
+      await this.write([...projects, project]);
+      return project;
+    });
   }
   async get(projectId: string): Promise<HarnessProject> {
     const project = (await this.read()).find((item) => item.projectId === projectId);
@@ -41,13 +51,15 @@ export class HarnessProjectStore {
     return project;
   }
   async touch(projectId: string): Promise<HarnessProject> {
-    const projects = await this.read();
-    const index = projects.findIndex((item) => item.projectId === projectId);
-    if (index < 0) throw new Error("未知项目。 ");
-    const project = { ...projects[index], updatedAt: new Date().toISOString() };
-    projects[index] = project;
-    await this.write(projects);
-    return project;
+    return this.#writeLocked(async () => {
+      const projects = await this.read();
+      const index = projects.findIndex((item) => item.projectId === projectId);
+      if (index < 0) throw new Error("未知项目。 ");
+      const project = { ...projects[index], updatedAt: new Date().toISOString() };
+      projects[index] = project;
+      await this.write(projects);
+      return project;
+    });
   }
   private path(): string { return join(this.root, "projects.json"); }
   private async read(): Promise<HarnessProject[]> {

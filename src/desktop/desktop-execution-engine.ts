@@ -437,6 +437,7 @@ export class DesktopExecutionEngine {
   /**
    * 自动扫描只发现、验证并保存候选，绝不写 selectedByCli。
    * 页面每次启动触发一次；单飞只合并同一时刻请求，不把失败当成默认项变更。
+   * 候选仍逐个验证（单候选各步已有超时）；并发派发后扫描不再阻塞其他请求。
    */
   private async scanCliRuntimes(value: unknown): Promise<ScanCliRuntimesResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "扫描本机 CLI 不接受请求字段。 ");

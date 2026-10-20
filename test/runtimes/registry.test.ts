@@ -184,3 +184,15 @@ describe("CliRuntimeRegistry", () => {
     await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
   });
 });
+
+/** 回归：Engine 派发与后台复验均为并发后，Registry 读-改-写必须串行，否则并发
+ * saveVerified 相互覆盖丢记录。 */
+test("并发 saveVerified 不丢更新", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-concurrent-")); roots.push(root);
+  const registry = new CliRuntimeRegistry(root);
+  const records = await Promise.all([...Array(8)].map((_, index) => kimiRecord(root, `kimi-${index}`)));
+  await Promise.all(records.map((item) => registry.saveVerified(item)));
+  const listed = await registry.list();
+  expect(listed.runtimes).toHaveLength(8);
+  expect(new Set(listed.runtimes.map((item) => item.runtimeId)).size).toBe(8);
+});

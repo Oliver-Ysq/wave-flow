@@ -37,13 +37,25 @@ export class AcpHarnessSession implements HarnessSession {
   /** initialize 协商后的图片能力；未协商返回 undefined，Engine 不得把未知当作支持。 */
   get promptImageCapable(): boolean | undefined { const image = this.#client.binding?.capabilities.promptCapabilities?.image; return image === undefined ? undefined : image === true; }
 
-  /** 提前完成 initialize 与 session/new；附件发送前的能力 fail closed 依赖它。 */
+  /** 提前完成 initialize 与 session/new；附件发送前的能力 fail closed 依赖它。
+   * 握手必须有界：附件路径在 Harness 生命周期锁内调用本方法，CLI 进程假死若无
+   * 超时会把锁永久挂住，该 Harness 后续所有 action 全部无响应。预算内失败即断开
+   * 并放行锁，用户可重试；回合 prompt 本身不受此预算限制。 */
   async prepare(): Promise<void> {
     if (this.#initialized) return;
     const controller = new AbortController();
-    await this.#client.initialize(controller.signal);
-    await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
-    this.#initialized = true;
+    // 测试注入的小预算走显式环境变量；生产路径永远使用默认 30s，不读取任何用户配置。
+    const override = Number(process.env.WF_HARNESS_PREPARE_BUDGET_MS);
+    const budget = Number.isFinite(override) && override > 0 ? override : 30_000;
+    const timer = setTimeout(() => controller.abort(), budget);
+    try {
+      await this.#client.initialize(controller.signal);
+      await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
+      this.#initialized = true;
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error(`主控 CLI 启动握手超过 ${Math.round(budget / 1000)} 秒未响应，已断开连接；请检查本机 CLI 状态后重试。 `);
+      throw error;
+    } finally { clearTimeout(timer); }
   }
 
   async prompt(text: string, attachments: readonly HarnessPromptAttachment[] = []): Promise<string> {

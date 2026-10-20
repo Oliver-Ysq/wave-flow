@@ -80,3 +80,19 @@ test("ACP tool_call / tool_call_update 归一化为结构化流事件，think �
     { type: "assistant_delta", delta: "完成" },
   ]);
 });
+
+/** 回归：附件路径在 Harness 生命周期锁内调用 prepare；CLI 假死若无超时会把锁永久
+ * 挂住，该 Harness 后续所有 action 无响应。握手必须在预算内断开并放行。 */
+test("主控 CLI 握手假死有界：prepare 超时断开而不是永久等待", async () => {
+  process.env.WF_HARNESS_PREPARE_BUDGET_MS = "100";
+  try {
+    const client = {
+      subscribe() { return () => {}; },
+      // initialize 永不主动返回，仅在调用方 abort 后 reject —— 模拟假死 CLI 进程。
+      initialize(signal: AbortSignal) { return new Promise((_resolve, reject) => { signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }); }); },
+      async createSession() {}, async prompt() {}, async cancel() {}, close() {},
+    } as unknown as AcpSessionClient;
+    const session = new AcpHarnessSession({ id: "codex-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "test", command: "fake", args: [], env: [] }, client);
+    await expect(session.prepare()).rejects.toThrow("未响应");
+  } finally { delete process.env.WF_HARNESS_PREPARE_BUDGET_MS; }
+});
