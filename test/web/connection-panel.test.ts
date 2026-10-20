@@ -12,13 +12,12 @@ test("退出确认锁定背景并默认聚焦取消，快捷键与菜单都进�
  expect(source).not.toContain('CmdOrMeta+Q');
  expect(source).toContain('matches!(event.id().as_ref(), "settings" | "shutdown")');
 });
-test("CLI安装项数量不冒充可用数量，默认与其他安装项显示真实验证状态",async()=>{
+test("每个 CLI 只展示一个安装，其余安装默认折叠并可查看真实验证状态",async()=>{
  const source=await Bun.file('src-tauri/web/src/App.tsx').text();
- expect(source).toContain('`${otherRuntimes.length} 个安装项`');
- expect(source).not.toContain('`${otherRuntimes.length} 个可用项`');
- expect(source).toContain('selected.status === "needs-revalidation"');
+ expect(source).toContain('runtime-badge');
+ expect(source).toContain('<summary>其他安装（');
  expect(source).toContain('runtime.status === "invalid"');
- expect(source).toContain('当前默认 CLI 暂不可用，请重新扫描或手动验证。');
+ expect(source).toContain('runtime.diagnostic &&');
 });
 test("手动CLI验证绑定当前输入，修改后清旧错误，关闭不冒充取消验证",async()=>{
  const source=await Bun.file('src-tauri/web/src/App.tsx').text();
@@ -76,8 +75,9 @@ test("设置与手动添加只锁定当前弹窗，支持Esc及原入口焦点�
 
 test("CLI设置默认项只在顶部展示，其他项保留技术详情与二次确认",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
- expect(source).toContain('const otherRuntimes = runtimeState.runtimes.filter(');
- expect(source).toContain('otherRuntimes.map');
+ expect(source).toContain('const preferredByCli = (() => {');
+ expect(source).toContain('runtimeState.selectedByCli?.[runtime.cli]');
+ expect(source).toContain('...otherRuntimes].map(runtimeRow)');
  expect(source).toContain('当前默认 CLI');
  expect(source).toContain('["cli", "CLI 设置"]');
  expect(source).toContain('<summary>技术信息</summary>');

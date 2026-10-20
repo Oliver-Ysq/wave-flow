@@ -858,7 +858,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-plan-status.accepted { background:var(--wf-success-wash); color:var(--wf-success); }
 .agent-workbench .wf-plan-status.rejected { background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
 .agent-workbench .wf-plan-goal { margin:8px 0 0; color:var(--wf-text-dim); font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
-.agent-workbench .wf-plan-label { color:var(--wf-accent); font-weight:600; }
+.agent-workbench .wf-plan-label { color:var(--wf-ink); font-weight:600; }
 .agent-workbench .wf-plan-preview { margin-top:10px; padding:10px 12px; border:1px solid var(--wf-line-soft); border-radius:9px; background:var(--wf-page); }
 .agent-workbench .wf-plan-preview ul { display:grid; gap:5px; margin:6px 0 0; padding:0; list-style:none; }
 .agent-workbench .wf-plan-preview li { display:flex; align-items:center; gap:10px; font-size:12px; }
@@ -950,17 +950,21 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-free-answer { display:grid; gap:8px; margin-top:8px; }
 .agent-workbench .wf-free-answer input { min-height:34px; padding:0 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-input); color:var(--wf-ink); font:12px ui-monospace, "SF Mono", Menlo, monospace; }
 
-/* 设置高度随窗口变化；空间不足640px时优先保证标题和关闭入口可见。 */
-/* 设置分区 / 原生选择器入口 / 可读性修复 */
-.agent-workbench .settings-panel { --settings-window-gap:56px; width:min(720px, 100%); height:max(640px, 80dvh); max-height:calc(100dvh - var(--settings-window-gap)); display:flex; flex-direction:column; overflow:hidden; }
-.agent-workbench .settings-panel > .connection-panel-head { flex-shrink:0; }
-.agent-workbench .settings-layout { display:grid; grid-template-columns:132px minmax(0,1fr); min-height:0; flex:1; }
-.agent-workbench .settings-nav { display:grid; align-content:start; gap:2px; padding:16px 10px; border-right:1px solid var(--wf-line-soft); }
-.agent-workbench .settings-nav button { padding:7px 10px; border:0; border-radius:8px; background:transparent; color:var(--wf-muted); font-size:12px; text-align:left; }
+/* 设置为独立视图而非浮层卡片：铺满窗口，左导航 + 可滚内容。 */
+.agent-workbench .settings-backdrop { padding:0; place-items:stretch; background:var(--wf-page); backdrop-filter:none; }
+.agent-workbench .settings-panel { --settings-window-gap:0px; width:100%; height:100dvh; max-height:none; display:flex; flex-direction:column; overflow:hidden; border:0; border-radius:0; box-shadow:none; background:var(--wf-page); }
+.agent-workbench .settings-panel > .connection-panel-head { flex-shrink:0; padding:44px 28px 20px; }
+.agent-workbench .settings-head { justify-content:flex-start; }
+.agent-workbench .settings-head-row { display:flex; align-items:center; gap:12px; }
+.agent-workbench .settings-close { flex:0 0 auto; min-height:28px; padding:4px 10px; border:1px solid var(--wf-line); border-radius:7px; background:transparent; color:var(--wf-muted); font-size:12px; cursor:pointer; }
+.agent-workbench .settings-close:hover { background:var(--wf-selected); color:var(--wf-text); }
+.agent-workbench .settings-layout { display:grid; grid-template-columns:200px minmax(0,1fr); min-height:0; flex:1; }
+.agent-workbench .settings-nav { display:grid; align-content:start; gap:2px; padding:20px 12px; border-right:1px solid var(--wf-line-soft); background:var(--wf-panel); }
+.agent-workbench .settings-nav button { padding:8px 12px; border:0; border-radius:8px; background:transparent; color:var(--wf-muted); font-size:13px; text-align:left; }
 .agent-workbench .settings-nav button:hover { background:var(--wf-selected); color:var(--wf-text); }
 .agent-workbench .settings-nav button.active { background:var(--wf-selected); color:var(--wf-text); font-weight:650; }
-.agent-workbench .settings-content { min-height:0; overflow-y:auto; scrollbar-gutter:stable; padding-bottom:10px; }
-.agent-workbench .settings-section { padding:18px 24px 22px; }
+.agent-workbench .settings-content { min-height:0; overflow-y:auto; scrollbar-gutter:stable; padding:0 36px 40px; }
+.agent-workbench .settings-section { max-width:760px; padding:24px 0 28px; }
 .agent-workbench .settings-section .runtime-status, .agent-workbench .settings-section .runtime-actions, .agent-workbench .settings-section .runtime-list { padding-left:0; padding-right:0; }
 .agent-workbench .settings-theme { display:flex; gap:18px; margin-top:12px; }
 .agent-workbench .settings-theme label { display:flex; align-items:center; gap:7px; color:var(--wf-text); font-size:12px; }
@@ -983,6 +987,22 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-copyable-path { display:flex; align-items:flex-start; gap:8px; margin-top:3px; }
 .agent-workbench .wf-copyable-path code { flex:1 1 auto; min-width:0; color:var(--wf-muted); font:10px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:normal; overflow-wrap:anywhere; }
 .agent-workbench .runtime-list .wf-copyable-path code { max-width:none; overflow:visible; text-overflow:unset; white-space:normal; }
+.agent-workbench .runtime-extras > summary { cursor:pointer; padding:4px 0; color:var(--wf-faint); font-size:10px; user-select:none; }
+.agent-workbench .runtime-extras > summary:hover { color:var(--wf-muted); }
+.agent-workbench .runtime-extras[open] > summary { margin-bottom:8px; }
+.agent-workbench .runtime-list { display:block; }
+.agent-workbench .runtime-list article { display:flex; align-items:flex-start; gap:12px; min-height:0; padding:12px 0; border:0; border-bottom:1px solid var(--wf-line-soft); border-radius:0; background:transparent; }
+.agent-workbench .runtime-list article:last-of-type { border-bottom:0; }
+.agent-workbench .runtime-list article.selected { border-color:var(--wf-line-soft); box-shadow:none; }
+.agent-workbench .runtime-icon { width:28px; height:28px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; border:1px solid var(--wf-line); border-radius:8px; background:var(--wf-panel-raised); color:var(--wf-muted); font-size:11px; font-weight:700; }
+.agent-workbench .runtime-badge { margin-left:6px; padding:1px 5px; border-radius:5px; background:var(--wf-success-wash); color:var(--wf-success); font-size:9px; font-style:normal; font-weight:650; }
+.agent-workbench .runtime-badge.warn { background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
+.agent-workbench .runtime-row-actions { margin-left:auto; display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+.agent-workbench .runtime-list article > .runtime-row-actions { flex:0 0 auto; }
+.agent-workbench .runtime-actions-group { display:flex; align-items:center; gap:8px; margin-left:auto; }
+.agent-workbench .settings-content > * { max-width:760px; }
+.agent-workbench .runtime-list strong { display:flex; align-items:center; gap:0; font-size:13px; }
+.agent-workbench .runtime-list small.runtime-version { font:11px ui-monospace, monospace; }
 .agent-workbench .runtime-status .wf-copyable-path code { color:var(--wf-muted); }
 .agent-workbench .wf-copyable-path button { flex:0 0 auto; padding:2px 8px; border:1px solid var(--wf-line); border-radius:6px; background:transparent; color:var(--wf-muted); font-size:10px; }
 .agent-workbench .wf-copyable-path button:hover { background:var(--wf-selected); color:var(--wf-text); }

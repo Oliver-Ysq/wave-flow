@@ -2399,7 +2399,7 @@ function RuntimeConnectionPanel({
   /** WKWebView 不支持 window.confirm；切换主控用两段式按钮确认，timer 只负责超时复位。 */
   const [confirmSwitchId, setConfirmSwitchId] = useState<string | null>(null);
   const confirmSwitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [section, setSection] = useState<SettingsSection>("cli");
+  const [section, setSection] = useState<SettingsSection>("general");
   const [engineStatus, setEngineStatus] =
     useState<DesktopStatusResponse | null>(null);
   const [engineStatusError, setEngineStatusError] = useState<string | null>(
@@ -2409,8 +2409,27 @@ function RuntimeConnectionPanel({
     runtimeState.runtimes.find(
       (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
     ) ?? null;
-  const otherRuntimes = runtimeState.runtimes.filter(
-    (runtime) => runtime.runtimeId !== selected?.runtimeId,
+  // 与 Orca 一致：每个 CLI 只呈现当前选中的那个安装，其余安装默认折叠。
+  const preferredByCli = (() => {
+    const byCli = new Map<CliRuntime["cli"], CliRuntime>();
+    for (const runtime of runtimeState.runtimes) {
+      const preferredId = runtimeState.selectedByCli?.[runtime.cli];
+      if (!byCli.has(runtime.cli) || runtime.runtimeId === preferredId)
+        byCli.set(runtime.cli, runtime);
+    }
+    return [...byCli.values()];
+  })();
+  const otherRuntimes = preferredByCli.filter(
+    (runtime) =>
+      runtime.runtimeId !== selected?.runtimeId &&
+      runtime.cli !== selected?.cli,
+  );
+  const shownIds = new Set([
+    ...(selected ? [selected.runtimeId] : []),
+    ...otherRuntimes.map((runtime) => runtime.runtimeId),
+  ]);
+  const extraRuntimes = runtimeState.runtimes.filter(
+    (runtime) => !shownIds.has(runtime.runtimeId),
   );
   const reloadRuntimes = useCallback(async () => {
     onRuntimeState(await api.cliRuntimes());
@@ -2486,98 +2505,98 @@ function RuntimeConnectionPanel({
     }
   }
 
+  const runtimeRow = (runtime: CliRuntime) => {
+    const isDefault = runtimeState.harnessRuntimeId === runtime.runtimeId;
+    const statusLabel =
+      runtime.status === "verified"
+        ? null
+        : runtime.status === "needs-revalidation"
+          ? "需重新验证"
+          : "验证失败";
+    return (
+      <article key={runtime.runtimeId} className={isDefault ? "selected" : ""}>
+        <span className={`runtime-icon ${runtime.cli}`} aria-hidden="true">
+          {runtime.cli === "codex" ? "C" : "K"}
+        </span>
+        <div>
+          <strong>
+            {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+            {isDefault && <em className="runtime-badge">默认</em>}
+            {statusLabel && <em className="runtime-badge warn">{statusLabel}</em>}
+          </strong>
+          <small className="runtime-version">{runtime.version}</small>
+          <details className="runtime-technical">
+            <summary>技术信息</summary>
+            <CopyablePath path={runtime.executablePath} />
+            <small>
+              adapter {runtime.verifiedAdapter.adapterId} ·{" "}
+              {runtime.verifiedAdapter.harnessTools ? "对话与执行" : "仅执行"}
+            </small>
+          </details>
+          {runtime.diagnostic && <p>{userFacingText(runtime.diagnostic)}</p>}
+        </div>
+        <div className="runtime-row-actions">
+          {isDefault ? null : runtime.status === "verified" &&
+            runtime.verifiedAdapter.harnessTools ? (
+            <button
+              className="button-secondary"
+              disabled={runtimeBusy}
+              onClick={() => void selectRuntime(runtime)}
+            >
+              {confirmSwitchId === runtime.runtimeId
+                ? "确认切换？"
+                : "设为默认"}
+            </button>
+          ) : (
+            <span className="runtime-passive">
+              {runtime.status === "needs-revalidation"
+                ? "需重新验证"
+                : runtime.status === "invalid"
+                  ? "验证失败"
+                  : "仅可用于执行"}
+            </span>
+          )}
+        </div>
+      </article>
+    );
+  };
+
   const cliContent = (
     <>
-      <section className="runtime-status" aria-live="polite">
-        {selected ? (
-          <>
-            <div
-              className={`status-mark ${selected.status === "verified" ? "verified" : ""}`}
-            >
-              {selected.status === "verified" ? "✓" : "!"}
-            </div>
-            <div>
-              <span>当前默认 CLI</span>
-              <strong>
-                {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
-              </strong>
-              <small className="runtime-version">{selected.version}</small>
-              <details className="runtime-technical">
-                <summary>技术信息</summary>
-                <CopyablePath path={selected.executablePath} />
-                <small>
-                  ACP adapter {selected.verifiedAdapter.adapterVersion}
-                </small>
-              </details>
-            </div>
-            <em>
-              {selected.status === "verified"
-                ? "已验证"
-                : selected.status === "needs-revalidation"
-                  ? "需重新验证"
-                  : "验证失败"}
-            </em>
-            {selected.status !== "verified" && (
-              <p role="alert">
-                {selected.diagnostic
-                  ? userFacingText(selected.diagnostic)
-                  : "当前默认 CLI 暂不可用，请重新扫描或手动验证。"}
-              </p>
-            )}
-          </>
-        ) : (
-          <>
-            <div className={`status-mark ${scanning ? "scanning" : ""}`}>
-              {scanning ? "···" : "◇"}
-            </div>
-            <div>
-              <span>
-                {scanning ? "正在检查本机 CLI" : "尚未设置 Wave Flow CLI"}
-              </span>
-              <strong>
-                {scanning ? "发现并验证可用候选" : "请选择一个已验证候选"}
-              </strong>
-              <small>
-                {scanning
-                  ? "正在安全验证 PATH 中的候选；不会修改默认项。"
-                  : "设置后才可进入工作台；手动添加不会自动设为默认。"}
-              </small>
-            </div>
-          </>
-        )}
-      </section>
       <section className="connection-form runtime-actions">
         <div className="section-row">
           <div>
-            <strong>{selected ? "其他 CLI 安装项" : "CLI 安装项"}</strong>
+            <strong>CLI</strong>
             <span>
               {selected
-                ? "切换 CLI 只影响新会话；正在处理的会话会阻止切换。"
+                ? "切换只影响新会话；正在处理的会话会阻止切换。"
                 : "从 PATH 自动发现，或手动添加一个绝对路径。"}
             </span>
           </div>
-          {!gateMode && (
+          <div className="runtime-actions-group">
+            {!gateMode && (
+              <button
+                className="button-secondary"
+                disabled={runtimeBusy || scanning}
+                onClick={() => void scan()}
+              >
+                {runtimeOperation === "scan" || scanning
+                  ? "正在扫描…"
+                  : "重新扫描"}
+              </button>
+            )}
             <button
-              className="button-secondary"
-              disabled={runtimeBusy || scanning}
-              onClick={() => void scan()}
+              className="button-secondary add-runtime"
+              disabled={runtimeBusy}
+              onClick={() => {
+                setManualError(null);
+                setManualOpen(true);
+              }}
             >
-              {runtimeOperation === "scan" || scanning
-                ? "正在扫描…"
-                : "重新扫描"}
+              手动添加
             </button>
-          )}
+          </div>
         </div>
-        <button
-          className="button-secondary add-runtime"
-          disabled={runtimeBusy}
-          onClick={() => {
-            setManualError(null);
-            setManualOpen(true);
-          }}
-        >
-          手动添加 CLI
-        </button>
         {!manualOpen && manualError && (
           <p role="alert" className="manual-validation-feedback">
             验证未通过：{manualError} 请重新打开手动添加，检查路径后重试。
@@ -2593,70 +2612,18 @@ function RuntimeConnectionPanel({
         )}
       </section>
       <section className="runtime-list">
-        <span className="list-caption">
-          {otherRuntimes.length
-            ? `${otherRuntimes.length} 个安装项`
-            : scanning
-              ? "正在验证候选…"
-              : selected
-                ? "没有其他可用 CLI，可重新扫描或手动添加。"
-                : "尚未发现可用 CLI"}
-        </span>
-        {otherRuntimes.map((runtime) => (
-          <article
-            key={runtime.runtimeId}
-            className={
-              runtimeState.harnessRuntimeId === runtime.runtimeId
-                ? "selected"
-                : ""
-            }
-          >
-            <div>
-              <strong>
-                {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
-              </strong>
-              <small className="runtime-version">
-                {runtime.version} ·{" "}
-                {discoveredFromLabel(runtime.discoveredFrom)}
-              </small>
-              <details className="runtime-technical">
-                <summary>技术信息</summary>
-                <CopyablePath path={runtime.executablePath} />
-                <small>
-                  adapter {runtime.verifiedAdapter.adapterId} ·{" "}
-                  {runtime.verifiedAdapter.harnessTools
-                    ? "对话与执行"
-                    : "仅执行"}
-                </small>
-              </details>
-              {runtime.diagnostic && (
-                <p>{userFacingText(runtime.diagnostic)}</p>
-              )}
-            </div>
-            {runtimeState.harnessRuntimeId === runtime.runtimeId ? (
-              <span className="runtime-selected">当前默认</span>
-            ) : runtime.status === "verified" &&
-              runtime.verifiedAdapter.harnessTools ? (
-              <button
-                className="button-primary"
-                disabled={runtimeBusy}
-                onClick={() => void selectRuntime(runtime)}
-              >
-                {confirmSwitchId === runtime.runtimeId
-                  ? "确认切换默认 CLI？"
-                  : "设为默认"}
-              </button>
-            ) : (
-              <span className="runtime-passive">
-                {runtime.status === "needs-revalidation"
-                  ? "需重新验证"
-                  : runtime.status === "invalid"
-                    ? "验证失败"
-                    : "仅可用于执行"}
-              </span>
-            )}
-          </article>
-        ))}
+        {!(selected || otherRuntimes.length) && (
+          <span className="list-caption">
+            {scanning ? "正在验证候选…" : "尚未发现可用 CLI"}
+          </span>
+        )}
+        {[...(selected ? [selected] : []), ...otherRuntimes].map(runtimeRow)}
+        {extraRuntimes.length > 0 && (
+          <details className="runtime-extras">
+            <summary>其他安装（{extraRuntimes.length}）</summary>
+            {extraRuntimes.map(runtimeRow)}
+          </details>
+        )}
       </section>
       {manualOpen && (
         <div
@@ -2801,19 +2768,17 @@ function RuntimeConnectionPanel({
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header className="connection-panel-head">
-          <div>
-            <span className="modal-kicker">Wave Flow</span>
+        <header className="connection-panel-head settings-head">
+          <div className="settings-head-row">
             <strong>设置</strong>
+            <button
+              className="settings-close"
+              type="button"
+              onClick={onClose}
+            >
+              返回工作台
+            </button>
           </div>
-          <button
-            className="modal-close"
-            type="button"
-            onClick={onClose}
-            aria-label="关闭设置"
-          >
-            ×
-          </button>
         </header>
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置分区">
