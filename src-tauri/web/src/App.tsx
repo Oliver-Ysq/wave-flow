@@ -2260,13 +2260,23 @@ function CopyablePath({ path }: { path: string }) {
   );
 }
 
+/** 扫描探测结论的中文文案；与 Engine 的 describeProbeStatus 同义，Web 侧不 import 服务端模块。 */
+const probeFailureLabels: Record<"absent" | "timeout" | "exec_failed" | "limit_reached", string> = {
+  absent: "未找到可执行文件",
+  timeout: "探测超时，无法确认是否已安装",
+  exec_failed: "程序无法运行（--version 失败）",
+  limit_reached: "候选过多且前几个都不可用",
+};
+
 /** 发现来源的中文文案。 */
 function discoveredFromLabel(from: CliRuntime["discoveredFrom"]): string {
   return from === "manual"
     ? "手动添加"
     : from === "gui-path"
       ? "从应用目录发现"
-      : "从终端 PATH 发现";
+      : from === "install-dir"
+        ? "从常见安装目录发现"
+        : "从终端 PATH 发现";
 }
 
 function RuntimeConnectionPanel({
@@ -2392,13 +2402,20 @@ function RuntimeConnectionPanel({
   useEffect(() => {
     if (manualError) manualErrorRef.current?.focus();
   }, [manualError]);
+  /** 上次扫描中未得到可用候选的 CLI 及探测结论；只影响说明文案。 */
+  const [scanFailures, setScanFailures] = useState<Partial<Record<"codex" | "kimi", "absent" | "timeout" | "exec_failed" | "limit_reached">>>({});
+  /** 扫描本身失败（Engine 不可达等）；与“某个 CLI 没探测到”分开呈现。 */
+  const [scanFailure, setScanFailure] = useState<string | null>(null);
   const [runtimeOperation, setRuntimeOperation] = useState<
-    "scan" | "validate" | "select" | null
+    "scan" | "validate" | "select" | "remove" | null
   >(null);
   const runtimeBusy = runtimeOperation !== null;
   /** WKWebView 不支持 window.confirm；切换主控用两段式按钮确认，timer 只负责超时复位。 */
   const [confirmSwitchId, setConfirmSwitchId] = useState<string | null>(null);
   const confirmSwitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 清理无效/多余安装同样用两段式确认，避免误删仍需复验的候选。 */
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const confirmRemoveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [section, setSection] = useState<SettingsSection>("general");
   const [engineStatus, setEngineStatus] =
     useState<DesktopStatusResponse | null>(null);
@@ -2449,13 +2466,19 @@ function RuntimeConnectionPanel({
   }, [section, loadEngineStatus]);
   async function scan() {
     // PATH 扫描护栏：进行中禁止重复触发；结果写回 App 级 runtimeState，
-    // 扫描期间切换分区不会丢弃返回结果。
+    // 扫描期间切换分区不会丢弃返回结果。探测结论单独展示，不能把
+    // “超时/无法运行”折叠成“没安装”。
     if (runtimeBusy || scanning) return;
     setRuntimeOperation("scan");
+    setScanFailure(null);
     try {
-      onRuntimeState((await api.scanCliRuntimes()).runtimes);
+      const result = await api.scanCliRuntimes();
+      setScanFailures(result.failures);
+      onRuntimeState(result.runtimes);
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setScanFailure(message);
+      onError(message);
     } finally {
       setRuntimeOperation(null);
     }
@@ -2499,13 +2522,37 @@ function RuntimeConnectionPanel({
       await api.selectCliRuntime(runtime.runtimeId);
       await reloadRuntimes();
     } catch (cause) {
+      // 选择失败可能同时把该安装耐久标为 needs-revalidation；刷新后让行状态与
+      // 拒绝原因一致，而不是继续显示“已验证”。
+      await reloadRuntimes().catch(() => {});
       onError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setRuntimeOperation(null);
     }
   }
 
-  const runtimeRow = (runtime: CliRuntime) => {
+  /** 清理多余或已失效的安装：只删除 Registry 记录，历史 Execution 自带 provenance。 */
+  async function removeRuntime(runtime: CliRuntime) {
+    if (runtimeBusy) return;
+    if (confirmRemoveId !== runtime.runtimeId) {
+      setConfirmRemoveId(runtime.runtimeId);
+      if (confirmRemoveTimer.current) clearTimeout(confirmRemoveTimer.current);
+      confirmRemoveTimer.current = setTimeout(() => setConfirmRemoveId(null), 4_000);
+      return;
+    }
+    setConfirmRemoveId(null);
+    setRuntimeOperation("remove");
+    try {
+      await api.deleteCliRuntime(runtime.runtimeId);
+      await reloadRuntimes();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRuntimeOperation(null);
+    }
+  }
+
+  const runtimeRow = (runtime: CliRuntime, removable = false) => {
     const isDefault = runtimeState.harnessRuntimeId === runtime.runtimeId;
     const statusLabel =
       runtime.status === "verified"
@@ -2556,6 +2603,16 @@ function RuntimeConnectionPanel({
                   : "仅可用于执行"}
             </span>
           )}
+          {removable && !isDefault && (
+            <button
+              className="button-secondary"
+              disabled={runtimeBusy}
+              onClick={() => void removeRuntime(runtime)}
+              aria-label={`移除 ${runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"} 安装 ${runtime.executablePath}`}
+            >
+              {confirmRemoveId === runtime.runtimeId ? "确认移除？" : "移除"}
+            </button>
+          )}
         </div>
       </article>
     );
@@ -2599,7 +2656,7 @@ function RuntimeConnectionPanel({
         </div>
         {!manualOpen && manualError && (
           <p role="alert" className="manual-validation-feedback">
-            验证未通过：{manualError} 请重新打开手动添加，检查路径后重试。
+            验证未通过：{manualError} 请重新打开「手动添加」修改后重试。
           </p>
         )}
         {!manualOpen && runtimeOperation === "validate" && (
@@ -2612,16 +2669,45 @@ function RuntimeConnectionPanel({
         )}
       </section>
       <section className="runtime-list">
-        {!(selected || otherRuntimes.length) && (
+        {scanFailure ? (
+          <div className="runtime-scan-failure" role="alert">
+            <span>无法完成 CLI 检测：{scanFailure}</span>
+            <button className="button-secondary" disabled={runtimeBusy} onClick={() => void scan()}>
+              重试检测
+            </button>
+          </div>
+        ) : !(selected || otherRuntimes.length) ? (
+          <div className="runtime-scan-empty">
+            <span>
+              {scanning || runtimeOperation === "scan"
+                ? "正在检测已安装的 CLI…"
+                : "未检测到本机 CLI。如果已安装仍未出现，可能是探测超时。"}
+            </span>
+            {!scanning && runtimeOperation !== "scan" && (
+              <button className="button-secondary" onClick={() => void scan()}>
+                重新检测
+              </button>
+            )}
+          </div>
+        ) : (
           <span className="list-caption">
-            {scanning ? "正在验证候选…" : "尚未发现可用 CLI"}
+            已检测到 {new Set(runtimeState.runtimes.filter((item) => item.status === "verified").map((item) => item.cli)).size} 个可用 CLI
           </span>
         )}
-        {[...(selected ? [selected] : []), ...otherRuntimes].map(runtimeRow)}
+        {(selected || otherRuntimes.length) && Object.keys(scanFailures).length > 0 && (
+          <ul className="runtime-scan-reasons">
+            {Object.entries(scanFailures).map(([cli, status]) => (
+              <li key={cli}>
+                {cli === "codex" ? "Codex CLI" : "Kimi CLI"}：{probeFailureLabels[status!]}
+              </li>
+            ))}
+          </ul>
+        )}
+        {[...(selected ? [selected] : []), ...otherRuntimes].map((runtime) => runtimeRow(runtime))}
         {extraRuntimes.length > 0 && (
           <details className="runtime-extras">
             <summary>其他安装（{extraRuntimes.length}）</summary>
-            {extraRuntimes.map(runtimeRow)}
+            {extraRuntimes.map((runtime) => runtimeRow(runtime, true))}
           </details>
         )}
       </section>
@@ -2678,8 +2764,14 @@ function RuntimeConnectionPanel({
                   disabled={runtimeBusy}
                   value={manualPath}
                   onChange={(event) => {
-                    setManualPath(event.target.value);
+                    const value = event.target.value;
+                    setManualPath(value);
                     setManualError(null);
+                    // 路径是事实、种类是意图：常见安装名直接跟随路径，避免用户把
+                    // Kimi 二进制留在“Codex CLI”选项上直到验证才失败。
+                    const base = value.trim().split("/").pop()?.toLowerCase() ?? "";
+                    if (base.includes("kimi")) setManualCli("kimi");
+                    else if (base.includes("codex")) setManualCli("codex");
                   }}
                   placeholder={
                     manualCli === "kimi"

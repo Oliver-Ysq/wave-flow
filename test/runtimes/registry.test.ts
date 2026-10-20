@@ -9,8 +9,8 @@ import { verifyExecutable } from "../../src/runtimes/identity";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
-async function record(root: string): Promise<CliRuntimeRecord> {
-  const executablePath = join(root, "codex"); await writeFile(executablePath, "#!/bin/sh\necho codex\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+async function record(root: string, name = "codex"): Promise<CliRuntimeRecord> {
+  const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho codex\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   return { runtimeId: crypto.randomUUID(), cli: "codex", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
@@ -80,15 +80,23 @@ describe("CliRuntimeRegistry", () => {
 
   test("主控可在空闲语义下切换到另一已验证 Runtime，同一选择幂等", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-switch-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const first = await registry.saveVerified(await record(root));
-    const secondPath = join(root, "second-codex"); await writeFile(secondPath, "#!/bin/sh\necho codex\n", { mode: 0o700 }); await chmod(secondPath, 0o700);
-    const executable = await verifyExecutable(secondPath);
-    const second = await registry.saveVerified({ ...(await record(root)), runtimeId: crypto.randomUUID(), executablePath: executable.executablePath, executableIdentity: executable.identity });
+    const registry = new CliRuntimeRegistry(root); const first = await registry.saveVerified(await record(root, "first-codex"));
+    const second = await registry.saveVerified({ ...(await record(root, "second-codex")), runtimeId: crypto.randomUUID() });
     await registry.select(first.runtimeId);
     await expect(registry.select(first.runtimeId)).resolves.toMatchObject({ runtimeId: first.runtimeId });
     await expect(registry.select(second.runtimeId)).resolves.toMatchObject({ runtimeId: second.runtimeId });
     await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: second.runtimeId });
     await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: second.runtimeId });
+  });
+
+  test("选择时复核安装文件：已删除的 CLI 拒绝设为默认并耐久标 needs-revalidation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-select-gone-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await record(root, "gone-codex"));
+    await rm(saved.executablePath, { force: true });
+    await expect(registry.select(saved.runtimeId)).rejects.toThrow("安装文件已被删除或修改");
+    const listed = await registry.list();
+    expect(listed.harnessRuntimeId).toBeNull();
+    expect(listed.runtimes.find(item => item.runtimeId === saved.runtimeId)?.status).toBe("needs-revalidation");
   });
 
   test("未声明 harnessTools 的 runtime 不能设为主控", async () => {

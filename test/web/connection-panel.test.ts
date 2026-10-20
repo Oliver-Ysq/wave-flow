@@ -22,14 +22,16 @@ test("每个 CLI 只展示一个安装，其余安装默认折叠并可查看真
 test("手动CLI验证绑定当前输入，修改后清旧错误，关闭不冒充取消验证",async()=>{
  const source=await Bun.file('src-tauri/web/src/App.tsx').text();
  expect(source).toContain('if (runtimeBusy || !manualPath.trim()) return');
- expect(source).toContain('setManualPath(event.target.value);\n                    setManualError(null);');
+ expect(source).toContain('setManualPath(value);\n                    setManualError(null);');
+ expect(source).toContain('if (base.includes("kimi")) setManualCli("kimi");');
+ expect(source).toContain('else if (base.includes("codex")) setManualCli("codex");');
  expect(source).toContain('关闭窗口不会取消验证');
  expect(source).toContain('{runtimeBusy ? "关闭窗口" : "取消"}');
  expect(source).toContain('manualErrorRef.current?.focus()');
  expect(source).toContain('ref={manualErrorRef}');
  expect(source).toContain('tabIndex={-1}');
  expect(source).toContain('!manualOpen && manualError');
- expect(source).toContain('请重新打开手动添加，检查路径后重试。');
+ expect(source).toContain('请重新打开「手动添加」修改后重试。');
  expect(source).toContain('onClick={() => setManualOpen(false)}');
  expect(source).toContain('setRuntimeOperation("validate");\n    setManualError(null);');
 });
@@ -77,12 +79,14 @@ test("CLI设置默认项只在顶部展示，其他项保留技术详情与二�
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
  expect(source).toContain('const preferredByCli = (() => {');
  expect(source).toContain('runtimeState.selectedByCli?.[runtime.cli]');
- expect(source).toContain('...otherRuntimes].map(runtimeRow)');
+ expect(source).toContain('...otherRuntimes].map((runtime) => runtimeRow(runtime))');
  expect(source).toContain('当前默认 CLI');
  expect(source).toContain('["cli", "CLI 设置"]');
  expect(source).toContain('<summary>技术信息</summary>');
  expect(source).toContain('confirmSwitchId !== runtime.runtimeId');
  expect(source).toContain('runtime.verifiedAdapter.harnessTools ? (');
+ expect(source).toContain('extraRuntimes.map((runtime) => runtimeRow(runtime, true))');
+ expect(source).toContain('confirmRemoveId === runtime.runtimeId ? "确认移除？" : "移除"');
 });
 
 test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅色表单", async () => {

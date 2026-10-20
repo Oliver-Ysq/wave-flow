@@ -25,6 +25,8 @@ import { CliRuntimeRegistry } from "../runtimes/registry";
 import type { CliRuntimeRecord, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
 import { validateCliRuntime } from "../runtimes/cli-runtime-validator";
+import { readCliVersion } from "../runtimes/cli-version";
+import { CLI_PROBE_LIMIT, probeFirstRunnable, type CliProbeStatus } from "../runtimes/cli-probe";
 import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
 import { AcpHarnessSession } from "../harness/acp-harness";
 import { resolveHarnessLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
@@ -87,7 +89,7 @@ export type DesktopExecutionEngineOptions = {
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
   /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
-  readonly validateCliRuntime?: (cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
+  readonly validateCliRuntime?: (cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
 };
 
 /**
@@ -438,6 +440,8 @@ export class DesktopExecutionEngine {
    * 自动扫描只发现、验证并保存候选，绝不写 selectedByCli。
    * 与 Orca 的 runnable-command 语义一致：每个 CLI 只取发现顺序中第一个可运行候选，
    * 不把机器上的每个安装都保存成并列选项；其他安装仍可由用户手动验证显式加入。
+   * 顺序也与之对齐：先用有界 `--version` 探测挑出可运行候选，再对它做一次完整 ACP 验证，
+   * 不让每个候选都承担一次握手；探测结论回传给 UI，不能把"没探测出来"说成"没安装"。
    * 页面每次启动触发一次；单飞只合并同一时刻请求，不把失败当成默认项变更。
    */
   private async scanCliRuntimes(value: unknown): Promise<ScanCliRuntimesResponse> {
@@ -445,16 +449,53 @@ export class DesktopExecutionEngine {
     if (!this.#runtimeScan) this.#runtimeScan = (async () => {
       const candidates = await this.discoverCliRuntimeCandidates();
       let verified = 0;
-      const resolved = new Set<RuntimeCli>();
-      for (const candidate of candidates) {
-        if (resolved.has(candidate.cli)) continue;
-        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate.cli, candidate)); verified += 1; resolved.add(candidate.cli); }
-        catch { /* 该候选不可用时继续尝试同 CLI 的下一个；细节不回显到 Web。 */ }
+      const failures: Partial<Record<RuntimeCli, CliProbeStatus>> = {};
+      for (const cli of ["codex", "kimi"] as const) {
+        const list = candidates.filter((candidate) => candidate.cli === cli);
+        if (list.length === 0) { failures[cli] = "absent"; continue; }
+        let offset = 0;
+        while (offset < list.length) {
+          const window = list.slice(offset, offset + CLI_PROBE_LIMIT);
+          const probe = await probeFirstRunnable(window.map((candidate) => candidate.executablePath));
+          // 探测只是排序与诊断：`--version` 跑不起来不等于 ACP 不可用（例如
+          // node 入口需要 Engine 解析的 node），因此探测无结论时仍对首个候选做一次
+          // 完整验证，失败再如实报告探测结论。
+          const candidate = probe.status === "available" && probe.binary
+            ? window.find((item) => item.executablePath === probe.binary) ?? window[0]!
+            : window[0]!;
+          try {
+            await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(cli, candidate));
+            verified += 1;
+            delete failures[cli];
+            break;
+          } catch {
+            // 探测无结论或 ACP 握手失败：继续验证后面的候选，失败原因留在 failures。
+            failures[cli] = probe.status === "available" ? "exec_failed" : probe.status;
+            offset = list.indexOf(candidate) + 1;
+          }
+        }
       }
-      return { discovered: candidates.length, verified, runtimes: await this.#cliRuntimes.list() };
+      return { discovered: candidates.length, verified, failures, runtimes: await this.#cliRuntimes.list() };
     })().finally(() => { this.#runtimeScan = null; });
     try { return await this.#runtimeScan; }
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /**
+   * 按可执行文件名与 `--version` 输出识别真实 CLI 种类。
+   * 用户手选的“CLI 种类”只是意图，路径才是事实：把 Kimi 二进制当 Codex 启动会得到
+   * 上游适配器的英文进程退出错误，正常用户无法自行判断。无法识别时返回 null，仍按用户选择验证。
+   */
+  private async detectCliKind(executablePath: string): Promise<RuntimeCli | null> {
+    const base = executablePath.split("/").pop()?.toLowerCase() ?? "";
+    if (base.includes("kimi")) return "kimi";
+    if (base.includes("codex")) return "codex";
+    try {
+      const version = (await readCliVersion(executablePath, "CLI")).toLowerCase();
+      if (version.includes("kimi")) return "kimi";
+      if (version.includes("codex")) return "codex";
+    } catch { /* 版本读不出来不是验证失败；继续按用户选择的种类验证。 */ }
+    return null;
   }
 
   /** 验证固定 adapter 与用户明确给出的绝对 CLI 路径；成功也不自动选为默认。 */
@@ -462,13 +503,22 @@ export class DesktopExecutionEngine {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string" || ((value as ValidateCliRuntimeRequest).cli !== "codex" && (value as ValidateCliRuntimeRequest).cli !== "kimi")) throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
     const request = value as ValidateCliRuntimeRequest;
     const discoveredFrom = request.discoveredFrom ?? "manual";
-    if (!["shell-path", "gui-path", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new EngineActionError(400, "CLI Runtime 验证来源无效。 ");
-    try {
-      const verified = await this.validateCliRuntimeCandidate(request.cli, { executablePath: request.executablePath, discoveredFrom, discoveredShell: request.discoveredShell ?? null });
-      const stored = await this.#cliRuntimes.saveVerified(verified); const { executableIdentity: _identity, ...runtime } = stored;
-      return { runtime };
-    } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    if (!["shell-path", "gui-path", "install-dir", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new EngineActionError(400, "CLI Runtime 验证来源无效。 ");
+    const detected = await this.detectCliKind(request.executablePath);
+    const other: RuntimeCli = request.cli === "codex" ? "kimi" : "codex";
+    // 已识别出真实种类时以它为准；识别不出但仍失败时再试另一种，避免用户被种类选择卡死。
+    const kinds: RuntimeCli[] = detected === request.cli ? [request.cli] : detected ? [detected, request.cli] : [request.cli, other];
+    let failure: unknown;
+    for (const cli of kinds) {
+      try {
+        const verified = await this.validateCliRuntimeCandidate(cli, { executablePath: request.executablePath, discoveredFrom, discoveredShell: request.discoveredShell ?? null });
+        const stored = await this.#cliRuntimes.saveVerified(verified); const { executableIdentity: _identity, ...runtime } = stored;
+        return { runtime };
+      } catch (error) { failure ??= error; }
+    }
+    throw new EngineActionError(400, describeCliValidationFailure(failure, request.cli));
   }
+
 
   /** 创建 Execution/Run 前的存在性预检：任一 cli 有已验证的 Worker 候选即可；逐节点仍按 cli fail closed。 */
   private async requireWorkerCandidate(): Promise<void> {
@@ -1216,8 +1266,7 @@ export async function inspectStoredRun(runId: string, storeRoot = runsRoot()): P
 
 class EngineActionError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
-function isEmptyObject(value: unknown): value is Record<string, never> {
-  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
+function isEmptyObject(value: unknown): value is Record<string, never> {  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
 }
 
 function isCreateRunRequest(value: unknown): value is CreateRunRequest {
@@ -1237,4 +1286,17 @@ function isPositiveInteger(value: unknown): value is number { return typeof valu
 
 function isLiveRunStatus(status: import("../runtime/run-types").RunStatus): boolean {
   return status === "running" || status === "pausing" || status === "paused" || status === "recovering";
+}
+
+/**
+ * 把手动验证时上游适配器的进程退出错误翻译成可操作的中文提示。
+ * 未知错误保持原文，避免用泛化文案抹掉真实诊断。
+ */
+function describeCliValidationFailure(error: unknown, requested: RuntimeCli): string {
+  const text = error instanceof Error ? error.message : String(error);
+  const exited = /process has exited with code (-?\d+)/i.exec(text);
+  if (!exited) return text;
+  if (/unknown command ['"`]?app-server/i.test(text)) return "这个程序不提供 Codex 的 ACP 入口（app-server），它不是 Codex CLI。请确认路径，或把 CLI 种类改为 Kimi CLI 后重试。";
+  const label = requested === "codex" ? "Codex" : "Kimi";
+  return `这个程序启动后立即退出（退出码 ${exited[1]}），无法建立 ACP 会话。请确认它是可用的 ${label} CLI，并在终端能直接运行。`;
 }

@@ -262,11 +262,11 @@ export type HarnessSnapshot = {
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
-export type CliRuntime = { runtimeId: string; cli: "codex" | "kimi"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
+export type CliRuntime = { runtimeId: string; cli: "codex" | "kimi"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
 export type CliRuntimeListResponse = { selectedByCli: Partial<Record<"codex" | "kimi", string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
 /** 启动自动扫描的无敏感信息摘要；成功项已保存但尚未被设为默认。 */
-export type ScanCliRuntimesResponse = { discovered: number; verified: number; runtimes: CliRuntimeListResponse };
-export type DiscoveredCliCandidate = { cli: "codex" | "kimi"; executablePath: string; discoveredFrom: "shell-path" | "gui-path"; discoveredShell: string | null; aliases: string[] };
+export type ScanCliRuntimesResponse = { discovered: number; verified: number; failures: Partial<Record<"codex" | "kimi", "absent" | "timeout" | "exec_failed" | "limit_reached">>; runtimes: CliRuntimeListResponse };
+export type DiscoveredCliCandidate = { cli: "codex" | "kimi"; executablePath: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir"; discoveredShell: string | null; aliases: string[] };
 /** 侧边栏耐久项目；项目提供 cwd，会话不再自行选择路径。 */
 export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
 export type HarnessProjectResponse = { project: HarnessProject };

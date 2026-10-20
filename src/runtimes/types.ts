@@ -2,7 +2,7 @@
 export type RuntimeCli = "codex" | "kimi";
 
 /** 发现候选时的来源；仅用于用户展示与审计，不保存 PATH 或 shell 环境。 */
-export type RuntimeDiscoverySource = "shell-path" | "gui-path" | "manual";
+export type RuntimeDiscoverySource = "shell-path" | "gui-path" | "install-dir" | "manual";
 
 /** 已保存 runtime 的可用性；只有 verified 可以被 Worker 使用。 */
 export type CliRuntimeStatus = "verified" | "needs-revalidation" | "invalid";
@@ -108,7 +108,7 @@ export type DiscoveredCliCandidate = {
   readonly cli: RuntimeCli;
   /** canonical realpath；重复 PATH 入口已经合并。 */
   readonly executablePath: string;
-  /** 候选来源。 */
+  /** 候选来源；`install-dir` 只在 login shell 与 GUI PATH 都没有该 CLI 时兜底。 */
   readonly discoveredFrom: Exclude<RuntimeDiscoverySource, "manual">;
   /** 发现 shell；GUI PATH 时为 null。 */
   readonly discoveredShell: string | null;

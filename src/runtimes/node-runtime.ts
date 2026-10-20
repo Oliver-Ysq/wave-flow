@@ -1,4 +1,6 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { systemCliInstallDirectories, versionManagerBinDirectories } from "./install-dirs";
 import { verifyExecutable, verifyExecutableIdentity } from "./identity";
 import type { ExecutableIdentity } from "./types";
 
@@ -19,9 +21,28 @@ export async function resolveNodeRuntime(shell: string | null): Promise<Verified
   const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
   clearTimeout(timer);
   const path = stdout.trim().split(/\r?\n/).find(line => line.startsWith("/"))?.trim();
-  if (code !== 0 || !path) throw new Error("无法解析 Codex CLI 所需的 node 解释器。 ");
-  const verified = await verifyExecutable(path);
-  return { executablePath: verified.executablePath, executableIdentity: verified.identity };
+  if (code === 0 && path) {
+    const verified = await verifyExecutable(path);
+    return { executablePath: verified.executablePath, executableIdentity: verified.identity };
+  }
+  // login shell 没给出 node 时按受控目录兜底：nvm 可能只由 GUI 环境注入，
+  // 从 Finder 启动的 App 两条 PATH 都不含它，Codex 会因此被判成不可用。
+  for (const candidate of await candidateNodePaths()) {
+    try { const verified = await verifyExecutable(candidate); return { executablePath: verified.executablePath, executableIdentity: verified.identity }; }
+    catch { /* 继续查下一个受控目录 */ }
+  }
+  throw new Error("无法解析 Codex CLI 所需的 node 解释器。 ");
+}
+
+/** 受控 node 候选：进程 PATH、系统安装目录与 nvm 版本目录，去重后逐个验证。 */
+async function candidateNodePaths(): Promise<readonly string[]> {
+  const home = process.env.HOME ?? homedir();
+  const directories = [
+    ...(process.env.PATH ?? "").split(":").filter(Boolean),
+    ...systemCliInstallDirectories(process.platform, home),
+    ...(home ? await versionManagerBinDirectories(home) : []),
+  ];
+  return [...new Set(directories)].map((directory) => join(directory.replace(/\/$/, ""), "node"));
 }
 
 /** 已存 node 依赖在每次启动前都要复核；路径漂移必须 fail closed。 */

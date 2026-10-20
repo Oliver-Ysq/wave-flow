@@ -2,6 +2,7 @@ import type { JsonObject } from "../shared/json";
 import type { HarnessSnapshot, WorkflowExecutionRecord } from "../harness/types";
 import type { HarnessProject } from "../harness/projects";
 import type { CliRuntimeView, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
+import type { CliProbeStatus } from "../runtimes/cli-probe";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
 
 /** 创建 Run 的 Desktop action 参数；Workflow 路径相对于 cwd 解析。 */
@@ -279,10 +280,12 @@ export type CliRuntimeListResponse = {
 export type DiscoverCliRuntimesResponse = { readonly candidates: readonly DiscoveredCliCandidate[] };
 /** 一次启动扫描的汇总；成功候选已完成完整 ACP 验证并写入 Registry，但绝不改变默认项。 */
 export type ScanCliRuntimesResponse = {
-  /** 本次从受控 PATH 发现的去重候选数。 */
+  /** 本次从受控 PATH 与常见安装目录发现的去重候选数。 */
   readonly discovered: number;
   /** 本次完整验证并保存成功的候选数。 */
   readonly verified: number;
+  /** 未得到可用候选的 CLI 及探测结论；`absent` 表示确实没找到，`timeout` 表示无法判断，不得当成未安装。 */
+  readonly failures: Partial<Record<RuntimeCli, CliProbeStatus>>;
   /** 当前安全可展示的 Runtime 列表；不含 PATH、环境或文件身份。 */
   readonly runtimes: CliRuntimeListResponse;
 };
@@ -292,7 +295,7 @@ export type ValidateCliRuntimeRequest = {
   readonly executablePath: string;
   /** 该路径声称的 CLI 种类；决定使用哪个内置 validator，不允许猜测。 */
   readonly cli: RuntimeCli;
-  readonly discoveredFrom?: "shell-path" | "gui-path" | "manual";
+  readonly discoveredFrom?: "shell-path" | "gui-path" | "install-dir" | "manual";
   readonly discoveredShell?: string | null;
 };
 /** 设置默认 Runtime 的响应。 */

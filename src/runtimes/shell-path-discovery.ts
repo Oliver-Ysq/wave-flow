@@ -1,5 +1,6 @@
 import { delimiter } from "node:path";
 import { verifyExecutable } from "./identity";
+import { systemCliInstallDirectories, versionManagerBinDirectories } from "./install-dirs";
 import type { DiscoveredCliCandidate, RuntimeCli } from "./types";
 
 /** 受控 shell discovery 的可替换执行器；测试无需启动真实 login shell。 */
@@ -7,15 +8,23 @@ export type ShellPathCommand = (shell: string, signal: AbortSignal) => Promise<{
 
 /** 只扫描用户明确触发的 PATH，绝不把完整 shell 环境返回或持久化。 */
 export class ShellPathDiscovery {
-  constructor(private readonly execute: ShellPathCommand = runShellPathCommand, private readonly guiPath: string | undefined = process.env.PATH) {}
+  constructor(
+    private readonly execute: ShellPathCommand = runShellPathCommand,
+    private readonly guiPath: string | undefined = process.env.PATH,
+    /** 兜底安装目录；测试注入固定列表，生产用本机常见安装目录 + nvm 版本目录。 */
+    private readonly installDirectories: () => Promise<readonly string[]> = defaultInstallDirectories,
+  ) {}
 
   async discover(): Promise<readonly DiscoveredCliCandidate[]> {
     if (process.platform === "win32") throw new Error("当前版本仅支持 macOS/Linux 的本机 CLI 扫描。 ");
-    const discovered: Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }> = [];
+    const discovered: Array<{ path: string; source: DiscoverySource; shell: string | null; cli: RuntimeCli }> = [];
     const shells = await candidateShells();
     for (const shell of shells) {
       try {
-        const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 5_000);
+        // 10 秒预算：加载 nvm/rvm/conda/gcloud 的 bash -ilc 在空闲时约 1 秒、
+        // 负载下可达 6-7 秒（Orca 对同一探针的实测结论）。预算过短会静默退回
+        // GUI PATH，表现为“终端里有的 CLI 扫不到”。
+        const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000);
         const result = await this.execute(shell, controller.signal); clearTimeout(timer);
         const extracted = extractPath(result.stdout);
         if (result.exitCode === 0 && extracted) discovered.push(...candidatePaths(extracted, "shell-path", shell));
@@ -23,9 +32,32 @@ export class ShellPathDiscovery {
       } catch { /* fallback to the next fixed shell; diagnostics remain intentionally non-sensitive. */ }
     }
     if (this.guiPath) discovered.push(...candidatePaths(this.guiPath, "gui-path", null));
-    return mergeCandidates(discovered);
+    const merged = await mergeCandidates(discovered);
+    return this.withInstallDirFallback(merged);
+  }
+
+  /**
+   * PATH 完全找不到某个 CLI 时，再按常见安装目录兜底。
+   * 语义移植自 Orca `detectCommandsInInstallDirs`（src/shared/local-agent-install-dir-detection.ts）：
+   * 只补缺失的 CLI，不改变已有候选顺序，也不把系统目录抬到用户 PATH 前面。
+   */
+  private async withInstallDirFallback(candidates: ReadonlyMap<string, DiscoveredCliCandidate>): Promise<readonly DiscoveredCliCandidate[]> {
+    const present = new Set([...candidates.values()].map((item) => item.cli));
+    const missing = (["codex", "kimi"] as const).filter((cli) => !present.has(cli));
+    if (missing.length === 0) return [...candidates.values()];
+    const directories = await this.installDirectories();
+    return [...(await mergeCandidates(directories.flatMap((directory) => missing.map((cli) => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source: "install-dir" as const, shell: null, cli }))), candidates)).values()];
   }
 }
+
+/** 生产兜底目录：常见安装位置在前，nvm 版本目录附后。 */
+async function defaultInstallDirectories(): Promise<readonly string[]> {
+  const home = process.env.HOME ?? "";
+  return [...systemCliInstallDirectories(process.platform, home), ...(home ? await versionManagerBinDirectories(home) : [])];
+}
+
+/** 内部候选来源；`install-dir` 只出现在 PATH 缺失后的兜底路径。 */
+type DiscoverySource = "shell-path" | "gui-path" | "install-dir";
 
 async function candidateShells(): Promise<readonly string[]> {
   const configured = process.env.SHELL?.startsWith("/") ? process.env.SHELL : null;
@@ -67,12 +99,12 @@ export function extractPath(output: string): string | null {
   return null;
 }
 
-function candidatePaths(pathValue: string, source: "shell-path" | "gui-path", shell: string | null): Array<{ path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }> {
+function candidatePaths(pathValue: string, source: DiscoverySource, shell: string | null): Array<{ path: string; source: DiscoverySource; shell: string | null; cli: RuntimeCli }> {
   return pathValue.split(delimiter).filter(Boolean).flatMap(directory => (["codex", "kimi"] as const).map(cli => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source, shell, cli }))).filter(item => item.path.startsWith("/"));
 }
 
-async function mergeCandidates(items: readonly { path: string; source: "shell-path" | "gui-path"; shell: string | null; cli: RuntimeCli }[]): Promise<readonly DiscoveredCliCandidate[]> {
-  const result = new Map<string, DiscoveredCliCandidate>();
+async function mergeCandidates(items: readonly { path: string; source: DiscoverySource; shell: string | null; cli: RuntimeCli }[], seed: ReadonlyMap<string, DiscoveredCliCandidate> = new Map()): Promise<Map<string, DiscoveredCliCandidate>> {
+  const result = new Map(seed);
   for (const item of items) {
     try {
       const verified = await verifyExecutable(item.path); const canonical = verified.executablePath;
@@ -85,5 +117,5 @@ async function mergeCandidates(items: readonly { path: string; source: "shell-pa
       result.set(key, existing ? { ...existing, aliases } : { cli, executablePath: canonical, discoveredFrom: item.source, discoveredShell: item.shell, aliases });
     } catch { /* PATH entries are only candidates; absence/non-executable is normal. */ }
   }
-  return [...result.values()];
+  return result;
 }

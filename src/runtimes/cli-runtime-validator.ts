@@ -28,7 +28,7 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
   const executable = await verifyExecutable(input.executablePath);
   const pinnedNode = input.nodeExecutablePath ? await verifyExecutable(input.nodeExecutablePath) : null;
   const node = entry.requiresNodeRuntime ? pinnedNode ? {executablePath:pinnedNode.executablePath,executableIdentity:pinnedNode.identity} : await resolveNodeRuntime(input.discoveredShell) : null;
-  const version = await readCliVersion(executable.executablePath, entry.displayName, node ? dirname(node.executablePath) : undefined);
+  const version = await readCliVersion(executable.executablePath, entry.displayName, node ? [dirname(node.executablePath)] : []);
   const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-validate-"));
   try {
     const runtime = {
