@@ -15,6 +15,14 @@ async function main(): Promise<void> {
   process.env.WF_DESKTOP_ENGINE = "1";
   const deterministicForTest = process.env.WF_ENGINE_DETERMINISTIC === "1";
   const engine = new DesktopExecutionEngine({ deterministicForTest });
+  // 父进程存活看门狗。控制流逐行移植自 Orca `installDevParentWatchdog`
+  // （src/main/startup/configure-process.ts）；生产适用性对应
+  // provider-process-supervisor.ts 的 ownerGone 检查（reparent 可能落在
+  // PID 1 或 subreaper，任何其他父进程都表示 owner 已消失）。
+  const stopParentWatchdog = installParentWatchdog(() => {
+    engine.shutdown();
+    process.exit(0);
+  });
   // Engine 进程重启时绝不认领旧 ACP session。必须在接受任何新 action 前将
   // 上一个进程遗留的活跃事实收敛，避免 UI 短暂展示一个实际上无人持有的 Worker。
   await engine.convergeStaleAcpWorkers();
@@ -41,11 +49,42 @@ async function main(): Promise<void> {
     // 不再阻塞后续请求，shutdown 时排空在途请求后退出。
     await serveEngineRequests(engine, lines(), write);
   } finally {
+    stopParentWatchdog();
     engine.shutdown();
   }
 }
 
 function write(value: unknown): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
+
+/**
+ * 父进程存活看门狗：逐行移植 Orca `installDevParentWatchdog`
+ * （src/main/startup/configure-process.ts）。每秒检查 ppid 是否变化，并用
+ * `kill(pid, 0)` 的 ESRCH 判断父进程是否消失；未知错误按 Orca 的做法重新抛出。
+ * 返回清理函数，正常退出时移除定时器。
+ */
+function installParentWatchdog(onParentGone: () => void): () => void {
+  const initialParentPid = process.ppid;
+  if (!Number.isInteger(initialParentPid) || initialParentPid <= 1) return () => {};
+  const timer = setInterval(() => {
+    const parentPidChanged = process.ppid !== initialParentPid;
+    let parentMissing = false;
+    try {
+      process.kill(initialParentPid, 0);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH") {
+        parentMissing = true;
+      } else {
+        throw error;
+      }
+    }
+    if (parentPidChanged || parentMissing) {
+      clearInterval(timer);
+      onParentGone();
+    }
+  }, 1_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
 
 /** 打包后的 Worker MCP 也必须由 Engine binary 启动，不能回退到任何旧控制面入口。 */
 process.env.WF_DESKTOP_ENGINE = "1";

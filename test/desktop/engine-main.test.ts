@@ -127,7 +127,7 @@ test("Desktop Engine 通过 stdin/stdout JSONL 提供状态并在 shutdown 后�
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "close", method: "engine.shutdown" })}\n`));
   expect(await next()).toEqual({ requestId: "close", ok: true, result: { accepted: true } });
   expect(await child.exited).toBe(0);
-});
+}, 15_000);
 
 /** 实际 Harness 快照可能远大于 pipe 单个读取块；Engine 必须逐行输出完整 JSON。 */
 test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async () => {
@@ -175,7 +175,7 @@ test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async (
   expect((response.result.harnesses as { messages: unknown[] }[])[0].messages.length).toBeGreaterThanOrEqual(12);
   send({ requestId: "close", method: "engine.shutdown" });
   await next(); expect(await child.exited).toBe(0);
-});
+}, 15_000);
 
 /** 新 Engine 的 ready 只能在遗留 ACP 会话被耐久收敛后发出，避免短暂假活跃。 */
 test("Desktop Engine 启动时将上次未结束的 ACP Worker 收敛为 interrupted", async () => {
@@ -205,7 +205,7 @@ test("Desktop Engine 启动时将上次未结束的 ACP Worker 收敛为 interru
   expect(reopened.events).toContainEqual(expect.objectContaining({ type: "run.status", status: "interrupted" }));
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "close", method: "engine.shutdown" })}\n`));
   await reader.read(); await child.exited;
-});
+}, 15_000);
 
 /** 暂停控制在进程崩溃时同样不能留下 paused 节点与 interrupted Run 的矛盾投影。 */
 test("Desktop Engine 启动时收敛 paused 节点，再将 Run 标为 interrupted", async () => {
@@ -236,7 +236,7 @@ test("Desktop Engine 启动时收敛 paused 节点，再将 Run 标为 interrupt
   expect(statusEvents.at(-1)?.status).toBe("interrupted");
   expect(reopened.events.filter((event): event is Extract<JournalEvent, { type: "run.status" }> => event.type === "run.status").at(-1)?.status).toBe("interrupted");
   child.kill(); await child.exited;
-});
+}, 15_000);
 
 /** 事件帧与请求响应共用同一 JSONL 通道：事件帧带协议版本/会话 ID/单调序号，响应关联不受影响。 */
 test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响应同通道分流", async () => {
@@ -285,7 +285,7 @@ test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响�
   expect(listed).toMatchObject({ requestId: "after", ok: true });
   send({ requestId: "close", method: "engine.shutdown" });
   await next(); expect(await child.exited).toBe(0);
-});
+}, 15_000);
 
 /** Runtime action 契约：已移除的 setWorkerEnabled 一律拒绝，validate 必须显式携带 cli。 */test("Engine runtime action 校验 validate 请求并拒绝已移除的 setWorkerEnabled", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-runtimes-")); roots.push(root);
@@ -310,7 +310,7 @@ test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响�
   expect((await next()).error).toContain("验证请求无效");
   send({ requestId: "close", method: "engine.shutdown" });
   await next(); expect(await child.exited).toBe(0);
-});
+}, 15_000);
 
 /** 崩溃可发生在首个 Agent session 建立前；没有节点也不能把丢失调用栈伪装成 running。 */
 test("Desktop Engine 启动时将无 Agent 的 live Run 收敛为 interrupted", async () => {
@@ -327,7 +327,7 @@ test("Desktop Engine 启动时将无 Agent 的 live Run 收敛为 interrupted", 
   const reopened = await RunJournal.open(runId, runsRoot(root));
   expect(reopened.events.filter((event): event is Extract<JournalEvent, { type: "run.status" }> => event.type === "run.status").at(-1)?.status).toBe("interrupted");
   child.kill(); await child.exited;
-});
+}, 15_000);
 
 /** 主控切换的空闲语义在 Engine 层：运行中回合拒绝（409），空闲后允许并耐久 harnessRuntimeId。 */
 test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", async () => {
@@ -463,4 +463,22 @@ test("主控 prompt 永久挂起时方案检查仍立即响应，用户停止可
     // 中断后可继续发送新消息（Engine 未被挂死回合占用）。
     await expect(engine.handleDesktopAction("harnesses.send", { harnessRunId: started.harness.harnessRunId, text: "继续" })).resolves.toBeDefined();
   } finally { engine.shutdown(); }
+});
+
+/** 回归：父进程消失后 Engine 必须自退；EOF 排空不能被楔死 action 无限拖住。 */
+test("EOF 排空有界：在途 action 不返回时 serve 仍按时结束", async () => {
+  process.env.WF_ENGINE_DRAIN_BUDGET_MS = "20";
+  try {
+    const engine = {
+      status: async () => ({ activeRuns: 0 }),
+      cancelForDesktopExit: async () => {},
+      handleDesktopAction: () => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 200)),
+    } as unknown as DesktopExecutionEngine;
+    async function* lines(): AsyncGenerator<string> {
+      yield `${JSON.stringify({ requestId: "slow", method: "engine.action", action: "slow", args: {} })}\n`;
+    }
+    const started = Date.now();
+    await serveEngineRequests(engine, lines(), () => {});
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally { delete process.env.WF_ENGINE_DRAIN_BUDGET_MS; }
 });

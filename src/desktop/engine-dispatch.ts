@@ -42,7 +42,17 @@ export async function serveEngineRequests(engine: DesktopExecutionEngine, lines:
       if (requestMethod(line) === "engine.shutdown" && (await task).ok) break;
     }
   } finally {
-    await Promise.allSettled([...inFlight]);
+    // 排空有界：父进程已消失或 action 楔死时，无限等待会让 Engine 永久驻留。
+    // 取值对齐 Orca provider supervisor 的 stdin 结束宽限（1 秒）；测试用环境变量覆盖。
+    const override = Number(process.env.WF_ENGINE_DRAIN_BUDGET_MS);
+    const budget = Number.isFinite(override) && override > 0 ? override : 1_000;
+    let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    await Promise.race([
+      Promise.allSettled([...inFlight]),
+      new Promise<void>((resolve) => { drainTimer = setTimeout(resolve, budget); }),
+    ]);
+    // 排空正常完成时清除兜底定时器，否则待触发的 5 秒定时器会拖住进程退出。
+    if (drainTimer) clearTimeout(drainTimer);
   }
 }
 
