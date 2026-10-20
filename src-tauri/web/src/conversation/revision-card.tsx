@@ -107,8 +107,8 @@ export function WorkflowRevisionCard({
           {status}
         </em>
       </div>
-      {!hideGoal&&<p className="wf-plan-goal">{revision.goal ?? "历史方案未保存独立目标"}</p>}
-      <p className="wf-plan-scope">{revision.scope ?? "历史方案未保存独立范围"}</p>
+      {!hideGoal&&<p className="wf-plan-goal"><span className="wf-plan-label">目标：</span>{revision.goal ?? "历史方案未保存独立目标"}</p>}
+      <p className="wf-plan-scope"><span className="wf-plan-label">范围：</span>{revision.scope ?? "历史方案未保存独立范围"}</p>
       {canReviseTemplate&&onSaved&&<button disabled={saving} onClick={()=>void prepareParameters().catch(error=>setTransferError(String(error)))}>准备参数新版本</button>}
       {harness.task?.workflowContract==="single-workflow-v1"&&harness.status==="idle"&&!revision.localOrigin&&latest?.revision===revision.revision&&harness.executions.some(item=>item.revision===revision.revision)&&!harness.executions.some(item=>item.finishedAt===null)&&onSaved&&<button disabled={saving} onClick={()=>{setSaving(true);const payload=`config:${revision.revision}`;if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};void api.prepareConfigurationRevision(harness.harnessRunId,revision.revision,saveRequest.current.id).then(result=>onSaved(result.harness)).catch(error=>setTransferError(String(error))).finally(()=>setSaving(false));}}>保留源码，准备 CLI 配置新版本</button>}
       {revision.localOrigin&&<><p>本地来源：{revision.localOrigin.path}</p><p>参数与源码已锁定；编辑文件后须重新预检。</p><pre>{JSON.stringify(revision.input,null,2)}</pre>{harness.status==="idle"&&!harness.executions.some(item=>item.finishedAt===null)&&latest?.revision===revision.revision&&onLocalRevision&&<button type="button" disabled={saving} onClick={onLocalRevision}>重新预检并准备新版本</button>}{transferError&&<p role="alert">{transferError}</p>}</>}

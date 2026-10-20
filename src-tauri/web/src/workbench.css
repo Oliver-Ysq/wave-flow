@@ -857,7 +857,8 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-plan-status.pending { background:color-mix(in srgb, var(--wf-wait) 18%, transparent); color:var(--wf-wait); }
 .agent-workbench .wf-plan-status.accepted { background:var(--wf-success-wash); color:var(--wf-success); }
 .agent-workbench .wf-plan-status.rejected { background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
-.agent-workbench .wf-plan-goal { margin:8px 0 0; color:var(--wf-text); font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+.agent-workbench .wf-plan-goal { margin:8px 0 0; color:var(--wf-text-dim); font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+.agent-workbench .wf-plan-label { color:var(--wf-accent); font-weight:600; }
 .agent-workbench .wf-plan-preview { margin-top:10px; padding:10px 12px; border:1px solid var(--wf-line-soft); border-radius:9px; background:var(--wf-page); }
 .agent-workbench .wf-plan-preview ul { display:grid; gap:5px; margin:6px 0 0; padding:0; list-style:none; }
 .agent-workbench .wf-plan-preview li { display:flex; align-items:center; gap:10px; font-size:12px; }
@@ -1034,7 +1035,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .central-plan .wf-plan-head { margin-bottom:8px; }
 .agent-workbench .central-plan .wf-plan-status { font-size:12px; font-weight:500; color:var(--wf-muted); background:var(--wf-panel-raised); }
 .agent-workbench .central-plan .wf-plan-status { margin-left:auto; }
-.agent-workbench .central-plan .wf-plan-goal { margin:18px 0 6px; font-size:18px; color:var(--wf-ink); font-weight:600; }
+.agent-workbench .central-plan .wf-plan-goal { margin:18px 0 6px; font-size:14px; color:var(--wf-muted); }
 .agent-workbench .central-plan .wf-plan-scope { margin:0; font-size:14px; line-height:1.7; color:var(--wf-muted); }
 .agent-workbench .wf-declared-phases,.agent-workbench .central-plan .wf-plan-preview { margin-top:26px; padding:22px 0 0; border:0; border-top:1px solid var(--wf-line); border-radius:0; background:transparent; }
 .agent-workbench .wf-declared-phases h3,.agent-workbench .central-plan .wf-plan-preview > h3 { margin:0 0 14px; font-size:14px; color:var(--wf-ink); font-weight:650; }
