@@ -436,17 +436,20 @@ export class DesktopExecutionEngine {
 
   /**
    * 自动扫描只发现、验证并保存候选，绝不写 selectedByCli。
+   * 与 Orca 的 runnable-command 语义一致：每个 CLI 只取发现顺序中第一个可运行候选，
+   * 不把机器上的每个安装都保存成并列选项；其他安装仍可由用户手动验证显式加入。
    * 页面每次启动触发一次；单飞只合并同一时刻请求，不把失败当成默认项变更。
-   * 候选仍逐个验证（单候选各步已有超时）；并发派发后扫描不再阻塞其他请求。
    */
   private async scanCliRuntimes(value: unknown): Promise<ScanCliRuntimesResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "扫描本机 CLI 不接受请求字段。 ");
     if (!this.#runtimeScan) this.#runtimeScan = (async () => {
       const candidates = await this.discoverCliRuntimeCandidates();
       let verified = 0;
+      const resolved = new Set<RuntimeCli>();
       for (const candidate of candidates) {
-        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate.cli, candidate)); verified += 1; }
-        catch { /* 单个 PATH 条目损坏/未登录不阻塞其余候选；细节不回显到 Web。 */ }
+        if (resolved.has(candidate.cli)) continue;
+        try { await this.#cliRuntimes.saveVerified(await this.validateCliRuntimeCandidate(candidate.cli, candidate)); verified += 1; resolved.add(candidate.cli); }
+        catch { /* 该候选不可用时继续尝试同 CLI 的下一个；细节不回显到 Web。 */ }
       }
       return { discovered: candidates.length, verified, runtimes: await this.#cliRuntimes.list() };
     })().finally(() => { this.#runtimeScan = null; });
