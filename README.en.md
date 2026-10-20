@@ -15,7 +15,7 @@ For example: “Review this project, have another agent independently verify the
 With Wave Flow, you can:
 
 1. **Review before you run.** Generate and refine workflows through conversation, or start with the built-in read-only code review preset.
-2. **Follow work by stage.** A Phase → Worker view shows the division of work, each agent's state, streamed text, and tool activity.
+2. **Follow work by stage.** A phase → executor view shows the division of work, each agent's state, streamed text, and tool activity.
 3. **Step in when needed.** Agents explicitly request human assistance. Your answer supplies information; the original agent confirms continuation. You can also pause or stop execution.
 4. **Inspect what happened.** Browse structured deliverables and historical attempts. Recover interrupted work explicitly—never through a silent rerun.
 
@@ -45,13 +45,13 @@ Adjust proposals through conversation and retain each revision. Discarding a pro
 
 - **Broad, evidence-driven exploration: technical research and large-scale code review.** Let multiple CLIs explore different directions, then verify and compare findings to reduce omissions and bias from a single model or Harness.
 - **Structured delivery: requirements → implementation → self-testing → code review.** Put handoffs and verification into the workflow, with distinct development and review roles—not only into a long prompt.
-- **Repetitive work with shared standards: dependency upgrades, API migrations, and cross-module cleanup.** Split work by module, handle non-conflicting parts independently, then verify and review consistently. Parallel writes remain subject to the path constraints below.
+- **Repetitive work with shared standards: dependency upgrades, API migrations, and cross-module cleanup.** Split work by module, handle non-conflicting parts independently, then verify and review consistently. Parallel writes use independent worktrees; conflicts require explicit integration.
 
 ## Quick start
 
-Open the desktop app and choose a project, then select automatic orchestration, a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start.
+Open the desktop app and choose a project, then describe the goal directly, or choose a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start.
 
-After the impact summary is complete, revise generated proposals through chat, prepare a template parameter version, or edit and recheck a local file. For CLI-only changes, choose “Keep source, prepare a new CLI configuration version.” Write revisions explicitly continue saved workspaces; independent branches require integration. New Executions work anew, and archived Tasks remain read-only.
+After the execution summary is complete, revise generated proposals through chat, prepare a template parameter version, or edit and recheck a local file. For CLI-only changes, choose “Keep source, prepare a new CLI configuration version.” Write revisions explicitly continue saved workspaces; independent branches require integration. New Executions work anew, and archived Tasks remain read-only.
 
 ## Current boundaries
 
@@ -63,7 +63,7 @@ Wave Flow is in early development. Please keep these limits in mind:
 - Revised execution requires complete impact summaries, current-scene supplements and verified writer handoffs. Every actual node in a new Execution works anew; completed results are not cached across Executions. New Tasks use one evolving chain; old multi-card records are not automatically migrated. Archived Tasks are read-only.
 - Interrupted execution recovery only reuses strictly matching completed prefixes within the same execution. It does not roll back files or undo external effects.
 - Worker stall handling records a diagnostic and interrupts after five minutes without native session events; it does not automatically resend tasks. Human-input waits, user pauses and control operations are exempt. Silence and read-only intent do not establish the absence of side effects.
-- Original-version recovery requires a complete impact summary and scene checks. Changed Git evidence requires a separate supplement and renewed confirmation. Unresolved writer handoffs, unsaved changes or inconsistent saved results block recovery without rolling back files; Git fingerprints do not establish external-system state.
+- Original-version recovery requires a complete execution summary and scene checks. Changed Git evidence requires a separate supplement and renewed confirmation. Unresolved writer handoffs, unsaved changes or inconsistent saved results block recovery without rolling back files; Git fingerprints do not establish external-system state.
 - If business execution completed but final Git source persistence failed, explicitly retry the Git handoff without rerunning business Workers. An unverified writer exit still prevents handoff.
 - The workbench and execution engine run locally. Model requests still go to the provider used by your chosen CLI; local execution does not mean offline inference or that data never leaves your machine.
 
