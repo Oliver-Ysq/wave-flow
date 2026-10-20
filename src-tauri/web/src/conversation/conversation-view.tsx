@@ -103,7 +103,7 @@ function BodyBlock({ entry, continuation = false }: { entry: HarnessBodyEntry; c
       data-read-identity={entry.completed ? `body:${entry.entryId}` : undefined}
       className={`chat-message assistant wf-body ${streaming ? "streaming" : ""} ${continuation ? "wf-body-continuation" : ""}`}
     >
-      <div className="chat-avatar" aria-hidden={continuation || undefined}>W</div>
+      <div className="chat-avatar" aria-hidden={continuation || undefined}>V</div>
       <div>
         {!continuation && <span>Wave Flow</span>}
         {entry.legacy ? (
@@ -163,11 +163,11 @@ function ConversationTurnView({
     if(item.kind==='body'){const continuation=bodySeen;bodySeen=true;return {key:`entry:${item.entryId}`,at:item.startedAt,content:<BodyBlock entry={item} continuation={continuation}/>};}
     return {key:`entry:${item.entryId}`,at:item.startedAt,content:item.kind==='thought'?<ThoughtBlock entry={item}/>:<ToolBlock entry={item}/>};
   });
-  if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">W</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(harness.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><HarnessToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
+  if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">V</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(harness.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><HarnessToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
   return (
     <Fragment>
       {!turn.user.summaryKey&&<article className="chat-message user">
-        <div className="chat-avatar">{turn.user.summaryKey?"W":"你"}</div>
+        <div className="chat-avatar">{turn.user.summaryKey?"V":"你"}</div>
         <div>
           <span>{turn.user.summaryKey?"系统 · 执行总结":"你"}</span>
           <p>{turn.user.text}</p>

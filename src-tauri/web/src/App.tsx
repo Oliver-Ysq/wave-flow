@@ -1145,7 +1145,7 @@ export function App() {
       <aside id="task-navigation" ref={navigationPanel} className="task-rail">
         <header>
           <div className="brand">
-            <span className="brand-mark">W</span>
+            <span className="brand-mark">V</span>
             <div>
               <strong>Wave Flow</strong>
               <span>本地 AI 工作台</span>
