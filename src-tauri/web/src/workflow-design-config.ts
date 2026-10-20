@@ -29,7 +29,7 @@ export class WorkspaceConfirmationCache {
     if(continuation){
       const ids=new Set(value.bindings.map(binding=>binding.workspaceId));
       const selected=continuation.workspaces.filter(item=>ids.has(item.workspaceId));
-      if(!selected.length)throw new Error("请明确选择至少一份原保存现场，不能从历史基准重做并丢弃已有改动。");
+      if(!selected.length)throw new Error("请明确选择至少一份已保存的改动，不能从历史基准重做并丢弃已有改动。");
       value.continuation={executionId:continuation.executionId,heads:continuation.workspaces.map(item=>({workspaceId:item.workspaceId,commit:item.commit}))};
     }
     this.requests.set(key,value);return structuredClone(value);

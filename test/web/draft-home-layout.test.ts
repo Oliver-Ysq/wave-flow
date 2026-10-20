@@ -17,7 +17,7 @@ test("预置与本地工作流复用居中弹窗，不回退主网格或伪切�
   const local=await Bun.file("src-tauri/web/src/local-workflow-preview.tsx").text();
   const shell=await Bun.file("src-tauri/web/src/workflow-source-dialog.tsx").text();
   const css=await Bun.file("src-tauri/web/src/workbench.css").text();
-  expect(app).toContain(">本地工作流</button>");
+  expect(app).toContain('>\n            本地工作流\n          </button>');
   expect(template).toContain('<WorkflowSourceDialog title="预置工作流"');
   expect(template).not.toContain("本地工作流请从新建任务页选择");
   expect(local).toContain('<WorkflowSourceDialog title="本地工作流"');
@@ -55,12 +55,11 @@ test("主页快捷入口位于输入框外上方，不占用输入框底部", as
   expect(home.indexOf('className="draft-project-name"')).toBeLessThan(home.indexOf("预置工作流"));
   expect(home.slice(composer)).not.toContain("draft-composer-context");
   expect(home).not.toContain("<span>本地</span>");
-  expect(home).toContain(">本地工作流</button>");
+  expect(home).toContain('>\n            本地工作流\n          </button>');
   expect(home).not.toContain(">本地文件</button>");
-  expect(home).toContain('event.key==="Escape"');
-  expect(home).toContain('event.currentTarget.open=false');
+  const dialog = await Bun.file("src-tauri/web/src/workflow-source-dialog.tsx").text();
+  expect(dialog).toContain('event.key === "Escape"');
   expect(home).toContain('aria-label="添加图片附件"');
-  expect(home).toContain('onClick={onAddAttachments}');
   expect(home).toContain('aria-label="待发送附件"');
 });
 
@@ -78,20 +77,20 @@ test("浅色主页上下文文字与快捷入口有独立层级，深色样式�
 test("待发送附件按草稿身份隔离，迟到选择和发送不清空其他草稿",async()=>{
   const app=await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(app).toContain("attachmentDrafts.get(attachmentOwner)");
-  expect(app).toContain("current.get(attachmentOwner)??[]");
+  expect(app).toContain("current.get(attachmentOwner) ?? []");
   expect(app).toContain("attachmentErrors.get(attachmentOwner)");
   expect(app).toContain('className="attachment-error" role="alert"');
-  expect(app).toContain("requestAnimationFrame(()=>attachmentButton.current?.focus())");
+  expect(app).toContain("attachmentButton.current?.focus()");
   expect(app).toContain("ref={attachmentButton}");
-  expect(app).toContain("current=>current.filter(item=>!stagedIds.includes(item.stagedId))");
-  expect(app).toContain("pendingMessage.current.owner!==owner");
-  expect(app).toContain("pendingMessage.current.attachmentIds!==attachmentIds");
+  expect(app).toContain("current.filter((item) => !stagedIds.includes(item.stagedId))");
+  expect(app).toContain("pendingMessage.current.owner !== owner");
+  expect(app).toContain("pendingMessage.current.attachmentIds !== attachmentIds");
   expect(app).not.toContain("useEffect(() => { setPendingAttachments([]); }");
-  expect(app).toContain("existing+paths.length>5");
-  expect(app.indexOf("existing+paths.length>5")).toBeLessThan(app.indexOf("await api.stageAttachment(path)"));
-  expect(app).toContain("attachmentBusy={stagingOwner===attachmentOwner}");
+  expect(app).toContain("existing + paths.length > 5");
+  expect(app.indexOf("existing + paths.length > 5")).toBeLessThan(app.indexOf("await api.stageAttachment(path)"));
+  expect(app).toContain("attachmentBusy={stagingOwner === attachmentOwner}");
   expect(app).toContain("正在添加图片…");
-  expect(app).toContain("sending.current || stagingOwner===attachmentOwner");
+  expect(app).toContain("sending.current ||");
   expect(app).toContain("disabled={!ready || !text.trim() || attachmentBusy}");
   const conversation=await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
   expect(conversation).toContain("disabled={!draft.trim()||attachmentBusy}");

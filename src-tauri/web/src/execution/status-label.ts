@@ -5,7 +5,7 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   pausing: "暂停中",
   paused: "已暂停",
   recovering: "恢复中",
-  completed: "已交付",
+  completed: "已完成",
   cancelled: "已停止",
   interrupted: "已中断",
 };

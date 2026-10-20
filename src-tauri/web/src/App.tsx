@@ -1926,6 +1926,7 @@ export function App() {
                 busy={executionBusy}
                 dynamicCount={executionDynamicCount}
                 harnessRunId={harness.harnessRunId}
+                theme={theme}
                 previousRecords={(harness.executionHistory ?? [])
                   .filter(
                     (item) =>
@@ -3003,7 +3004,7 @@ function HarnessListItem({
         <strong>{conversationTitle(item)}</strong>
         <div className="sidebar-hover-project"><span className="folder-glyph" aria-hidden="true" />{item.cwd.split("/").filter(Boolean).at(-1) ?? "项目"}</div>
         <div className="sidebar-hover-meta">
-          <span>{item.status === "running" ? "进行中" : item.status === "interrupted" ? "已中断" : item.status === "completed" ? "已完成" : item.executions.some(execution => execution.finishedAt === null) ? "执行中" : interruptedSummaryObligations(item).length ? "总结待重试" : "可继续"}</span>
+          <span>{item.status === "running" ? "进行中" : item.status === "interrupted" ? "已中断" : item.status === "completed" ? "已完成" : item.executions.some(execution => execution.finishedAt === null) ? "执行中" : interruptedSummaryObligations(item).length ? "总结未完成" : "可继续"}</span>
           <time dateTime={item.completedAt ?? item.createdAt}>{new Date(item.completedAt ?? item.createdAt).toLocaleString("zh-CN")}</time>
         </div>
         {item.decisions.some(decision => decision.answer === null) && item.status === "running" && <small>需要你的回答</small>}
@@ -3770,7 +3771,7 @@ function ArchiveTaskConfirmation({
           <strong>{conversationTitle(task)}</strong>
           <p>
             仍有 {count}{" "}
-            份影响面总结未完成。你可以返回处理，或明确放弃总结并归档。归档后可在“已完成”中查看历史，不能继续执行。
+            份执行总结未完成。你可以返回处理，或明确放弃总结并归档。归档后可在“已完成”中查看历史，不能继续执行。
           </p>
         </div>
         <div className="modal-actions">
@@ -3844,7 +3845,7 @@ function ArchiveImpactConfirmation({
         <div className="connection-form">
           <p>
             仍有 {count}{" "}
-            份影响面总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。
+            份执行总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。
           </p>
         </div>
         <div className="modal-actions">
@@ -3940,7 +3941,7 @@ function HistoricalResults({
       {!value && !error && <p>正在读取结果…</p>}
       {value && (
         <>
-          <h2>节点交付</h2>
+          <h2>节点结果</h2>
           {value.nodes.length === 0 && <p>这份记录没有已完成节点。</p>}
           {value.nodes.map((node) => (
             <PersistedDetails
@@ -4045,10 +4046,10 @@ function ImpactSummaryPanel({
     );
   if (!summaryKey)
     return (
-      <section aria-label="原总结与现场补充">
+      <section aria-label="原总结与补充">
         {summaries.map((item) => (
           <div key={item.key}>
-            {item.supplementOf && <h3>现场影响面补充</h3>}
+            {item.supplementOf && <h3>现场变化补充</h3>}
             <ImpactSummaryPanel
               harness={harness}
               executionId={executionId}
@@ -4080,7 +4081,7 @@ function ImpactSummaryPanel({
               }
             }}
           >
-            {busy ? "正在检查现场…" : "检查当前现场（不执行）"}
+            {busy ? "正在检查…" : "检查项目现状（不会执行）"}
           </button>
         )}
       </section>
@@ -4088,7 +4089,7 @@ function ImpactSummaryPanel({
   if (obligation.supersededBy)
     return (
       <p>
-        此现场补充已被新的证据版本替代；保留历史，不再阻塞恢复。请查看最新现场补充。
+        此补充已被更新的检查结果替代；保留历史，不再阻塞恢复。请查看最新补充。
       </p>
     );
   if (
@@ -4099,7 +4100,7 @@ function ImpactSummaryPanel({
     return (
       <section>
         <p role="alert">
-          {userFacingText(obligation.diagnostic ?? "现场补充已中断")}
+          {userFacingText(obligation.diagnostic ?? "补充检查已中断")}
         </p>
         {error && <p role="alert">{userFacingText(error)}</p>}
         <button
@@ -4127,7 +4128,7 @@ function ImpactSummaryPanel({
             }
           }}
         >
-          重新检查现场并重试补充
+          重新检查并重试补充
         </button>
       </section>
     );
@@ -4141,14 +4142,14 @@ function ImpactSummaryPanel({
     : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
   if (obligation.status === "cancelled")
     return (
-      <article aria-label="影响面总结">
-        <h2>影响面总结</h2>
-        <p>用户已放弃总结并只读归档；影响面未完成，不再开放执行。</p>
+      <article aria-label="执行总结">
+        <h2>执行总结</h2>
+        <p>用户已放弃总结并只读归档；总结未完成，不再开放执行。</p>
       </article>
     );
   return (
-    <article aria-label="影响面总结">
-      <h2>影响面总结</h2>
+    <article aria-label="执行总结">
+      <h2>执行总结</h2>
       <p role="status">
         {
           {
@@ -4161,7 +4162,7 @@ function ImpactSummaryPanel({
       </p>
       {obligation.status !== "completed" && (
         <p>
-          完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只总结，不重跑Worker。
+          完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只生成总结，不会重新执行节点。
         </p>
       )}
       {obligation.diagnostic && (
@@ -4207,8 +4208,8 @@ function ImpactSummaryPanel({
           {busy
             ? "正在处理…"
             : obligation.status === "running"
-              ? "停止影响面总结"
-              : "重试影响面总结"}
+              ? "停止总结"
+              : "重试总结"}
         </button>
       )}
     </article>
@@ -4224,6 +4225,7 @@ function ExecutionDetail({
   busy,
   dynamicCount,
   harnessRunId,
+  theme,
   onControl,
   onAnswer,
   onAnswerBlock,
@@ -4240,6 +4242,8 @@ function ExecutionDetail({
   dynamicCount: number;
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
+  /** 当前应用主题，驱动变更面板 diff 配色。 */
+  theme: ColorTheme;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
@@ -4261,6 +4265,7 @@ function ExecutionDetail({
   const [visitsError, setVisitsError] = useState<string | null>(null);
   const [partialError, setPartialError] = useState<string | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
   /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
   const loadAllVisits = useCallback(async () => {
     const items: import("./types").PhaseVisit[] = [];
@@ -4331,7 +4336,7 @@ function ExecutionDetail({
       )}
       {detail.sourceDiagnostic && (
         <p role="alert">
-          尚未形成完整成果来源：{userFacingText(detail.sourceDiagnostic)}
+          改动还没有整理好：{userFacingText(detail.sourceDiagnostic)}
         </p>
       )}
       {!readOnly &&
@@ -4340,16 +4345,23 @@ function ExecutionDetail({
         detail.execution.config?.workspaces &&
         (!detail.sourceEvidence || detail.sourceDiagnostic) && (
           <button disabled={!!busy} onClick={() => void onControl("resume")}>
-            重试 Git 成果收尾（不重跑业务）
+            重新整理改动（不会重新执行）
           </button>
         )}
       {detail.sourceEvidence && (
-        <GitReviewPanel
+        <button disabled={!!busy} onClick={() => setChangesOpen(true)}>
+          查看变更
+        </button>
+      )}
+      {detail.sourceEvidence && changesOpen && (
+        <ChangesPanel
           key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`}
           taskId={harnessRunId}
           executionId={executionId}
           sourceCommit={detail.sourceEvidence.sourceCommit}
           writable={!readOnly && Boolean(onCleanupWorkspaces) && !historical}
+          theme={theme}
+          onClose={() => setChangesOpen(false)}
         />
       )}
       {partialError && <p role="alert">{partialError}</p>}
@@ -4369,7 +4381,7 @@ function ExecutionDetail({
                 );
               }}
             >
-              保存停止现场（partial，不代表交付）
+              保存当前改动（未交付）
             </button>
             {partialError && <p role="alert">{partialError}</p>}
           </>
@@ -4397,8 +4409,8 @@ function ExecutionDetail({
               }}
             >
               {confirmCleanup
-                ? "确认移除干净 checkout？分支和 commit 将保留"
-                : "清理受管 checkout"}
+                ? "确认清理临时工作区？改动提交已保留，不受影响"
+                : "清理临时工作区"}
             </button>
             {confirmCleanup && (
               <button onClick={() => setConfirmCleanup(false)}>取消清理</button>
@@ -4447,10 +4459,10 @@ function ExecutionDetail({
             allVisits={allVisits}
           />
           <div className="execution-summary">
-            <span>冻结 revision v{detail.execution.revision}</span>
+            <span>方案 v{detail.execution.revision}（已锁定）</span>
             {detail.execution.config && (
               <small>
-                分配：{detail.execution.config.assignments.length} 名 Worker
+                分配：{detail.execution.config.assignments.length} 名执行者
                 {detail.execution.config.ruleText
                   ? ` · 规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
                   : ""}
@@ -4468,7 +4480,7 @@ function ExecutionDetail({
           </div>
           {detail.workspaceEvidence && (
             <details className="execution-workspace-evidence">
-              <summary>内部 Git 检查点与诊断详情</summary>
+              <summary>高级 / 诊断 · 内部 Git 检查点</summary>
               {detail.workspaceEvidence.map((item) => (
                 <article key={item.nodeId}>
                   <strong>{item.nodeId}</strong>
@@ -4731,4 +4743,4 @@ function Action({
     </button>
   );
 }
-import { GitReviewPanel } from "./git-review";
+import { ChangesPanel } from "./changes-panel";

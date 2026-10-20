@@ -17,6 +17,7 @@ export type GitReview = {
   /** 唯一完整ready来源。 */ readonly sourceCommit: string;
   /** 实际相对基准变更文件。 */ readonly paths: readonly string[];
   /** 本机分支及本次读取的HEAD，确认时须复核。 */ readonly targets: readonly { /** 本机分支短名，不含受管工作分支。 */ readonly branch: string; /** 本次审阅目标完整oid，合入时漂移则拒绝。 */ readonly head: string }[];
+  /** 当前checkout分支短名，仅用于界面预选目标；detached或读取失败为null，合入仍以targets复核。 */ readonly currentBranch: string | null;
   /** 已耐久合入事实；重新打开页面不会误显示为未合入。 */ readonly merged?: GitMergeResult;
 };
 /** 单文件有界diff；不能将省略当作没有改动。 */
@@ -110,7 +111,8 @@ export class GitRepository {
     const targets = (await git(this.cwd, ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"])).trim().split("\n").filter(Boolean).map(line => {
       const [branch, head] = line.split(" "); return { branch, head };
     }).filter(target => !target.branch.startsWith("codex/wf-") && !target.branch.startsWith("codex/delivery-"));
-    return { baseCommit, sourceCommit, paths, targets };
+    const currentBranch = (await git(this.cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim() || null;
+    return { baseCommit, sourceCommit, paths, targets, currentBranch };
   }
 
   /** 按已保存的Git对象加载文件patch，不允许任意路径读取。 */

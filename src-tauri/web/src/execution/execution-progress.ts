@@ -47,7 +47,7 @@ export function computeExecutionProgress(
   if (allVisits) for (const group of computeReusedAgents(allVisits, snapshot.currentExecutionAttemptId).values()) {
     for (const agent of group.agents) if (!present.has(agent.id)) {
       present.add(agent.id);
-      items.push({ id: agent.id, label: `${agent.label}（历史已交付）`, status: agent.status });
+      items.push({ id: agent.id, label: `${agent.label}（历史已完成）`, status: agent.status });
     }
   }
   const fromPlan = plannedTotal !== undefined && plannedTotal >= items.length;

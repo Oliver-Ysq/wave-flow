@@ -18,7 +18,7 @@ test('执行与结果共用原终态时间，聊天事件不展示恢复次数',
  const app=await Bun.file('src-tauri/web/src/App.tsx').text();
  const events=await Bun.file('src-tauri/web/src/conversation/workflow-summary.tsx').text();
  expect(app).toContain('records={previousRecords}');
- expect(app).toContain("item.kind==='finished'");
+ expect(app).toContain('item.kind === "finished"');
  expect(app).not.toContain('<label>执行尝试');
  expect(events).not.toContain('第 {attempt} 次');
  const result=app.slice(app.indexOf('function HistoricalResults('),app.indexOf('function ImpactSummaryPanel('));

@@ -166,7 +166,7 @@ function ConversationTurnView({
       {!turn.user.summaryKey&&<article className="chat-message user">
         <div className="chat-avatar">{turn.user.summaryKey?"W":"你"}</div>
         <div>
-          <span>{turn.user.summaryKey?"系统 · 影响面总结":"你"}</span>
+          <span>{turn.user.summaryKey?"系统 · 执行总结":"你"}</span>
           <p>{turn.user.text}</p>
           {turn.user.attachments?.map((attachment) => (
             <MessageAttachmentView

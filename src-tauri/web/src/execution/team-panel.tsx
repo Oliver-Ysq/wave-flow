@@ -156,7 +156,7 @@ function AgentRow({
               {!answerAllowed ? <p className="wf-agent-note">历史记录只读，不能交付答案。</p> : paused ? (
                 <p className="wf-agent-note">暂停中。恢复后才能交付答案。</p>
               ) : agent.block.answered ? (
-                <p className="wf-agent-note">答案已交付，等待 Agent continue。</p>
+                <p className="wf-agent-note">答案已提交，等待继续。</p>
               ) : (
                 <BlockAnswerForm
                   blockRequestId={agent.block.blockRequestId}
@@ -244,10 +244,10 @@ function VisitBatches({
   );
 }
 
-/** 一次 Phase 访问的时间线条目状态。 */
-type VisitStatus = "当前访问" | "已完成访问" | "未访问";
+/** 一次 Phase 执行的时间线条目状态。 */
+type VisitStatus = "进行中" | "已完成" | "未开始";
 
-/** 历史访问已交付、本次 replay 复用的节点组（只读展示，标清来源访问）。 */
+/** 历史执行已完成、本次复用原结果的节点组（只读展示，标清来源）。 */
 function ReusedBlock({
   group,
   runId,
@@ -263,7 +263,7 @@ function ReusedBlock({
   return (
     <div className="wf-reused-block">
       <div className="wf-reused-head">
-        第 {group.sourceOccurrence} 次访问已交付 · 本次 replay 复用
+        复用第 {group.sourceOccurrence} 次执行的结果
       </div>
       {group.agents.map((agent) => (
         <AgentRow
@@ -315,7 +315,7 @@ export function TeamPanel({
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
   /**
    * 可选：读取全部 attempt 的耐久 Phase 访问（Harness Execution 专用通道）。
-   * 提供时面板为每个 Phase 补齐"历史访问已交付、本次 replay 复用"的节点组，
+   * 提供时面板为每个 Phase 补齐"历史执行已完成、本次复用原结果"的节点组，
    * 否则只展示当前 attempt 视野（独立 Run 现状）。
    */
   loadAllVisits?: () => Promise<PhaseVisit[]>;
@@ -407,12 +407,12 @@ export function TeamPanel({
             batch.agents.some((agent) => ACTIVE_STATUSES.has(agent.status)),
           );
           const status: VisitStatus = active
-            ? "当前访问"
+            ? "进行中"
             : phase.agents.length > 0
-              ? "已完成访问"
-              : "未访问";
+              ? "已完成"
+              : "未开始";
           return (
-            <section className={`wf-visit ${status === "当前访问" ? "current" : ""}`} key={phase.title}>
+            <section className={`wf-visit ${status === "进行中" ? "current" : ""}`} key={phase.title}>
               <header>
                 <strong>{phase.title}</strong>
                 <em>{status}</em>
@@ -454,9 +454,9 @@ export function TeamPanel({
             <header>
               <strong>
                 {visit.title}
-                {visit.occurrence > 1 && <span className="wf-revisit">回访 #{visit.occurrence}</span>}
+                {visit.occurrence > 1 && <span className="wf-revisit">第 {visit.occurrence} 轮</span>}
               </strong>
-              <em>{waiting ? "等待你的回答" : current ? "当前访问" : "已完成访问"}</em>
+              <em>{waiting ? "等待你的回答" : current ? "进行中" : "已完成"}</em>
             </header>
             <VisitBatches
               visit={visit}
@@ -473,7 +473,7 @@ export function TeamPanel({
         <section className="wf-visit" key={title}>
           <header>
             <strong>{title}</strong>
-            <em>未访问</em>
+            <em>未开始</em>
           </header>
           {renderReused(title, null)}
         </section>

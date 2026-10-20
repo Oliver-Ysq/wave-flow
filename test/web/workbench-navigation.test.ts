@@ -13,11 +13,12 @@ test("执行与结果共用所选尝试：历史保持，未指定随最新，�
 test("结果选择更新路由，不读取另一份缓存；切回执行保留尝试",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
  expect(source).not.toContain("resultAttempts");
- expect(source).toContain("loaded?.identity===resultIdentity?loaded.value:null");
- expect(source).toContain("const attempt=readingAttempt(selectedAttempt,currentAttempt)");
- expect(source).toContain("selectedAttempt={route.attempt} onSelectAttempt={attempt=>setRoute({...route,attempt})}");
+ expect(source).toContain("loaded?.identity === resultIdentity ? loaded.value : null");
+ expect(source).toContain("const attempt = readingAttempt(selectedAttempt, currentAttempt)");
+ expect(source).toContain("selectedAttempt={route.attempt}");
+ expect(source).toContain("onSelectAttempt={(attempt) => setRoute({ ...route, attempt })}");
  expect(source).not.toContain('section:"execution",executionId:ex?.executionId,attempt:undefined');
- expect(source).toContain('Array.from({length:detail.snapshot.currentExecutionAttemptId},(_,index)=>index+1)');
+ expect(source).toContain('Array.from(\n    { length: detail.snapshot.currentExecutionAttemptId },\n    (_, index) => index + 1,\n  )');
  expect(source).toContain('此尝试未保存阶段过程记录，不代表没有执行');
  expect(source).toContain('历史过程暂时无法读取');
  expect(source).toContain('正在读取历史过程…');

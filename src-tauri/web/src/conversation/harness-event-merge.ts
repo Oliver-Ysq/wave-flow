@@ -149,7 +149,7 @@ export function composeConversationTurns(
     const assistant=obligation.status==="completed"?harness.messages.find(item=>item.id===obligation.messageId)??null:null;
     const summaryTurnIds=[...entriesByTurn.keys()].filter(id=>id===`summary:${obligation.key}`||id.startsWith(`summary:${obligation.key}:`));
     if(!summaryTurnIds.includes(turnId))summaryTurnIds.push(turnId);
-    for(const id of summaryTurnIds){const startedAt=entriesByTurn.get(id)?.[0]?.startedAt??obligation.createdAt;turns.push({turnId:id,user:{id,role:"user",summaryKey:obligation.key,text:id===turnId?"自动影响面总结":"影响面总结（原中断回合）",createdAt:startedAt},entries:[],assistant:id===turnId?assistant:null});}
+    for(const id of summaryTurnIds){const startedAt=entriesByTurn.get(id)?.[0]?.startedAt??obligation.createdAt;turns.push({turnId:id,user:{id,role:"user",summaryKey:obligation.key,text:id===turnId?"自动执行总结":"执行总结（原中断回合）",createdAt:startedAt},entries:[],assistant:id===turnId?assistant:null});}
   }
   for (const turn of turns) {
     turn.entries = (entriesByTurn.get(turn.turnId) ?? [])
