@@ -744,22 +744,43 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
   font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
 }
 
-.agent-workbench .wf-markdown { max-width:760px; font-size:16px; line-height:1.75; text-align:left; }
+/* Markdown 正文：标题靠“字号 + 间距 + 一条发丝线”建立层级；强调降为 semibold，
+   行内代码用低对比底色，避免长哈希把正文切成一块块灰砖。 */
+.agent-workbench .wf-markdown { max-width:42em; font-size:16px; line-height:1.72; text-align:left; }
 .agent-workbench .wf-markdown > :first-child { margin-top:0; }
 .agent-workbench .wf-markdown > :last-child { margin-bottom:0; }
-.agent-workbench .wf-markdown p { margin:10px 0; font-size:16px; line-height:1.75; max-width:760px; }
-.agent-workbench .wf-markdown ul, .agent-workbench .wf-markdown ol { margin:10px 0; padding-left:22px; }
-.agent-workbench .wf-markdown li { margin:4px 0; }
-.agent-workbench .wf-markdown h1, .agent-workbench .wf-markdown h2, .agent-workbench .wf-markdown h3, .agent-workbench .wf-markdown h4 { margin:16px 0 8px; line-height:1.4; }
-.agent-workbench .wf-markdown h1 { font-size:20px; } .agent-workbench .wf-markdown h2 { font-size:18px; } .agent-workbench .wf-markdown h3, .agent-workbench .wf-markdown h4 { font-size:16px; }
-.agent-workbench .wf-markdown a { color:var(--wf-accent-strong); text-decoration:underline; text-underline-offset:2px; }
-.agent-workbench .wf-markdown code { padding:1px 5px; border:0; border-radius:4px; background:var(--wf-raised); font:0.92em/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
-.agent-workbench .wf-markdown pre { max-width:760px; margin:12px 0; padding:12px 14px; overflow-x:auto; border:1px solid var(--wf-border); border-radius:10px; background:var(--wf-terminal-bg); }
-.agent-workbench .wf-markdown pre code { padding:0; border:0; background:transparent; color:#e8e8ea; font:13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
-.agent-workbench .wf-markdown table { margin:12px 0; border-collapse:collapse; font-size:14px; }
-.agent-workbench .wf-markdown th, .agent-workbench .wf-markdown td { padding:6px 12px; border:1px solid var(--wf-border); text-align:left; }
-.agent-workbench .wf-markdown th { background:var(--wf-raised); }
-.agent-workbench .wf-markdown blockquote { margin:12px 0; padding:2px 14px; border-left:3px solid var(--wf-border); color:var(--wf-text-dim); }
+.agent-workbench .wf-markdown p { margin:.8em 0; max-width:42em; text-wrap:pretty; }
+.agent-workbench .wf-markdown strong { font-weight:600; }
+.agent-workbench .wf-markdown h1, .agent-workbench .wf-markdown h2, .agent-workbench .wf-markdown h3, .agent-workbench .wf-markdown h4 { margin:1.6em 0 .55em; color:var(--wf-text); font-weight:600; line-height:1.35; }
+.agent-workbench .wf-markdown h1 { font-size:21px; }
+.agent-workbench .wf-markdown h2 { font-size:18px; }
+.agent-workbench .wf-markdown h3 { margin-bottom:.8em; padding-bottom:.3em; border-bottom:1px solid color-mix(in srgb, var(--wf-border) 72%, transparent); font-size:15px; letter-spacing:.01em; }
+.agent-workbench .wf-markdown h4 { font-size:14px; color:var(--wf-text-dim); }
+.agent-workbench .wf-markdown ul, .agent-workbench .wf-markdown ol { margin:.7em 0; padding-left:1.4em; }
+.agent-workbench .wf-markdown li { margin:.28em 0; }
+.agent-workbench .wf-markdown li::marker { color:var(--wf-text-dim); }
+.agent-workbench .wf-markdown li > p { margin:.22em 0; }
+.agent-workbench .wf-markdown li > ul, .agent-workbench .wf-markdown li > ol { margin:.3em 0; }
+.agent-workbench .wf-markdown a { color:var(--wf-accent-strong); text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:3px; }
+.agent-workbench .wf-markdown code { margin:0 .08em; padding:.1em .4em; border:0; border-radius:5px; background:color-mix(in srgb, var(--wf-text) 6%, transparent); color:color-mix(in srgb, var(--wf-text) 90%, var(--wf-accent-strong)); font:0.86em/1.55 ui-monospace, "SF Mono", Menlo, monospace; overflow-wrap:anywhere; -webkit-box-decoration-break:clone; box-decoration-break:clone; }
+.agent-workbench .wf-markdown code.wf-code-long { word-break:break-all; }
+.agent-workbench .wf-markdown pre { max-width:42em; margin:1em 0; padding:12px 14px; overflow-x:auto; border:1px solid var(--wf-border); border-radius:10px; background:var(--wf-terminal-bg); }
+.agent-workbench .wf-markdown pre code { margin:0; padding:0; border:0; background:transparent; color:#e8e8ea; font:12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; overflow-wrap:normal; word-break:normal; }
+/* 代码块恒为深底，因此高亮配色与主题无关；只给少数语义 token 上色，避免整块花掉。 */
+.agent-workbench .wf-markdown .hljs-comment, .agent-workbench .wf-markdown .hljs-quote { color:#8a8a95; font-style:italic; }
+.agent-workbench .wf-markdown .hljs-keyword, .agent-workbench .wf-markdown .hljs-selector-tag, .agent-workbench .wf-markdown .hljs-literal, .agent-workbench .wf-markdown .hljs-section, .agent-workbench .wf-markdown .hljs-link { color:#b7a4f5; }
+.agent-workbench .wf-markdown .hljs-string, .agent-workbench .wf-markdown .hljs-attr, .agent-workbench .wf-markdown .hljs-template-variable, .agent-workbench .wf-markdown .hljs-addition { color:#a8d8a8; }
+.agent-workbench .wf-markdown .hljs-number, .agent-workbench .wf-markdown .hljs-symbol, .agent-workbench .wf-markdown .hljs-bullet, .agent-workbench .wf-markdown .hljs-variable { color:#e5b47f; }
+.agent-workbench .wf-markdown .hljs-title, .agent-workbench .wf-markdown .hljs-name, .agent-workbench .wf-markdown .hljs-built_in, .agent-workbench .wf-markdown .hljs-type { color:#9db8ff; }
+.agent-workbench .wf-markdown .hljs-meta { color:#8f9bf7; }
+.agent-workbench .wf-markdown .hljs-deletion { color:#ff9a9a; }
+.agent-workbench .wf-markdown table { max-width:100%; margin:1em 0; border-collapse:collapse; font-size:13.5px; }
+.agent-workbench .wf-markdown th, .agent-workbench .wf-markdown td { padding:7px 12px; border:0; border-bottom:1px solid color-mix(in srgb, var(--wf-border) 80%, transparent); text-align:left; vertical-align:top; }
+.agent-workbench .wf-markdown th { border-bottom-color:var(--wf-border); background:transparent; color:var(--wf-text); font-weight:600; }
+.agent-workbench .wf-markdown tr:last-child td { border-bottom:0; }
+.agent-workbench .wf-markdown blockquote { margin:1em 0; padding:.15em 0 .15em .9em; border-left:2px solid color-mix(in srgb, var(--wf-border) 85%, transparent); color:var(--wf-text-dim); }
+.agent-workbench .wf-markdown hr { margin:1.6em 0; border:0; border-top:1px solid var(--wf-border); }
+.agent-workbench .wf-markdown li > input[type="checkbox"] { margin:0 .45em 0 0; vertical-align:middle; accent-color:var(--wf-accent-strong); }
 .agent-workbench .wf-image-placeholder { display:inline-block; padding:2px 8px; border:1px dashed var(--wf-border); border-radius:6px; color:var(--wf-text-dim); font-size:12px; }
 
 /* 思考/工具折叠行：无边框透明行，整行降为灰色（正文保持亮色形成层级）；展开区用左侧发丝线引导。 */
