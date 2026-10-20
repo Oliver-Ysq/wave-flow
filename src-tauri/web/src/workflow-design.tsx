@@ -12,6 +12,16 @@ const localConfirmations=new ViewCache<string>(64);
 const workspaceDrafts=new ViewCache<Record<string,{resources:string;workspaceId:string;sources?:string;workspaceGroup?:string}>>(64);
 const workspaceConfirmations=new WorkspaceConfirmationCache();
 
+/** 每个 CLI 只呈现一个安装（优先当前选中项）；安装切换属于执行底座的职责。 */
+function oneRuntimePerCli(plan:ExecutionPlanResponse){
+  const byCli=new Map<"codex"|"kimi",ExecutionPlanResponse["pool"][number]>();
+  for(const runtime of plan.pool){
+    const selected=plan.selectedByCli?.[runtime.cli];
+    if(!byCli.has(runtime.cli)||runtime.runtimeId===selected)byCli.set(runtime.cli,runtime);
+  }
+  return [...byCli.values()];
+}
+
 /** Workflow设计与CLI内联选择；只有确认按钮发起执行，读取计划不调度Worker。 */
 export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,onAdjustViaChat,onAbandonCard,onCreated,input,execution,validateBeforeRun}:{
  /** 确认前由参数区校验并定位错误；false不发请求、不批准。 */ validateBeforeRun?:()=>boolean;
@@ -45,10 +55,11 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
      if(planError)return <span>检查未完成 · 见下方错误</span>;
      return <span className="cli-pending">Wave Flow 处理结束后显示可用 CLI</span>;
    }
-   if(plan.pool.length===0)return <span>没有已验证的 CLI</span>;
-   if(plan.pool.length===1){const only=plan.pool[0]!;return <span>{only.cli==="codex"?"Codex CLI":"Kimi CLI"} {only.version} · 本机唯一</span>;}
-   const fallback=plan.harnessRuntime;
-   return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={choices[id]??fallback?.runtimeId??""} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{plan.pool.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{runtime.cli==="codex"?"Codex CLI":"Kimi CLI"} · {runtime.version}</option>)}</select>;
+   const options=oneRuntimePerCli(plan);
+   if(options.length===0)return <span>没有已验证的 CLI</span>;
+   if(options.length===1){const only=options[0]!;return <span>{only.cli==="codex"?"Codex CLI":"Kimi CLI"}</span>;}
+   const preferred=choices[id]&&options.some(runtime=>runtime.runtimeId===choices[id])?choices[id]:options.find(runtime=>runtime.runtimeId===plan.harnessRuntime?.runtimeId)?.runtimeId??options[0]!.runtimeId;
+   return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{runtime.cli==="codex"?"Codex CLI":"Kimi CLI"}</option>)}</select>;
  }
  function continuationSelect(nodeId:string){
    if(!plan?.continuationPlan)return null;
