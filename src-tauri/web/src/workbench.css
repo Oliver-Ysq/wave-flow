@@ -29,6 +29,12 @@
   --wf-success: #79cfaa;
   --wf-success-wash: rgb(121 207 170 / 12%);
   --wf-shadow-deep: rgb(0 0 0 / 42%);
+  /* 运动 token：入场用减速缓出，轻量反馈用带轻回弹的弹簧；时长按距离分级。 */
+  --wf-ease-out: cubic-bezier(.22, 1, .36, 1);
+  --wf-ease-spring: cubic-bezier(.34, 1.45, .5, 1);
+  --wf-t-fast: 120ms;
+  --wf-t-mid: 180ms;
+  --wf-t-slow: 260ms;
 }
 
 :root[data-theme="light"] {
@@ -1236,6 +1242,42 @@ details.execution-workspace-evidence>article{margin-top:10px}
   .agent-workbench .workflow-modal { padding:0; }
   .agent-workbench .workflow-modal .central-workflow { width:100%; max-height:100vh; height:100vh; border:0; border-radius:0; }
   .agent-workbench .workflow-modal .central-plan { padding:12px 20px 80px; }
+}
+
+/* ---------- 微动效 ---------- */
+
+@keyframes wf-rise { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes wf-drop { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+@keyframes wf-pop { from { opacity:0; transform:scale(.6); } to { opacity:1; transform:none; } }
+
+/* 新消息与新区块入场：统一小幅上浮淡入；续排正文不再重复入场。 */
+.agent-workbench .chat-message { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
+.agent-workbench .chat-message.wf-body-continuation { animation:none; }
+.agent-workbench .central-plan > * { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
+.agent-workbench .workflow-detail-scroll > * { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
+
+/* 展开详情、回到最新与提示条都是“出现”事件，同一曲线。 */
+.agent-workbench .wf-agent-detail { animation:wf-rise var(--wf-t-fast) var(--wf-ease-out) both; }
+.agent-workbench .wf-back-to-latest { animation:wf-rise var(--wf-t-fast) var(--wf-ease-out) both; }
+.agent-workbench .toast-layer .notice { animation:wf-drop var(--wf-t-mid) var(--wf-ease-out) both; }
+
+/* 完成勾选弹出一次，随后保持静态；状态文字颜色平滑过渡。 */
+.agent-workbench .wf-progress-check.filled { animation:wf-pop var(--wf-t-mid) var(--wf-ease-spring) both; }
+.agent-workbench .wf-agent-status { transition:color var(--wf-t-mid) ease; }
+.agent-workbench .wf-visit > header em { transition:color var(--wf-t-mid) ease; }
+
+/* 按钮与列表行的即时反馈：悬停换底色，按下轻微回缩，绝不移动布局。 */
+.agent-workbench .button-primary, .agent-workbench .button-secondary, .agent-workbench .button-state { transition:background-color var(--wf-t-fast) ease, border-color var(--wf-t-fast) ease, filter var(--wf-t-fast) ease, transform var(--wf-t-fast) ease; }
+.agent-workbench .button-primary:active:not(:disabled), .agent-workbench .button-secondary:active:not(:disabled), .agent-workbench .button-state:active:not(:disabled) { transform:scale(.97); }
+.agent-workbench .harness-list-item, .agent-workbench .wf-entry { transition:background-color var(--wf-t-fast) ease; }
+
+/* 明暗主题切换：主表面平滑换色，不做全量重绘。 */
+.agent-workbench { transition:background-color var(--wf-t-slow) ease, color var(--wf-t-slow) ease; }
+.agent-workbench .task-rail, .agent-workbench .central-workflow { transition:background-color var(--wf-t-slow) ease, border-color var(--wf-t-slow) ease; }
+
+/* 用户偏好减少动效时，全部动画与过渡压缩到不可见。 */
+@media (prefers-reduced-motion: reduce) {
+  .agent-workbench *, .agent-workbench *::before, .agent-workbench *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }
 
 /* ---------- 方案页排版：居中阅读列与分组 ---------- */
