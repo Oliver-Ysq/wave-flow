@@ -4,6 +4,7 @@ import { loadWorkflow } from "../workflow/load-workflow";
 import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
+import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
 import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { ImpactSupplementRequiredError } from "../harness/impact-summary";
@@ -37,7 +38,7 @@ import { HarnessControlPipe } from "../harness/harness-control-pipe";
 import { createIsolatedHarness } from "../harness/isolated-harness";
 import { generateAcpTaskTitle } from "../harness/acp-task-naming";
 import { prepareSessionScratch } from "../workspace/session-scratch";
-import { adapterById } from "../runtimes/adapter-catalog";
+import { adapterById, adapterForCli, catalogClis } from "../runtimes/adapter-catalog";
 import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
 import { validateExecutionConfig } from "./execution-assignment";
@@ -174,6 +175,7 @@ export class DesktopExecutionEngine {
       const mcpServer = { name: "wave-flow-harness", command, args, env: [
         { name: "WF_HARNESS_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_HARNESS_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
       ] } as any;
+      assertAbsoluteMcpCommand(mcpServer);
       let session: AcpHarnessSession;
       try { session = await createIsolatedHarness({ launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(), prior, mcp: mcpServer }); }
       catch (error) { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); throw error; }
@@ -410,12 +412,13 @@ export class DesktopExecutionEngine {
     const command = process.execPath;
     const compiled = import.meta.dir.startsWith("/$bunfs/");
     const args = compiled ? ["__worker-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-mcp"];
-    return {
-      name: "wave-flow-worker-control", command, args,
-      env: [
+    const server = { name: "wave-flow-worker-control", command, args, env: [
         { name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo },
         { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
-      ],
+      ] };
+    assertAbsoluteMcpCommand(server);
+    return {
+      ...server,
       close: () => { pipe.close(); this.#workerControlPipes.delete(key); },
     } as any;
   }
@@ -450,7 +453,7 @@ export class DesktopExecutionEngine {
       const candidates = await this.discoverCliRuntimeCandidates();
       let verified = 0;
       const failures: Partial<Record<RuntimeCli, CliProbeStatus>> = {};
-      for (const cli of ["codex", "kimi"] as const) {
+      for (const cli of catalogClis()) {
         const list = candidates.filter((candidate) => candidate.cli === cli);
         if (list.length === 0) { failures[cli] = "absent"; continue; }
         let offset = 0;
@@ -488,26 +491,23 @@ export class DesktopExecutionEngine {
    */
   private async detectCliKind(executablePath: string): Promise<RuntimeCli | null> {
     const base = executablePath.split("/").pop()?.toLowerCase() ?? "";
-    if (base.includes("kimi")) return "kimi";
-    if (base.includes("codex")) return "codex";
+    for (const { cli, keyword } of CLI_KIND_KEYWORDS) if (base.includes(keyword)) return cli;
     try {
       const version = (await readCliVersion(executablePath, "CLI")).toLowerCase();
-      if (version.includes("kimi")) return "kimi";
-      if (version.includes("codex")) return "codex";
+      for (const { cli, keyword } of CLI_KIND_KEYWORDS) if (version.includes(keyword)) return cli;
     } catch { /* 版本读不出来不是验证失败；继续按用户选择的种类验证。 */ }
     return null;
   }
 
   /** 验证固定 adapter 与用户明确给出的绝对 CLI 路径；成功也不自动选为默认。 */
   private async validateCliRuntime(value: unknown): Promise<SelectCliRuntimeResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string" || ((value as ValidateCliRuntimeRequest).cli !== "codex" && (value as ValidateCliRuntimeRequest).cli !== "kimi")) throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string" || !catalogClis().includes((value as ValidateCliRuntimeRequest).cli)) throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
     const request = value as ValidateCliRuntimeRequest;
     const discoveredFrom = request.discoveredFrom ?? "manual";
     if (!["shell-path", "gui-path", "install-dir", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new EngineActionError(400, "CLI Runtime 验证来源无效。 ");
     const detected = await this.detectCliKind(request.executablePath);
-    const other: RuntimeCli = request.cli === "codex" ? "kimi" : "codex";
-    // 已识别出真实种类时以它为准；识别不出但仍失败时再试另一种，避免用户被种类选择卡死。
-    const kinds: RuntimeCli[] = detected === request.cli ? [request.cli] : detected ? [detected, request.cli] : [request.cli, other];
+    // 已识别出真实种类时以它为准；识别不出但仍失败时再依次试其他种类，避免用户被种类选择卡死。
+    const kinds: RuntimeCli[] = detected === request.cli ? [request.cli] : detected ? [detected, request.cli] : [request.cli, ...catalogClis().filter(cli => cli !== request.cli)];
     let failure: unknown;
     for (const cli of kinds) {
       try {
@@ -1289,14 +1289,27 @@ function isLiveRunStatus(status: import("../runtime/run-types").RunStatus): bool
 }
 
 /**
+ * detectCliKind 的种类关键字表：先按 basename 包含匹配，再按 --version 输出匹配。
+ * 关键字只与 CLI 名本身对应（claude/dsh/kimi/codex 互不重叠），新增 CLI 在此登记。
+ */
+const CLI_KIND_KEYWORDS: ReadonlyArray<{ readonly cli: RuntimeCli; readonly keyword: string }> = [
+  { cli: "codex", keyword: "codex" },
+  { cli: "kimi", keyword: "kimi" },
+  { cli: "claude", keyword: "claude" },
+  { cli: "dsh", keyword: "dsh" },
+];
+
+/**
  * 把手动验证时上游适配器的进程退出错误翻译成可操作的中文提示。
  * 未知错误保持原文，避免用泛化文案抹掉真实诊断。
  */
 function describeCliValidationFailure(error: unknown, requested: RuntimeCli): string {
   const text = error instanceof Error ? error.message : String(error);
+  // dsh 在 Node ≤22 下静默退出 0 且零输出：表现为版本读取失败（退出 0、空输出）或握手超时。
+  if (requested === "dsh" && (/无法读取 .* 版本/.test(text) || /超时|abort/i.test(text))) return "DeepSeek Harness（dsh）需要 Node ≥ 24 运行时；旧版本 Node 下 dsh 会静默退出且没有任何输出。请确认已验证的 node 为 Node 24 或更高版本后重试。";
   const exited = /process has exited with code (-?\d+)/i.exec(text);
   if (!exited) return text;
-  if (/unknown command ['"`]?app-server/i.test(text)) return "这个程序不提供 Codex 的 ACP 入口（app-server），它不是 Codex CLI。请确认路径，或把 CLI 种类改为 Kimi CLI 后重试。";
-  const label = requested === "codex" ? "Codex" : "Kimi";
+  if (/unknown command ['"`]?app-server/i.test(text)) return "这个程序不提供 Codex 的 ACP 入口（app-server），它不是 Codex CLI。请确认路径，或把 CLI 种类改为其他已支持的 CLI 后重试。";
+  const label = adapterForCli(requested).displayName;
   return `这个程序启动后立即退出（退出码 ${exited[1]}），无法建立 ACP 会话。请确认它是可用的 ${label} CLI，并在终端能直接运行。`;
 }

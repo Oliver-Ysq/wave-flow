@@ -2,7 +2,7 @@
 
 **Give long tasks a clear path. Let agents play to their strengths.**
 
-Wave Flow is a local desktop app for AI agent workflows. Describe a goal in conversation, review the controller's proposal, then let real Codex / Kimi agents execute it in stages. Follow progress, answer questions, or stop the work when you need to.
+Wave Flow is a local desktop app for AI agent workflows. Describe a goal in conversation, review the controller's proposal, then let real Codex / Kimi / DeepSeek Harness / Claude Code agents execute it in stages. Follow progress, answer questions, or stop the work when you need to.
 
 Give long tasks a controlled workflow and each job the right agent. An ever-growing conversation shouldn't have to carry everything from planning to delivery.
 
@@ -31,7 +31,7 @@ Deliverables must pass schema validation and be durably recorded. “I'm done”
 
 ### Don't bet everything on one agent
 
-Bring Codex and Kimi into the same Workflow: research independently, cross-review findings, then compare evidence and synthesize the strongest results. Assign work based on the strengths of each CLI, its tools, and its underlying model.
+Bring Codex, Kimi, DeepSeek Harness and Claude Code into the same Workflow: research independently, cross-review findings, then compare evidence and synthesize the strongest results. Assign work based on the strengths of each CLI, its tools, and its underlying model.
 
 Each Worker uses an independent real ACP session with your selected local CLI and its default model. Multiple CLIs bring complementary model and Harness perspectives, reducing single-path blind spots. CLI assignment is user-controlled; automatic model routing is not provided.
 
@@ -58,7 +58,8 @@ After the execution summary is complete, revise generated proposals through chat
 Wave Flow is in early development. Please keep these limits in mind:
 
 - Local workflows are explicitly selected trusted `.ts` extensions inside the project. New local Tasks require a literal `meta.inputSchema` object schema; preflight reads but does not execute. URL downloads, visual workflow editing, remote control and cloud sync are not supported.
-- Controllers retain OS write isolation and four narrow tools. Workers use trusted native CLI configuration and permissions, without additional Wave Flow OS file isolation. Worktrees/cwd separate ordinary work, but do not prevent writing other worktrees, shared Git, user files or credentials. Native directories include `~/.codex` and `~/.kimi-code`; model tools can also modify configuration and credentials. Task intent is not a security guarantee. Parallel branches may change the same file; explicit integration resolves conflicts.
+- Controllers retain OS write isolation and four narrow tools. Workers use trusted native CLI configuration and permissions, without additional Wave Flow OS file isolation. Worktrees/cwd separate ordinary work, but do not prevent writing other worktrees, shared Git, user files or credentials. Native directories include `~/.codex`, `~/.kimi-code`, `~/.dsh` and `~/.claude`; model tools can also modify configuration and credentials. Task intent is not a security guarantee. Parallel branches may change the same file; explicit integration resolves conflicts.
+- DeepSeek Harness and Claude Code have both completed real controller- and Worker-role acceptance and can be set as the default controller. Controllers use their own isolated private home: Claude inherits only auth/model env (user hooks and permissions are excluded); DeepSeek Harness uses the shipped profile skeleton with the user patch cleared, and credentials are referenced by symlink only. DeepSeek Harness needs a provider key under `$DSH_HOME` plus a Node ≥ 24 runtime (on Node ≤ 22 its CLI exits silently with no output). Claude Code acceptance verified harness compatibility (Claude Code 2.1.304 + claude-agent-acp 0.94.0); the model side is decided by your own `~/.claude/settings.json` authentication (acceptance used an Anthropic-compatible endpoint, not an Anthropic model).
 - A complete ready source can be reviewed and explicitly squash-merged into a local branch. Target drift and dirty/staged/untracked overwrite risks are rejected; no automatic push. Git evidence does not cover external effects or replace sensitive-content review.
 - Revised execution requires complete impact summaries, current-scene supplements and verified writer handoffs. Every actual node in a new Execution works anew; completed results are not cached across Executions. New Tasks use one evolving chain; old multi-card records are not automatically migrated. Archived Tasks are read-only.
 - Interrupted execution recovery only reuses strictly matching completed prefixes within the same execution. It does not roll back files or undo external effects.

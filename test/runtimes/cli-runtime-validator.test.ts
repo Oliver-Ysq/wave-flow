@@ -15,6 +15,11 @@ async function fakeCli(root: string, name: string, version: string): Promise<str
   return path;
 }
 
+/** 固定打印指定 `node --version` 输出的假 node；用于确定性覆盖 minNodeVersion 校验，不依赖本机 node 版本。 */
+async function fakeNode(root: string, name: string, version: string): Promise<string> {
+  return fakeCli(root, name, version);
+}
+
 function fakeTransport(hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string }; failSession?: boolean }): AcpTransportFactory {
   return async () => {
     const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -69,4 +74,39 @@ describe("validateCliRuntime / codex", () => {
     expect(typeof record.nodeExecutable?.path).toBe("string");
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
   }, 20_000);
+});
+
+describe("validateCliRuntime / claude", () => {
+  test("bridge 入口握手与 MCP 探针成功，adapterVersion 锁定为 0.94.0 不跟随 agentInfo", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-claude-validate-")); roots.push(root);
+    const hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string } } = { agentInfo: { name: "claude-agent-acp", version: "9.9.9" } };
+    const record = await validateCliRuntime("claude", { executablePath: await fakeCli(root, "claude", "2.0.0 (Claude Code)"), discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v22.17.1"), createTransport: fakeTransport(hooks) });
+    expect(record).toMatchObject({ cli: "claude", status: "verified", version: "2.0.0 (Claude Code)", diagnostic: null });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, harnessTools: true });
+    expect(record.nodeExecutable).toBeUndefined();
+    expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
+  });
+});
+
+describe("validateCliRuntime / dsh", () => {
+  test("Node ≥ 24 时握手成功，adapterVersion 取握手 agentInfo.version", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-dsh-validate-")); roots.push(root);
+    const hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string } } = { agentInfo: { name: "dsh", version: "0.0.1" } };
+    const record = await validateCliRuntime("dsh", { executablePath: await fakeCli(root, "dsh", "0.2.1-rc.2"), discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v24.22.0"), createTransport: fakeTransport(hooks) });
+    expect(record).toMatchObject({ cli: "dsh", status: "verified", version: "0.2.1-rc.2", diagnostic: null });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: true });
+    expect(typeof record.nodeExecutable?.path).toBe("string");
+    expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
+  });
+
+  test("node 主版本低于 minNodeVersion 时验证失败且文案可操作", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-dsh-old-node-")); roots.push(root);
+    await expect(validateCliRuntime("dsh", { executablePath: await fakeCli(root, "dsh", "0.2.1-rc.2"), discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v22.17.1"), createTransport: fakeTransport({}) })).rejects.toThrow("DeepSeek Harness 需要 Node ≥ 24");
+  });
+
+  test("dsh 在旧 Node 下静默退出零输出时 --version 读取失败，验证拒绝", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-dsh-silent-")); roots.push(root);
+    const silent = join(root, "dsh"); await writeFile(silent, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(silent, 0o700);
+    await expect(validateCliRuntime("dsh", { executablePath: silent, discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v24.22.0"), createTransport: fakeTransport({}) })).rejects.toThrow("无法读取 DeepSeek Harness 版本");
+  });
 });

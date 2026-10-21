@@ -1,7 +1,7 @@
 import {expect,test} from "bun:test";
 import {designExecutionConfig,DesignConfirmationCache,WorkspaceConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
-import type {ExecutionPlanResponse} from "../../src-tauri/web/src/types";
-const runtime=(runtimeId:string,cli:"codex"|"kimi")=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:cli==="codex"?"codex-acp":"kimi-acp",adapterVersion:"1",harnessTools:true}});
+import type {ExecutionPlanResponse,RuntimeCli} from "../../src-tauri/web/src/types";
+const runtime=(runtimeId:string,cli:RuntimeCli)=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:`${cli}-acp`,adapterVersion:"1",harnessTools:true}});
 const plan={workers:[{id:"reviewer"},{id:"verifier"}],pool:[runtime("c","codex"),runtime("k","kimi")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
 test("内联CLI默认主控，手工选择记录user，动态默认与固定Worker独立",()=>{
  const config=designExecutionConfig(plan,{verifier:"k","*":"k"},"2026-10-16T00:00:00Z");
@@ -13,6 +13,12 @@ test("内联CLI默认主控，手工选择记录user，动态默认与固定Work
 test("内联CLI失效或未知节点拒绝，不静默随机或替换",()=>{
  expect(()=>designExecutionConfig(plan,{reviewer:"missing"})).toThrow("不可用");
  expect(()=>designExecutionConfig(plan,{ghost:"c"})).toThrow("未知");
+});
+test("新增 CLI 种类（claude/dsh）作为 Worker 候选参与分配，不与 codex/kimi 混淆",()=>{
+ const wide={workers:[{id:"writer"}],pool:[runtime("a","claude"),runtime("d","dsh"),runtime("c","codex")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
+ const config=designExecutionConfig(wide,{writer:"d"},"2026-10-20T00:00:00Z");
+ expect(config.assignments[0]).toMatchObject({agentId:"writer",cli:"dsh",adapterId:"dsh-acp",runtimeId:"d",source:"user"});
+ expect(config.defaultAssignment.cli).toBe("codex");
 });
 test("导航后相同确认重试复用UUID和原配置，读取副本不能污染缓存",()=>{
  const cache=new DesignConfirmationCache();

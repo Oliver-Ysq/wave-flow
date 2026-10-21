@@ -5,7 +5,8 @@ import { computeReusedAgents, type ReusedAgentGroup } from "./reused-agents";
 import { SchemaForm } from "../forms/schema-form";
 import { ViewCache } from "../workbench-state";
 import {PersistedDetails} from "../persisted-details";
-import {userFacingText} from "../user-facing-text";
+import { userFacingText } from "../user-facing-text";
+import { cliDisplayName } from "../cli-meta";
 import { statusLabel } from "./status-label";
 const agentExpansion=new ViewCache<boolean>(256);
 const AnswerAllowed=createContext(true);
@@ -131,7 +132,7 @@ function AgentRow({
         <Identicon seed={agent.id} />
         <span className="wf-agent-name">{agent.label}</span>
         <span className="wf-agent-cli">
-          {agent.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+          {cliDisplayName(agent.cli)}
         </span>
         <em className={`wf-agent-status ${agent.status}`}>{statusLabel(agent.status)}</em>
       </button>

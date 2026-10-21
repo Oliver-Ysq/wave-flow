@@ -5,6 +5,8 @@ import {ViewCache} from "./workbench-state";
 import {DesignConfirmationCache,WorkspaceConfirmationCache} from "./workflow-design-config";
 import {groupWorkersByPhase} from "./conversation/plan-groups";
 import {userFacingText} from "./user-facing-text";
+import {cliDisplayName} from "./cli-meta";
+import type {RuntimeCli} from "./types";
 const cliDrafts=new ViewCache<Record<string,string>>(64);
 const plans=new ViewCache<ExecutionPlanResponse>(64);
 const confirmations=new DesignConfirmationCache();
@@ -14,7 +16,7 @@ const workspaceConfirmations=new WorkspaceConfirmationCache();
 
 /** 每个 CLI 只呈现一个安装（优先当前选中项）；安装切换属于执行底座的职责。 */
 function oneRuntimePerCli(plan:ExecutionPlanResponse){
-  const byCli=new Map<"codex"|"kimi",ExecutionPlanResponse["pool"][number]>();
+  const byCli=new Map<RuntimeCli,ExecutionPlanResponse["pool"][number]>();
   for(const runtime of plan.pool){
     const selected=plan.selectedByCli?.[runtime.cli];
     if(!byCli.has(runtime.cli)||runtime.runtimeId===selected)byCli.set(runtime.cli,runtime);
@@ -44,11 +46,11 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
  const local=!!revision.localOrigin;
  useEffect(()=>{let live=true;if(editable){setChecking(true);const timeout=setTimeout(()=>{if(live){setPlanError("执行配置检查超时（如果 macOS 刚弹出文件夹访问授权——常见于项目位于桌面、文稿等受保护目录——请点允许后重新检查；也可能正与其他窗口/进程抢占执行环境）。参数和 CLI 选择已保留。");setChecking(false);}},15_000);const done=()=>clearTimeout(timeout);void api.planExecution(taskId,revision.revision).then(result=>{done();if(live){plans.set(identity,result);setPlan(result);setPlanError(local||result.harnessRuntime?null:"尚未设置已验证的 Wave Flow CLI，请在执行环境设置中选择。");}}).catch(error=>{done();if(live&&!String(error).includes("主控必须空闲"))setPlanError(userFacingText(error instanceof Error?error.message:String(error)));}).finally(()=>{if(live)setChecking(false);});}else setChecking(false);return()=>{live=false;};},[taskId,revision.revision,editable,identity,checkAttempt]);
  function cliSelect(id:string,label:string){
-   if(revision.localOrigin){const cli=(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;return <span>{cli ? (cli==="codex"?"Codex CLI":"Kimi CLI") : "运行时决定"}</span>;}
-   if(execution){const assignment=execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment;return <span>{assignment?(assignment.cli==="codex"?"Codex CLI":"Kimi CLI"):"历史CLI配置未知"}</span>;}
+   if(revision.localOrigin){const cli=(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;return <span>{cli ? cliDisplayName(cli) : "运行时决定"}</span>;}
+   if(execution){const assignment=execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment;return <span>{assignment?cliDisplayName(assignment.cli):"历史CLI配置未知"}</span>;}
    if(!editable&&!blockedConfirmReason){
      const cli=revision.preview?.previewAgents.find(worker=>worker.nodeId===id)?.cli;
-     return <span>{cli==='codex'?'Codex CLI':cli==='kimi'?'Kimi CLI':'运行时决定'}</span>;
+     return <span>{cli?cliDisplayName(cli):'运行时决定'}</span>;
    }
    if(!plan){
      if(checking)return <span className="cli-pending" role="status">正在检查可用 CLI…</span>;
@@ -57,9 +59,9 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
    }
    const options=oneRuntimePerCli(plan);
    if(options.length===0)return <span>没有已验证的 CLI</span>;
-   if(options.length===1){const only=options[0]!;return <span>{only.cli==="codex"?"Codex CLI":"Kimi CLI"}</span>;}
+   if(options.length===1){const only=options[0]!;return <span>{cliDisplayName(only.cli)}</span>;}
    const preferred=choices[id]&&options.some(runtime=>runtime.runtimeId===choices[id])?choices[id]:options.find(runtime=>runtime.runtimeId===plan.harnessRuntime?.runtimeId)?.runtimeId??options[0]!.runtimeId;
-   return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{runtime.cli==="codex"?"Codex CLI":"Kimi CLI"}</option>)}</select>;
+   return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{cliDisplayName(runtime.cli)}</option>)}</select>;
  }
  function continuationSelect(nodeId:string){
    if(!plan?.continuationPlan)return null;

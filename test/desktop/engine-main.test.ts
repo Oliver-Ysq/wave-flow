@@ -424,6 +424,60 @@ test("Engine runtimes.validate 翻译上游进程退出错误", async () => {
   } finally { engine.shutdown(); }
 });
 
+/** dsh 在旧 Node 下静默退出零输出：版本读取失败必须翻译成可操作的 Node ≥ 24 提示。 */
+test("Engine runtimes.validate 把 dsh 旧 Node 静默退出翻译为 Node 版本提示", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-dsh-translate-")); roots.push(root);
+  const executablePath = join(root, "dsh"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async () => { throw new Error("无法读取 DeepSeek Harness 版本。 "); },
+  });
+  try {
+    await expect(engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "dsh" })).rejects.toThrow("DeepSeek Harness（dsh）需要 Node ≥ 24 运行时");
+  } finally { engine.shutdown(); }
+});
+
+/** 识别不到种类的自定义文件名按 Catalog 全种类回退尝试，不再只有二元。 */
+test("Engine runtimes.validate 未识别种类时按 Catalog 全部种类回退", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-fallback-")); roots.push(root);
+  const seen: string[] = [];
+  const executablePath = join(root, "custom-cli"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executable = await verifyExecutable(executablePath);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async (cli, input) => {
+      seen.push(cli);
+      if (cli !== "dsh") throw new Error("fixture 失败。 ");
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "0.2.1-rc.2", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    },
+  });
+  try {
+    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" }) as { runtime: { cli: string } };
+    expect(response.runtime.cli).toBe("dsh");
+    expect(seen).toEqual(["codex", "kimi", "claude", "dsh"]);
+  } finally { engine.shutdown(); }
+});
+
+/** 用户把 Claude 路径留在其他种类上时，按可执行文件名识别为 claude。 */
+test("Engine runtimes.validate 按文件名识别 claude 种类", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-detect-claude-")); roots.push(root);
+  const seen: string[] = [];
+  const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executable = await verifyExecutable(executablePath);
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    validateCliRuntime: async (cli, input) => {
+      seen.push(cli);
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "2.0.0 (Claude Code)", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    },
+  });
+  try {
+    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" }) as { runtime: { cli: string } };
+    expect(response.runtime.cli).toBe("claude");
+    expect(seen).toEqual(["claude"]);
+  } finally { engine.shutdown(); }
+});
+
 /** 探测只是排序与诊断：`--version` 失败（例如 node 入口需要 Engine 解析 node）仍要对
  * 首个候选做完整验证，不能把探测结论当成“未安装”。 */
 test("扫描在探测无结论时仍完整验证首个候选，并清掉失败结论", async () => {

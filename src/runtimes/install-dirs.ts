@@ -6,9 +6,10 @@ import { join } from "node:path";
  *
  * 目录与优先级移植自 Orca `getSystemCliInstallDirectories`
  * （src/shared/system-cli-install-dirs.ts）：Homebrew 两个前缀、npm 默认全局前缀、
- * nix、以及各 CLI 自带安装器；并按本项目两个 CLI 的真实位置补充
+ * nix、以及各 CLI 自带安装器；并按本项目 CLI 的真实位置补充
  * `~/.kimi-code/bin`、`~/.npm-global/bin`、`~/.bun/bin`、`~/.volta/bin` 与
- * ChatGPT.app 内嵌 Codex。只在 PATH 完全找不到该 CLI 时兜底，不参与优先级排序，
+ * ChatGPT.app 内嵌 Codex；claude 与 dsh 主要由 npm 全局前缀及 nvm 枚举覆盖。
+ * 只在 PATH 完全找不到该 CLI 时兜底，不参与优先级排序，
  * 避免把系统目录抬到用户已选的 PATH 前面。
  */
 export function systemCliInstallDirectories(platform: NodeJS.Platform, homePath: string): string[] {

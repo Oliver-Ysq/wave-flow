@@ -113,7 +113,7 @@ function extractDisplayOptions(argument: ts.Expression | undefined): { id: strin
     if (!ts.isPropertyAssignment(property) || !ts.isStringLiteral(property.initializer)) continue;
     const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null;
     if (name === "id" || name === "label") display[name] = property.initializer.text;
-    else if (name === "cli" && (property.initializer.text === "codex" || property.initializer.text === "kimi")) display.cli = property.initializer.text;
+    else if (name === "cli" && (property.initializer.text === "codex" || property.initializer.text === "kimi" || property.initializer.text === "claude" || property.initializer.text === "dsh")) display.cli = property.initializer.text;
   }
   return display;
 }
@@ -129,7 +129,7 @@ function extractOptions(argument: ts.Expression | undefined): Omit<ExtractedAgen
     if (property.name.text === "id") {
       if (!ts.isStringLiteral(property.initializer)) return null;
       id = property.initializer.text;
-    } else if (property.name.text === "cli" && ts.isStringLiteral(property.initializer) && (property.initializer.text === "codex" || property.initializer.text === "kimi")) {
+    } else if (property.name.text === "cli" && ts.isStringLiteral(property.initializer) && (property.initializer.text === "codex" || property.initializer.text === "kimi" || property.initializer.text === "claude" || property.initializer.text === "dsh")) {
       cli = property.initializer.text;
     } else if (property.name.text === "label" && ts.isStringLiteral(property.initializer)) {
       label = property.initializer.text;

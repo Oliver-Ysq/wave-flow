@@ -21,6 +21,36 @@ export function createKimiWorkerEnvironment(_runtime: VerifiedCliRuntime, inheri
   return result;
 }
 
+/** 为 Claude Code ACP Worker 构造最小环境；adapter 包经 CLAUDE_CODE_EXECUTABLE 找到用户已验证的 claude realpath。
+ * Claude Code 2.x 的 CLI 是原生二进制，不强制依赖 node；Runtime 若记录了 node（旧版 JS 入口）则一并前置。
+ */
+export function createClaudeWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+  const node = runtime.nodeExecutable;
+  const result = inheritedWorkerEnvironment(inherited);
+  result.PATH = normalizedPath(inherited.PATH, node ? nodeRuntimeDirectory({ executablePath: node.path, executableIdentity: node.identity }) : null);
+  result.CLAUDE_CODE_EXECUTABLE = runtime.executablePath;
+  result.NO_BROWSER = "1";
+  return result;
+}
+
+/**
+ * 为 dsh Worker 构造最小环境。dsh shim 是 `#!/usr/bin/env node`，运行时 node 完全由
+ * PATH 解析，因此必须前置已验证的 node 目录（dsh 需要 Node ≥ 24）。绝不注入任何
+ * API key 或伪造 $DSH_HOME 配置——凭证永远来自用户自己的环境与配置。
+ * 用户显式设置 DSH_HOME 时按 dsh 自身的 `DSH_HOME ?? ~/.dsh` 契约透传（仅接受绝对路径），
+ * 否则由 dsh 回退到 ~/.dsh；这与 Orca 的 home 解析语义一致。
+ */
+export function createDshWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+  const node = runtime.nodeExecutable;
+  if (!node) throw new Error("dsh Worker 缺少已验证的 node 依赖（需要 Node ≥ 24），需要重新验证。 ");
+  const result = inheritedWorkerEnvironment(inherited);
+  result.PATH = normalizedPath(inherited.PATH, nodeRuntimeDirectory({ executablePath: node.path, executableIdentity: node.identity }));
+  result.NO_BROWSER = "1";
+  const home = inherited.DSH_HOME?.trim();
+  if (home?.startsWith("/")) result.DSH_HOME = home;
+  return result;
+}
+
 /** 两种 CLI 共用继承白名单；CLI 专属变量仍由各自构造器添加，不扩大权限。 */
 function inheritedWorkerEnvironment(inherited: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};

@@ -1,7 +1,7 @@
 import type { JsonObject, JsonValue } from "./json";
 
 /** Workflow 当前可使用的正常交互式 CLI；新 CLI 只在其 Adapter、测试与能力探测完成后加入。 */
-export type AgentCli = "codex" | "kimi";
+export type AgentCli = "codex" | "kimi" | "claude" | "dsh";
 
 /** Agent CLI 的可写范围；默认 read-only，当前 Codex ACP Worker 尚不以该声明可靠限制真实权限。 */
 export type AgentSandbox = "read-only" | "workspace-write";

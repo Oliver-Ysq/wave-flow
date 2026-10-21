@@ -4,7 +4,7 @@ import { waveFlowHome } from "../journal/paths";
 import { adapterById, adapterForCli } from "./adapter-catalog";
 import { verifyExecutable, verifyExecutableIdentity } from "./identity";
 import { validateCliRuntime } from "./cli-runtime-validator";
-import { resolveNodeRuntime, verifyNodeRuntime } from "./node-runtime";
+import { resolveNodeRuntime, verifyNodeRuntime, assertNodeMinimumVersion } from "./node-runtime";
 import type { CliRuntimeRecord, CliRuntimeRegistryFile, CliRuntimeView, RuntimeCli, VerifiedCliRuntime } from "./types";
 
 /** 用户级 CLI Runtime Registry；只保存确认后的 CLI metadata，绝不保存 shell env 或凭据。 */
@@ -201,7 +201,8 @@ export class CliRuntimeRegistry {
     }
     let node = runtime.nodeExecutable;
     if (!node) {
-      const resolved = await resolveNodeRuntime(runtime.discoveredShell);
+      // 旧记录没有钉 node 时按 Catalog 的版本下限补解析；不能先选默认 node 再断言失败。
+      const resolved = await resolveNodeRuntime(runtime.discoveredShell, adapterForCli(runtime.cli).minNodeVersion);
       node = { path: resolved.executablePath, identity: resolved.executableIdentity };
       // 锁内重读再补写：并发 action 或后台复验可能已先更新该记录。
       await this.#writeLocked(async () => {
@@ -210,6 +211,9 @@ export class CliRuntimeRegistry {
       });
     }
     await verifyNodeRuntime(node.path, node.identity);
+    // 声明了最低 node 主版本的 CLI（如 dsh）在启动前复核时同步断言版本，防止用户切换 nvm 默认版本后静默退化。
+    const minNode = adapterForCli(runtime.cli).minNodeVersion;
+    if (minNode !== undefined) await assertNodeMinimumVersion({ executablePath: node.path, executableIdentity: node.identity }, minNode, adapterForCli(runtime.cli).displayName);
     await verifyExecutableIdentity(runtime.executablePath, runtime.executableIdentity);
     return { ...runtime, nodeExecutable: node, status: "verified" };
   }
@@ -269,7 +273,7 @@ function parse(value: unknown): CliRuntimeRegistryFile {
     if (!valid(item)) throw new Error("Registry runtime 记录无效。 "); const record = item as CliRuntimeRecord;
     if (ids.has(record.runtimeId) || paths.has(`${record.cli}\0${record.executablePath}`)) throw new Error("Registry runtime 重复。 "); ids.add(record.runtimeId); paths.add(`${record.cli}\0${record.executablePath}`);
   }
-  for (const [cli, id] of Object.entries(file.selectedByCli as Record<string, unknown>)) if ((cli !== "codex" && cli !== "kimi") || typeof id !== "string" || !ids.has(id)) throw new Error("Registry 默认选择无效。 ");
+  for (const [cli, id] of Object.entries(file.selectedByCli as Record<string, unknown>)) if ((cli !== "codex" && cli !== "kimi" && cli !== "claude" && cli !== "dsh") || typeof id !== "string" || !ids.has(id)) throw new Error("Registry 默认选择无效。 ");
   if (file.harnessRuntimeId !== undefined && (typeof file.harnessRuntimeId !== "string" || !ids.has(file.harnessRuntimeId))) throw new Error("Registry 主控选择无效。 ");
   const selectedByCli = file.selectedByCli as Partial<Record<RuntimeCli, string>>;
   // 迁移规则：旧文件没有 harnessRuntimeId 时回填用户原 codex 默认项，语义不变。
@@ -292,7 +296,7 @@ function valid(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false; const r = value as Record<string, unknown>; const i = r.executableIdentity as Record<string, unknown>;
   const node = r.nodeExecutable as Record<string, unknown> | undefined;
   const adapter = r.verifiedAdapter as Record<string, unknown> | undefined;
-  return typeof r.runtimeId === "string" && !!r.runtimeId && (r.cli === "codex" || r.cli === "kimi") && typeof r.executablePath === "string" && r.executablePath.startsWith("/") && !!i && typeof i.device === "number" && typeof i.inode === "number" && typeof i.size === "number" && typeof i.modifiedAtMs === "number" && (node === undefined || (typeof node.path === "string" && node.path.startsWith("/") && !!node.identity && typeof (node.identity as Record<string, unknown>).device === "number" && typeof (node.identity as Record<string, unknown>).inode === "number" && typeof (node.identity as Record<string, unknown>).size === "number" && typeof (node.identity as Record<string, unknown>).modifiedAtMs === "number")) && typeof r.version === "string" && !!r.version && (r.discoveredFrom === "shell-path" || r.discoveredFrom === "gui-path" || r.discoveredFrom === "install-dir" || r.discoveredFrom === "manual") && (r.discoveredShell === null || typeof r.discoveredShell === "string") && !!adapter && typeof adapter === "object" && (adapter.adapterId === "codex-acp" || adapter.adapterId === "kimi-acp") && typeof adapter.adapterVersion === "string" && typeof adapter.acpProtocolVersion === "number" && (adapter.harnessTools === undefined || typeof adapter.harnessTools === "boolean") && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt as string)) && (r.status === "verified" || r.status === "needs-revalidation" || r.status === "invalid") && (r.diagnostic === null || typeof r.diagnostic === "string") && (r.workerEnabled === undefined || typeof r.workerEnabled === "boolean");
+  return typeof r.runtimeId === "string" && !!r.runtimeId && (r.cli === "codex" || r.cli === "kimi" || r.cli === "claude" || r.cli === "dsh") && typeof r.executablePath === "string" && r.executablePath.startsWith("/") && !!i && typeof i.device === "number" && typeof i.inode === "number" && typeof i.size === "number" && typeof i.modifiedAtMs === "number" && (node === undefined || (typeof node.path === "string" && node.path.startsWith("/") && !!node.identity && typeof (node.identity as Record<string, unknown>).device === "number" && typeof (node.identity as Record<string, unknown>).inode === "number" && typeof (node.identity as Record<string, unknown>).size === "number" && typeof (node.identity as Record<string, unknown>).modifiedAtMs === "number")) && typeof r.version === "string" && !!r.version && (r.discoveredFrom === "shell-path" || r.discoveredFrom === "gui-path" || r.discoveredFrom === "install-dir" || r.discoveredFrom === "manual") && (r.discoveredShell === null || typeof r.discoveredShell === "string") && !!adapter && typeof adapter === "object" && (adapter.adapterId === "codex-acp" || adapter.adapterId === "kimi-acp" || adapter.adapterId === "claude-acp" || adapter.adapterId === "dsh-acp") && typeof adapter.adapterVersion === "string" && typeof adapter.acpProtocolVersion === "number" && (adapter.harnessTools === undefined || typeof adapter.harnessTools === "boolean") && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt as string)) && (r.status === "verified" || r.status === "needs-revalidation" || r.status === "invalid") && (r.diagnostic === null || typeof r.diagnostic === "string") && (r.workerEnabled === undefined || typeof r.workerEnabled === "boolean");
 }
 async function assertPrivateDirectory(path: string): Promise<void> { const info = await lstat(path); if (!info.isDirectory() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) throw new Error("CLI Runtime 状态目录不安全。 "); }
 async function assertPrivateFile(path: string): Promise<void> { const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) throw new Error("CLI Runtime 状态文件不安全。 "); }

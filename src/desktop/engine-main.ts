@@ -99,6 +99,9 @@ function installParentWatchdog(onParentGone: () => void): () => void {
 process.env.WF_DESKTOP_ENGINE = "1";
 if (process.argv[2] === "__codex-acp") {
   await import("@agentclientprotocol/codex-acp");
+} else if (process.argv[2] === "__claude-acp") {
+  // 包根 main 是 lib.js（库入口）；ACP stdio server 在 bin 入口 dist/index.js。
+  await import("@agentclientprotocol/claude-agent-acp/dist/index.js");
 } else if (process.argv[2] === "__worker-mcp") {
   const { runWorkerMcpServer } = await import("../runtime/worker-mcp-server");
   // 测试注入的小预算走显式参数；生产路径永远使用默认 25s，不读取任何用户配置。

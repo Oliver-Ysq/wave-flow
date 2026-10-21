@@ -191,7 +191,42 @@ describe("CliRuntimeRegistry", () => {
     // 漂移后再次按 id 解析仍拒绝，绝不静默换到另一候选。
     await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
   });
+
+  test("dsh runtime 记录解析往返：selectedByCli 接受 dsh 键，node 24 复核通过", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-dsh-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root);
+    const saved = await registry.saveVerified(await dshRecord(root, "dsh", "v24.22.0"));
+    // dsh 不声明 harnessTools：不能设为主控，但可作为 Worker 候选按 cli 解析。
+    await expect(registry.select(saved.runtimeId)).rejects.toThrow("不能设为主控");
+    await expect(registry.resolveWorker("dsh")).resolves.toMatchObject({ runtimeId: saved.runtimeId, cli: "dsh" });
+    const listed = await registry.list();
+    expect(listed.runtimes[0]).toMatchObject({ cli: "dsh", verifiedAdapter: { adapterId: "dsh-acp", harnessTools: false } });
+    expect(JSON.stringify(listed)).not.toContain("inode");
+    // Registry 文件校验白名单已拓宽：selectedByCli 的 dsh 键合法且必须引用存在的记录。
+    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { dsh: saved.runtimeId }, runtimes: [saved] })}\n`);
+    await (await import("node:fs/promises")).chmod(join(root, "runtimes.json"), 0o600);
+    expect((await new CliRuntimeRegistry(root).list()).selectedByCli.dsh).toBe(saved.runtimeId);
+    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { traex: saved.runtimeId }, runtimes: [saved] })}\n`);
+    await (await import("node:fs/promises")).chmod(join(root, "runtimes.json"), 0o600);
+    await expect(new CliRuntimeRegistry(root).list()).rejects.toThrow("默认选择无效");
+  });
+
+  test("dsh 启动前复核发现 node 主版本低于 24 时触发受控复验并 fail closed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-dsh-old-node-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root, async () => { throw Error("探针失败"); });
+    await registry.saveVerified(await dshRecord(root, "dsh", "v22.17.1"));
+    await expect(registry.resolveWorker("dsh")).rejects.toThrow("自动检查失败");
+    await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ status: "needs-revalidation" }] });
+  });
 });
+
+/** dsh 记录：requiresNodeRuntime + minNodeVersion，node 由固定打印指定版本的假 node 扮演。 */
+async function dshRecord(root: string, name: string, nodeVersion: string): Promise<CliRuntimeRecord> {
+  const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho dsh\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const nodePath = join(root, `${name}-node`); await writeFile(nodePath, `#!/bin/sh\necho '${nodeVersion}'\n`, { mode: 0o700 }); await chmod(nodePath, 0o700);
+  const executable = await verifyExecutable(executablePath); const node = await verifyExecutable(nodePath);
+  return { runtimeId: crypto.randomUUID(), cli: "dsh", executablePath: executable.executablePath, executableIdentity: executable.identity, nodeExecutable: { path: node.executablePath, identity: node.identity }, version: "0.2.1-rc.2", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+}
 
 /** 回归：Engine 派发与后台复验均为并发后，Registry 读-改-写必须串行，否则并发
  * saveVerified 相互覆盖丢记录。 */

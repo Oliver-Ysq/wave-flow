@@ -58,6 +58,19 @@ async function run(args) {
     ]);
     expect(dynamicCount).toBe(0);
   });
+  test("字面量 cli 白名单已拓宽到 claude 与 dsh", () => {
+    const { workers } = extractAgentWorkers(`async function run(args) {
+  phase("工作");
+  await agent("丙", { id: "c", cli: "claude" });
+  await agent("丁", { id: "d", cli: "dsh" });
+  await agent("戊", { id: "e", cli: "traex" });
+}`);
+    expect(workers).toEqual([
+      { id: "c", cli: "claude", label: null, phaseTitle: "工作" },
+      { id: "d", cli: "dsh", label: null, phaseTitle: "工作" },
+      { id: "e", cli: null, label: null, phaseTitle: "工作" },
+    ]);
+  });
 
   test("按源码顺序记录 phase 归属；无前置 phase() 的节点为 null（未分阶段）", () => {
     const source = `const meta = { name: "x", description: "x", phases: [{ title: "验证" }, { title: "分析" }] };

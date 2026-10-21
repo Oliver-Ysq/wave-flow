@@ -58,19 +58,23 @@ describe("Workflow 作者 API", () => {
     }]);
   });
 
-  test("接受 cli: kimi，拒绝未知 cli", async () => {
+  test("接受 cli: kimi/claude/dsh，拒绝未知 cli", async () => {
     const host = new MemoryHost();
     const result = await executeWorkflow(workflow(async () => agent("Review", { id: "kimi-node", cli: "kimi" })), undefined, host);
     expect(result).toEqual({ id: "kimi-node" });
     expect(host.agents).toEqual([expect.objectContaining({ id: "kimi-node", cli: "kimi" })]);
-    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unknown-cli", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex 或 kimi");
+    for (const cli of ["claude", "dsh"] as const) {
+      const extra = new MemoryHost();
+      await executeWorkflow(workflow(async () => agent("Review", { id: `${cli}-node`, cli })), undefined, extra);
+      expect(extra.agents).toEqual([expect.objectContaining({ id: `${cli}-node`, cli })]);
+    }
+    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unknown-cli", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex、kimi、claude 或 dsh");
   });
 
   test("拒绝非法 Agent 选项、重复 id 与未声明阶段", async () => {
     const host = new MemoryHost();
     await expect(executeWorkflow(workflow(async () => agent("", { id: "bad", cli: "codex" })), undefined, host)).rejects.toThrow("非空字符串");
-    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unsupported", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex");
-    await expect(executeWorkflow(workflow(async () => phase("missing")), undefined, host)).rejects.toThrow("已声明的阶段");
+    await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unsupported", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex");    await expect(executeWorkflow(workflow(async () => phase("missing")), undefined, host)).rejects.toThrow("已声明的阶段");
     await expect(executeWorkflow(workflow(async () => {
       await agent("one", { id: "same", cli: "codex" });
       return agent("two", { id: "same", cli: "codex" });

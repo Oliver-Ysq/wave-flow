@@ -1,6 +1,11 @@
 export type AgentStatus = "queued" | "running" | "blocked" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
 export type RunStatus = "running" | "pausing" | "paused" | "recovering" | "completed" | "cancelled" | "interrupted";
 
+/** 前端可识别的本机 Agent CLI 种类；与后端 RuntimeCli 联合一一对应，新增种类必须同步 `cli-meta.ts`。 */
+export type RuntimeCli = "codex" | "kimi" | "claude" | "dsh";
+/** 已验证 ACP Adapter id；与 CLI 种类一一对应。 */
+export type RuntimeAdapterId = "codex-acp" | "kimi-acp" | "claude-acp" | "dsh-acp";
+
 export type AgentSnapshot = {
   /** 当前节点的Wave Flow会话身份；未派发时null，缺失时UI不得批准文件操作。 */
   agentSessionId?: string | null;
@@ -11,7 +16,7 @@ export type AgentSnapshot = {
   /** 面向界面展示的节点名称。 */
   label: string;
   /** 实际承载该节点的 Agent CLI（生效值；受限 Execution 由分配快照决定）。 */
-  cli: "codex" | "kimi";
+  cli: RuntimeCli;
   /** 节点当前权威状态。 */
   status: AgentStatus;
   /** Agent 实际工作目录。 */
@@ -198,7 +203,7 @@ export type WorkflowExecution = {
  executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
-export type WorkerAssignment = { agentId: string; cli: "codex" | "kimi"; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string };
+export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: RuntimeAdapterId; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
 export type ExecutionWorkspaceConfig = {
  /** 明确复用原执行保存现场，不复用节点完成状态；缺省首次分配。 */ continuation?:{executionId:string;heads:Array<{workspaceId:string;commit:string}>};
@@ -226,17 +231,17 @@ export type ExecutionPlanResponse = {
     /** 非空字面量 label → 固定 id → Agent；不求值动态表达式。 */
     name: string;
     /** 字面量 CLI 提示；null 表示由分配决定。 */
-    cli: "codex" | "kimi" | null;
+    cli: RuntimeCli | null;
     /** 最近的字面量 phase 标题；null 表示无法静态确定，不是运行事实。 */
     phaseTitle: string | null;
   }>;
-  workers: Array<{ id: string; cli: "codex" | "kimi" | null; label: string | null;
+  workers: Array<{ id: string; cli: RuntimeCli | null; label: string | null;
     /** 源码中最近的字面量 phase 标题；null 表示无法静态确定，不是运行事实。 */
     phaseTitle: string | null;
   }>;
   dynamicCount: number;
   pool: CliRuntime[];
-  selectedByCli: Partial<Record<"codex" | "kimi", string>>;
+  selectedByCli: Partial<Record<RuntimeCli, string>>;
   harnessRuntime: CliRuntime | null;
 };
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
@@ -262,11 +267,11 @@ export type HarnessSnapshot = {
 export type HarnessRunResponse = { harness: HarnessSnapshot };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
-export type CliRuntime = { runtimeId: string; cli: "codex" | "kimi"; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: "codex-acp" | "kimi-acp"; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
-export type CliRuntimeListResponse = { selectedByCli: Partial<Record<"codex" | "kimi", string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
+export type CliRuntime = { runtimeId: string; cli: RuntimeCli; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: RuntimeAdapterId; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
+export type CliRuntimeListResponse = { selectedByCli: Partial<Record<RuntimeCli, string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
 /** 启动自动扫描的无敏感信息摘要；成功项已保存但尚未被设为默认。 */
-export type ScanCliRuntimesResponse = { discovered: number; verified: number; failures: Partial<Record<"codex" | "kimi", "absent" | "timeout" | "exec_failed" | "limit_reached">>; runtimes: CliRuntimeListResponse };
-export type DiscoveredCliCandidate = { cli: "codex" | "kimi"; executablePath: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir"; discoveredShell: string | null; aliases: string[] };
+export type ScanCliRuntimesResponse = { discovered: number; verified: number; failures: Partial<Record<RuntimeCli, "absent" | "timeout" | "exec_failed" | "limit_reached">>; runtimes: CliRuntimeListResponse };
+export type DiscoveredCliCandidate = { cli: RuntimeCli; executablePath: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir"; discoveredShell: string | null; aliases: string[] };
 /** 侧边栏耐久项目；项目提供 cwd，会话不再自行选择路径。 */
 export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
 export type HarnessProjectResponse = { project: HarnessProject };
