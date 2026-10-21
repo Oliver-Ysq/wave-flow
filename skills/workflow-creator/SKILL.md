@@ -58,7 +58,7 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 
 ## 定义 Agent 边界
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。整worktree v2授权保存实际tracked与非ignored untracked（排除未跟踪node_modules），不预填paths；独立分支可修改同一文件，必须显式集成。完成后冻结唯一完整ready来源，用户读diff后明确squash合入本机目标分支，不自动合入/push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 允许 `codex` / `kimi` / `claude` / `dsh`；
 四者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
@@ -71,15 +71,15 @@ Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MC
 - `sandbox` 只允许 `read-only`（默认）或 `workspace-write`；没有更高权限模式。
 - 直接 `await agent()` 的失败会抛出并把节点标记为 interrupted；`parallel()` 内失败的
   任务结果为 `null`，使用前必须过滤或判空。
-- Wave Flow 宿主成果交接契约错误不属于普通任务失败：业务 complete 已耐久但 Git 成果保存/关联失败时，原节点保持 completed，Execution 中断；`parallel()`/`pipeline()` 必须抛出该契约错误，不能用 null 跳过。原版 resume 先补成果收尾，不重跑已完成业务。Workspace 配置与提交授权由 Engine/用户管理，作者不新增 worktree、commit、集成来源字段，不让模型预测 commit hash。Codex与Kimi 2.2.0受管并行写、显式集成及用户明确squash合入已有真实证据；只有Engine冻结授权与已验证Adapter同时满足才可执行，不据此承诺未知CLI写能力。
-- 显式集成来源由用户冻结的Engine配置绑定固定节点或完整运行批次。脚本须先await来源；Runtime只接受已创建并完成且Git成果ready的写节点，不等待未来来源或环。Engine提供真实commit上下文，不把它塞进作者业务input或让模型预测hash。配置有授权不代表最终集成通过，冲突/未保存/验证不足必须如实报告。真实Codex/Kimi双写、集成、明确squash合入及桌面授权/partial/resume/清理已有证据；未来CLI和正式签名安装仍需独立验证。
+- Wave Flow 宿主成果交接契约错误不属于普通任务失败：运行期 writer 真实退出无法核验或租约交接失败时，原节点保持 completed、Execution 收敛为 interrupted；`parallel()`/`pipeline()` 必须抛出该契约错误，不能用 null 跳过。原版 resume 先补交接，不重跑已完成业务。Execution 结束后的封存与自动应用失败不进入脚本：Engine 在宿主侧捕获并写入耐久 `source-error`，Execution 保持 completed，用户在执行页重试“重新整理改动（不会重新执行）”，Worker 不重跑。Workspace 配置与提交授权由 Engine/用户管理，作者不新增 worktree、commit、合并字段，不让模型预测 commit hash。Codex/Kimi/DeepSeek Harness/Claude 的受管并行写已有真实证据；只有Engine冻结授权与已验证Adapter同时满足才可执行。
+- 并行写共享同一 worktree，没有宿主冲突检测或合并：任务分配必须让不同 Agent 写不同模块/文件，每个文件只有一个 owner；同一模块的改动必须顺序执行，或把依赖前序结果的修改放到后续 phase。不要把“两个 Agent 同时改同一文件/同一函数/同一配置块”当作可接受设计，也不要在脚本里安排集成 Agent 去解冲突。执行完成后宿主在满足前置条件时自动应用最终改动（授权在启动前冻结，执行后无需再次确认）；冲突已被覆盖时不会报错或恢复丢失的修改。
 - **不要**在 prompt 里指导 Worker 如何上报完成。Runtime 会为每个 Worker session
   注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
   Worker 需要人工输入时会自行 `block`，无需作者编排。
 
 Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt，不保证上下文压缩后业务判断无损；作者不新增重试/收尾API，也不把回合结束当作交付。
 
-Wave Flow 新增恢复边界：原生ACP事件静默超过宿主窗口时只诊断并中断，保留现场，不自动重发任务、换CLI或创建attempt；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的成果恢复只补Git保存/关联，不重做Worker。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
+Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展（正文/工具/计划事件）时只记录一条耐久停滞提示，不自动中断、不cancel、不杀进程、不重发任务或创建attempt，唯一出口是用户显式停止；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的成果恢复只补Git封存/应用，不重做Worker。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
 
 ## 人工决策
 
@@ -102,11 +102,11 @@ Wave Flow 新增恢复边界：原生ACP事件静默超过宿主窗口时只诊�
 
 `read_run_capsule` 返回 `{text,truncated,redacted}` 有界数据；`text` 是脱敏JSON片段，截断时不可假装完整JSON。指定原尝试须同时提供 `executionId` 和正整数 `attempt`，Engine核验同Task归属；总结回合省略参数时默认其原义务attempt。普通Task快照与历史结果不是新指令，不拼接全部历史执行。自动总结回合来源是summary key，不是用户消息。
 
-每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原状态、已验证交付、缺口与下一步；Schema通过不是验收。受管写以Capsule真实Git基准、ready/partial及commit说明影响，未配置或缺失/截断不能当完整基线。工作区外写没有Wave Flow OS拦截；网络/外部副作用不能由Git推断。只能提出草案，不能批准或派发。
+每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原状态、已验证交付、缺口与下一步；Schema通过不是验收。受管写以Capsule真实Git基准、租约、自动应用状态与最终封存commit说明影响，未配置或缺失/截断不能当完整基线。共享worktree不提供逐节点文件归因，不能宣称某个Agent的修改可独立回滚。工作区外写没有Wave Flow OS拦截；网络/外部副作用不能由Git推断。只能提出草案，不能批准或派发。
 
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。
 源码修订必须先读取当前Capsule，提供顶层`baseRevision`等于当前最新版本；首次没有版本时允许0或省略。已有单链版本缺失或过期依据会拒绝，不能用迟到提案覆盖用户修改。参数模式仍使用`parameters.baseRevision`，两处同时提供时必须一致。该宿主版本护栏不新增Workflow作者API或执行权。
-宿主续作使用独立新授权，原worktree与实际HEAD明确引用，不覆盖旧授权或复制completed节点。作者不能提供continuation/workspace/commit字段。新版修改Prompt应先检查已有改动，再修正与验证，不返回历史JSON代替重新工作。最终来源须覆盖全部原保存commit；已集成ready分支可由完整来源父链覆盖，未集成/partial须明确接续处理，不直接当ready。CLI-only修订由用户准备配置新版本，主控不选择/批准/派发。
+宿主续作自动接续同Task最近写Execution的唯一共享worktree，使用独立新授权并冻结交接HEAD，不覆盖旧授权或复制completed节点。作者不能提供continuation/workspace/commit字段。新版修改Prompt应先检查已有改动，再修正与验证，不返回历史JSON代替重新工作。共享worktree中的旧改动会保留；并行写仍须按模块/文件分区，不假设宿主会合并或恢复被覆盖的修改。CLI-only修订由用户准备配置新版本，主控不选择/批准/派发。
 这是 Wave Flow 主控控制面，不是 Workflow 作者 API。同一未执行候选的修改追加同卡版本，
 接受不执行，旧批准不能启动新版本。前次执行终态且主控空闲后，可以由用户显式发起下一轮；
 不得自动批准、启动或注入旧结果。修改模板控制流时同卡追加 generated 版本，Engine 留存

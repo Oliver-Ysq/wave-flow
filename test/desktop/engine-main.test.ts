@@ -20,7 +20,7 @@ import { mkdir, realpath } from "node:fs/promises";
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 
-test("Engine重启仅补completed来源证据，diff与显式合入不重跑业务", async () => {
+test("Engine重启仅补completed来源证据，自动应用不重跑业务", async () => {
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-auto-delivery-")));roots.push(root);
  const cwd=join(root,"repo");await mkdir(cwd);
  const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Test","-c","user.email=test@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
@@ -33,9 +33,9 @@ test("Engine重启仅补completed来源证据，diff与显式合入不重跑业�
  const source='const meta={name:"auto-delivery",description:"自动交付",phases:[{title:"write"}]};async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
  await harness.proposeWorkflowRevision(task.harnessRunId,source);await harness.acceptWorkflowRevision(task.harnessRunId,1);
  const assignment={agentId:"writer",cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test-runtime",adapterId:"codex-acp" as const,adapterVersion:"test"};
- const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test-runtime",ruleText:null,ruleDegraded:false,defaultAssignment:{...assignment,agentId:"*"},assignments:[assignment],workspaces:{version:2 as const,authorization,bindings:[{nodeId:"writer",workspaceId}]}};
+ const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test-runtime",ruleText:null,ruleDegraded:false,defaultAssignment:{...assignment,agentId:"*"},assignments:[assignment],workspaces:{version:3 as const,authorization,workspaceId}};
  let calls=0,runId="";
- const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer");await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.finish(lease,true,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},harnessRoot,join(root,"runs"),join(root,"workspaces"));
+ const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer");await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.release(lease,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},harnessRoot,join(root,"runs"),join(root,"workspaces"));
  const {execution}=await executions.createExecution(task.harnessRunId,1,{},config);
  for(let n=0;n<1000;n++){if((await executions.listExecutions(task.harnessRunId))[0].finishedAt!==null)break;await Bun.sleep(10);}
  expect((await executions.listExecutions(task.harnessRunId))[0].status).toBe("completed");expect(calls).toBe(1);harness.close();
@@ -60,19 +60,14 @@ test("Engine重启仅补completed来源证据，diff与显式合入不重跑业�
   expect(detail.sourceEvidence?.commit).toBe(savedRef);
   expect(detail.sourceDiagnostic).toBeUndefined();
   expect(await git("show","-s","--format=%P",detail.sourceEvidence!.commit)).toBe(base);
-  expect(await git("rev-list","--count",`${base}..${detail.sourceEvidence!.commit}`)).toBe("1");
-  expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+  // 最终树自动应用到主工作区，保持未提交、不移动分支。
+  expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("final\n");
+  expect(await git("diff","--cached","--name-only")).toBe("");expect(await git("status","--porcelain")).toBe("M a.txt");
   await engine.convergeStaleAcpWorkers();expect(await manager.inspectSource(execution.executionId)).toEqual(detail.sourceEvidence!);expect(calls).toBe(1);
   const identity={harnessRunId:task.harnessRunId,executionId:execution.executionId};
   const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
   expect(review.paths).toEqual(["a.txt"]);expect(review.sourceCommit).toBe(savedRef);
   await expect(engine.handleDesktopAction("executions.fileDiff",{...identity,path:".git/config"})).rejects.toThrow("不属于");
-  await expect(engine.handleDesktopAction("executions.merge",{...identity,authorized:false})).rejects.toThrow("明确");
-  const input={...identity,authorized:true,requestId:crypto.randomUUID(),sourceCommit:savedRef,targetBranch:"main",targetHead:base};
-  const merged=await engine.handleDesktopAction("executions.merge",input) as import("../../src/workspace/git-repository").GitMergeResult;
-  expect(await engine.handleDesktopAction("executions.merge",{...input,requestId:crypto.randomUUID()})).toEqual(merged);
-  expect((await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview).merged).toEqual(merged);
-  expect(await git("show","-s","--format=%P",merged.commit)).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("final\n");expect(calls).toBe(1);
  }finally{engine.shutdown();}
 },30_000);
 afterEach(async () => { for (const child of children.splice(0)) child.kill(); await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });

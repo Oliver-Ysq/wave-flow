@@ -59,8 +59,8 @@ export function validateExecutionConfig(value: unknown, workers: readonly Extrac
   });
   if (!byId.has(config.fallbackRuntimeId)) throw new Error("执行配置快照的回退 Runtime 不存在或未验证。 ");
   const workspaces = config.workspaces === undefined ? undefined : validateExecutionWorkspaces(config.workspaces);
-  if (workspaces) for (const binding of workspaces.bindings) {
-    const assignment = assignments.find(item => item.agentId === binding.nodeId) ?? defaultAssignment;
+  if (workspaces) for (const node of workspaces.authorization.nodes) {
+    const assignment = assignments.find(item => item.agentId === node.nodeId) ?? defaultAssignment;
     if (!adapterById(assignment.adapterId)?.capabilities.workerControlMcp) throw new Error("所选Adapter尚未完成Worker私有完成协议验证；请重新选择CLI。");
   }
   return { version: 1, createdAt: typeof config.createdAt === "string" ? config.createdAt : new Date().toISOString(), fallbackRuntimeId: config.fallbackRuntimeId, ruleText: (config.ruleText as string | null) ?? null, ruleDegraded: config.ruleDegraded, defaultAssignment, assignments, ...(workspaces ? { workspaces } : {}) };

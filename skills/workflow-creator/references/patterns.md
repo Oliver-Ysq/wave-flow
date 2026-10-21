@@ -83,13 +83,13 @@ const confirmed = unique.filter((_, index) => verdicts[index] !== null);
 
 ## 代码改动任务
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。整worktree v2授权保存实际tracked与非ignored untracked（排除未跟踪node_modules），不预填paths；独立分支可修改同一文件，必须显式集成。完成后冻结唯一完整ready来源，用户读diff后明确squash合入本机目标分支，不自动合入/push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 给改动类 Agent 明确的项目 `cwd`、`workspace-write` 权限、验收标准和它应运行的检查。
 Wave Flow 的作者 API 不声明 worktree 或 commit。Desktop 会对固定 `workspace-write` 节点
-要求用户冻结整个 Git 工作区授权：独立worktree允许修改同一文件，相同工作区分组表示
-同一改动链顺序复用；独立分支须后续显式集成。未取得此配置、动态写节点无法核验、
-或 Adapter 未通过Worker Control验证时 fail closed。cwd不是OS安全边界：
+要求用户冻结整个 Git 工作区授权；所有写节点共享同一worktree，并行写冲突不会被检测或合并。
+未取得此配置、动态写节点无法核验、或 Adapter 未通过Worker Control验证时 fail closed。
+分配并行写任务时按模块/文件分区，每个文件只有一个 owner；cwd不是OS安全边界：
 
 ```ts
 phase("实现");
@@ -109,9 +109,10 @@ return agent(`复审刚才的实现，修复已验证的问题并再次运行检
 });
 ```
 
-显式集成仍是普通 `agent()`，脚本必须先 await 来源；来源 node id、workspace 和 commit 由
-Desktop 冻结配置与 Runtime 提供，不新增作者字段。prompt 只描述合并、冲突处理和整体测试，
-不得预测 commit hash、执行 push 或合入主工作区。
+写任务按模块/文件分区，每个文件只有一个 owner；新增与修改同一模块的 Agent 必须顺序执行。
+共享 worktree 不检测、不合并冲突，后写覆盖先写且不会报错或恢复丢失的修改。不要安排
+“集成 Agent”去解冲突，也不得预测 commit hash 或执行 push；主工作区的写入只由宿主在
+Execution 收尾时自动应用（保持未提交），作者不提供该接口。
 
 ## 脚本级人工决策（仅受限草案）
 

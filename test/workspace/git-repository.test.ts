@@ -1,8 +1,8 @@
-import { afterEach, expect, spyOn, test as bunTest } from "bun:test";
+import { afterEach, expect, test as bunTest } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { GitRepository, type GitSaveRequest } from "../../src/workspace/git-repository";
+import { GitRepository, type GitSealRequest } from "../../src/workspace/git-repository";
 
 // 真实Git进程验证不是内存单测，保留明确15s总预算。
 const test = (name: string, run: () => Promise<void>, timeout = 15_000) => bunTest(name, run, timeout);
@@ -20,121 +20,129 @@ async function fixture() {
   await writeFile(join(cwd, "a.txt"), "base\n"); await writeFile(join(cwd, "b.txt"), "base\n");
   await git(cwd, "add", "--", "a.txt", "b.txt"); await git(cwd, "commit", "-m", "fixture");
   const repo = await GitRepository.open(cwd), base = (await repo.inspect()).head;
-  const request: GitSaveRequest = { requestId: crypto.randomUUID(), baseCommit: base, startCommit: base };
+  const request: GitSealRequest = { requestId: crypto.randomUUID(), baseCommit: base, startCommit: base };
   return { root, cwd, repo, base, request };
 }
 
-test("显式squash合入已checkout主分支，单父/同请求幂等，未跟踪与dirty不覆盖", async () => {
- const {root,cwd,repo,base,request}=await fixture();
- const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
- await writeFile(join(worker.cwd,"a.txt"),"result\n");
- const saved=await worker.save(request), input={requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"main",targetHead:base};
- const review=await repo.review(base,saved.commit);expect(review.paths).toEqual(["a.txt"]);expect(review.targets).toEqual([{branch:"main",head:base}]);
- expect((await repo.fileDiff(base,saved.commit,"a.txt")).patch).toContain("+result");
- await expect(repo.fileDiff(base,saved.commit,".git/config")).rejects.toThrow("不属于");
- await writeFile(join(cwd,"user.txt"),"keep");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"user.txt")).text()).toBe("keep");await rm(join(cwd,"user.txt"));
- await writeFile(join(cwd,"b.txt"),"dirty\n");await git(cwd,"add","b.txt");await expect(repo.mergeSquash(input)).rejects.toThrow("未提交");expect(await Bun.file(join(cwd,"b.txt")).text()).toBe("dirty\n");await git(cwd,"restore","--staged","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");
-  await writeFile(join(cwd,"b.txt"),"staged\n");await git(cwd,"add","b.txt");await writeFile(join(cwd,"b.txt"),"base\n");expect((await repo.inspect()).changedPaths).toEqual(["b.txt"]);await expect(repo.mergeSquash(input)).rejects.toThrow("未提交/暂存");await git(cwd,"restore","--staged","b.txt");
- const merged=await repo.mergeSquash(input);expect(await repo.mergeSquash(input)).toEqual(merged);
- expect(await git(cwd,"show","-s","--format=%P",merged.commit)).toBe(base);expect(await git(cwd,"rev-list","--count",`${base}..main`)).toBe("1");
- expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("result\n");expect((await repo.inspect()).changedPaths).toEqual([]);
- await expect(repo.mergeSquash({...input,requestId:crypto.randomUUID()})).rejects.toThrow("已变化");
-});
-test("未checkout目标仅CAS ref；目标前进拒绝，二进制diff明确省略",async()=>{
- const {root,cwd,repo,base,request}=await fixture();await git(cwd,"branch","target");
- const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,"image.bin"),Buffer.from([0,1,2]));const saved=await worker.save(request);
- expect(await repo.fileDiff(base,saved.commit,"image.bin")).toMatchObject({omitted:true,reason:"binary"});
- const merged=await repo.mergeSquash({requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"target",targetHead:base});
- expect((await repo.inspect()).head).toBe(base);expect(await git(cwd,"rev-parse","target")).toBe(merged.commit);
- await expect(repo.mergeSquash({requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"target",targetHead:merged.commit})).rejects.toThrow("偏离");
-});
-test("大文本diff明确省略而不丢失成果文件，已跟踪ignored依赖仍保存",async()=>{
- const {root,cwd,repo}=await fixture();await mkdir(join(cwd,"node_modules"));await writeFile(join(cwd,"node_modules","tracked.txt"),"base\n");await git(cwd,"add","node_modules/tracked.txt");await git(cwd,"commit","-m","tracked fixture");const base=(await repo.inspect()).head;
- const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,".gitignore"),"node_modules/\n");await writeFile(join(worker.cwd,"node_modules","tracked.txt"),"changed\n");await writeFile(join(worker.cwd,"large.txt"),"line content\n".repeat(170000));
- const saved=await worker.save({requestId:crypto.randomUUID(),baseCommit:base,startCommit:base});expect(saved.paths).toContain("node_modules/tracked.txt");expect(saved.paths).toContain("large.txt");expect(await repo.fileDiff(base,saved.commit,"large.txt")).toMatchObject({omitted:true,reason:"too-large",patch:""});
-},20000);
-test("tracked始终纳入，gitignored和未跟踪node_modules不收集，特殊路径通过NUL暂存",async()=>{
- const {root,cwd,repo,base}=await fixture();const worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
- await writeFile(join(worker.cwd,".gitignore"),"*.log\n");await writeFile(join(worker.cwd,"debug.log"),"ignored");await mkdir(join(worker.cwd,"node_modules"));await writeFile(join(worker.cwd,"node_modules","dep"),"ignored dependency");await writeFile(join(worker.cwd,"[x] space.ts"),"new");
- const saved=await worker.save({requestId:crypto.randomUUID(),baseCommit:base,startCommit:base});expect(saved.paths).toEqual([".gitignore","[x] space.ts"]);expect((await worker.inspect()).changedPaths).toEqual([]);
- expect(await Bun.file(join(worker.cwd,"debug.log")).text()).toBe("ignored");expect((await repo.inspect()).head).toBe(base);
-});
-test("候选已冻结但ref更新失败时，重试拒绝新增成果；恢复原tree后保存同候选",async()=>{
- const {root,repo,base,request}=await fixture(),worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);
- await writeFile(join(worker.cwd,"a.txt"),"frozen\n");
- const original=Bun.spawn, injected=spyOn(Bun,"spawn").mockImplementation((...args:any[])=>{const argv=args[0];if(Array.isArray(argv)&&argv.includes("update-ref"))throw Error("fixture ref unavailable");return (original as any)(...args);});
- try{await expect(worker.save(request)).rejects.toThrow("fixture ref unavailable");}finally{injected.mockRestore();}
- await writeFile(join(worker.cwd,"extra.txt"),"late");await expect(worker.save(request)).rejects.toThrow("候选已冻结");expect((await worker.inspect()).head).toBe(base);await rm(join(worker.cwd,"extra.txt"));
- const saved=await worker.save(request);expect(saved.paths).toEqual(["a.txt"]);expect(await worker.save(request)).toEqual(saved);
-});
-test("合入CAS成功但checkout失败时重试补现场，不覆盖随后用户变化",async()=>{
- const {root,cwd,repo,base,request}=await fixture(),worker=await repo.createWorktree(join(root,"worker"),"codex/wf-worker",base);await writeFile(join(worker.cwd,"a.txt"),"result\n");const saved=await worker.save(request);
- const input={requestId:crypto.randomUUID(),baseCommit:base,sourceCommit:saved.commit,targetBranch:"main",targetHead:base},original=Bun.spawn;
- const injected=spyOn(Bun,"spawn").mockImplementation((...args:any[])=>{const argv=args[0];if(Array.isArray(argv)&&argv.includes("read-tree")&&argv.includes("-u"))throw Error("fixture checkout unavailable");return (original as any)(...args);});
- try{await expect(repo.mergeSquash(input)).rejects.toThrow("fixture checkout unavailable");}finally{injected.mockRestore();}
- const head=await git(cwd,"rev-parse","HEAD");expect(head).not.toBe(base);await writeFile(join(cwd,"b.txt"),"user\n");await expect(repo.mergeSquash(input)).rejects.toThrow("现场已变化");expect(await Bun.file(join(cwd,"b.txt")).text()).toBe("user\n");await writeFile(join(cwd,"b.txt"),"base\n");
- expect((await repo.mergeSquash(input)).commit).toBe(head);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("result\n");expect((await repo.inspect()).changedPaths).toEqual([]);
-});
-test("独立worktree不复制主工作区dirty内容，实际成果保存与同请求重试只创建一个commit", async () => {
+test("封存共享worktree为单父commit；应用后主工作区保持未提交、未暂存、不移动分支", async () => {
   const { root, cwd, repo, base, request } = await fixture();
-  await writeFile(join(cwd, "a.txt"), "user dirty\n");
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-  expect(await Bun.file(join(worker.cwd, "a.txt")).text()).toBe("base\n");
-  await writeFile(join(worker.cwd, "a.txt"), "worker result\n");
-  const saved = await worker.save(request);
-  expect(saved.paths).toEqual(["a.txt"]); expect(saved.commit).not.toBe(base);
-  expect(await worker.save(request)).toEqual(saved);
-  expect(await git(worker.cwd, "rev-list", "--count", `${base}..HEAD`)).toBe("1");
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  const sealed = await worker.seal(request);
+  expect(sealed.commit).not.toBe(base);
+  const retried = await worker.seal(request);
+  expect(retried.commit).toBe(sealed.commit);
+  expect(retried.paths).toEqual(sealed.paths);
+  expect(retried.unchanged).toBe(true);
+  expect(await git(worker.cwd, "show", "-s", "--format=%P", sealed.commit)).toBe(base);
   expect((await worker.inspect()).changedPaths).toEqual([]);
+  expect(await repo.review(base, sealed.commit)).toEqual({ baseCommit: base, sourceCommit: sealed.commit, paths: ["a.txt"] });
+  expect((await repo.fileDiff(base, sealed.commit, "a.txt")).patch).toContain("+result");
+  await expect(repo.fileDiff(base, sealed.commit, ".git/config")).rejects.toThrow("不属于");
+  expect(await repo.inspect()).toMatchObject({ head: base, changedPaths: [] });
+
+  expect(await repo.applyCommit(sealed.commit, base)).toEqual(["a.txt"]);
+  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("result\n");
   expect(await git(cwd, "rev-parse", "HEAD")).toBe(base);
-  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("user dirty\n");
+  expect(await git(cwd, "diff", "--cached", "--name-only")).toBe("");
+  expect((await repo.inspect()).changedPaths).toEqual(["a.txt"]);
 });
 
-test("无改动复用HEAD，不生成空commit", async () => {
+test("主工作区dirty、HEAD漂移或冲突时拒绝自动应用，不覆盖现场", async () => {
+  const { root, cwd, repo, base, request } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  const sealed = await worker.seal(request);
+
+  await writeFile(join(cwd, "user.txt"), "keep");
+  await expect(repo.applyCommit(sealed.commit, base)).rejects.toThrow("未提交");
+  expect(await Bun.file(join(cwd, "user.txt")).text()).toBe("keep");
+  await rm(join(cwd, "user.txt"));
+
+  await writeFile(join(cwd, "b.txt"), "staged\n"); await git(cwd, "add", "b.txt"); await writeFile(join(cwd, "b.txt"), "base\n");
+  await expect(repo.applyCommit(sealed.commit, base)).rejects.toThrow("未提交");
+  expect(await git(cwd, "show", ":b.txt")).toBe("staged");
+  await git(cwd, "restore", "--staged", "b.txt");
+
+  await git(cwd, "commit", "--allow-empty", "-m", "external");
+  await expect(repo.applyCommit(sealed.commit, base)).rejects.toThrow("偏离");
+  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
+});
+
+test("应用删除文件且不覆盖ignored现场", async () => {
+  const { root, cwd, repo, base, request } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await rm(join(worker.cwd, "b.txt"));
+  const sealed = await worker.seal(request);
+  expect(sealed.paths).toEqual(["b.txt"]);
+  await repo.applyCommit(sealed.commit, base);
+  expect(await Bun.file(join(cwd, "b.txt")).exists()).toBe(false);
+  expect((await repo.inspect()).changedPaths).toEqual(["b.txt"]);
+});
+
+test("无改动复用HEAD不生成空commit；仅暂存区有变化时拒绝空成果", async () => {
   const { root, repo, base, request } = await fixture();
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-  expect(await worker.save(request)).toEqual({ requestId: request.requestId, commit: base, unchanged: true, paths: [] });
+  expect(await worker.seal(request)).toEqual({ requestId: request.requestId, commit: base, unchanged: true, paths: [] });
+  await writeFile(join(worker.cwd, "a.txt"), "staged\n");
+  const add = Bun.spawn(["/usr/bin/git", "add", "--", "a.txt"], { cwd: worker.cwd, stdout: "ignore", stderr: "pipe" }); expect(await add.exited).toBe(0);
+  await writeFile(join(worker.cwd, "a.txt"), "base\n");
+  await expect(worker.seal({ ...request, requestId: crypto.randomUUID() })).rejects.toThrow("暂存区");
+  expect(await git(worker.cwd, "show", ":a.txt")).toBe("staged");
 });
-test("额外untracked成果自动保存，无需事先列举文件", async () => {
-  const { root, repo, base, request } = await fixture(); const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-  await writeFile(join(worker.cwd, "secret.env"), "secret");
-  const saved = await worker.save(request); expect(saved.paths).toEqual(["secret.env"]); expect((await worker.inspect()).head).not.toBe(base); expect(await Bun.file(join(worker.cwd, "secret.env")).text()).toBe("secret");
-});
-test("被忽略依赖目录内的 attributes 不判定现场不可核验；被忽略的根部 attributes 仍拒绝", async () => {
-  const { root, repo, request } = await fixture();
-  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", request.baseCommit);
-  await writeFile(join(worker.cwd, ".gitignore"), "node_modules/\n");
-  await mkdir(join(worker.cwd, "node_modules", "fast-json-stringify"), { recursive: true });
-  await writeFile(join(worker.cwd, "node_modules", "fast-json-stringify", ".gitattributes"), "*.js filter=evil\n");
-  await writeFile(join(worker.cwd, "a.txt"), "content\n");
-  const saved = await worker.save(request);
-  expect(saved.paths).toEqual([".gitignore", "a.txt"]);
 
-  const second = await repo.createWorktree(join(root, "worker-root-ignored"), "codex/wf-worker-2", request.baseCommit);
-  await writeFile(join(second.cwd, ".gitignore"), ".gitattributes\n");
-  await writeFile(join(second.cwd, ".gitattributes"), "*.txt filter=evil\n");
-  await expect(second.save(request)).rejects.toThrow("attributes");
+test("tracked始终纳入，gitignored与未跟踪node_modules不收集，特殊路径通过NUL暂存", async () => {
+  const { root, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, ".gitignore"), "*.log\n"); await writeFile(join(worker.cwd, "debug.log"), "ignored");
+  await mkdir(join(worker.cwd, "node_modules")); await writeFile(join(worker.cwd, "node_modules", "dep"), "ignored dependency");
+  await writeFile(join(worker.cwd, "[x] space.ts"), "new");
+  const saved = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  expect(saved.paths).toEqual([".gitignore", "[x] space.ts"]);
+  expect((await worker.inspect()).changedPaths).toEqual([]);
+  expect(await Bun.file(join(worker.cwd, "debug.log")).text()).toBe("ignored");
+  expect((await repo.inspect()).head).toBe(base);
 });
-test("禁止主工作区保存、越界路径、符号链接与Git attributes", async () => {
+
+test("二进制和大文本diff明确省略，成果文件仍完整保存", async () => {
+  const { root, repo, base, request } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "image.bin"), Buffer.from([0, 1, 2]));
+  await writeFile(join(worker.cwd, "large.txt"), "line content\n".repeat(170000));
+  const saved = await worker.seal(request);
+  expect(saved.paths).toEqual(["image.bin", "large.txt"]);
+  expect(await repo.fileDiff(base, saved.commit, "image.bin")).toMatchObject({ omitted: true, reason: "binary" });
+  expect(await repo.fileDiff(base, saved.commit, "large.txt")).toMatchObject({ omitted: true, reason: "too-large", patch: "" });
+  expect(Buffer.byteLength(await Bun.file(join(worker.cwd, "large.txt")).text())).toBeGreaterThan(2_000_000);
+}, 20_000);
+
+test("禁止主工作区封存、越界worktree、符号链接与Git attributes", async () => {
   const { root, cwd, repo, base, request } = await fixture();
-  await expect(repo.save(request)).rejects.toThrow("非受管分支");
+  await expect(repo.seal(request)).rejects.toThrow("非受管分支");
   await git(cwd, "switch", "-c", "codex/wf-user-main");
-  await expect(repo.save(request)).rejects.toThrow("主工作区");
+  await expect(repo.seal(request)).rejects.toThrow("主工作区");
   await expect(repo.createWorktree(join(cwd, "worker"), "codex/wf-worker", base)).rejects.toThrow("之外");
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
-
   await symlink(join(cwd, "a.txt"), join(worker.cwd, "link"));
-  await expect(worker.save({ ...request })).rejects.toThrow("符号链接");
+  await expect(worker.seal({ ...request })).rejects.toThrow("符号链接");
   await rm(join(worker.cwd, "link")); await writeFile(join(worker.cwd, ".gitattributes"), "*.txt filter=evil\n");
-  await expect(worker.save({ ...request })).rejects.toThrow("attributes");
+  await expect(worker.seal({ ...request })).rejects.toThrow("attributes");
 });
-test("保存后现场变化不能冒充原成果补关联，既有commit保留", async () => {
-  const { root, repo, request } = await fixture(); const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", request.baseCommit);
-  await writeFile(join(worker.cwd, "a.txt"), "first\n"); const saved = await worker.save(request);
-  await writeFile(join(worker.cwd, "a.txt"), "changed\n");
-  await expect(worker.save(request)).rejects.toThrow("现场已改变");
-  expect((await worker.inspect()).head).toBe(saved.commit);
+
+test("封存接受worktree内已有commit并包含其全部历史", async () => {
+  const { root, repo, base, request } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "a.txt"), "committed\n");
+  await git(worker.cwd, "commit", "-am", "agent commit");
+  await writeFile(join(worker.cwd, "b.txt"), "uncommitted\n");
+  const sealed = await worker.seal({ ...request, startCommit: base });
+  expect(sealed.paths).toEqual(["a.txt", "b.txt"]);
+  expect(await git(worker.cwd, "rev-list", "--count", `${base}..${sealed.commit}`)).toBe("2");
+  await repo.applyCommit(sealed.commit, base);
+  expect(await Bun.file(join(repo.cwd, "a.txt")).text()).toBe("committed\n");
+  expect(await Bun.file(join(repo.cwd, "b.txt")).text()).toBe("uncommitted\n");
 });
+
 test("hooks及本地filters拒绝打开且不执行外部程序", async () => {
   const { cwd } = await fixture();
   await writeFile(join(cwd, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n");
@@ -143,37 +151,94 @@ test("hooks及本地filters拒绝打开且不执行外部程序", async () => {
   await expect(GitRepository.open(cwd)).rejects.toThrow("filters");
 });
 
-test("两个独立成果用标准Git显式合并，主分支不变化；冲突现场不允许ready保存", async () => {
-  const { root, cwd, repo, base, request } = await fixture();
-  const a = await repo.createWorktree(join(root, "writer-a"), "codex/wf-a", base);
-  const b = await repo.createWorktree(join(root, "writer-b"), "codex/wf-b", base);
-  const integration = await repo.createWorktree(join(root, "integration"), "codex/wf-integration", base);
-  await writeFile(join(a.cwd, "a.txt"), "a result\n"); await writeFile(join(b.cwd, "b.txt"), "b result\n");
-  const first = await a.save(request), second = await b.save({ ...request, requestId: crypto.randomUUID() });
-  await git(integration.cwd, "merge", "--no-edit", first.commit);
-  await git(integration.cwd, "merge", "--no-edit", second.commit);
-  expect(await Bun.file(join(integration.cwd, "a.txt")).text()).toBe("a result\n"); expect(await Bun.file(join(integration.cwd, "b.txt")).text()).toBe("b result\n");
-  expect((await integration.inspect()).changedPaths).toEqual([]); expect((await repo.inspect()).head).toBe(base);
-  const conflict = await repo.createWorktree(join(root, "conflict-source"), "codex/wf-conflict", base);
-  await writeFile(join(conflict.cwd, "a.txt"), "different\n");
-  const conflicting = await conflict.save({ ...request, requestId: crypto.randomUUID() });
-  await expect(git(integration.cwd, "merge", "--no-edit", conflicting.commit)).rejects.toThrow();
-  expect((await integration.inspect()).conflicts).toEqual(["a.txt"]);
-  await expect(integration.save({ ...request, startCommit: (await integration.inspect()).head })).rejects.toThrow("merge 冲突");
-  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
-}, 15_000);
+test("续作自动应用能删除/回退上一Execution新增的文件，后续续作不被死锁", async () => {
+  const { root, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "new.txt"), "e1\n");
+  const c1 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  expect(await repo.applyCommit(c1.commit, base)).toEqual(["new.txt"]);
+  expect(await Bun.file(join(repo.cwd, "new.txt")).exists()).toBe(true);
+  await rm(join(worker.cwd, "new.txt"));
+  const c2 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: c1.commit });
+  expect(c2.paths).toEqual([]);
+  expect(await repo.applyCommit(c2.commit, base, c1.commit)).toEqual([]);
+  expect(await Bun.file(join(repo.cwd, "new.txt")).exists()).toBe(false);
+  expect((await repo.inspect()).changedPaths).toEqual([]);
+  await writeFile(join(worker.cwd, "later.txt"), "e3\n");
+  const c3 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: c2.commit });
+  expect(await repo.applyCommit(c3.commit, base, c2.commit)).toEqual(["later.txt"]);
+  expect((await repo.inspect()).changedPaths).toEqual(["later.txt"]);
+});
 
-test("宿主保存集成成果保留真实多父Git关系，重试不生成第二merge commit", async () => {
-  const { root, repo, base, request } = await fixture();
-  const source = await repo.createWorktree(join(root, "source"), "codex/wf-source", base);
-  const integration = await repo.createWorktree(join(root, "integration"), "codex/wf-merge", base);
-  await writeFile(join(source.cwd, "a.txt"), "merged\n"); const saved = await source.save(request);
-  await git(integration.cwd, "merge", "--no-commit", "--no-ff", saved.commit);
-  const mergeRequest = { ...request, requestId: crypto.randomUUID(), mergeParents: [saved.commit] };
-  const merged = await integration.save(mergeRequest);
-  expect(await git(integration.cwd, "show", "-s", "--format=%P", merged.commit)).toBe(`${base} ${saved.commit}`);
-  expect(await integration.save(mergeRequest)).toEqual(merged);
-  const state = await integration.inspect(); expect(await Bun.file(join(state.gitDirectory, "MERGE_HEAD")).exists()).toBe(false);
-  expect(await Bun.file(join(integration.cwd, "a.txt")).text()).toBe("merged\n");
-  expect((await repo.inspect()).head).toBe(base);
+test("续作应用拒绝并保留仅暂存区中的用户内容", async () => {
+  const { root, cwd, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "new.txt"), "e1\n");
+  const c1 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  await repo.applyCommit(c1.commit, base);
+  await writeFile(join(cwd, "a.txt"), "USER STAGED\n"); await git(cwd, "add", "--", "a.txt"); await writeFile(join(cwd, "a.txt"), "base\n");
+  await writeFile(join(worker.cwd, "later.txt"), "e2\n");
+  const c2 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: c1.commit });
+  await expect(repo.applyCommit(c2.commit, base, c1.commit)).rejects.toThrow("暂存区");
+  expect(await git(cwd, "show", ":a.txt")).toBe("USER STAGED");
+  expect(await Bun.file(join(cwd, "later.txt")).exists()).toBe(false);
+});
+
+test("自动应用中断后按目标tree幂等修复，不误报用户改动", async () => {
+  const { cwd, root, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  const sealed = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  expect(await repo.applyCommit(sealed.commit, base)).toEqual(["a.txt"]);
+  // 模拟 read-tree 已执行、reset --mixed 前中断：索引停在目标tree。
+  await git(cwd, "read-tree", sealed.commit);
+  expect(await git(cwd, "diff", "--cached", "--name-only")).toBe("a.txt");
+  expect(await repo.applyCommit(sealed.commit, base)).toEqual(["a.txt"]);
+  expect(await git(cwd, "diff", "--cached", "--name-only")).toBe("");
+  expect((await repo.inspect()).changedPaths).toEqual(["a.txt"]);
+});
+
+test("相对基准零改动时不因主工作区dirty误报未自动应用", async () => {
+  const { cwd, repo, base } = await fixture();
+  await writeFile(join(cwd, "user.txt"), "keep");
+  expect(await repo.applyCommit(base, base)).toEqual([]);
+  expect(await Bun.file(join(cwd, "user.txt")).text()).toBe("keep");
+});
+
+test("续作应用会覆盖主工作区ignored文件时拒绝并保留现场", async () => {
+  const { root, cwd, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, ".gitignore"), "secret.local\n");
+  const c1 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  expect(await repo.applyCommit(c1.commit, base)).toEqual([".gitignore"]);
+  // 用户在已应用现场里创建被忽略文件；续作封存同名文件时必须拒绝覆盖。
+  await writeFile(join(cwd, "secret.local"), "user local\n");
+  expect((await repo.inspect()).ignoredPaths).toContain("secret.local");
+  await writeFile(join(worker.cwd, "secret.local"), "agent\n");
+  await git(worker.cwd, "add", "-f", "--", "secret.local"); await git(worker.cwd, "commit", "-m", "track ignored file");
+  const c2 = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: c1.commit });
+  expect(c2.paths).toContain("secret.local");
+  await expect(repo.applyCommit(c2.commit, base, c1.commit)).rejects.toThrow("ignored");
+  expect(await Bun.file(join(cwd, "secret.local")).text()).toBe("user local\n");
+});
+
+test("封存中断（update-ref后未read-tree）重试修复索引", async () => {
+  const { root, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  const request = { requestId: crypto.randomUUID(), baseCommit: base, startCommit: base };
+  const sealed = await worker.seal(request);
+  await git(worker.cwd, "read-tree", base);
+  expect((await worker.inspect()).changedPaths).toEqual(["a.txt"]);
+  const retried = await worker.seal(request);
+  expect(retried.commit).toBe(sealed.commit);
+  expect((await worker.inspect()).changedPaths).toEqual([]);
+});
+
+test("不得把其他Execution的封存HEAD当成本次来源", async () => {
+  const { root, repo, base } = await fixture();
+  const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  await worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base });
+  await expect(worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: base })).rejects.toThrow("其他封存来源");
 });

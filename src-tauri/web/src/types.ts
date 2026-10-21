@@ -25,6 +25,11 @@ export type AgentSnapshot = {
   result: Record<string, unknown> | null;
   /** 当前可展示的诊断信息；无信息为 null。 */
   diagnostic: string | null;
+  /**
+   * 节点停滞等人机提示；可选，缺省或 null 表示无提示。
+   * 仅补充可见性，不代表节点状态改变，也不构成失败或人工确认依据。
+   */
+  hint?: string | null;
   /** 当前人工协助请求；非 blocked 节点为 null。 */
   block: {
     /** 原阻塞请求身份；答案仅交付原Worker。 */
@@ -206,13 +211,13 @@ export type WorkflowExecution = {
 export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: RuntimeAdapterId; adapterVersion: string };
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
 export type ExecutionWorkspaceConfig = {
- /** 明确复用原执行保存现场，不复用节点完成状态；缺省首次分配。 */ continuation?:{executionId:string;heads:Array<{workspaceId:string;commit:string}>};
- version:2; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string;externalResources?:string[]}>};bindings:Array<{nodeId:string;workspaceId:string;integrationSources?:{nodeIds:string[]}|{batchSequence:number}}> };
+ /** 明确接续同Task最近写Execution的共享worktree；缺省首次分配。 */ continuation?:{executionId:string;workspaceId:string;head:string};
+ version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>}; workspaceId:string };
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
-  /** 已核验原执行保存现场，用户明确选择，不自动合并partial或复制节点状态。 */
-  continuationPlan?:{executionId:string;baseCommit:string;workspaces:Array<{workspaceId:string;commit:string;nodeIds:string[];ready:boolean}>}|null;
+  /** 已核验原执行共享worktree，写修订自动接续；不复制节点状态。 */
+  continuationPlan?:{executionId:string;baseCommit:string;workspaceId:string;head:string}|null;
   /** 最新终态执行现场证据；首次null，确认绑定此版本，不构成授权。 */
   sceneEvidenceHash?:string|null;
   workspacePlan?:{nodeIds:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
@@ -279,16 +284,18 @@ export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   workspaceDiagnostic?:string;
-  /** 最终ready来源证据；不创建交付分支，不代表已合入或push。 */
+  /** 最终封存与自动应用证据；只读投影，不代表已提交或 push。 */
   sourceEvidence?: {
     /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
-    /** 受管来源分支及commit完整oid。 */ branch:string; commit:string;
-    /** 内部最终成果及工作区身份。 */ sourceCommit:string; sourceWorkspaceId:string;
-    /** 基准和冻结授权身份。 */ baseCommit:string; authorizationId:string;
-    /** 实际变化文件与耐久时间。 */ paths:string[]; savedAt:string;
+    /** 共享worktree分支及UUID。 */ branch:string; workspaceId:string;
+    /** 最终封存commit与基准。 */ commit:string; baseCommit:string;
+    /** 冻结授权身份。 */ authorizationId:string;
+    /** 实际变化文件、自动应用状态与耐久时间。 */ paths:string[]; savedAt:string;
+    /** 已自动写入主工作区，或记录未应用原因。 */ applied:{at:string;paths:string[]}|{skippedAt:string;reason:string};
   };
   /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
-  workspaceEvidence?:Array<{nodeId:string;branch:string;lease:{attempt:number}|null;results:Array<{attempt:number;commit:string;paths:string[];ready:boolean;unchanged:boolean;mergeParents:string[]}>}>;
+  /** 共享worktree与租约投影。 */
+  workspaceEvidence?:{workspaceId:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;staleLeases:number;cleaned:boolean};
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };

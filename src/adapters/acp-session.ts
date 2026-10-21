@@ -46,6 +46,21 @@ export type AcpSessionEvent = {
   readonly update: acp.SessionUpdate;
 };
 
+/**
+ * 判断一条 ACP session update 是否代表模型侧的真实进展。
+ * 只有正文、工具调用/更新与计划更新算进展；thought 空分片、available_commands、
+ * current_mode 等心跳/元信息事件不得刷新 Worker 停滞提示计时——否则“进程活着、
+ * 模型流静默”时空心跳会续命，“无实质进展”提示永远不出现。
+ */
+export function acpProgressIsMeaningful(update: acp.SessionUpdate): boolean {
+  return update.sessionUpdate === "agent_message_chunk"
+    || update.sessionUpdate === "tool_call"
+    || update.sessionUpdate === "tool_call_update"
+    || update.sessionUpdate === "plan"
+    || update.sessionUpdate === "plan_update"
+    || update.sessionUpdate === "plan_removed";
+}
+
 /** Wave Flow 需要持久化的 ACP 会话绑定；能力快照仅用于 Policy，不是授权凭证。 */
 export type AcpSessionBinding = {
   /** 配置中选择的 launcher id。 */

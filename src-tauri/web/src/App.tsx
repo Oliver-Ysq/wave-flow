@@ -441,6 +441,17 @@ export function App() {
       );
   }, [route, harness?.harnessRunId, draftProjectId]);
   const workflowPanelOpen = route.kind === "workflow";
+  /** 变更审阅属于整个详情弹窗，不随正文滚动；页签或执行身份变化即关闭。 */
+  const [changesView, setChangesView] = useState<{
+    taskId: string;
+    executionId: string;
+    sourceCommit: string;
+  } | null>(null);
+  /** 详情面包屑只标示当前页签，避免整句用户输入挤占头部。 */
+  const sectionLabel =
+    route.kind === "workflow"
+      ? { plan: "方案", execution: "执行", results: "结果" }[route.section]
+      : "方案";
   const workflowTitle = useRef<HTMLElement>(null);
   const workflowReturn = useRef<{
     taskId: string | null;
@@ -465,7 +476,7 @@ export function App() {
     }
     wasWorkflowOpen.current = workflowPanelOpen;
   }, [workflowPanelOpen, harness?.harnessRunId]);
-  // 大弹窗支持 Esc 返回对话；其上若还有别的弹层（预置选择、清理确认等），先让内层处理。
+  // 大弹窗支持 Esc 返回对话；其上若还有别的弹层（预置选择、清理确认、归档确认等），先让内层处理。
   useEffect(() => {
     if (!workflowPanelOpen) return;
     const keydown = (event: KeyboardEvent) => {
@@ -477,17 +488,23 @@ export function App() {
       )
         return;
       event.preventDefault();
+      if (changesView) {
+        setChangesView(null);
+        return;
+      }
       setRoute({ kind: "conversation" });
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [workflowPanelOpen]);
-  const centralScroll = useRef<HTMLElement | null>(null);
+  }, [workflowPanelOpen, changesView]);
+  const centralScroll = useRef<HTMLDivElement | null>(null);
   const pageKey =
     route.kind === "workflow"
       ? `${route.taskId}:${route.cardId}:${route.revision}:${route.section}:${route.executionId ?? ""}:${route.attempt ?? "current"}`
       : "conversation";
   useEffect(() => {
+    // 切页或换执行时收起变更面板，避免把上一个执行来源的 diff 留在新页面上。
+    setChangesView(null);
     const el = centralScroll.current;
     if (!el || route.kind !== "workflow") return;
     el.scrollTop = detailPositions.get(pageKey) ?? 0;
@@ -566,6 +583,24 @@ export function App() {
   );
   const [executionDetail, setExecutionDetail] =
     useState<ExecutionResponse | null>(null);
+  /** 最新一次“重新整理改动”的内联结果；用于成功/仍跳过都给出即时反馈，不再静默无变化。 */
+  const [applyRetryResult, setApplyRetryResult] = useState<{
+    executionId: string;
+    outcome: "applied" | "skipped";
+    reason?: string;
+  } | null>(null);
+  /** 受管 worktree 清理确认；null 表示未打开确认弹窗。 */
+  const [cleanupConfirmation, setCleanupConfirmation] = useState<{
+    harnessRunId: string;
+    executionId: string;
+    branch: string;
+  } | null>(null);
+  useEffect(() => {
+    setApplyRetryResult(null);
+  }, [harness?.harnessRunId, selectedExecutionId]);
+  useEffect(() => {
+    setCleanupConfirmation(null);
+  }, [harness?.harnessRunId]);
   /** 当前详情 revision 的动态节点数；plan 不可用或为 0 时按 0 处理。 */
   const [executionDynamicCount, setExecutionDynamicCount] = useState(0);
   useEffect(() => {
@@ -1032,26 +1067,35 @@ export function App() {
     action: "pause" | "recover" | "stop" | "resume",
   ) {
     if (!harness || !executionDetail) return;
+    const owner = harness.harnessRunId;
+    const executionId = executionDetail.execution.executionId;
+    // 已完成 Execution 的 resume 就是“重新整理改动”：Engine 只补 Git 收尾，不重跑 Workflow。
+    const retryingApply =
+      action === "resume" && executionDetail.snapshot.status === "completed";
     const valid = requestFence.current.begin(
-      `execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`,
+      `execution:${owner}:${executionId}`,
     );
     const finishBusy = beginBusy(
-      `execution:${executionDetail.execution.executionId}`,
+      `execution:${executionId}`,
       `execution:${action}`,
     );
+    if (retryingApply) setApplyRetryResult(null);
     try {
+      const response =
+        action === "resume"
+          ? await api.resumeExecution(owner, executionId)
+          : await api.executionControl(owner, executionId, action);
+      // executions.resume 只返回运行快照，不携带 sourceEvidence/workspaceEvidence；必须回读完整详情，
+      // 否则重试成功后来源证据从页面消失，仍跳过时也无从展示原因。回读失败时保留旧证据，只更新运行快照。
       const detail =
         action === "resume"
-          ? await api.resumeExecution(
-              harness.harnessRunId,
-              executionDetail.execution.executionId,
-            )
-          : await api.executionControl(
-              harness.harnessRunId,
-              executionDetail.execution.executionId,
-              action,
-            );
-      const owner = harness.harnessRunId;
+          ? await api.execution(owner, executionId).catch(() => ({
+              ...executionDetail,
+              execution: response.execution,
+              snapshot: response.snapshot,
+              controllable: response.controllable,
+            }))
+          : response;
       if (
         valid() &&
         harnessRef.current?.harnessRunId === owner &&
@@ -1059,6 +1103,18 @@ export function App() {
         routeRef.current.executionId === detail.execution.executionId
       )
         setExecutionDetail(detail);
+      if (retryingApply && valid() && harnessRef.current?.harnessRunId === owner) {
+        const applied = detail.sourceEvidence?.applied;
+        setApplyRetryResult({
+          executionId: detail.execution.executionId,
+          outcome: applied && "at" in applied ? "applied" : "skipped",
+          reason:
+            applied && "skippedAt" in applied
+              ? applied.reason
+              : detail.sourceDiagnostic ??
+                "执行页仍未读到自动应用证据，请稍后刷新详情。",
+        });
+      }
       const next = (await api.harness(owner)).harness;
       if (harnessRef.current?.harnessRunId === owner)
         setHarness((current) =>
@@ -1071,6 +1127,46 @@ export function App() {
       finishBusy();
     }
   }
+
+  /** 清理受管 worktree；只删除临时 checkout，已封存成果与主工作区自动应用结果不受影响。 */
+  async function cleanupWorkspaces(target: {
+    harnessRunId: string;
+    executionId: string;
+  }) {
+    const valid = requestFence.current.begin(
+      `execution:${target.harnessRunId}:${target.executionId}`,
+    );
+    const finishBusy = beginBusy(
+      `execution:${target.executionId}`,
+      "cleanup-workspaces",
+    );
+    try {
+      const next = await api.cleanupWorkspaces(
+        target.harnessRunId,
+        target.executionId,
+      );
+      if (
+        valid() &&
+        harnessRef.current?.harnessRunId === target.harnessRunId &&
+        routeRef.current.kind === "workflow" &&
+        routeRef.current.executionId === target.executionId
+      )
+        setExecutionDetail(next);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      finishBusy();
+    }
+  }
+
+  /** 变更面板展示自动应用结果；只读历史不改写当前工作区。 */
+  const changesApplied =
+    changesView &&
+    executionDetail &&
+    changesView.executionId === executionDetail.execution.executionId
+      ? executionDetail.sourceEvidence?.applied
+      : undefined;
 
   return (
     <main
@@ -1158,6 +1254,17 @@ export function App() {
               })
               .catch((cause) => setError(String(cause)))
               .finally(finishBusy);
+          }}
+        />
+      )}
+      {cleanupConfirmation && (
+        <WorkspaceCleanupConfirmation
+          branch={cleanupConfirmation.branch}
+          onClose={() => setCleanupConfirmation(null)}
+          onConfirm={() => {
+            const target = cleanupConfirmation;
+            setCleanupConfirmation(null);
+            void cleanupWorkspaces(target);
           }}
         />
       )}
@@ -1290,7 +1397,7 @@ export function App() {
           {projects.length === 0 && <p>还没有项目，请从侧边栏创建。</p>}
         </nav>
         <footer>
-          <span>桌面执行环境</span>
+          <span></span>
           <small>
             {connected ? "Desktop Engine 已连接" : "Desktop Engine 未连接"}
           </small>
@@ -1652,22 +1759,18 @@ export function App() {
         }}
       >
       <aside
-        ref={centralScroll}
-        onScroll={() => {
-          if (route.kind === "workflow" && centralScroll.current)
-            detailPositions.set(pageKey, centralScroll.current.scrollTop);
-        }}
-        className="central-workflow"
+        className={`central-workflow${changesView ? " changes-open" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="工作流详情"
       >
         <WorkflowPanelErrorBoundary onClose={() => setWorkflowPanelOpen(false)}>
+          <div className="workflow-detail-column">
           <header className="workflow-page-header">
-            <div>
+            <div className="workflow-page-heading">
               <span>
                 {harness
-                  ? `${conversationTitle(harness)} / 方案`
+                  ? detailBreadcrumb(harness, sectionLabel)
                   : "工作流详情"}
               </span>
               <strong
@@ -1690,24 +1793,33 @@ export function App() {
               </strong>
             </div>
             <button
+              className="workflow-page-return"
               onClick={() => setWorkflowPanelOpen(false)}
-              aria-label="返回对话"
+              aria-label={`返回对话${harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0 ? `（${unreadCounts.get(harness.harnessRunId)} 条未读）` : ""}`}
             >
-              返回对话
-              {harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0
-                ? `（${unreadCounts.get(harness.harnessRunId)} 条未读）`
-                : ""}
+              <span>返回对话</span>
+              {harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0 && (
+                <em>{unreadCounts.get(harness.harnessRunId)} 条未读</em>
+              )}
             </button>
           </header>
           {harness &&
             route.kind === "workflow" &&
             !routeMatchesTask(harness, route) && (
-              <p role="alert">所选工作流记录已失效，请返回对话重新选择。</p>
+              <div className="workflow-page-nav" role="alert">
+                <p>所选工作流记录暂时不可用；请返回对话后重新打开。</p>
+                <button
+                  className="button-secondary"
+                  onClick={() => setWorkflowPanelOpen(false)}
+                >
+                  返回对话
+                </button>
+              </div>
             )}
           {harness &&
             route.kind === "workflow" &&
             routeMatchesTask(harness, route) && (
-              <div className="central-plan">
+              <div className="workflow-page-nav">
                 <div
                   className="workflow-page-tabs"
                   role="tablist"
@@ -1793,36 +1905,52 @@ export function App() {
                     结果
                   </button>
                 </div>
-                {harness.status === "running" && (
-                  <button onClick={() => setRoute({ kind: "conversation" })}>
-                    {harness.decisions.some((item) => !item.answer)
-                      ? "需要你的回答"
-                      : "Wave Flow 正在处理"}{" "}
-                    · 返回对话
-                  </button>
-                )}
-                {harness.executions
-                  .filter((execution) => {
-                    const attention = harnesses.find(
-                      (task) => task.harnessRunId === harness.harnessRunId,
-                    )?.executionAttention?.[execution.executionId];
-                    return (
-                      execution.finishedAt === null &&
-                      attention &&
-                      (attention.workerRequests > 0 ||
-                        attention.scriptGates > 0)
-                    );
-                  })
-                  .map((execution) => (
-                    <button
-                      key={execution.executionId}
-                      onClick={() =>
-                        void selectExecution(execution.executionId)
-                      }
-                    >
-                      执行需要回答 · 前往所属执行
+              </div>
+            )}
+          <div
+            className="workflow-page-body"
+            ref={centralScroll}
+            onScroll={() => {
+              if (route.kind === "workflow" && centralScroll.current)
+                detailPositions.set(pageKey, centralScroll.current.scrollTop);
+            }}
+          >
+          {harness &&
+            route.kind === "workflow" &&
+            routeMatchesTask(harness, route) && (
+              <div className="central-plan workflow-page-content">
+                <div className="workflow-page-banners">
+                  {harness.status === "running" && (
+                    <button onClick={() => setRoute({ kind: "conversation" })}>
+                      {harness.decisions.some((item) => !item.answer)
+                        ? "需要你的回答"
+                        : "Wave Flow 正在处理"}{" "}
+                      · 返回对话
                     </button>
-                  ))}
+                  )}
+                  {harness.executions
+                    .filter((execution) => {
+                      const attention = harnesses.find(
+                        (task) => task.harnessRunId === harness.harnessRunId,
+                      )?.executionAttention?.[execution.executionId];
+                      return (
+                        execution.finishedAt === null &&
+                        attention &&
+                        (attention.workerRequests > 0 ||
+                          attention.scriptGates > 0)
+                      );
+                    })
+                    .map((execution) => (
+                      <button
+                        key={execution.executionId}
+                        onClick={() =>
+                          void selectExecution(execution.executionId)
+                        }
+                      >
+                        执行需要回答 · 前往所属执行
+                      </button>
+                    ))}
+                </div>
                 {route.section === "plan" &&
                   (() => {
                     const revisions = harness.workflowRevisions.filter(
@@ -1958,7 +2086,7 @@ export function App() {
           route.kind === "workflow" &&
           routeMatchesTask(harness, route) &&
           route.section === "execution" ? (
-            <div className="workflow-detail-scroll">
+            <div className="workflow-page-content">
               <ExecutionDetail
                 readOnly={
                   harness.status === "completed" ||
@@ -1972,7 +2100,6 @@ export function App() {
                 busy={executionBusy}
                 dynamicCount={executionDynamicCount}
                 harnessRunId={harness.harnessRunId}
-                theme={theme}
                 previousRecords={(harness.executionHistory ?? [])
                   .filter(
                     (item) =>
@@ -1986,6 +2113,31 @@ export function App() {
                     status: item.status,
                   }))}
                 onControl={controlExecution}
+                applyRetryResult={applyRetryResult}
+                canCleanupWorkspaces={
+                  harness.executions
+                    .filter(
+                      (item) => item.finishedAt !== null && item.config?.workspaces,
+                    )
+                    .at(-1)?.executionId ===
+                  executionDetail.execution.executionId
+                }
+                onRequestCleanupWorkspaces={() =>
+                  setCleanupConfirmation({
+                    harnessRunId: harness.harnessRunId,
+                    executionId: executionDetail.execution.executionId,
+                    branch: executionDetail.workspaceEvidence?.branch ?? "",
+                  })
+                }
+                onOpenChanges={() => {
+                  const evidence = executionDetail.sourceEvidence;
+                  if (!evidence) return;
+                  setChangesView({
+                    taskId: harness.harnessRunId,
+                    executionId: executionDetail.execution.executionId,
+                    sourceCommit: evidence.commit,
+                  });
+                }}
                 onSavePartial={async () => {
                   const owner = harness.harnessRunId,
                     id = executionDetail.execution.executionId;
@@ -1998,24 +2150,6 @@ export function App() {
                   );
                   try {
                     const next = await api.savePartial(owner, id);
-                    if (valid() && harnessRef.current?.harnessRunId === owner)
-                      setExecutionDetail(next);
-                  } finally {
-                    finishBusy();
-                  }
-                }}
-                onCleanupWorkspaces={async () => {
-                  const owner = harness.harnessRunId,
-                    id = executionDetail.execution.executionId;
-                  const valid = requestFence.current.begin(
-                    `execution:${owner}:${id}`,
-                  );
-                  const finishBusy = beginBusy(
-                    `execution:${id}`,
-                    "cleanup-workspaces",
-                  );
-                  try {
-                    const next = await api.cleanupWorkspaces(owner, id);
                     if (valid() && harnessRef.current?.harnessRunId === owner)
                       setExecutionDetail(next);
                   } finally {
@@ -2080,6 +2214,19 @@ export function App() {
               />
             </div>
           ) : null}
+          </div>
+          </div>
+          {workflowPanelOpen && changesView && (
+            <ChangesPanel
+              key={`${changesView.taskId}:${changesView.executionId}:${changesView.sourceCommit}`}
+              taskId={changesView.taskId}
+              executionId={changesView.executionId}
+              sourceCommit={changesView.sourceCommit}
+              applied={changesApplied}
+              theme={theme}
+              onClose={() => setChangesView(null)}
+            />
+          )}
         </WorkflowPanelErrorBoundary>
       </aside>
       </div>
@@ -3974,6 +4121,81 @@ function ArchiveImpactConfirmation({
   );
 }
 
+/** 受管 worktree 清理确认：只删除临时 checkout，不删除已封存成果或主工作区改动。 */
+function WorkspaceCleanupConfirmation({
+  branch,
+  onClose,
+  onConfirm,
+}: {
+  /** 待清理 worktree 分支名；仅用于让用户确认清理对象。 */ branch: string;
+  /** 取消清理；不产生 Engine 动作。 */ onClose: () => void;
+  /** 用户明确确认清理；由父层调用 Engine 并回读详情。 */ onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const prior = document.activeElement as HTMLElement | null;
+    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => {
+      if (prior?.isConnected) prior.focus();
+    };
+  }, []);
+  return (
+    <div
+      className="connection-backdrop"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        ref={dialog}
+        className="connection-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-cleanup-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            onClose();
+          }
+          if (event.key === "Tab") {
+            const buttons =
+              dialog.current?.querySelectorAll<HTMLButtonElement>("button");
+            if (!buttons?.length) return;
+            const first = buttons[0]!,
+              last = buttons[buttons.length - 1]!;
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }
+        }}
+      >
+        <div className="connection-panel-head">
+          <h2 id="workspace-cleanup-title">清理临时工作区？</h2>
+        </div>
+        <div className="connection-form">
+          <p>
+            将删除该 Execution 的受管 worktree{branch ? `（${branch}）` : ""}。
+            已封存的改动、变更审阅与主工作区自动应用结果都不受影响；此操作不会重新执行 Workflow，也不能撤销。
+          </p>
+        </div>
+        <div className="modal-actions">
+          <button className="button-secondary" onClick={onClose}>
+            取消
+          </button>
+          <button className="button-danger" onClick={onConfirm}>
+            清理临时工作区
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /** 原 attempt 的只读证据；切换或迟到响应不污染其他任务。 */
 function HistoricalResults({
   taskId,
@@ -4254,7 +4476,7 @@ function ImpactSummaryPanel({
   const gitLimitation = harness.executions.find(
     (item) => item.executionId === executionId,
   )?.config?.workspaces
-    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已合入主工作区或外部系统已回滚。"
+    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已自动应用到主工作区或外部系统已回滚。"
     : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
   if (obligation.status === "cancelled")
     return (
@@ -4344,12 +4566,14 @@ function ExecutionDetail({
   busy,
   dynamicCount,
   harnessRunId,
-  theme,
   onControl,
+  applyRetryResult,
+  canCleanupWorkspaces = false,
+  onRequestCleanupWorkspaces,
+  onOpenChanges,
   onAnswer,
   onAnswerBlock,
   onSavePartial,
-  onCleanupWorkspaces,
 }: {
   /** 原终态记录时间和状态；与结果页同源，缺失不按阶段时间推断。 */
   previousRecords?: readonly { id: number; at?: string; status?: string }[];
@@ -4361,9 +4585,19 @@ function ExecutionDetail({
   dynamicCount: number;
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
-  /** 当前应用主题，驱动变更面板 diff 配色。 */
-  theme: ColorTheme;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
+  /** 最新一次“重新整理改动”的即时结果；只展示给产生它的 Execution。 */
+  applyRetryResult?: {
+    executionId: string;
+    outcome: "applied" | "skipped";
+    reason?: string;
+  } | null;
+  /** 最新终态且已有封存成果时才允许显式清理受管 worktree。 */
+  canCleanupWorkspaces?: boolean;
+  /** 打开清理确认弹窗；实际 Engine 动作与详情回读由父层执行。 */
+  onRequestCleanupWorkspaces?: () => void;
+  /** 打开右侧变更审阅面板；只读展示最终封存与自动应用结果。 */
+  onOpenChanges: () => void;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
     blockId: string,
@@ -4371,8 +4605,6 @@ function ExecutionDetail({
   ) => Promise<void>;
   /** 显式保存停止现场，不恢复业务；只有当前Engine可核验writer才成功。 */
   onSavePartial?: () => Promise<void>;
-  /** 清理安全checkout，不删除分支commit或业务证据。 */
-  onCleanupWorkspaces?: () => Promise<void>;
   /** 阅读指定耐久 attempt；缺省显示当前执行，不改变业务状态。 */
   selectedAttempt?: number;
   /** 只更新阅读路由，不恢复或派发。 */
@@ -4383,8 +4615,6 @@ function ExecutionDetail({
   const [visitsLoading, setVisitsLoading] = useState(true);
   const [visitsError, setVisitsError] = useState<string | null>(null);
   const [partialError, setPartialError] = useState<string | null>(null);
-  const [confirmCleanup, setConfirmCleanup] = useState(false);
-  const [changesOpen, setChangesOpen] = useState(false);
   /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
   const loadAllVisits = useCallback(async () => {
     const items: import("./types").PhaseVisit[] = [];
@@ -4441,6 +4671,25 @@ function ExecutionDetail({
     return (
       <p role="alert">所选执行尝试不存在或尚未读取，请选择当前执行查看。</p>
     );
+  /** 执行页顶部只保留一行概览：完成度、冻结方案与分配叙事各出现一次。 */
+  const executionMeta = [
+    `方案 v${detail.execution.revision}（已锁定）`,
+    detail.execution.config
+      ? `${detail.execution.config.assignments.length} 名执行者`
+      : null,
+    detail.execution.config?.ruleText
+      ? `规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const changesAction = detail.sourceEvidence ? (
+    <button disabled={!!busy} onClick={() => onOpenChanges()}>
+      查看变更
+    </button>
+  ) : null;
+  /** 已封存但主工作区当时不满足条件时，仍需保留显式重试入口。 */
+  const applySkipped = Boolean(detail.sourceEvidence && "skippedAt" in detail.sourceEvidence.applied);
   return (
     <>
       <PreviousRecords
@@ -4458,87 +4707,9 @@ function ExecutionDetail({
           改动还没有整理好：{userFacingText(detail.sourceDiagnostic)}
         </p>
       )}
-      {!readOnly &&
-        !historical &&
-        detail.snapshot.status === "completed" &&
-        detail.execution.config?.workspaces &&
-        (!detail.sourceEvidence || detail.sourceDiagnostic) && (
-          <button disabled={!!busy} onClick={() => void onControl("resume")}>
-            重新整理改动（不会重新执行）
-          </button>
-        )}
-      {detail.sourceEvidence && (
-        <button disabled={!!busy} onClick={() => setChangesOpen(true)}>
-          查看变更
-        </button>
-      )}
-      {detail.sourceEvidence && changesOpen && (
-        <ChangesPanel
-          key={`${harnessRunId}:${executionId}:${detail.sourceEvidence.sourceCommit}`}
-          taskId={harnessRunId}
-          executionId={executionId}
-          sourceCommit={detail.sourceEvidence.sourceCommit}
-          writable={!readOnly && Boolean(onCleanupWorkspaces) && !historical}
-          theme={theme}
-          onClose={() => setChangesOpen(false)}
-        />
-      )}
-      {partialError && <p role="alert">{partialError}</p>}
-      {!readOnly &&
-        !historical &&
-        detail.workspaceEvidence?.some((item) => item.lease) &&
-        ["cancelled", "interrupted"].includes(detail.snapshot.status) && (
-          <>
-            <button
-              disabled={!!busy}
-              onClick={() => {
-                setPartialError(null);
-                void onSavePartial?.().catch((error) =>
-                  setPartialError(
-                    error instanceof Error ? error.message : String(error),
-                  ),
-                );
-              }}
-            >
-              保存当前改动（未交付）
-            </button>
-            {partialError && <p role="alert">{partialError}</p>}
-          </>
-        )}
-      {!readOnly &&
-        !historical &&
-        detail.workspaceEvidence?.length &&
-        !detail.controllable && (
-          <>
-            <button
-              disabled={!!busy}
-              onClick={() => {
-                if (!confirmCleanup) {
-                  setConfirmCleanup(true);
-                  return;
-                }
-                setPartialError(null);
-                void onCleanupWorkspaces?.()
-                  .then(() => setConfirmCleanup(false))
-                  .catch((error) =>
-                    setPartialError(
-                      error instanceof Error ? error.message : String(error),
-                    ),
-                  );
-              }}
-            >
-              {confirmCleanup
-                ? "确认清理临时工作区？改动提交已保留，不受影响"
-                : "清理临时工作区"}
-            </button>
-            {confirmCleanup && (
-              <button onClick={() => setConfirmCleanup(false)}>取消清理</button>
-            )}
-            {partialError && <p role="alert">{partialError}</p>}
-          </>
-        )}
       {historical ? (
         <>
+          <div className="execution-actions">{changesAction}</div>
           <p>历史过程，只读；此页面不会恢复执行。</p>
           {visitsLoading ? (
             <p role="status">正在读取历史过程…</p>
@@ -4576,132 +4747,118 @@ function ExecutionDetail({
             dynamicCount={dynamicCount}
             plannedTotal={detail.execution.config?.assignments.length}
             allVisits={allVisits}
+            meta={executionMeta}
           />
-          <div className="execution-summary">
-            <span>方案 v{detail.execution.revision}（已锁定）</span>
-            {detail.execution.config && (
-              <small>
-                分配：{detail.execution.config.assignments.length} 名执行者
-                {detail.execution.config.ruleText
-                  ? ` · 规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
-                  : ""}
-              </small>
-            )}
-            {/* 有 Git 检查点时诊断并入同一折叠块，避免两个相邻的“高级 / 诊断”入口。 */}
-            {!detail.workspaceEvidence && (
-              <ExecutionDiagnostics
-                executionId={detail.execution.executionId}
-                sourceHash={detail.execution.sourceHash}
-                runtimeVersion={detail.execution.runtimeVersion}
-                currentAttempt={detail.snapshot.currentExecutionAttemptId}
-                fallbackRuntimeId={
-                  detail.execution.config?.fallbackRuntimeId ?? null
-                }
-              />
-            )}
-          </div>
-          {detail.workspaceEvidence && (
-            <details className="execution-workspace-evidence">
-              <summary>高级 / 诊断信息</summary>
-              <ExecutionDiagnostics
-                bare
-                executionId={detail.execution.executionId}
-                sourceHash={detail.execution.sourceHash}
-                runtimeVersion={detail.execution.runtimeVersion}
-                currentAttempt={detail.snapshot.currentExecutionAttemptId}
-                fallbackRuntimeId={
-                  detail.execution.config?.fallbackRuntimeId ?? null
-                }
-              />
-              {detail.workspaceEvidence.map((item) => (
-                <article key={item.nodeId}>
-                  <strong>{item.nodeId}</strong>
-                  <code>{item.branch}</code>
-                  {item.lease && (
-                    <span role="status">
-                      writer / Git 收尾锁仍保留 · attempt #{item.lease.attempt}
-                    </span>
-                  )}
-                  {item.results.length === 0 && !item.lease && (
-                    <small>尚无保存成果</small>
-                  )}
-                  {item.results.map((result) => (
-                    <div key={`${result.attempt}:${result.commit}`}>
-                      <span>
-                        {result.ready ? "成果 ready" : "partial，未交付"} ·
-                        attempt #{result.attempt}
-                        {result.unchanged ? " · 无文件变化" : ""}
-                      </span>
-                      <code title={result.commit}>
-                        {result.commit.slice(0, 12)}
-                      </code>
-                      <small>
-                        {result.paths.length
-                          ? result.paths.join("、")
-                          : "没有提交文件"}
-                        {result.mergeParents.length
-                          ? ` · 集成 ${result.mergeParents.length} 个来源`
-                          : " · 未集成其他分支"}
-                      </small>
-                    </div>
-                  ))}
-                </article>
-              ))}
-              <p>
-                Git 证据只覆盖受管Git文件与已执行验证，不证明外部系统已回滚。
-              </p>
-            </details>
-          )}
-          {!readOnly && (
-            <div className="actions">
-              {detail.controllable && detail.snapshot.status === "running" && (
-                <Action
-                  label="暂停"
-                  icon="Ⅱ"
-                  tone="secondary"
-                  loading={busy === "execution:pause"}
-                  onClick={() => void onControl("pause")}
-                />
-              )}
-              {detail.controllable && detail.snapshot.status === "paused" && (
-                <Action
-                  label="恢复执行"
-                  icon="▶"
-                  tone="primary"
-                  loading={busy === "execution:recover"}
-                  onClick={() => void onControl("recover")}
-                />
-              )}
-              {(detail.snapshot.status === "interrupted" ||
-                detail.snapshot.status === "cancelled" ||
-                (!detail.controllable &&
-                  detail.snapshot.status !== "completed")) && (
-                <Action
-                  label={
-                    detail.snapshot.status === "cancelled"
-                      ? "恢复已停止 Execution"
-                      : "恢复中断 Execution"
-                  }
-                  icon="↻"
-                  tone="primary"
-                  loading={busy === "execution:resume"}
+          <div className="execution-actions">
+            {changesAction}
+            {!readOnly &&
+              detail.snapshot.status === "completed" &&
+              detail.execution.config?.workspaces &&
+              (!detail.sourceEvidence ||
+                detail.sourceDiagnostic ||
+                applySkipped) && (
+                <button
+                  disabled={!!busy}
                   onClick={() => void onControl("resume")}
-                />
+                >
+                  重新整理改动（不会重新执行）
+                </button>
               )}
-              {detail.controllable &&
-                ["running", "pausing", "recovering", "paused"].includes(
-                  detail.snapshot.status,
-                ) && (
+            {!readOnly &&
+              detail.snapshot.status === "completed" &&
+              canCleanupWorkspaces &&
+              detail.sourceEvidence &&
+              detail.workspaceEvidence &&
+              !detail.workspaceEvidence.cleaned && (
+                <button
+                  disabled={!!busy}
+                  onClick={() => onRequestCleanupWorkspaces?.()}
+                >
+                  清理临时工作区
+                </button>
+              )}
+            {!readOnly &&
+              (detail.workspaceEvidence?.leases.length ?? 0) > 0 &&
+              ["cancelled", "interrupted"].includes(
+                detail.snapshot.status,
+              ) && (
+                <button
+                  disabled={!!busy}
+                  onClick={() => {
+                    setPartialError(null);
+                    void onSavePartial?.().catch((error) =>
+                      setPartialError(
+                        error instanceof Error ? error.message : String(error),
+                      ),
+                    );
+                  }}
+                >
+                  结束停止现场（保留改动）
+                </button>
+              )}
+            {!readOnly && (
+              <>
+                {detail.controllable &&
+                  detail.snapshot.status === "running" && (
+                    <Action
+                      label="暂停"
+                      icon="Ⅱ"
+                      tone="secondary"
+                      loading={busy === "execution:pause"}
+                      onClick={() => void onControl("pause")}
+                    />
+                  )}
+                {detail.controllable && detail.snapshot.status === "paused" && (
                   <Action
-                    label="停止 Execution"
-                    icon="■"
-                    tone="danger"
-                    loading={busy === "execution:stop"}
-                    onClick={() => void onControl("stop")}
+                    label="恢复执行"
+                    icon="▶"
+                    tone="primary"
+                    loading={busy === "execution:recover"}
+                    onClick={() => void onControl("recover")}
                   />
                 )}
-            </div>
+                {(detail.snapshot.status === "interrupted" ||
+                  detail.snapshot.status === "cancelled" ||
+                  (!detail.controllable &&
+                    detail.snapshot.status !== "completed")) && (
+                  <Action
+                    label={
+                      detail.snapshot.status === "cancelled"
+                        ? "恢复已停止 Execution"
+                        : "恢复中断 Execution"
+                    }
+                    icon="↻"
+                    tone="primary"
+                    loading={busy === "execution:resume"}
+                    onClick={() => void onControl("resume")}
+                  />
+                )}
+                {detail.controllable &&
+                  ["running", "pausing", "recovering", "paused"].includes(
+                    detail.snapshot.status,
+                  ) && (
+                    <Action
+                      label="停止 Execution"
+                      icon="■"
+                      tone="danger"
+                      loading={busy === "execution:stop"}
+                      onClick={() => void onControl("stop")}
+                    />
+                  )}
+              </>
+            )}
+          </div>
+          {!historical && applyRetryResult?.executionId === executionId && (
+            <p
+              className={`execution-apply-retry ${applyRetryResult.outcome}`}
+              role={applyRetryResult.outcome === "applied" ? "status" : "alert"}
+            >
+              {applyRetryResult.outcome === "applied"
+                ? "已重新应用到主工作区（未提交、未推送）。"
+                : `仍未应用：${userFacingText(applyRetryResult.reason ?? "自动应用条件仍不满足")}。处理主工作区后可再次重新整理。`}
+            </p>
           )}
+          {partialError && <p role="alert">{partialError}</p>}
           {!readOnly &&
             !detail.controllable &&
             detail.snapshot.status !== "completed" &&
@@ -4756,6 +4913,61 @@ function ExecutionDetail({
               )?.phaseVisitId ?? undefined
             }
           />
+          {/* 诊断与 Git 检查点合并为唯一的页尾附录，不占正文与操作区之间。 */}
+          {!detail.workspaceEvidence && (
+            <ExecutionDiagnostics
+              executionId={detail.execution.executionId}
+              sourceHash={detail.execution.sourceHash}
+              runtimeVersion={detail.execution.runtimeVersion}
+              currentAttempt={detail.snapshot.currentExecutionAttemptId}
+              fallbackRuntimeId={
+                detail.execution.config?.fallbackRuntimeId ?? null
+              }
+            />
+          )}
+          {detail.workspaceEvidence && (
+            <details className="execution-workspace-evidence">
+              <summary>高级 / 诊断信息</summary>
+              <ExecutionDiagnostics
+                bare
+                executionId={detail.execution.executionId}
+                sourceHash={detail.execution.sourceHash}
+                runtimeVersion={detail.execution.runtimeVersion}
+                currentAttempt={detail.snapshot.currentExecutionAttemptId}
+                fallbackRuntimeId={
+                  detail.execution.config?.fallbackRuntimeId ?? null
+                }
+              />
+              {detail.workspaceEvidence && <article>
+                <strong>{detail.workspaceEvidence.branch}</strong>
+                <span>
+                  {detail.workspaceEvidence.cleaned
+                    ? "受管 worktree 已清理"
+                    : detail.workspaceEvidence.head
+                      ? `HEAD ${detail.workspaceEvidence.head.slice(0, 12)}`
+                      : "HEAD 不可读取"}
+                </span>
+                {detail.workspaceEvidence.leases.map((lease) => (
+                  <span key={`${lease.nodeId}:${lease.attempt}`} role="status">
+                    writer 锁 · {lease.nodeId} · attempt #{lease.attempt}
+                  </span>
+                ))}
+                {detail.workspaceEvidence.staleLeases > 0 && (
+                  <small>
+                    {detail.workspaceEvidence.staleLeases} 个重启前租约已释放（该受管 worktree 累计，含其他接续 Execution）；现场改动保留
+                  </small>
+                )}
+                <small>
+                  {detail.sourceEvidence
+                    ? `最终封存 ${detail.sourceEvidence.commit.slice(0, 12)} · ${detail.sourceEvidence.paths.length} 个文件`
+                    : "尚无最终封存"}
+                </small>
+              </article>}
+              <p>
+                所有写节点共享同一 worktree；Git 证据覆盖受管文件与已执行验证，不提供逐节点文件归因，也不证明外部系统已回滚。
+              </p>
+            </details>
+          )}
         </>
       )}
       <PreviousRecords
@@ -4853,6 +5065,19 @@ function conversationTitle(harness: HarnessSnapshot): string {
     harness.cwd.split("/").filter(Boolean).at(-1) ||
     "新任务"
   );
+}
+
+/**
+ * 详情面包屑只取短任务名；手动标题过长或缺失时回落到项目文件夹名，
+ * 避免把整句用户提示词塞进弹窗头部。
+ */
+function detailBreadcrumb(harness: HarnessSnapshot, section: string): string {
+  const title = harness.task?.title?.trim();
+  const project =
+    harness.cwd.split("/").filter(Boolean).at(-1) ?? "任务";
+  const label =
+    title && Array.from(title).length <= 24 ? title : project;
+  return `${label} / ${section}`;
 }
 
 function Action({

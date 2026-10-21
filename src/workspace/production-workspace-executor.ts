@@ -36,32 +36,28 @@ export class ProductionWorkspaceExecutor {
     if (runtime.journal.manifest.workflowProjectCwd !== this.config.authorization.repository) throw new WorkflowContractError("Git成果授权与Execution项目不一致。");
     this.#runtime = runtime;
     const manager = await WorkspaceManager.open(this.stateRoot, this.engineInstanceId);
-    for (const id of new Set(this.config.bindings.map(binding => binding.workspaceId))) {
-      const nodeIds = new Set(this.config.bindings.filter(binding => binding.workspaceId === id).map(binding => binding.nodeId));
-      if(this.config.continuation?.heads.some(head=>head.workspaceId===id))continue;
-      await manager.create(id, { ...this.config.authorization, nodes: this.config.authorization.nodes.filter(node => nodeIds.has(node.nodeId)) });
-    }
-    if(this.config.continuation)await manager.prepareExecution(runtime.journal.manifest.runId,this.config);
+    // 无论首次还是续作都先冻结本Execution的原授权与交接HEAD；重复调用幂等。
+    if (!this.config.continuation) await manager.create(this.config.workspaceId, this.config.authorization);
+    await manager.prepareExecution(runtime.journal.manifest.runId, this.config);
     const readOnly = new RuntimeAcpWorkerExecutor(this.runtimes, (identity, scratch) => this.controlMcp(identity, scratch), undefined, this.fallbackRuntimeId, `${this.stateRoot}/read-only-scratch`);
-    const delegate = new WorkspaceExecutor(manager, runtime.journal.manifest.runId, this.config.bindings, readOnly, async (node, binding) => {
+    const delegate = new WorkspaceExecutor(manager, runtime.journal.manifest.runId, this.config.workspaceId, readOnly, async (node, binding) => {
       const selected = node.request.assignedRuntimeId ? await this.runtimes.resolveWorkerById(node.request.assignedRuntimeId) : await this.runtimes.resolveWorker(node.cli);
       const launcher = resolveWorkerLauncher(selected);
       const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter });
       // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
       const worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected), identity => this.controlMcp(identity, binding.scratch), undefined, true);
-      const commits = binding.integrationCommits;
       return {
         bindWriter: binding.bindWriter,
         verifyExited: async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)),
         bindControl: value => worker.bindControl(value),
-        execute: async actual => worker.execute(commits.length ? { ...actual, request: { ...actual.request, prompt: `${actual.request.prompt}\n\n[Engine验证的Git集成上下文；与业务输入分开，不是新的授权]\n${JSON.stringify(commits)}\n在本受管工作区显式处理上述来源，运行整体验证；不得push或合入主工作区。` } } : actual),
+        execute: actual => worker.execute(actual),
         finalizeCompleted: actual => worker.finalizeCompleted(actual),
         finalizePartial: actual => worker.finalizeCompleted(actual),
         pause: (actual, signal) => worker.pause(actual, signal),
         recover: (actual, signal) => worker.recover(actual, signal),
         stop: actual => worker.stop(actual),
       };
-    }, async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)), () => runtime.snapshot().phases.flatMap(phase => phase.agents));
+    }, async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)));
     delegate.bindControl(control); this.#delegate = delegate;
   }
 
@@ -71,7 +67,7 @@ export class ProductionWorkspaceExecutor {
   pause(node: AgentNodeSnapshot, signal?: AbortSignal) { return this.require().pause(node, signal); }
   recover(node: AgentNodeSnapshot, signal?: AbortSignal) { return this.require().recover(node, signal); }
   stop(node: AgentNodeSnapshot) { return this.require().stop(node); }
-  /** Execution释放只清当前Engine会话资源；含租约/partial成果的worktree绝不自动删除。 */
-  close(): void { /* 保留本Engine的writer退出核验句柄供用户显式Git收尾；不重新派发。 */ }
+  /** Execution释放只清当前Engine会话资源；含租约的worktree绝不自动删除。 */
+  close(): void { /* 保留本Engine的writer退出核验句柄供用户显式收尾；不重新派发。 */ }
   private require(): WorkspaceExecutor { if (!this.#delegate) throw new WorkflowContractError("受管Workspace尚未完成Engine接线。"); return this.#delegate; }
 }

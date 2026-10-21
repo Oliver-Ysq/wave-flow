@@ -7,6 +7,7 @@ import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
 import { AcpWorkerExecutor, type AcpWorkerSession } from "../../src/runtime/acp-worker-executor";
+import { acpProgressIsMeaningful } from "../../src/adapters/acp-session";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
 
@@ -28,26 +29,91 @@ async function fixture() {
   return { cwd, manifest, journal, state, control: new ControlServer(journal, state), node: state.agent("node"), sessionId };
 }
 
-test("原生ACP静默停滞只中断一次，保留节点身份且不重发业务", async () => {
-  const value = await fixture(); let prompts = 0, closed = 0, unsubscribed = 0;
+test("空心ACP事件不续命停滞提示，超窗只诊断一次且不中断、不cancel", async () => {
+  const value = await fixture(); let prompts = 0, closed = 0, cancels = 0, capability = "", halted = false;
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  let finishTurn!: () => void;
   const session: AcpWorkerSession = {
     binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
     async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
-    prompt() { prompts++; return new Promise(() => {}); },
-    async cancel() { throw new Error("不可确认取消"); }, close() { closed++; },
-    subscribe() { return () => { unsubscribed++; }; },
+    prompt() {
+      prompts++;
+      void (async () => {
+        while (!halted) {
+          // Codex 式空心分片：进程活着、事件不断，但没有任何有意义进展。
+          listener?.({ sessionId: "native", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "思考中" } } });
+          await Bun.sleep(8);
+        }
+      })();
+      return new Promise<{ readonly stopReason: string }>(resolve => { finishTurn = () => resolve({ stopReason: "end_turn" }); });
+    },
+    async cancel() { cancels++; }, close() { closed++; halted = true; }, subscribe(value) { listener = value; return () => { listener = undefined; }; },
   };
-  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, undefined, undefined, false, 20);
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 20);
   executor.bindControl(value.control);
-  await expect(executor.execute(value.node)).rejects.toThrow("现场安全续作证据不足");
-  await Bun.sleep(45);
-  expect(prompts).toBe(1); expect(closed).toBe(1); expect(unsubscribed).toBe(1);
-  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
-  const diagnostics = events.filter(event => event.type === "log.written");
+  const pending = executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
+    await Bun.sleep(10);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+  }
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
+  await Bun.sleep(60);
+  expect(cancels).toBe(0);
+  // 提示不伪造中断：显式 complete 仍正常完成，且不再重复诊断。
+  await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: {} });
+  finishTurn();
+  await expect(pending).resolves.toEqual({});
+  expect(prompts).toBe(1); expect(closed).toBe(1);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written")).toHaveLength(1);
+});
+
+test("停滞计时只认可正文、工具与计划类ACP进展", () => {
+  const text = { type: "text" as const, text: "x" };
+  expect(acpProgressIsMeaningful({ sessionUpdate: "agent_message_chunk", content: text })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "tool_call", toolCallId: "t", title: "x", status: "pending" })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "tool_call_update", toolCallId: "t" })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "plan", entries: [] })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_update", plan: { type: "items", planId: "p", entries: [] } })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_removed", planId: "p" })).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "agent_thought_chunk", content: text })).toBe(false);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "user_message_chunk", content: text })).toBe(false);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "available_commands_update", availableCommands: [] })).toBe(false);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "current_mode_update", currentModeId: "m" })).toBe(false);
+});
+
+test("原生ACP静默停滞只耐久提示一次，不自动中断；显式complete仍完成", async () => {
+  const value = await fixture(); let prompts = 0, closed = 0, cancels = 0, unsubscribed = 0, capability = "";
+  let finishTurn!: () => void;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    prompt() { prompts++; return new Promise<{ readonly stopReason: string }>(resolve => { finishTurn = () => resolve({ stopReason: "end_turn" }); }); },
+    async cancel() { cancels++; }, close() { closed++; },
+    subscribe() { return () => { unsubscribed++; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 20);
+  executor.bindControl(value.control);
+  const pending = executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
+    await Bun.sleep(10);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+  }
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
+  await Bun.sleep(60);
+  expect(cancels).toBe(0);
+  expect(value.state.agent("node").status).toBe("running");
+  await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: {} });
+  finishTurn();
+  await expect(pending).resolves.toEqual({});
+  expect(prompts).toBe(1); expect(closed).toBe(1); expect(unsubscribed).toBe(1);
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  expect(events.filter(event => event.type === "log.written")).toHaveLength(1);
   expect(events.filter(event => event.type === "agent.session")).toHaveLength(1);
-  expect(events.some(event => event.type === "agent.completed")).toBe(false);
+  expect(events.filter(event => event.type === "agent.completed")).toHaveLength(1);
 });
 
 test("真实会话事件持续刷新停滞窗口，complete仍只由Control决定", async () => {
@@ -187,7 +253,17 @@ test("其他session事件不能掩盖当前Worker停滞", async () => {
   };
   const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, undefined, undefined, false, 25);
   executor.bindControl(value.control);
-  await expect(executor.execute(value.node)).rejects.toThrow("停滞");
+  const pending = executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
+    await Bun.sleep(10);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+  }
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toMatchObject({ diagnostic: expect.stringContaining("停滞") });
+  // 其他会话的事件只掩盖提示计时，不制造中断；显式停止仍走用户停止路径。
+  await executor.stop(value.node);
+  await expect(pending).rejects.toThrow("用户停止 Run。");
 });
 
 test("非法停滞窗口在启动前拒绝", () => {

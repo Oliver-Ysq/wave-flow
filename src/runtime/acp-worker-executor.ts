@@ -1,4 +1,4 @@
-import { AcpSessionClient, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
+import { AcpSessionClient, acpProgressIsMeaningful, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
 import type { ControlServer, WorkerTurnContext } from "../control/control-server";
 import { workerAdapterForCli } from "../runtimes/adapter-catalog";
 import type { JsonObject } from "../shared/json";
@@ -47,7 +47,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly isSupportedWorkerCli: (cli: string) => boolean = (cli) => workerAdapterForCli(cli) !== null,
     /** 受管写要求真实退出证明；默认false保持现有只读/测试路径，生产workspace工厂必须true。 */
     private readonly requireWriterExit = false,
-    /** Engine停滞窗口，默认五分钟；正整数毫秒，不扩展作者API或触发业务重试。 */
+    /** Engine停滞提示窗口，默认五分钟；只由有意义ACP进展（正文/工具/计划）刷新，blocked/paused/控制等待合法豁免；超窗只耐久提示一次，不自动中断/重试，唯一出口是用户显式停止。 */
     private readonly stallWindowMs = 300_000,
   ) {
     if (!Number.isSafeInteger(stallWindowMs) || stallWindowMs < 1) throw new Error("ACP停滞窗口必须为正整数毫秒。");
@@ -80,13 +80,16 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     let lastActivity = performance.now();
     let stallTimer: ReturnType<typeof setInterval> | undefined;
     let checkingStall = false;
-    const unsubscribe = session.subscribe?.(event => {
-      if (event.sessionId === session.binding?.sessionId) lastActivity = performance.now();
-    });
     let mcpServers: acp.McpServer[] = [];
     const key = nodeKey(node);
-    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
-    active.onTurnStarted = () => { lastActivity = performance.now(); };
+    // active 必须先于 subscribe 声明：测试 fixture 的 binding 从构造起即非空，
+    // 同步回放事件的实现不得在 TDZ 内触碰 active。
+    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
+    active.onTurnStarted = () => { lastActivity = performance.now(); active.stallDiagnosed = false; };
+    const unsubscribe = session.subscribe?.(event => {
+      // 停滞提示只由有意义进展刷新；thought 空分片/心跳不得续命。进展恢复后允许再次提示。
+      if (event.sessionId === session.binding?.sessionId && acpProgressIsMeaningful(event.update)) { lastActivity = performance.now(); active.stallDiagnosed = false; }
+    });
     this.#active.set(key, active);
     try {
       const signal = new AbortController();
@@ -104,30 +107,27 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       });
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝投递任务。");
       active.readTurnContext=()=>control.workerTurnContext({runId:control.runId,nodeId:node.id,agentSessionId:node.agentSessionId!,capability});
-      // 不重发业务任务：可信Worker可能已产生任意外部副作用，read-only标签也不
-      // 构成安全证明。缺少显式现场安全证明时，诊断后由用户总结并显式恢复。
+      // 不重发业务任务：可信Worker可能已产生任意外部副作用，read-only标签也不构成安全证明。
       if (unsubscribe) stallTimer = setInterval(() => {
-        if (checkingStall || active.stopped || settled) return;
+        if (checkingStall || active.stopped || settled || active.stallDiagnosed) return;
         if (!active.turn || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
         checkingStall = true;
         void (async () => {
           const context = await active.readTurnContext!();
-          if (settled || active.stopped) return;
+          if (settled || active.stopped || active.stallDiagnosed) return;
           if (context.status === "blocked" || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
           if (performance.now() - lastActivity < this.stallWindowMs) return;
-          await control.recordExecutorDiagnostic("ACP会话停滞；现场副作用无法核验，不自动重发。请完成影响面总结后显式恢复。", node.id, node.agentSessionId!);
-          if (settled || active.stopped || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) return;
-          // 诊断落盘期间可能收到事件或进入block，不能用旧读取结果中断合法等待。
-          const current = await active.readTurnContext!();
-          if (current.status === "blocked" || performance.now() - lastActivity < this.stallWindowMs) { lastActivity = performance.now(); return; }
-          if (settled || active.stopped || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) return;
-          active.stopped = true;
-          active.reject(new Error("ACP会话停滞，现场安全续作证据不足；中断并保留现场，不自动重试。"));
-        })().catch(error => {
-          // Runtime先写pausing/recovering再操作Executor；只读事实恰好跨该转换时
-          // 不把合法控制等待当会话异常，下一个采样重新读取权威状态。
-          if (!settled && !active.stopped && !active.pauseRequested && !active.paused && !control.isWorkerWaiting(node.id, node.agentSessionId!)) active.reject(error instanceof Error ? error : new Error(String(error)));
-        })
+          // 与社区一致（orca “silence is not evidence” turn 不设超时、vibe-kanban 无信号即
+          // stall-forever、Zed/claude-agent-acp 不按沉默杀回合）：静默不自动中断、不cancel、
+          // 不杀进程——单个长命令可能合法静默，自动中断会误杀真实工作。连续无实质进展期间
+          // 只耐久落一条停滞提示；唯一出口是用户显式停止。
+          const observed = lastActivity;
+          try {
+            await control.recordExecutorDiagnostic("ACP会话超过停滞窗口无实质进展；长命令可能合法静默，不自动中断。请确认现场后显式停止或继续等待。", node.id, node.agentSessionId!);
+            // 落盘期间到达的进展（监听已刷新lastActivity并清除标记）不被旧观察覆盖。
+            if (!settled && !active.stopped && lastActivity === observed) active.stallDiagnosed = true;
+          } catch { /* 提示落盘失败不杀死节点，下个采样周期重试。 */ }
+        })().catch(() => { /* 提示采样永不终结节点：只读事实读取失败时下个周期重试。 */ })
           .finally(() => { checkingStall = false; });
       }, Math.min(1_000, this.stallWindowMs));
       const turn = this.runTurn(active, managedPrompt(node), signal.signal);
@@ -292,6 +292,8 @@ type ActiveAcpWorker = {
   pauseRequested: boolean;
   paused: boolean;
   stopped: boolean;
+  /** 当前 turn 是否已落过停滞提示；不自动中断，只避免每秒重复诊断。 */
+  stallDiagnosed: boolean;
   resume: Promise<void> | null;
   releaseResume: (() => void) | null;
   recoveryStarted: Promise<void> | null;

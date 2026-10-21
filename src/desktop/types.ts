@@ -167,16 +167,12 @@ export type CreateExecutionRequest = {
 
 /** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
 export type ExecutionPlanResponse = {
-  /** 原执行安全可交接的Git现场；仅专用续作验收提供，用户明确选择，不自动合并partial。 */
+  /** 原执行可安全接续的共享worktree；写修订默认自动接续，不复制节点完成状态。 */
   readonly continuationPlan?: {
     /** 同Task最近写执行UUID；中间只读轮次不清除已有成果。 */ readonly executionId:string;
     /** 原冻结Git基准，保留累计diff。 */ readonly baseCommit:string;
-    /** 各原分支当前保存现场，非ready仍显示partial。 */ readonly workspaces:readonly {
-      /** 原受管目录UUID。 */ readonly workspaceId:string;
-      /** 当前可核验HEAD。 */ readonly commit:string;
-      /** 原绑定节点名称，帮助用户选现场，不复制节点完成状态。 */ readonly nodeIds:readonly string[];
-      /** 最近保存是否ready；false保留未完成状态。 */ readonly ready:boolean;
-    }[];
+    /** 唯一受管worktree UUID。 */ readonly workspaceId:string;
+    /** 交接时worktree权威HEAD；漂移拒绝旧确认。 */ readonly head:string;
   }|null;
   /** 最新终态执行的现场证据hash；首次为null，确认须携带，变化拒绝旧确认；不是授权凭据。 */
   readonly sceneEvidenceHash?: string | null;
@@ -216,13 +212,20 @@ export type ExecutionResponse = {
    * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
    */
   readonly controllable: boolean;
-  /** 受管Git成果投影；只展示WorkspaceManager事实，不改变Run业务状态。 */
-  readonly workspaceEvidence?: readonly { readonly nodeId:string; readonly branch:string; readonly lease:{readonly attempt:number}|null; readonly results:readonly {readonly attempt:number;readonly commit:string;readonly paths:readonly string[];readonly ready:boolean;readonly unchanged:boolean;readonly mergeParents:readonly string[]}[] }[];
+  /** 受管Git成果投影；只展示共享worktree与租约事实，不改变Run业务状态。 */
+  readonly workspaceEvidence?: {
+    /** 本Execution唯一受管worktree UUID。 */ readonly workspaceId:string;
+    /** 受管分支短名。 */ readonly branch:string;
+    /** worktree当前HEAD；已清理为null。 */ readonly head:string|null;
+    /** 当前仍存活的本Execution writer租约。 */ readonly leases:readonly { readonly nodeId:string; readonly attempt:number }[];
+    /** 该worktree累计被显式resume释放的旧Engine租约数（含其他接续Execution）。 */ readonly staleLeases:number;
+    /** worktree是否已安全清理。 */ readonly cleaned:boolean;
+  };
   /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
   readonly workspaceDiagnostic?: string;
-  /** 最终ready来源的耐久Git证据；缺省不可合入，不代表主分支已合入。 */
+  /** 最终封存与自动应用证据；缺省表示尚未收尾。 */
   readonly sourceEvidence?: import("../workspace/workspace-manager").WorkspaceSource;
-  /** 最终来源收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
+  /** 最终收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
   readonly sourceDiagnostic?: string;
 };
 

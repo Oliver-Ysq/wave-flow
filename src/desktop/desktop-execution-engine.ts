@@ -46,6 +46,7 @@ import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-e
 import { readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace-manager";
+import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
 import { WorkflowContractError } from "../workflow/errors";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
@@ -628,18 +629,12 @@ export class DesktopExecutionEngine {
       const prior=[...snapshot.executions].reverse().find(item=>item.config?.workspaces);
       if(workspacePlan&&!intent.uncertain&&snapshot.task?.workflowContract==="single-workflow-v1"&&prior?.config?.workspaces){
         if(!this.singleWorkflowForAcceptance)throw new Error("修订现场续作仅专用验收入口可用。");
-        const frozen=prior.config.workspaces,manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId),items=[];
-        for(const workspaceId of new Set(frozen.bindings.map(binding=>binding.workspaceId))){
-          const record=await manager.inspect(workspaceId),latest=record.results.at(-1);
-          if(record.lease||record.cleanedAt||record.cleanupRequestedAt)throw new Error("原writer未交接或工作区已清理，不能准备新版写入。");
-          if(!latest)continue;
-          const repo=await GitRepository.open(record.cwd),scene=await repo.inspect();
-          if(latest.runId!==prior.executionId||scene.head!==latest.commit||scene.changedPaths.length||scene.conflicts.length)throw new Error("原现场尚未保存或已经漂移，请先处理原执行成果。");
-          for(const result of record.results)await repo.verifyCommitObject(result.commit,result.startCommit,result.paths);
-          items.push({workspaceId,commit:latest.commit,nodeIds:frozen.bindings.filter(binding=>binding.workspaceId===workspaceId).map(binding=>binding.nodeId),ready:latest.ready});
-        }
-        if(!items.length)throw new Error("原执行没有可交接的已保存现场。");
-        continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaces:items};
+        assertCurrentWorkspaceRecord(prior.config.workspaces);
+        const frozen=prior.config.workspaces,manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId),record=await manager.inspect(frozen.workspaceId);
+        if(record.leases.length||record.cleanedAt||record.cleanupRequestedAt)throw new Error("原writer未交接或worktree已清理，不能准备新版写入。");
+        const scene=await (await GitRepository.open(record.cwd)).inspect();
+        if(scene.conflicts.length)throw new Error("原现场存在未解决冲突，请先处理后再准备新版写入。");
+        continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaceId:frozen.workspaceId,head:scene.head};
         workspacePlan={...workspacePlan,baseCommit:frozen.authorization.baseCommit,dirtyPaths:[],diagnostic:null};
       }
       return { continuationPlan,sceneEvidenceHash, workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
@@ -666,7 +661,9 @@ export class DesktopExecutionEngine {
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
         sourceEvidence=await manager.inspectSource(executionId)??undefined;
         sourceDiagnostic=await manager.inspectSourceDiagnostic(executionId)??undefined;
-        workspaceEvidence=await Promise.all(execution.config.workspaces.bindings.map(async binding=>{const value=await manager.inspect(binding.workspaceId);return {nodeId:binding.nodeId,branch:value.branch,lease:value.lease?{attempt:value.lease.attempt}:null,results:value.results.filter(result=>result.runId===executionId).map(result=>({attempt:result.attempt,commit:result.commit,paths:result.paths,ready:result.ready,unchanged:result.unchanged,mergeParents:result.mergeParents}))};}));
+        const value=await manager.inspect(execution.config.workspaces.workspaceId);
+        const head=value.cleanedAt?null:(await (await GitRepository.open(value.cwd)).inspect()).head;
+        workspaceEvidence={workspaceId:value.workspaceId,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),staleLeases:value.staleReleases?.length??0,cleaned:value.cleanedAt!==null};
         } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
       }
       return { execution, workspaceEvidence, workspaceDiagnostic, sourceEvidence, sourceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
@@ -828,19 +825,15 @@ export class DesktopExecutionEngine {
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
       case "executions.review":
-      case "executions.fileDiff":
-      case "executions.merge": {
+      case "executions.fileDiff": {
         const taskId = requiredString(value, "harnessRunId"), executionId = requiredString(value, "executionId");
         const task = await this.#harness.snapshot(taskId), execution = task.executions.find(item => item.executionId === executionId);
         if (!execution?.config?.workspaces) throw new Error("执行不属于当前任务或没有Git成果配置。");
         const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId), evidence = await manager.inspectSource(executionId);
-        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无完整ready来源可审阅合入。");
+        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无最终封存记录可审阅。");
         const repo = await GitRepository.open(execution.config.workspaces.authorization.repository);
-        if (action === "executions.review") return { ...await repo.review(evidence.baseCommit, evidence.sourceCommit), merged: await manager.inspectMerge(executionId) ?? undefined };
-        if (action === "executions.fileDiff") return repo.fileDiff(evidence.baseCommit, evidence.sourceCommit, requiredString(value, "path"));
-        if (task.status === "completed" || task.executions.at(-1)?.executionId !== executionId || object(value).authorized !== true) throw new Error("只能明确合入未归档任务的最新执行。");
-        if (requiredString(value, "sourceCommit") !== evidence.sourceCommit) throw new Error("审阅来源已变化；请重新读取diff。");
-        return manager.merge(executionId, repo.cwd, { requestId: requiredString(value, "requestId"), baseCommit: evidence.baseCommit, sourceCommit: evidence.sourceCommit, targetBranch: requiredString(value, "targetBranch"), targetHead: requiredString(value, "targetHead") });
+        if (action === "executions.review") return repo.review(evidence.baseCommit, evidence.commit);
+        return repo.fileDiff(evidence.baseCommit, evidence.commit, requiredString(value, "path"));
       }
       case "executions.savePartial": {
         if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
@@ -854,14 +847,16 @@ export class DesktopExecutionEngine {
         for(const node of detail.snapshot.phases.flatMap(phase=>phase.agents))if(node.status==="cancelled"||node.status==="interrupted")await executor.finalizePartial(node);
         return this.executionSnapshot(taskId,executionId);
       }
+      // 执行页“清理临时工作区”入口；只删除已封存、干净、无租约的受管checkout，分支与证据保留。
       case "executions.cleanupWorkspaces": {
         if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
         const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId"),task=await this.#harness.snapshot(taskId);
         const execution=task.executions.find(item=>item.executionId===executionId);
         if(task.status==="completed"||!execution?.config?.workspaces)throw new Error("只能清理当前未归档任务的受管workspace。");
         if(execution.finishedAt===null)throw new Error("执行尚未终态，禁止清理。");
+        assertCurrentWorkspaceRecord(execution.config.workspaces);
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
-        for(const id of new Set(execution.config.workspaces.bindings.map(binding=>binding.workspaceId)))await manager.cleanup(id,true);
+        await manager.cleanup(execution.config.workspaces.workspaceId,executionId,true);
         return this.executionSnapshot(taskId,executionId);
       }
       case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));

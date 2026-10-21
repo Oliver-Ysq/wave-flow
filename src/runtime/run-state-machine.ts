@@ -69,7 +69,9 @@ export class RunStateMachine {
         this.#applyPhaseEntered(event);
         return;
       case "phase.changed":
+        return;
       case "log.written":
+        this.#applyLogWritten(event);
         return;
       case "agent.created":
         this.#applyAgentCreated(event);
@@ -284,6 +286,17 @@ export class RunStateMachine {
     this.#phaseVisits.set(visitKey(event.executionAttemptId, event.phaseVisitId), { executionAttemptId: event.executionAttemptId, phaseVisitId: event.phaseVisitId, title: event.title, occurrence: event.occurrence, batches: [], createdAt: event.at });
   }
 
+  /**
+   * 执行器诊断只更新节点的最近提示，不改变业务状态、诊断或时间；没有节点绑定的
+   * Run 级日志保持原有忽略语义。节点未知时也忽略，保证旧档案可只读重放。
+   */
+  #applyLogWritten(event: Extract<JournalEvent, { type: "log.written" }>): void {
+    if (event.nodeId === null) return;
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent) return;
+    this.#agents.set(event.nodeId, { ...agent, hint: event.message });
+  }
+
   /** 显式 resume 对同一节点创建新 attempt；只允许覆盖非 completed 的旧尝试。 */
   #applyAgentRestarted(event: Extract<JournalEvent, { type: "agent.restarted" }>): void {
     if (!event.nodeId) throw new Error("agent.restarted 缺少节点。");
@@ -300,7 +313,7 @@ export class RunStateMachine {
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
     if (executionAttemptId !== agent.executionAttemptId) this.#historicalAgents.set(`${agent.executionAttemptId}:${agent.id}`, cloneAgent(agent));
-    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null });
+    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", hint: null, startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null });
   }
 
   #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
@@ -333,6 +346,9 @@ export class RunStateMachine {
       status,
       result,
       diagnostic,
+      // 提示只描述“上一次执行器看到的现场”；任何状态事实都意味着它已过期，
+      // 清空可避免把旧停滞提示误读成当前失败。
+      hint: null,
       startedAt: status === "running" && agent.startedAt === null ? at : agent.startedAt,
       endedAt: terminalAgentStatuses.has(status) ? at : agent.endedAt,
       agentSessionId: agent.agentSessionId ?? agentSessionId,

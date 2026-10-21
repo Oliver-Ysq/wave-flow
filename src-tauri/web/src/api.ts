@@ -17,15 +17,13 @@ export const api = {
   startConversationWithAttachments: (projectId:string,text:string,clientRequestId:string,title:string|undefined,stagedAttachmentIds:string[]) => action<HarnessRunResponse>("harnesses.startConversation",{projectId,text,clientRequestId,...(title?{title}:{}),...(stagedAttachmentIds.length?{stagedAttachmentIds}:{})}),
   /** 读取已登记项目当前分支，仅用于展示，不批准或启动执行。 */
   projectContext: (projectId: string) => action<import("../../../src/desktop/project-context").ProjectContext>("projects.context", { projectId }),
-  /** 读取冻结成果diff与本机分支，不产生Git写入。 */
+  /** 读取执行前后完整diff；自动应用结果只读展示，不产生新的Git写入。 */
   reviewGit:(harnessRunId:string,executionId:string)=>action<import("../../../src/workspace/git-repository").GitReview>("executions.review",{harnessRunId,executionId}),
   /** 仅读取已属于该成果diff的指定文件patch。 */
   fileDiff:(harnessRunId:string,executionId:string,path:string)=>action<import("../../../src/workspace/git-repository").GitFileDiff>("executions.fileDiff",{harnessRunId,executionId,path}),
-  /** 用户明确确认后squash合入本机分支；原请求重试不新增commit。 */
-  mergeGit:(harnessRunId:string,executionId:string,request:{requestId:string;sourceCommit:string;targetBranch:string;targetHead:string})=>action<import("../../../src/workspace/git-repository").GitMergeResult>("executions.merge",{harnessRunId,executionId,...request,authorized:true}),
   /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
   savePartial: (harnessRunId:string,executionId:string)=>action<ExecutionResponse>("executions.savePartial",{harnessRunId,executionId,authorized:true}),
-  /** 用户确认后只清理已保存/无writer的checkout，分支与commit保留。 */
+  /** 显式清理该 Execution 的受管 worktree；仅当前未归档任务且执行已终态时成功，已封存成果不受影响。 */
   cleanupWorkspaces:(harnessRunId:string,executionId:string)=>action<ExecutionResponse>("executions.cleanupWorkspaces",{harnessRunId,executionId,authorized:true}),
   /** 只重试原义务的主控总结，不能派发或恢复Worker。 */
   retryImpactSummary:(harnessRunId:string,key:string)=>action<HarnessRunResponse>("harnesses.retryImpactSummary",{harnessRunId,key}),

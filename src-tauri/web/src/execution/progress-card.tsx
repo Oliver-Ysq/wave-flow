@@ -1,37 +1,16 @@
 import type { RunSnapshot } from "../types";
 import { computeExecutionProgress } from "./execution-progress";
 
-/** 节点状态在待办卡上的展示文案与修饰类。 */
-function itemMark(status: string): { text: string; className: string } {
-  switch (status) {
-    case "completed":
-      return { text: "已完成", className: "completed" };
-    case "running":
-    case "recovering":
-      return { text: "进行中", className: "running" };
-    case "blocked":
-      return { text: "等待输入", className: "blocked" };
-    case "cancelled":
-      return { text: "已停止", className: "stopped" };
-    case "interrupted":
-      return { text: "已中断", className: "stopped" };
-    case "pausing":
-    case "paused":
-      return { text: "已暂停", className: "pending" };
-    default:
-      return { text: "排队中", className: "pending" };
-  }
-}
-
 /**
- * 待办卡：执行进度勾选清单。数据与团队面板同源（同一个 Run 权威快照），
- * 不另发请求；动态节点只以"数量待定"提示，不伪造分母或百分比。
+ * 执行进度概览：完成度、冻结方案与分配叙事合并为一行；
+ * 节点级状态只由下方 Phase/Agent 行表达，不再重复渲染 chips 清单。
  */
 export function ExecutionProgressCard({
   snapshot,
   dynamicCount = 0,
   plannedTotal,
   allVisits,
+  meta,
 }: {
   /** 当前 Execution/Run 的权威快照。 */
   snapshot: RunSnapshot;
@@ -41,6 +20,8 @@ export function ExecutionProgressCard({
   plannedTotal?: number;
   /** 已读取的全部耐久访问；用于标明历史完成节点，不触发执行或授权 replay。 */
   allVisits?: RunSnapshot["phaseVisits"];
+  /** 冻结方案版本、执行者数量与分配规则；与完成度同行展示。 */
+  meta?: string;
 }) {
   const progress = computeExecutionProgress(snapshot, plannedTotal, allVisits);
   return (
@@ -51,6 +32,7 @@ export function ExecutionProgressCard({
             ? `${progress.completed} 完成 · 动态节点数量待定`
             : `${progress.completed}/${progress.total} 完成`}
         </strong>
+        {meta && <small>{meta}</small>}
         {dynamicCount > 0 && (
           <small>静态节点共 {progress.total} 个；动态节点在执行时确定</small>
         )}
@@ -58,23 +40,6 @@ export function ExecutionProgressCard({
           <small>分母为已创建节点；计划总数未提供</small>
         )}
       </header>
-      <ul>
-        {progress.items.map((item) => {
-          const mark = itemMark(item.status);
-          return (
-            <li key={item.id} className={mark.className}>
-              {/* key 绑状态：状态变化会重建勾选框，完成时弹出一次，之后保持静态。 */}
-              <span key={item.status} className={`wf-progress-check${item.status === "completed" ? " filled" : ""}`} aria-hidden="true">
-                {item.status === "completed" ? "✓" : ""}
-              </span>
-              <span className="wf-progress-label">{item.label}</span>
-              {/* 已完成已由 ✓ 勾选框表达，不再重复文字；非完成态保留文字状态。 */}
-              {item.status !== "completed" && <em>{mark.text}</em>}
-            </li>
-          );
-        })}
-        {progress.items.length === 0 && <li className="pending">尚未创建节点</li>}
-      </ul>
     </section>
   );
 }

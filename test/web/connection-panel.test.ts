@@ -166,7 +166,7 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(css).toContain("white-space:pre-wrap");
   expect(css).toContain(".workflow-render-error");
   expect(css).toContain("grid-template-columns: var(--wf-rail-width, 260px) minmax(0, 1fr)");
-  expect(source).toContain('className="central-workflow"');
+  expect(source).toContain('central-workflow${changesView ? " changes-open" : ""}');
   expect(source).not.toContain('className="workflow-peek"');
 });
 
@@ -209,7 +209,7 @@ test("取消或中断的 Execution 都提供同一冻结 revision 的显式恢�
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain('detail.snapshot.status === "interrupted" ||');
   expect(source).toContain('detail.snapshot.status === "cancelled"');
-  expect(source).toContain('detail.snapshot.status === "cancelled"\n                      ? "恢复已停止 Execution"\n                      : "恢复中断 Execution"');
+  expect(source).toMatch(/detail\.snapshot\.status === "cancelled"\s*\?\s*"恢复已停止 Execution"\s*:\s*"恢复中断 Execution"/);
   expect(source).toContain('onClick={() => void onControl("resume")}');
 });
 

@@ -136,6 +136,12 @@ function AgentRow({
         </span>
         <em className={`wf-agent-status ${agent.status}`}>{statusLabel(agent.status)}</em>
       </button>
+      {/* 停滞提示只补充可见性：不改变状态徽标、不进入错误态，也不阻断答题。 */}
+      {agent.hint && (
+        <p className="wf-agent-hint" role="status">
+          {userFacingText(agent.hint)}
+        </p>
+      )}
       {open && (
         <div className="wf-agent-detail">
           {agent.diagnostic && (

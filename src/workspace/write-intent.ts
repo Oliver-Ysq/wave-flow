@@ -14,6 +14,13 @@ export function readWorkspaceWriteIntent(source: string): { readonly nodeIds: re
       else {
         let id: string | null = null, sandbox: string | null = "read-only";
         for (const property of options.properties) {
+          // 展开可能覆盖前面的 id/sandbox，必须判定不确定。
+          if (ts.isSpreadAssignment(property)) { uncertain = true; continue; }
+          // 只有 id/sandbox 的简写会隐藏写授权；schema 等其余简写与写意图无关。
+          if (ts.isShorthandPropertyAssignment(property)) {
+            if (property.name.text === "id" || property.name.text === "sandbox") uncertain = true;
+            continue;
+          }
           if (!ts.isPropertyAssignment(property) || (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name))) { uncertain = true; continue; }
           const key = property.name.text;
           if (key === "id") id = ts.isStringLiteral(property.initializer) ? property.initializer.text : null;

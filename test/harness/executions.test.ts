@@ -102,7 +102,7 @@ describe("HarnessExecutionService", () => {
     try{
       const task=await harness.startTask(root,{clientRequestId:crypto.randomUUID(),projectId:"p",text:"写任务"});
       await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,1);
-      const config={...testConfig(),workspaces:{version:2 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},bindings:[{nodeId:"w1",workspaceId:crypto.randomUUID()}]}};
+      const config={...testConfig(),workspaces:{version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},workspaceId:crypto.randomUUID()}};
       await service.createExecution(task.harnessRunId,1,{},config);
       await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).impactSummaries?.[0]?.status==="completed");
       await harness.send(task.harnessRunId,"先只读复核");await waitFor(async()=>(await harness.snapshot(task.harnessRunId)).status==="idle");await harness.acceptWorkflowRevision(task.harnessRunId,2);
@@ -161,7 +161,7 @@ describe("HarnessExecutionService", () => {
   });
   test("原completed成果补收尾失败不重开Execution、不派发第二Worker，错误可诊断", async () => {
     const {harness,harnessRunId,root}=await fixture();let calls=0,prepares=0;
-    const config={...testConfig(),workspaces:{version:2 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},bindings:[{nodeId:"w1",workspaceId:crypto.randomUUID()}]}};
+    const config={...testConfig(),workspaces:{version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},workspaceId:crypto.randomUUID()}};
     const service=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {ok:true};}}}),{prepareResume:async()=>{prepares++;throw Error("writer退出仍未知");}},root);
     await harness.proposeWorkflowRevision(harnessRunId,SIMPLE_SOURCE.replace('cli: "codex"','cli: "codex", sandbox: "workspace-write"'));await harness.acceptWorkflowRevision(harnessRunId,1);
     const {execution}=await service.createExecution(harnessRunId,1,{},config);
@@ -177,7 +177,7 @@ describe("HarnessExecutionService", () => {
   test("来源收尾在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
     const { harness, harnessRunId, root } = await fixture();
     let finalized = false, called = 0;
-    const config = { ...testConfig(), workspaces: { version: 2 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "w1" }] }, bindings: [{ nodeId: "w1", workspaceId: crypto.randomUUID() }] } };
+    const config = { ...testConfig(), workspaces: { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "w1" }] }, workspaceId: crypto.randomUUID() } };
     const executions = new HarnessExecutionService(harness, () => ({ executor: { execute: async () => ({ ok: true }), finalizeCompleted: async () => { finalized = true; } } }), {
       finalizeSource: async (id, frozen) => {
         expect(finalized).toBe(true); expect(frozen).toEqual(config); called++;

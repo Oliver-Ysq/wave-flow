@@ -64,6 +64,12 @@ export type AgentNodeSnapshot = {
   readonly result: JsonObject | null;
   /** 失败、中断或取消时的可诊断原因；正常完成时为 null。 */
   readonly diagnostic: string | null;
+  /**
+   * 最近一次执行器提示（例如停滞诊断），不改变业务状态，也不得当作失败依据；
+   * null/缺省表示暂无提示。节点任意状态事件（agent.status / agent.completed /
+   * agent.restarted）都会清空它，因此它只是“最后提示”，不是持久诊断。
+   */
+  readonly hint?: string | null;
   /** 节点创建、开始与终止时间；尚未发生时为 null。 */
   readonly createdAt: string;
   readonly startedAt: string | null;

@@ -290,7 +290,7 @@
 .toast-layer { position:fixed; z-index:200; top:18px; right:20px; width:min(340px,calc(100vw - 40px)); pointer-events:none; }.toast-layer .notice { display:grid; grid-template-columns:15px minmax(0,1fr) 22px; gap:9px; align-items:start; margin:0; padding:10px 11px; border:1px solid var(--wf-danger-line); border-radius:10px; background:var(--wf-danger-bg); color:var(--wf-danger-ink); box-shadow:0 14px 38px rgb(0 0 0 / 27%); font-size:12px; line-height:1.45; pointer-events:auto; }.toast-layer .notice > span { display:grid; place-items:center; width:15px; height:15px; margin-top:1px; border-radius:50%; background:#cb5e70; color:#fff; font-size:10px; font-weight:800; }.toast-layer .notice > div { min-width:0; overflow-wrap:anywhere; }.toast-layer .notice button { display:grid; place-items:center; width:22px; height:22px; margin:-3px -3px 0 0; padding:0; border:0; border-radius:6px; background:transparent; color:inherit; font-size:17px; line-height:1; }.toast-layer .notice button:hover { background:rgb(255 255 255 / 10%); }
 
 /* Workflow detail: flat drawer, hairline divider, no blur or heavy shadow. */
-.agent-workbench .workflow-empty { display:grid; align-content:center; justify-items:center; gap:12px; padding:32px; text-align:center; }.agent-workbench .workflow-empty > div { display:grid; place-items:center; width:40px; height:40px; border-radius:12px; background:var(--wf-accent-wash); color:var(--wf-accent); font-size:22px; }.agent-workbench .workflow-empty strong { color:var(--wf-ink); font-size:14px; }.agent-workbench .workflow-empty p { max-width:320px; margin:0; color:var(--wf-muted); font-size:12px; line-height:1.7; }.agent-workbench .workflow-detail-scroll { min-height:0; overflow:auto; padding:16px; }
+.agent-workbench .workflow-empty { display:grid; align-content:center; justify-items:center; gap:12px; padding:32px; text-align:center; }.agent-workbench .workflow-empty > div { display:grid; place-items:center; width:40px; height:40px; border-radius:12px; background:var(--wf-accent-wash); color:var(--wf-accent); font-size:22px; }.agent-workbench .workflow-empty strong { color:var(--wf-ink); font-size:14px; }.agent-workbench .workflow-empty p { max-width:320px; margin:0; color:var(--wf-muted); font-size:12px; line-height:1.7; }
 .agent-workbench .workflow-render-error { display:grid; align-content:center; gap:10px; min-height:100%; padding:28px; background:var(--wf-panel); }.agent-workbench .workflow-render-error strong { color:var(--wf-ink); font-size:14px; }.agent-workbench .workflow-render-error p { margin:0; color:var(--wf-muted); font-size:12px; line-height:1.65; }.agent-workbench .workflow-render-error button { justify-self:start; padding:8px 10px; border:1px solid var(--wf-line); border-radius:8px; background:var(--wf-panel-raised); color:var(--wf-ink); font-size:11px; }
 
 /* Connection panels: one structural language for runtime and project setup. */
@@ -906,21 +906,11 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-plan-diag dd { margin:0; color:var(--wf-text); font-family:ui-monospace, "SF Mono", Menlo, monospace; overflow-wrap:anywhere; }
 .agent-workbench .workflow-revision.rejected { opacity:.72; }
 
-.agent-workbench .wf-progress-card { padding:12px 2px; border-bottom:1px solid var(--wf-line-soft); }
-.agent-workbench .wf-progress-card > header { display:flex; align-items:baseline; gap:10px; }
-.agent-workbench .wf-progress-card > header strong { color:var(--wf-text); font-size:14px; }
-.agent-workbench .wf-progress-card > header small { color:var(--wf-text-dim); font-size:11px; }
-/* 进度清单收敛为紧凑 chips：不再竖向逐行堆叠，与下方阶段节点不形成两份清单。 */
-.agent-workbench .wf-progress-card ul { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 0; padding:0; list-style:none; }
-.agent-workbench .wf-progress-card li { display:inline-flex; align-items:center; gap:7px; padding:4px 10px 4px 7px; border:1px solid var(--wf-line-soft); border-radius:999px; font-size:11px; color:var(--wf-text-dim); transition:border-color var(--wf-t-mid) ease, color var(--wf-t-mid) ease, background-color var(--wf-t-mid) ease; }
-.agent-workbench .wf-progress-card li.completed { color:var(--wf-text); border-color:color-mix(in srgb, var(--wf-success) 45%, var(--wf-line-soft)); }
-.agent-workbench .wf-progress-card li.running { color:var(--wf-accent-strong); border-color:color-mix(in srgb, var(--wf-accent-strong) 50%, var(--wf-line-soft)); }
-.agent-workbench .wf-progress-card li.blocked em { color:var(--wf-wait); }
-.agent-workbench .wf-progress-card li.stopped em { color:var(--wf-danger-ink); }
-.agent-workbench .wf-progress-card li em { font-size:10px; font-style:normal; }
-.agent-workbench .wf-progress-card li em::before { content:"· "; }
-.agent-workbench .wf-progress-check { display:grid; place-items:center; width:15px; height:15px; flex:0 0 auto; border:1px solid var(--wf-border); border-radius:5px; color:var(--wf-success); font-size:10px; transition:border-color var(--wf-t-mid) ease, color var(--wf-t-fast) ease; }
-.agent-workbench .wf-progress-card li.completed .wf-progress-check { border-color:var(--wf-success); }
+/* 执行概览只保留完成度与冻结方案/分配叙事；节点级状态由下方阶段与 Agent 行唯一表达。 */
+.agent-workbench .wf-progress-card { padding:0 0 14px; border-bottom:1px solid var(--wf-line-soft); }
+.agent-workbench .wf-progress-card > header { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 14px; }
+.agent-workbench .wf-progress-card > header strong { color:var(--wf-text); font-size:17px; font-weight:650; letter-spacing:-.01em; }
+.agent-workbench .wf-progress-card > header small { min-width:0; color:var(--wf-text-dim); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
 
 .agent-workbench .wf-team-panel { display:grid; gap:4px; }
 .agent-workbench .wf-visit { padding:10px 2px; border-bottom:1px solid var(--wf-line-soft); }
@@ -951,6 +941,8 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-agent-line p { margin:4px 0 0; color:var(--wf-text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .agent-workbench .wf-agent-line pre { max-height:220px; margin:4px 0 0; padding:8px 10px; overflow-x:hidden; overflow-y:auto; white-space:pre-wrap; overflow-wrap:anywhere; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-terminal-bg); color:#e8e8ea; font:11px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
 .agent-workbench .wf-agent-note { margin:4px 0 0; color:var(--wf-text-dim); font-size:11px; }
+/* 停滞提示：低对比提示条，只补充可见性，不抢状态徽标也不进入错误态。 */
+.agent-workbench .wf-agent-hint { margin:0; padding:5px 10px 7px 41px; border-radius:0 0 8px 8px; background:var(--wf-accent-wash); color:var(--wf-accent); font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
 .agent-workbench .wf-agent-diag summary { color:var(--wf-text-dim); font-size:11px; cursor:pointer; }
 .agent-workbench .wf-agent-diag dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:3px 10px; margin:6px 0 0; font-size:11px; }
 .agent-workbench .wf-agent-diag dt { color:var(--wf-text-dim); }
@@ -1063,8 +1055,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .workflow-page-header span { font-size:12px; color:var(--wf-muted); }
 .agent-workbench .workflow-page-header strong { display:-webkit-box; overflow:hidden; margin-top:6px; font-size:17px; line-height:1.45; font-weight:650; overflow-wrap:anywhere; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
 .agent-workbench .workflow-page-header button { flex-shrink:0; margin:0; cursor:pointer; }
-.agent-workbench .central-plan,.agent-workbench .central-workflow .workflow-detail-scroll { max-width:1000px; margin:0 auto; }
-.agent-workbench .central-workflow .workflow-detail-scroll { padding:24px 0; overflow:visible; }
+.agent-workbench .central-plan { max-width:820px; margin:0 auto; }
 .agent-workbench .workflow-page-tabs { display:flex; gap:24px; border-bottom:1px solid var(--wf-line); margin:0 0 12px; }
 .agent-workbench .workflow-page-tabs button { margin:0; padding:10px 2px 12px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; font-size:14px; color:var(--wf-muted); cursor:pointer; }
 .agent-workbench .workflow-page-tabs button[aria-selected="true"] { color:var(--wf-ink); border-bottom-color:var(--wf-accent); font-weight:650; }
@@ -1179,15 +1170,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .workflow-design-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--wf-line-soft); }
 .workflow-design-row select { max-width: 280px; color: var(--wf-ink); background: var(--wf-input); border: 1px solid var(--wf-line); border-radius: 6px; padding: 8px; }
 .workflow-design small { display: block; margin: 10px 0; color: var(--wf-muted); }
-.workflow-git-advanced{margin-top:16px;border-top:1px solid var(--wf-line-soft);padding-top:12px}
-.workflow-git-advanced>summary{cursor:pointer;color:var(--wf-muted);font-size:13px;user-select:none}
-.workflow-git-advanced>summary:hover{color:var(--wf-ink)}
-.workflow-git-advanced[open]>summary{margin-bottom:10px}
-.workflow-git-advanced p{margin:0 0 10px;color:var(--wf-muted);font-size:13px}
-.workflow-git-advanced fieldset{display:grid;gap:10px;margin:0 0 10px;padding:12px;border:1px solid var(--wf-line);border-radius:10px}
-.workflow-git-advanced label{display:grid;gap:6px;font-size:13px}
-.workflow-git-advanced textarea{min-height:64px;resize:vertical}
-.workflow-git-advanced select{max-width:100%;min-height:36px;padding:8px;color:var(--wf-ink);background:var(--wf-input);border:1px solid var(--wf-line);border-radius:6px}
+.workflow-design .workflow-workspace-summary{margin:16px 0 0;padding-top:12px;border-top:1px solid var(--wf-line-soft);color:var(--wf-muted);font-size:12px;line-height:1.6}
 .execution-workspace-evidence{display:grid;gap:10px;margin:16px 0;padding:14px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
 .execution-workspace-evidence code{overflow-wrap:anywhere;white-space:normal}
 .execution-workspace-evidence summary{cursor:pointer}
@@ -1195,74 +1178,94 @@ details.execution-workspace-evidence{display:block}
 details.execution-workspace-evidence>article{margin-top:10px}
 .execution-workspace-evidence article{display:grid;grid-template-columns:minmax(100px,.6fr) minmax(160px,1.4fr);gap:6px 12px;padding:10px;border:1px solid var(--wf-line-soft);border-radius:10px}
 .execution-workspace-evidence article>div,.execution-workspace-evidence article>small,.execution-workspace-evidence article>span{grid-column:1/-1;display:grid;gap:4px}
-.agent-workbench .changes-panel { position:fixed; top:0; right:0; bottom:0; width:min(820px,78vw); display:flex; flex-direction:column; background:var(--wf-page); border-left:1px solid var(--wf-line); box-shadow:-24px 0 48px var(--wf-shadow-deep); z-index:70; }
-.agent-workbench.native-titlebar .changes-panel { top:38px; }
-.changes-panel>header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--wf-line-soft); }
-.changes-panel>header strong { color:var(--wf-ink); font-size:14px; }
+.agent-workbench .changes-panel { position:relative; flex:0 0 clamp(480px, 52%, 820px); box-sizing:border-box; min-width:0; min-height:0; align-self:stretch; display:flex; flex-direction:column; overflow:hidden; background:var(--wf-page); border-left:1px solid var(--wf-line); animation:wf-drawer-in var(--wf-t-slow) var(--wf-ease-out) both; }
+.changes-panel>header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:76px; padding:16px 20px; border-bottom:1px solid var(--wf-line-soft); }
+.changes-panel>header strong { color:var(--wf-ink); font-size:14px; font-weight:650; }
 .changes-panel>header button { border:none; background:transparent; color:var(--wf-muted); font-size:18px; padding:4px 10px; border-radius:8px; cursor:pointer; }
 .changes-panel>header button:hover { background:var(--wf-panel-raised); color:var(--wf-ink); }
-.changes-panel>p[role="alert"] { margin:12px 16px 0; color:var(--wf-danger-ink); }
-.changes-panel>p[role="status"] { margin:12px 16px 0; color:var(--wf-muted); }
+.changes-panel>p[role="alert"] { margin:12px 20px 0; color:var(--wf-danger-ink); }
+.changes-panel>p[role="status"] { margin:12px 20px 0; color:var(--wf-muted); }
 .changes-panel .changes-body { flex:1; display:flex; min-height:0; }
-.changes-panel .changes-files { width:230px; flex:none; overflow:auto; border-right:1px solid var(--wf-line-soft); padding:8px; display:flex; flex-direction:column; gap:2px; }
+.changes-panel .changes-files { width:220px; flex:none; overflow:auto; border-right:1px solid var(--wf-line-soft); padding:10px 8px; display:flex; flex-direction:column; gap:2px; }
 .changes-panel .changes-files button { display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%; padding:8px 10px; border:none; border-radius:8px; background:transparent; color:var(--wf-ink); text-align:left; cursor:pointer; }
 .changes-panel .changes-files button:hover { background:var(--wf-panel-raised); }
 .changes-panel .changes-files button.active { background:var(--wf-accent-wash); }.changes-panel .changes-files .changes-file-path { font-size:12px; overflow-wrap:anywhere; }
 .changes-panel .changes-files small { color:var(--wf-muted); }
-.changes-panel .changes-diff { flex:1; min-width:0; overflow:auto; padding:12px 16px; }
+.changes-panel .changes-diff { flex:1; min-width:0; overflow:auto; padding:14px 20px; }
 .changes-panel .changes-diff>p[role="status"] { color:var(--wf-muted); }
-.changes-panel>footer { display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid var(--wf-line-soft); }
-.changes-panel>footer label { display:flex; align-items:center; gap:8px; color:var(--wf-muted); font-size:13px; }
-.changes-panel>footer select { min-height:34px; padding:6px 8px; color:var(--wf-ink); background:var(--wf-input); border:1px solid var(--wf-line); border-radius:8px; }
-.changes-panel>footer span { color:var(--wf-muted); font-size:13px; }
+.changes-panel>footer { flex:0 0 auto; display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 20px; border-top:1px solid var(--wf-line-soft); }
 .changes-panel>footer small { color:var(--wf-faint); }
 .changes-panel>footer p[role="status"] { margin:0; color:var(--wf-success); }
-.changes-panel .changes-apply { padding:8px 16px; border:1px solid var(--wf-accent-strong); border-radius:8px; background:var(--wf-accent-strong); color:#fff; font-weight:600; cursor:pointer; }
-.changes-panel .changes-apply:disabled { opacity:.45; cursor:default; }
-@media(max-width:900px) { .agent-workbench .changes-panel { width:100vw; border-left:none; } .changes-panel .changes-files { width:180px; } }
+@keyframes wf-drawer-in { from { opacity:0; transform:translateX(28px); } to { opacity:1; transform:none; } }
+@media(max-width:900px) {
+  .agent-workbench .workflow-modal .central-workflow.changes-open .workflow-detail-column { display:none; }
+  .agent-workbench .changes-panel { flex:1 1 auto; border-left:0; }
+  .changes-panel .changes-files { width:180px; }
+}
 
 /* ---------- 工作流详情大弹窗 ---------- */
 
 /* 弹窗骨架：遮罩淡入淡出 + 卡片上浮入场；关闭沿同一曲线退场，不立即消失。 */
 .agent-workbench .workflow-modal { position:fixed; inset:0; z-index:120; display:grid; place-items:center; padding:clamp(28px, 4.5vw, 56px); background:color-mix(in srgb, var(--wf-overlay) 92%, var(--wf-page)); backdrop-filter:blur(10px); opacity:0; visibility:hidden; pointer-events:none; transition:opacity var(--wf-t-mid) var(--wf-ease-out), visibility 0s var(--wf-t-mid); }
 .agent-workbench .workflow-modal.open { opacity:1; visibility:visible; pointer-events:auto; transition-delay:0s; }
-.agent-workbench .workflow-modal .central-workflow { box-sizing:border-box; width:min(1080px, 100%); height:auto; max-height:calc(100vh - 72px); margin:0; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:0; border:1px solid var(--wf-line); border-radius:16px; background:var(--wf-page); box-shadow:0 28px 80px var(--wf-shadow-deep); opacity:0; transform:translateY(14px) scale(.975); transition:transform var(--wf-t-slow) var(--wf-ease-out), opacity var(--wf-t-mid) ease; }
+/* 高度固定为窗口的百分比，不随内容拉伸；头部、页签、正文三层各自占位。 */
+.agent-workbench .workflow-modal .central-workflow { box-sizing:border-box; display:flex; flex-direction:column; width:min(1080px, 100%); height:86dvh; max-height:calc(100dvh - 2 * clamp(28px, 4.5vw, 56px)); margin:0; overflow:hidden; padding:0; border:1px solid var(--wf-line); border-radius:16px; background:var(--wf-page); box-shadow:0 28px 80px var(--wf-shadow-deep); opacity:0; transform:translateY(14px) scale(.975); transition:transform var(--wf-t-slow) var(--wf-ease-out), opacity var(--wf-t-mid) ease; }
 .agent-workbench .workflow-modal.open .central-workflow { opacity:1; transform:none; }
+/* 详情列始终占满剩余空间；打开变更时弹窗改为左右分栏，面板在弹窗内部向右展开。 */
+.agent-workbench .workflow-detail-column { flex:1 1 auto; display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; }
+.agent-workbench .workflow-modal .central-workflow.changes-open { flex-direction:row; width:min(1680px, 100%); }
+/* 分栏后左侧阅读列已窄于 820，滚动条只占右侧，正文与页头/页签保持同一条左边缘。 */
+.agent-workbench .workflow-modal .central-workflow.changes-open .workflow-page-body { scrollbar-gutter:stable; }
 
-/* 粘性头部与页签：长内容滚动时仍能返回对话或切换页签。 */
-.agent-workbench .workflow-modal .workflow-page-header { position:sticky; top:0; z-index:6; box-sizing:border-box; height:58px; margin:0; padding:0 20px; align-items:center; border-bottom:1px solid var(--wf-line-soft); background:color-mix(in srgb, var(--wf-page) 88%, transparent); backdrop-filter:blur(12px); }
-.agent-workbench .workflow-page-header strong { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; -webkit-line-clamp:1; }
-.agent-workbench .workflow-modal .central-plan { max-width:none; padding:8px 24px 20px; }
-.agent-workbench .workflow-modal .workflow-page-tabs { position:sticky; top:58px; z-index:5; box-sizing:border-box; max-width:820px; margin:0 auto; padding:0 22px; background:var(--wf-page); }
+/* 头部：面包屑与标题分两行，返回入口居右，不与标题或页签挤在一起。 */
+.agent-workbench .workflow-modal .workflow-page-header { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:24px; box-sizing:border-box; max-width:none; min-height:76px; margin:0; padding:16px 28px 16px max(clamp(20px, 4vw, 40px), calc((100% - 820px) / 2)); border-bottom:1px solid var(--wf-line-soft); background:var(--wf-page); }
+.agent-workbench .workflow-page-heading { display:grid; gap:6px; min-width:0; }
+.agent-workbench .workflow-page-header span { overflow:hidden; color:var(--wf-muted); font-size:11px; letter-spacing:.02em; text-overflow:ellipsis; white-space:nowrap; }
+.agent-workbench .workflow-page-header strong { display:block; overflow:hidden; margin:0; font-size:17px; line-height:1.4; font-weight:650; text-overflow:ellipsis; white-space:nowrap; -webkit-line-clamp:1; }
+.agent-workbench .workflow-page-return { flex:0 0 auto; display:inline-flex; align-items:center; gap:8px; min-height:34px; margin:0 !important; padding:0 14px !important; border:1px solid var(--wf-line) !important; border-radius:9px !important; background:var(--wf-panel-raised) !important; color:var(--wf-ink) !important; font-size:12px !important; cursor:pointer; }
+.agent-workbench .workflow-page-return:hover { border-color:var(--wf-accent) !important; }
+.agent-workbench .workflow-page-return em { color:var(--wf-muted); font-size:11px; font-style:normal; }
+
+/* 页签行固定在头部下方；三页始终可切换，不随正文滚走。 */
+.agent-workbench .workflow-page-nav { flex:0 0 auto; padding:0 clamp(20px, 4vw, 40px); border-bottom:1px solid var(--wf-line); background:var(--wf-page); }
+.agent-workbench .workflow-modal .workflow-page-tabs { position:static; display:flex; gap:28px; box-sizing:border-box; max-width:820px; margin:0 auto; padding:0; border-bottom:0; background:transparent; }
+.agent-workbench .workflow-modal .workflow-page-tabs button { margin:0; padding:13px 2px 12px; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; font-size:14px; color:var(--wf-muted); cursor:pointer; }
+.agent-workbench .workflow-modal .workflow-page-tabs button[aria-selected="true"] { color:var(--wf-ink); border-bottom-color:var(--wf-accent); font-weight:650; }
 .agent-workbench .workflow-page-tabs button { transition:color var(--wf-t-fast) ease, border-bottom-color var(--wf-t-mid) var(--wf-ease-out); }
-/* 执行与结果页同样收敛到阅读列，不再铺满弹窗。 */
-.agent-workbench .workflow-modal .workflow-detail-scroll > *, .agent-workbench .workflow-modal .workflow-detail-scroll > section { max-width:820px; margin-left:auto; margin-right:auto; }
+
+/* 正文是唯一滚动容器；方案、执行、结果共用同一阅读列与上下留白。 */
+.agent-workbench .workflow-page-body { flex:1 1 auto; min-width:0; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable both-edges; padding:26px clamp(20px, 4vw, 40px) 44px; }
+.agent-workbench .workflow-page-content { width:100%; max-width:820px; margin:0 auto; }
+.agent-workbench .workflow-page-content > * { min-width:0; }
+.agent-workbench .workflow-page-banners { display:grid; gap:8px; margin:0 0 16px; }
+.agent-workbench .workflow-page-banners:empty { display:none; }
+.agent-workbench .workflow-page-banners button { justify-self:start; margin:0; }
 
 @media(max-width:900px){
   .agent-workbench .workflow-modal { padding:0; }
-  .agent-workbench .workflow-modal .central-workflow { width:100%; max-height:100vh; height:100vh; border:0; border-radius:0; }
-  .agent-workbench .workflow-modal .central-plan { padding:12px 20px 80px; }
+  .agent-workbench .workflow-modal .central-workflow { width:100%; height:100dvh; max-height:100dvh; border:0; border-radius:0; }
+  .agent-workbench .workflow-modal .workflow-page-header { min-height:70px; padding:14px 20px; }
+  .agent-workbench .workflow-page-nav { padding:0 20px; }
+  .agent-workbench .workflow-page-body { padding:20px 20px 40px; scrollbar-gutter:auto; }
 }
 
 /* ---------- 微动效 ---------- */
 
 @keyframes wf-rise { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 @keyframes wf-drop { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
-@keyframes wf-pop { from { opacity:0; transform:scale(.6); } to { opacity:1; transform:none; } }
 
 /* 新消息与新区块入场：统一小幅上浮淡入；续排正文不再重复入场。 */
 .agent-workbench .chat-message { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
 .agent-workbench .chat-message.wf-body-continuation { animation:none; }
 .agent-workbench .central-plan > * { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
-.agent-workbench .workflow-detail-scroll > * { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
+.agent-workbench .workflow-page-banners > * { animation:wf-rise var(--wf-t-mid) var(--wf-ease-out) both; }
 
 /* 展开详情、回到最新与提示条都是“出现”事件，同一曲线。 */
 .agent-workbench .wf-agent-detail { animation:wf-rise var(--wf-t-fast) var(--wf-ease-out) both; }
 .agent-workbench .wf-back-to-latest { animation:wf-rise var(--wf-t-fast) var(--wf-ease-out) both; }
 .agent-workbench .toast-layer .notice { animation:wf-drop var(--wf-t-mid) var(--wf-ease-out) both; }
 
-/* 完成勾选弹出一次，随后保持静态；状态文字颜色平滑过渡。 */
-.agent-workbench .wf-progress-check.filled { animation:wf-pop var(--wf-t-mid) var(--wf-ease-spring) both; }
+/* 状态文字颜色平滑过渡。 */
 .agent-workbench .wf-agent-status { transition:color var(--wf-t-mid) ease; }
 .agent-workbench .wf-visit > header em { transition:color var(--wf-t-mid) ease; }
 
@@ -1320,7 +1323,7 @@ details.execution-workspace-evidence>article{margin-top:10px}
 
 /* 弹窗页头：面包屑弱化，标题控制为一行。 */
 .agent-workbench .workflow-page-header span { font-size:11px; }
-.agent-workbench .workflow-page-header strong { font-size:16px; font-weight:650; }
+.agent-workbench .workflow-page-header strong { font-size:17px; font-weight:650; }
 /* 程序化聚焦仅用于朗读通知，标题不是可交互控件，不绘制焦点框。 */
 .agent-workbench .workflow-page-header strong:focus { outline:none; }
 
@@ -1329,4 +1332,31 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .agent-workbench .wf-status-text.completed { background:var(--wf-success-wash); color:var(--wf-success); }
 .agent-workbench .wf-status-text.interrupted, .agent-workbench .wf-status-text.cancelled { background:color-mix(in srgb, var(--wf-wait) 16%, transparent); color:var(--wf-wait); }
 .agent-workbench .wf-status-text.running, .agent-workbench .wf-status-text.paused, .agent-workbench .wf-status-text.pausing, .agent-workbench .wf-status-text.recovering { background:var(--wf-accent-wash); color:var(--wf-accent-strong); }
+
+/* ---------- 详情阅读列：方案 / 执行 / 结果共用排版 ---------- */
+
+/* 结果页章节标题与方案页标题同尺度；首个标题不再额外增加顶部留白。 */
+.agent-workbench .workflow-page-content .workflow-results > h2 { margin:28px 0 12px; font-size:17px; font-weight:650; letter-spacing:-.01em; }
+.agent-workbench .workflow-page-content .workflow-results > h2:first-child { margin-top:0; }
+.agent-workbench .workflow-page-content .workflow-results > p { max-width:760px; }
+
+/* 操作区：所有按钮同一行、同一间距，不再散落在正文与诊断之间。 */
+.agent-workbench .workflow-page-content .execution-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:14px 0 6px; }
+.agent-workbench .workflow-page-content .execution-actions:empty { display:none; }
+.agent-workbench .workflow-page-content .execution-actions button { margin:0; }
+/* “重新整理改动”的内联结果：成功与仍跳过都必须可见，不只依赖按钮状态。 */
+.agent-workbench .workflow-page-content .execution-apply-retry { margin:0 0 10px; padding:8px 12px; border:1px solid var(--wf-line); border-left:3px solid var(--wf-success); border-radius:8px; background:var(--wf-success-wash); color:var(--wf-text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.agent-workbench .workflow-page-content .execution-apply-retry.skipped { border-left-color:var(--wf-danger-line); background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
+
+/* 执行轨迹与诊断附录沿用方案页的层级和留白。 */
+.agent-workbench .workflow-page-content > .wf-team-panel { margin-top:18px; }
+.agent-workbench .workflow-page-content > .diagnostic { margin-top:12px; }
+.agent-workbench .workflow-page-content > .execution-diagnostics,
+.agent-workbench .workflow-page-content > .execution-workspace-evidence { margin-top:22px; }
+
+/* 正文直接挂载的提示与恢复记录同样落在阅读列内。 */
+.agent-workbench .workflow-page-body > .previous-records,
+.agent-workbench .workflow-page-body > p[role="alert"],
+.agent-workbench .workflow-page-body > p[role="status"] { max-width:820px; margin-left:auto; margin-right:auto; }
+
 .agent-workbench .wf-status-text.pending { background:var(--wf-raised); color:var(--wf-text-dim); }

@@ -4,9 +4,9 @@
 
 ## 宿主成果交接边界
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。整worktree v2授权保存实际tracked与非ignored untracked（排除未跟踪node_modules），不预填paths；独立分支可修改同一文件，必须显式集成。完成后冻结唯一完整ready来源，用户读diff后明确squash合入本机目标分支，不自动合入/push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
-Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API。业务 complete 耐久后，受管写执行器须完成 Git 成果保存与关联，`agent()` 才返回原 JSON；保存错误作为 WorkflowContractError 穿透 parallel/pipeline。原版 resume 可只恢复宿主成果交接，业务 completed 不回退，不创建新 Worker 或假 executionAttempt。Codex与Kimi 2.2.0受管并行写/集成、明确squash合入与桌面收尾已有真实证据，执行仍要求Engine冻结授权和已验证Adapter；不能使用未公开workspace作者字段或把当前两种CLI能力扩展到未知CLI。
+Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API。业务 complete 耐久后，写节点只释放自己的租约；`agent()` 返回原 JSON。运行期的 writer 退出核验或租约交接失败会抛 WorkflowContractError，`parallel()`/`pipeline()` 必须继续抛出（节点保持 completed，Execution 收敛为 interrupted）。Execution 结束后的封存与自动应用在宿主收尾阶段执行：失败不进入脚本，Engine 记录耐久 `source-error`，Execution 保持 completed，用户在执行页重试“重新整理改动（不会重新执行）”，不重跑 Worker。原版 resume 可只恢复宿主交接，业务 completed 不回退，不创建新 Worker 或假 executionAttempt。Codex/Kimi/DeepSeek Harness/Claude 的受管并行写已有真实证据，执行仍要求Engine冻结授权和已验证Adapter；不能使用未公开workspace作者字段。
 
 ## 两种模块形状
 
@@ -165,9 +165,11 @@ const drafted = await pipeline(
 );
 ```
 
-注意：worktree/commit/集成来源不是作者 API。Desktop 对固定写节点冻结用户 Git 授权后，
-独立受管工作区可并行修改同一文件；相同分组顺序复用。没有整工作区授权或Worker Control验证时写节点 fail
-closed。作者仍须先 await 来源，再调用普通集成 Agent；不得在脚本里预测 commit hash。
+注意：worktree/commit/合并不是作者 API。Desktop 对固定写节点冻结用户 Git 授权后，
+所有写节点共享同一受管 worktree；并行写直接写同一目录，宿主不检测或合并冲突。
+没有整工作区授权或Worker Control验证时写节点 fail closed。写任务必须按模块/文件分区，
+每个文件只有一个 owner；同一区域顺序执行或放到后续 phase。不得在脚本里预测 commit hash
+或安排集成 Agent 解冲突。
 
 ## `log()`
 

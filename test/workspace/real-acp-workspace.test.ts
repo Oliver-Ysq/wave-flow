@@ -16,48 +16,51 @@ import type { JsonObject } from "../../src/shared/json";
 import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engine";
 import { DesignConfirmationCache } from "../../src-tauri/web/src/workflow-design-config";
 import { RunJournal } from "../../src/journal/run-journal";
+import type { ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写Worker完成后Git保存失败，显式恢复只补保存且零新会话", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写Worker完成后租约释放失败，显式恢复只补交接且零新会话", async () => {
   const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-result-recovery-"))),cwd=join(root,"repo");await mkdir(cwd);
   const git=async(...args:string[])=>{const child=Bun.spawn(["/usr/bin/git","-c","user.name=Acceptance","-c","user.email=acceptance@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);if(code)throw Error(err);return out.trim();};
   await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
   const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID();
   const cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex",registry=new CliRuntimeRegistry();await registry.resolveWorker(cli);
   let runtime!:RunRuntime;const pipes:WorkerControlPipe[]=[];
-  const executor=new ProductionWorkspaceExecutor({version:2,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},bindings:[{nodeId:"writer",workspaceId}]},join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
+  const executor=new ProductionWorkspaceExecutor({version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId},join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
     const pipe=new WorkerControlPipe(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
     return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_MCP_REQUEST_FIFO",value:pipe.endpoints.requestFifo},{name:"WF_WORKER_MCP_RESPONSE_FIFO",value:pipe.endpoints.responseFifo}],close:()=>pipe.close()} as acp.McpServer;
   },null);
-  const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"result-recovery",description:"成果保存恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('只将当前cwd的a.txt改成done加换行；不要commit/push、联网或安装。最终结果{ok:true}。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
+  const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"result-recovery",description:"成果交接恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('只将当前cwd的a.txt改成done加换行；不要commit/push、联网或安装。最终结果{ok:true}。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
   await writeFile(join(root,"workflow.ts"),"result-recovery");
   runtime=await RunRuntime.create({workflow,input:{},workflowSource:"result-recovery",workflowPath:join(root,"workflow.ts"),workflowProjectCwd:cwd,clientRequestId:crypto.randomUUID(),executor,storeRoot:join(root,"runs")});
   const control=runtime.createControlServer();runtime.createControlServer=()=>control;await executor.bindRuntime(runtime,control);
   console.log(JSON.stringify({root,runId:runtime.snapshot().id,cli}));
-  const finish=spyOn(WorkspaceManager.prototype,"finish").mockRejectedValueOnce(new Error("injected Git persistence failure"));
-  try{await expect(runtime.run(workflow)).rejects.toThrow("injected Git persistence failure");}finally{finish.mockRestore();}
+  const release=spyOn(WorkspaceManager.prototype,"release").mockRejectedValueOnce(new Error("injected lease release failure"));
+  try{await expect(runtime.run(workflow)).rejects.toThrow("injected lease release failure");}finally{release.mockRestore();}
   try{
     expect(runtime.snapshot().status).toBe("interrupted");const node=runtime.snapshot().phases[0].agents[0];expect(node.status).toBe("completed");
-    const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId);expect((await manager.inspect(workspaceId)).lease).not.toBeNull();
+    const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId);expect((await manager.inspect(workspaceId)).leases).toHaveLength(1);
     let businessCalls=0;
     const resumed=await RunRuntime.resume(runtime.snapshot().id,{execute:async()=>{businessCalls++;throw Error("不得重跑业务");},finalizeCompleted:actual=>executor.finalizeCompleted(actual)},join(root,"runs"));
     expect(await resumed.run(workflow)).toEqual({ok:true});expect(businessCalls).toBe(0);
-    const workspace=await manager.inspect(workspaceId);expect(workspace.lease).toBeNull();expect(workspace.results).toHaveLength(1);expect(workspace.results[0].ready).toBe(true);
-    expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("done\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+    const workspace=await manager.inspect(workspaceId);expect(workspace.leases).toHaveLength(0);
+    expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("done\n");
+    expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+    expect((await GitRepository.open(workspace.cwd)).inspect()).resolves.toMatchObject({ head: base, changedPaths: ["a.txt"] });
     const events=(await RunJournal.open(runtime.snapshot().id,join(root,"runs"))).events;
     expect(events.filter(event=>event.type==="agent.session")).toHaveLength(1);expect(events.filter(event=>event.type==="agent.restarted")).toHaveLength(0);
     expect(events.filter(event=>event.type==="execution-attempt.started")).toHaveLength(1);
-    console.log(JSON.stringify({status:resumed.snapshot().status,commit:workspace.results[0].commit,businessCalls,sessionCount:events.filter(event=>event.type==="agent.session").length}));
+    console.log(JSON.stringify({status:resumed.snapshot().status,businessCalls,sessionCount:events.filter(event=>event.type==="agent.session").length}));
   }finally{pipes.forEach(pipe=>pipe.close());executor.close();}
 },180_000);
 
 // 真实模型/登录验收仅显式开启，普通bun test不访问模型；保留隔离现场用于审计，不自动删除成果。
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场stop保存partial后resume新attempt，不丢已有文件", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场stop后保留共享worktree改动，resume新attempt继续写", async () => {
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-partial-resume-"))),cwd=join(root,"repo");await mkdir(cwd);
  const git=async(...args:string[])=>{const child=Bun.spawn(["/usr/bin/git","-c","user.name=Acceptance","-c","user.email=acceptance@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);if(code)throw Error(err);return out.trim();};
  await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
  const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID(),registry=new CliRuntimeRegistry();
  const cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex";await registry.resolveWorker(cli);
- const config={version:2 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},bindings:[{nodeId:"writer",workspaceId}]};
+ const config={version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId};
  const pipes:WorkerControlPipe[]=[];
  const makeExecutor=(getRuntime:()=>RunRuntime)=>new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
    const pipe=new WorkerControlPipe(getRuntime().createControlServer(),identity,undefined,scratch);pipes.push(pipe);
@@ -79,35 +82,36 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
    expect(runtime.snapshot().status).toBe("cancelled");const node=runtime.snapshot().phases[0].agents[0];
    await executor.finalizePartial(node);
    const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId);const partial=await manager.inspect(workspaceId);
-   expect(partial.results[0].ready).toBe(false);expect(partial.lease).toBeNull();expect(await Bun.file(join(partial.cwd,"a.txt")).text()).toBe("partial\n");
+   expect(partial.leases).toHaveLength(0);expect(await Bun.file(join(partial.cwd,"a.txt")).text()).toBe("partial\n");
    let resumed!:RunRuntime;const next=makeExecutor(()=>resumed);resumed=await RunRuntime.resume(runtime.snapshot().id,next,join(root,"runs"));const nextControl=resumed.createControlServer();resumed.createControlServer=()=>nextControl;await next.bindRuntime(resumed,nextControl);
    expect(await resumed.run(workflow)).toEqual({ok:true});
    const current=resumed.snapshot().phases[0].agents[0];expect(current.agentSessionId).not.toBe(node.agentSessionId);expect(current.executionAttemptId).toBe(2);
-   const final=await manager.inspect(workspaceId);expect(final.results).toHaveLength(2);expect(final.results[1].ready).toBe(true);expect(final.results[1].commit).toBe(partial.results[0].commit);
-   expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");console.log(JSON.stringify({runId:resumed.snapshot().id,status:resumed.snapshot().status,attempt:2,partialCommit:partial.results[0].commit,finalCommit:final.results[1].commit}));
+   const final=await manager.inspect(workspaceId);expect(final.leases).toHaveLength(0);expect(await Bun.file(join(final.cwd,"a.txt")).text()).toBe("partial\n");
+   expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");console.log(JSON.stringify({runId:resumed.snapshot().id,status:resumed.snapshot().status,attempt:2}));
  }finally{release();held.mockRestore();pipes.forEach(pipe=>pipe.close());executor.close();}
 },240_000);
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写与显式集成保存多父成果，主工作区不变", async () => {
+
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，Execution收尾封存并自动应用", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-workspace-")));
   const cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code) throw new Error(err); return out.trim(); };
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await writeFile(join(cwd, "b.txt"), "base\n"); await git("add", "--", "a.txt", "b.txt"); await git("commit", "-m", "acceptance base");
   const base = (await (await GitRepository.open(cwd)).inspect()).head;
-  const engine = crypto.randomUUID(), a = crypto.randomUUID(), b = crypto.randomUUID(), integratedId = crypto.randomUUID();
+  const engine = crypto.randomUUID(), workspaceId = crypto.randomUUID();
   const registry = new CliRuntimeRegistry();
   const cli = process.env.WF_REAL_WORKSPACE_CLI === "kimi" ? "kimi" : "codex";
   await registry.resolveWorker(cli);
   const pipes: WorkerControlPipe[] = [];
   let runtime!: RunRuntime;
-  const executor = new ProductionWorkspaceExecutor({ version: 2, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }, { nodeId: "integrate" }] }, bindings: [{ nodeId: "a", workspaceId: a }, { nodeId: "b", workspaceId: b }, { nodeId: "integrate", workspaceId: integratedId, integrationSources: { nodeIds: ["a", "b"] } }] }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
+  const executor = new ProductionWorkspaceExecutor({ version: 3, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] }, workspaceId }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
     const pipe = new WorkerControlPipe(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
     return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo }], close: () => pipe.close() } as acp.McpServer;
   }, null);
   const schema = { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false };
-  const workflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "workspace-acceptance", description: "真实双写验收", phases: [{ title: "write" }, { title: "integrate" }] }, default: async () => {
-    phase("write"); const outputs = await parallel([() => agent('只修改当前cwd的a.txt为"worker-a\\n"。不要读其他目录，不执行git commit/push，不联网，不安装依赖。最终结果为{ok:true}。', { id: "a", cli, sandbox: "workspace-write", schema }), () => agent('只修改当前cwd的b.txt为"worker-b\\n"。不要读其他目录，不执行git commit/push，不联网，不安装依赖。最终结果为{ok:true}。', { id: "b", cli, sandbox: "workspace-write", schema })]);
-    if (outputs.some(value => value === null)) throw new Error("来源Worker未交付");
-    phase("integrate"); return agent('Engine上下文已给出两个来源commit，已由宿主验证它们都是当前base的独立子分支。直接且只运行一次 git -c core.hooksPath=/dev/null merge --no-commit --no-ff <两个来源commit>，不要先实验、克隆、创建临时文件、reset、commit或push。随后只读取验证a.txt精确为worker-a加换行、b.txt精确为worker-b加换行；通过后立即返回{ok:true}。不要联网或安装。', { id: "integrate", cli, sandbox: "workspace-write", schema });
+  const workflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "workspace-acceptance", description: "真实双写验收", phases: [{ title: "write" }] }, default: async () => {
+    phase("write"); const outputs = await parallel([() => agent('只修改当前cwd的a.txt为"worker-a\\n"，不要碰b.txt。不要执行git commit/push，不联网，不安装依赖。最终结果为{ok:true}。', { id: "a", cli, sandbox: "workspace-write", schema }), () => agent('只修改当前cwd的b.txt为"worker-b\\n"，不要碰a.txt。不要执行git commit/push，不联网，不安装依赖。最终结果为{ok:true}。', { id: "b", cli, sandbox: "workspace-write", schema })]);
+    if (outputs.some(value => value === null)) throw new Error("Worker未交付");
+    return { ok: true };
   } };
   const sourcePath = join(root, "workflow.ts"); await writeFile(sourcePath, "acceptance");
   runtime = await RunRuntime.create({ workflow, input: {}, workflowSource: "acceptance", workflowPath: sourcePath, workflowProjectCwd: cwd, clientRequestId: crypto.randomUUID(), executor, storeRoot: join(root, "runs") });
@@ -127,27 +131,23 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     catch (error) { console.log(JSON.stringify(runtime.snapshot().phases.flatMap(phase => phase.agents).map(node => ({ id: node.id, status: node.status, diagnostic: node.diagnostic })))); throw error; }
     expect(output).toEqual({ ok: true });
     const manager = await WorkspaceManager.open(join(root, "workspaces"), engine);
-    const first = await manager.inspect(a), second = await manager.inspect(b), integrated = await manager.inspect(integratedId);
-    expect(first.cwd).not.toBe(second.cwd); expect(first.results[0].ready).toBe(true); expect(second.results[0].ready).toBe(true);
-    expect(await Bun.file(join(first.cwd, "a.txt")).text()).toBe("worker-a\n"); expect(await Bun.file(join(second.cwd, "b.txt")).text()).toBe("worker-b\n");
+    const workspace = await manager.inspect(workspaceId);
+    expect(workspace.leases).toHaveLength(0);
+    expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("worker-a\n");
+    expect(await Bun.file(join(workspace.cwd, "b.txt")).text()).toBe("worker-b\n");
     expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n"); expect(await git("rev-parse", "HEAD")).toBe(base);
-    expect(integrated.results[0].ready).toBe(true);
-    expect(await Bun.file(join(integrated.cwd, "a.txt")).text()).toBe("worker-a\n"); expect(await Bun.file(join(integrated.cwd, "b.txt")).text()).toBe("worker-b\n");
-    expect(await git("show", "-s", "--format=%P", integrated.results[0].commit)).toBe(`${base} ${first.results[0].commit} ${second.results[0].commit}`);
-    // 真实验收启动授权也必须覆盖squash；不对旧记录凭空扩权。
-    expect(executor.config.version).toBe(2);
-    const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config);
-    expect(delivery.commit).toBe(integrated.results[0].commit);
-    expect(await git("rev-parse", `${delivery.commit}^{tree}`)).toBe(await git("rev-parse", `${integrated.results[0].commit}^{tree}`));
-    expect(delivery.commit).toBe(integrated.results[0].commit);
+    expect(executor.config.version).toBe(3);
+    const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config, ["a", "b"]);
+    expect(delivery.paths).toEqual(["a.txt", "b.txt"]);
+    expect(delivery.applied).toHaveProperty("at");
     expect(await manager.finalizeSource(runtime.snapshot().id, executor.config)).toEqual(delivery);
-    expect(await git("rev-parse", "HEAD")).toBe(base);
-    console.log(JSON.stringify({ deliveryBranch: delivery.branch, deliveryCommit: delivery.commit, sourceCommit: delivery.sourceCommit, paths: delivery.paths }));
-    console.log(JSON.stringify({ root, runId: runtime.snapshot().id, status: runtime.snapshot().status, commits: [first.results[0].commit, second.results[0].commit], integrationCommit: integrated.results[0].commit }));
+    expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("worker-a\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("worker-b\n");
+    expect(await git("rev-parse", "HEAD")).toBe(base);expect(await git("diff", "--cached", "--name-only")).toBe("");
+    console.log(JSON.stringify({ deliveryBranch: delivery.branch, deliveryCommit: delivery.commit, paths: delivery.paths, applied: delivery.applied }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
 }, 240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execution接续已保存现场，新节点修正并重新验证，不跨执行Replay",async()=>{
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execution接续共享worktree，新节点修正并重新验证，不跨执行Replay",async()=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-revision-"))),cwd=join(root,"repo");await mkdir(cwd);
  const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Acceptance","-c","user.email=acceptance@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
  await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
@@ -155,7 +155,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
  await registry.resolveWorker(cli);const pipes:WorkerControlPipe[]=[],executors:ProductionWorkspaceExecutor[]=[];
  const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId),schema={type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false};
  const original={authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"write"}]};
- const run=async(config:import("../../src/workspace/execution-workspaces").ExecutionWorkspaceConfig,id:string,prompt:string)=>{
+ const run=async(config:ExecutionWorkspaceConfig,id:string,prompt:string)=>{
   let runtime!:RunRuntime;
   const executor=new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
    const pipe=new WorkerControlPipe(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
@@ -168,23 +168,24 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   expect(await runtime.run(workflow)).toEqual({ok:true});return runtime;
  };
  try{
-  const first=await run({version:2,authorization:original,bindings:[{nodeId:"write",workspaceId}]},"write",'仅把当前cwd a.txt改为done加换行并读取验证。不commit/push、联网或安装。结果{ok:true}。');
-  const saved=(await manager.inspect(workspaceId)).results[0];
+  const firstConfig:ExecutionWorkspaceConfig={version:3,authorization:original,workspaceId};
+  const first=await run(firstConfig,"write",'仅把当前cwd a.txt改为done加换行并读取验证。不commit/push、联网或安装。结果{ok:true}。');
+  const firstSource=await manager.finalizeSource(first.snapshot().id,firstConfig,["write"]);
   const renewed={...original,authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),nodes:[{nodeId:"repair"}]};
-  const config={version:2 as const,authorization:renewed,bindings:[{nodeId:"repair",workspaceId}],continuation:{executionId:first.snapshot().id,heads:[{workspaceId,commit:saved.commit}]}};
+  const config:ExecutionWorkspaceConfig={version:3,authorization:renewed,workspaceId,continuation:{executionId:first.snapshot().id,workspaceId,head:firstSource.commit}};
   const second=await run(config,"repair",'先读取当前cwd a.txt，必须是done加换行；若不是请如实报告，不重建旧基准。把已有内容改为repaired加换行，再读取验证。不commit/push、联网或安装。结果{ok:true}。');
   const workspace=await manager.inspect(workspaceId),source=await manager.finalizeSource(second.snapshot().id,config,["repair"]);
-  expect(workspace.authorization).toEqual(original);expect(workspace.results).toHaveLength(2);expect(workspace.executionAuthorizations?.[0].authorization).toEqual(renewed);
-  expect(workspace.results[1].startCommit).toBe(saved.commit);expect(source.commit).toBe(workspace.results[1].commit);
-  expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+  expect(workspace.authorization).toEqual(original);expect(workspace.executionAuthorizations).toHaveLength(2);expect(workspace.executionAuthorizations?.[1].authorization).toEqual(renewed);
+  expect(source.applied).toHaveProperty("at");expect(source.paths).toEqual(["a.txt"]);
+  expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("repaired\n");
   const oldEvents=(await RunJournal.open(first.snapshot().id,join(root,"runs"))).events,newEvents=(await RunJournal.open(second.snapshot().id,join(root,"runs"))).events;
   expect(newEvents.filter(item=>item.type==="agent.session")).toHaveLength(1);expect(newEvents.filter(item=>item.type==="agent.restarted")).toHaveLength(0);expect(second.snapshot().currentExecutionAttemptId).toBe(1);
   expect(newEvents.find(item=>item.type==="agent.session")!.agentSessionId).not.toBe(oldEvents.find(item=>item.type==="agent.session")!.agentSessionId);
-  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,firstCommit:saved.commit,secondCommit:source.commit,cli}));
+  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,firstCommit:firstSource.commit,secondCommit:source.commit,cli}));
  }finally{pipes.forEach(pipe=>pipe.close());executors.forEach(executor=>executor.close());}
 },240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff并经明确确认squash合入", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff并自动应用到主工作区", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-auto-delivery-"))), cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const p = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]); if (code) throw Error(err); return out.trim(); };
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "a.txt"); await git("commit", "-m", "acceptance base");
@@ -199,7 +200,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保�
     const taskId = started.harness.harnessRunId;
     for (let n = 0; n < 1000; n++) { const value = await engine.handleDesktopAction("harnesses.get", { harnessRunId: taskId }) as import("../../src/desktop/types").HarnessRunResponse; if (value.harness.status === "idle" && value.harness.workflowRevisions.length) break; await Bun.sleep(10); }
     const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId: taskId, revision: 1 }) as import("../../src-tauri/web/src/types").ExecutionPlanResponse;
-    const workspaces = { version: 2 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, bindings: [{ nodeId: "writer", workspaceId: crypto.randomUUID() }] };
+    const workspaces = { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, workspaceId: crypto.randomUUID() };
     const request = new DesignConfirmationCache().get(`${taskId}:1`, {}, {}, plan, workspaces);
     const created = await engine.handleDesktopAction("executions.confirm", { harnessRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
     console.log(JSON.stringify({ root, taskId, executionId: created.execution.executionId, cli }));
@@ -212,12 +213,12 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保�
     expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(base);
     expect(await git("rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
     expect(await git("show", `${delivery.commit}:a.txt`)).toBe("done");
-    expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
+    expect(delivery.applied).toHaveProperty("at");
+    expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("done\n");
+    expect(await git("diff", "--cached", "--name-only")).toBe("");
     const identity={harnessRunId:taskId,executionId:detail.execution.executionId};
     const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
-    expect(review.paths).toEqual(["a.txt"]);
-    const merged=await engine.handleDesktopAction("executions.merge",{...identity,authorized:true,requestId:crypto.randomUUID(),sourceCommit:review.sourceCommit,targetBranch:"main",targetHead:base}) as import("../../src/workspace/git-repository").GitMergeResult;
-    expect(await git("show","-s","--format=%P",merged.commit)).toBe(base);expect(await git("rev-list","--count",`${base}..main`)).toBe("1");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("done\n");
+    expect(review.paths).toEqual(["a.txt"]); expect(review.sourceCommit).toBe(delivery.commit);
     console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, delivery }));
   } finally { engine.shutdown(); }
 }, 180_000);

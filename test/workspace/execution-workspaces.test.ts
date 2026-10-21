@@ -1,34 +1,40 @@
 import { expect, test } from "bun:test";
-import { validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
+import { assertCurrentWorkspaceRecord, validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
 
 function config(): ExecutionWorkspaceConfig {
-  return { version: 2, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "integrate" }] }, bindings: [{ nodeId: "a", workspaceId: crypto.randomUUID() }, { nodeId: "integrate", workspaceId: crypto.randomUUID(), integrationSources: { nodeIds: ["a"] } }] };
+  return { version: 3, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] }, workspaceId: crypto.randomUUID() };
 }
-test("Git授权深复制冻结，CLI配置不授予新workspace或来源权限", () => {
+test("Git授权深复制冻结，CLI配置不授予新workspace或节点权限", () => {
   const input = config(), accepted = validateExecutionWorkspaces(input); expect(accepted).toEqual(input); expect(accepted).not.toBe(input);
   (input.authorization.nodes as { nodeId: string }[])[0].nodeId = "changed"; expect(accepted.authorization.nodes[0].nodeId).toBe("a");
 });
-test("旧v1与自动交付授权不能静默扩张为整工作区授权", () => {
- const input = config();
- expect(() => validateExecutionWorkspaces({...input, version:1})).toThrow("v2");
- expect(() => validateExecutionWorkspaces({...input, authorization:{...input.authorization, autoSquashDelivery:true}})).toThrow("旧自动");
-});
-test("未授权节点、越界路径、重复绑定和缺失来源拒绝", () => {
+test("旧v2每节点绑定与自动交付授权不能静默升级为共享worktree", () => {
   const input = config();
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [...input.bindings, { nodeId: "x", workspaceId: crypto.randomUUID() }] })).toThrow("未授权");
-  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a", paths:["../secret"] }] } })).toThrow("节点授权");
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], input.bindings[0]] })).toThrow("绑定");
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0]] })).toThrow("缺少workspace");
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { nodeIds: ["future"] } }] })).toThrow("缺失或成环");
+  expect(() => validateExecutionWorkspaces({ ...input, version: 2 })).toThrow("v3");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, autoSquashDelivery: true } })).toThrow("旧自动");
+  const { workspaceId: _workspaceId, ...withoutWorkspace } = input;
+  expect(() => validateExecutionWorkspaces(withoutWorkspace)).toThrow();
 });
-test("集成固定来源循环静态拒绝；动态批次只验证形状不假装证明Runtime依赖", () => {
+test("写节点授权校验拒绝越界路径、重复节点与外部分组字段", () => {
   const input = config();
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [{ ...input.bindings[0], integrationSources: { nodeIds: ["integrate"] } }, input.bindings[1]] })).toThrow("成环");
-  expect(validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { batchSequence: 3 } }] }).bindings[1].integrationSources).toEqual({ batchSequence: 3 });
-  expect(() => validateExecutionWorkspaces({ ...input, bindings: [input.bindings[0], { ...input.bindings[1], integrationSources: { batchSequence: 0 } }] })).toThrow("批次");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a", paths: ["../secret"] }] } })).toThrow("节点授权");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a", externalResources: ["db"] }] } })).toThrow("节点授权");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [{ nodeId: "a" }, { nodeId: "a" }] } })).toThrow("节点授权");
+  expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, nodes: [] } })).toThrow("授权字段");
 });
-test("续作来源UUID和冻结HEAD严格核验，仅允许本轮实际绑定工作区",()=>{
- const input=config(),head={workspaceId:input.bindings[0].workspaceId,commit:"b".repeat(40)},continuation={executionId:crypto.randomUUID(),heads:[head]};
- expect(validateExecutionWorkspaces({...input,continuation}).continuation).toEqual(continuation);
- for(const prior of [{...continuation,executionId:"bad"},{...continuation,heads:[]},{...continuation,heads:[head,head]},{...continuation,heads:[{...head,commit:"bad"}]}])expect(()=>validateExecutionWorkspaces({...input,continuation:prior})).toThrow();
+test("旧版记录在入口显式拒绝，不泄漏UUID断言", () => {
+  expect(() => assertCurrentWorkspaceRecord({ version: 2, bindings: {} })).toThrow("不自动升级");
+  expect(() => assertCurrentWorkspaceRecord(undefined)).toThrow("不自动升级");
+  expect(() => assertCurrentWorkspaceRecord(config())).not.toThrow();
+});
+test("续作UUID、共享worktree身份与冻结HEAD严格核验", () => {
+  const input = config();
+  const continuation = { executionId: crypto.randomUUID(), workspaceId: input.workspaceId, head: "b".repeat(40) };
+  expect(validateExecutionWorkspaces({ ...input, continuation }).continuation).toEqual(continuation);
+  for (const prior of [
+    { ...continuation, executionId: "bad" },
+    { ...continuation, workspaceId: crypto.randomUUID() },
+    { ...continuation, head: "bad" },
+    { ...continuation, heads: [] },
+  ]) expect(() => validateExecutionWorkspaces({ ...input, continuation: prior })).toThrow();
 });

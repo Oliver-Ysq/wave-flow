@@ -19,22 +19,40 @@ test("结果页逐一显示原总结与现场补充，过时义务不暴露重�
 });
 test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
+ const panel=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
  expect(app).toContain('(harness.task?.workflowContract === "single-workflow-v1" &&');
  expect(app).toContain('harness.executions.at(-1)?.executionId !==');
- expect(app).toContain('writable={!readOnly && Boolean(onCleanupWorkspaces) && !historical}');
+ expect(app).toContain('const changesApplied =');
+ expect(app).toContain('所选工作流记录暂时不可用');
+ expect(app).not.toContain('所选工作流记录已失效');
+ expect(app).toContain('(detail.workspaceEvidence?.leases.length ?? 0) > 0');
+ expect(app).not.toContain('TEMP DEBUG');
+ expect(app).toContain('const applySkipped =');
+ expect(app).toContain('applySkipped) && (');
+ expect(app).toContain('applied={changesApplied}');
  expect(app).toContain('{!readOnly && (');
- expect(app).toContain('<div className="actions">');
+ expect(app).toContain('<div className="execution-actions">');
+ expect(app).toContain('<ChangesPanel');
+ expect(app).not.toContain("executions.merge");
+ expect(app).not.toContain("changesWritable");
+ expect(panel).toContain("已自动应用到主工作区（未提交、未推送）");
+ expect(panel).not.toContain("采用这些改动");
 });
 
-test("整工作区授权并入确认运行，显式diff合入，内部检查点默认折叠",async()=>{
+test("整工作区授权并入确认运行，自动应用，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(design).toContain("改动保存在受管分支（不改主工作区、不 push）");
- expect(design).not.toContain("我确认以上节点、外部资源与集成来源");
+ expect(design).toContain("完成后自动应用到主工作区");
+ expect(design).toContain("所有写节点共享同一 worktree");
+ expect(design).not.toContain("工作区分组");
+ expect(design).not.toContain("集成来源节点");
+ expect(design).not.toContain("接续上次改动");
  expect(design).not.toContain("approveGit");
- expect(design).not.toContain("成果文件路径（每行一个）");
  expect(app).toContain("<ChangesPanel");
- const review=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();expect(review).toContain("采用这些改动");expect(review).toContain("generation.current === token");
+ const review=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
+ expect(review).toContain("已自动应用到主工作区（未提交、未推送）");
+ expect(review).toContain("未自动应用");
+ expect(review).toContain("generation.current === token");
  expect(app).toContain("改动还没有整理好");
  // 诊断与 Git 检查点合并为一个折叠入口，不再出现两个相邻的“高级 / 诊断”。
  expect(app).toContain("<summary>高级 / 诊断信息</summary>");
@@ -58,7 +76,7 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
  expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');
- expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,workspaceDraft,true,plan.continuationPlan)');
+ expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,true,plan.continuationPlan)');
  expect(source).toContain('localChoices[worker.id]=runtimeId');
 });
 
