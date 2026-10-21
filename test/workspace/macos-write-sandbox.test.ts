@@ -121,3 +121,80 @@ test.skipIf(process.platform!=="darwin")("未创建插件及MCP路径同样受�
  const child=Bun.spawn(["/usr/bin/sandbox-exec","-p",profile,"/bin/sh","-c",'printf state > "$1/state"; printf bad > "$1/mcp.json"; mkdir "$1/plugins"; mkdir -p "$1/nested/hooks"',"test",home],{stdout:"ignore",stderr:"pipe"});
  expect(await child.exited).not.toBe(0);expect(await Bun.file(join(home,"state")).text()).toBe("state");expect(await Bun.file(join(home,"mcp.json")).exists()).toBe(false);await expect(lstat(join(home,"plugins"))).rejects.toMatchObject({code:"ENOENT"});await expect(lstat(join(home,"nested","hooks"))).rejects.toMatchObject({code:"ENOENT"});
 });
+
+test.skipIf(process.platform !== "darwin")("感知模式profile先deny受保护目录再allow嵌套scratch，空保护列表拒绝", async () => {
+  const { root } = await fixture();
+  const project = join(root, "project"), stateHome = join(root, "state"), scratch = join(stateHome, "harness-scratch", "session-fixture");
+  for (const path of [project, stateHome, join(stateHome, "harness-scratch"), scratch]) await mkdir(path);
+  const profile = await macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [project, stateHome] });
+  expect(profile).toContain("(allow default)");
+  const denyIndex = profile.indexOf(`(deny file-write* (subpath ${JSON.stringify(project)})`);
+  const allowIndex = profile.indexOf(`(allow file-write* (subpath ${JSON.stringify(scratch)})`);
+  const unlinkIndex = profile.indexOf(`(deny file-write-unlink (literal ${JSON.stringify(project)})`);
+  // 顺序即语义：Seatbelt 最后匹配优先，scratch 位于被保护状态目录内必须排在其后。
+  expect(denyIndex).toBeGreaterThan(0);
+  expect(allowIndex).toBeGreaterThan(denyIndex);
+  expect(unlinkIndex).toBeGreaterThan(allowIndex);
+  expect(profile).toContain(`(subpath ${JSON.stringify(stateHome)})`);
+  // 路径写权限不能阻止通过项目外硬链接别名改写项目文件，必须全局禁建硬链接。
+  expect(profile).toContain("(deny file-link)");
+  // 感知模式不允许退化成全盘可写：必须至少声明一个受保护目录。
+  await expect(macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [] })).rejects.toThrow("受保护目录");
+  // 受保护目录落在 scratch 内时 allow 会覆盖 deny，拒绝这种边界。
+  const outside = join(root, "outside"), insideScratch = join(outside, "protected"); await mkdir(outside); await mkdir(insideScratch);
+  await expect(macosWriteProfile({ workspace: null, mode: "perception", scratch: outside, controlFiles: [], protectedDirectories: [insideScratch] })).rejects.toThrow("不得覆盖");
+  // 受保护目录必须是 canonical 真实目录。
+  await symlink(project, join(root, "project-link"));
+  await expect(macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [join(root, "project-link")] })).rejects.toThrow("canonical");
+  // 感知模式不接受额外 CLI 可写根或只读例外。
+  await expect(macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [project], cliWritableRoots: [outside] })).rejects.toThrow("额外CLI可写根");
+  await expect(macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [project], readOnlyPaths: [join(project, "x")] })).rejects.toThrow("只读例外");
+});
+
+test.skipIf(process.platform !== "darwin")("感知模式真实sandbox-exec：项目与Engine状态目录不可写不可删，scratch与Home其他目录可写", async () => {
+  const { root } = await fixture();
+  const project = join(root, "project"), engineHome = join(root, "engine-home"), scratch = join(engineHome, "harness-scratch", "session-fixture"), home = join(root, "home");
+  for (const path of [project, engineHome, join(engineHome, "harness-scratch"), scratch, home]) await mkdir(path);
+  await writeFile(join(project, "existing.txt"), "original\n");
+  const profile = await macosWriteProfile({ workspace: null, mode: "perception", scratch, controlFiles: [], protectedDirectories: [project, engineHome] });
+  // 参数只通过 argv 传入，无用户文本 shell 插值；子进程同样继承 Seatbelt。
+  const program = `
+    const fs = await import("node:fs/promises");
+    const [root, project, engineHome, scratch, home] = process.argv.slice(-5);
+    const attempts = [];
+    const attempt = async (name, operation) => { try { await operation(); attempts.push({ name, denied: false }); } catch (error) { attempts.push({ name, denied: true, code: error.code }); } };
+    await attempt("project-write", () => fs.writeFile(project + "/new.txt", "bad"));
+    await attempt("project-delete", () => fs.unlink(project + "/existing.txt"));
+    await attempt("project-rename", () => fs.rename(project + "/existing.txt", project + "/renamed.txt"));
+    await attempt("engine-home-write", () => fs.writeFile(engineHome + "/settings.json", "bad"));
+    await attempt("scratch-write", () => fs.writeFile(scratch + "/tool-state", "ok"));
+    await attempt("scratch-mkdir", () => fs.mkdir(scratch + "/run-dir"));
+    await attempt("project-hardlink", () => fs.link(project + "/existing.txt", root + "/hard-alias"));
+    await attempt("home-write", () => fs.writeFile(home + "/notes.txt", "ok"));
+    await attempt("outside-write", () => fs.writeFile(root + "/other.txt", "ok"));
+    // 根目录 unlink 由 tail 的 deny file-write-unlink( literal ) 保护；放在最后避免影响前序断言。
+    await attempt("project-root-rename", () => fs.rename(project, root + "/moved-project"));
+    await attempt("engine-home-rename", () => fs.rename(engineHome, root + "/moved-engine"));
+    await attempt("project-subtree-delete", () => fs.rm(project, { recursive: true, force: false }));
+    console.log(JSON.stringify(attempts));
+  `;
+  const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, process.execPath, "-e", program, root, project, engineHome, scratch, home], { stdout: "pipe", stderr: "pipe", env: { PATH: "/usr/bin:/bin", TMPDIR: scratch } });
+  const [code, output, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect(code, stderr).toBe(0);
+  const results = JSON.parse(output) as { name: string; denied: boolean }[];
+  const byName = Object.fromEntries(results.map(item => [item.name, item.denied]));
+  // 项目内写入/删除/重命名、Engine 状态目录写入、两个根目录重命名与项目子树删除全部拒绝。
+  for (const name of ["project-write", "project-delete", "project-rename", "engine-home-write", "project-hardlink", "project-root-rename", "engine-home-rename", "project-subtree-delete"]) expect(byName[name], name).toBe(true);
+  // scratch（位于被保护状态目录内）与 Home 其他目录、项目外目录可写。
+  for (const name of ["scratch-write", "scratch-mkdir", "home-write", "outside-write"]) expect(byName[name], name).toBe(false);
+  expect(await Bun.file(join(project, "existing.txt")).text()).toBe("original\n");
+  expect(await Bun.file(join(project, "new.txt")).exists()).toBe(false);
+  expect(await Bun.file(join(project, "renamed.txt")).exists()).toBe(false);
+  expect(await Bun.file(join(engineHome, "settings.json")).exists()).toBe(false);
+  expect(await Bun.file(join(scratch, "tool-state")).text()).toBe("ok");
+  expect(await Bun.file(join(home, "notes.txt")).text()).toBe("ok");
+  expect(await Bun.file(join(root, "other.txt")).text()).toBe("ok");
+  expect(await Bun.file(join(root, "hard-alias")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "moved-project")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "moved-engine")).exists()).toBe(false);
+}, 20_000);

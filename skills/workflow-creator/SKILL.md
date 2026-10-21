@@ -58,7 +58,7 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 
 ## 定义 Agent 边界
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；设置关闭后回到私有Home与全量写隔离，四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 允许 `codex` / `kimi` / `claude` / `dsh`；
 四者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：

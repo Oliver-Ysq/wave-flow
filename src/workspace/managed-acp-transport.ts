@@ -31,7 +31,9 @@ export function managedAcpTransport(options: {
 }): AcpTransportFactory {
   return async (launcher, signal) => {
     const profile = await macosWriteProfile(options.boundary);
-    const env: Record<string, string> = { ...launcher.env, TMPDIR: options.boundary.scratch, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    // isolated 模式禁止读取用户 git 配置，避免黑盒 CLI 借全局配置扩大行为；感知模式
+    // 刻意保留用户原生 git 环境，因为主控可能用用户自己的 skill/CLI 读取资料。
+    const env: Record<string, string> = { ...launcher.env, TMPDIR: options.boundary.scratch, ...(options.boundary.mode === "perception" ? {} : { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }) };
     const transport = await (options.transport ?? bunAcpTransport)({ ...launcher, command: "/usr/bin/sandbox-exec", args: ["-p", profile, launcher.command, ...launcher.args], env }, signal);
     const writer = transport.writerProcess;
     if (!writer) { transport.close(); throw new WorkflowContractError("受管ACP transport没有真实进程组，拒绝启动写Worker。"); }

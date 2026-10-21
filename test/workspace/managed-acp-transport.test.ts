@@ -33,6 +33,25 @@ test.skipIf(process.platform !== "darwin")("受管transport先绑定writer再交
   transport.close(); expect(closed).toBe(1); expect(groups.hasExited(bound)).toBe(false);
   await transport.verifyClosed!(); expect(groups.hasExited(bound)).toBe(true);
 });
+test.skipIf(process.platform !== "darwin")("感知模式保留用户git环境，隔离模式继续禁用全局git配置", async () => {
+  const value = await boundary();
+  const seen: AcpLauncher[] = [];
+  const stream = acp.ndJsonStream(new WritableStream<Uint8Array>(), new ReadableStream<Uint8Array>());
+  const launch = (mode: "isolated" | "perception") => managedAcpTransport({
+    boundary: { ...value, mode },
+    groups: new WriterProcessGroups(() => false),
+    bindWriter: async () => {},
+    transport: async launcher => { seen.push(launcher); return { stream, exited: Promise.resolve(0), close() {}, writerProcess: { pid: 43211, exited: Promise.resolve(0), terminate() {} } }; },
+  });
+  await launch("perception")({ id: "test", command: "/bin/true", args: [], env: { HOME: "/native/home" } }, new AbortController().signal);
+  await launch("isolated")({ id: "test", command: "/bin/true", args: [], env: { HOME: "/native/home" } }, new AbortController().signal);
+  // 感知模式让用户原生 CLI 看到自己的 git 配置；隔离模式仍用空全局配置限制黑盒 CLI。
+  expect(seen[0]?.env).toMatchObject({ HOME: "/native/home", TMPDIR: value.scratch });
+  expect(seen[0]?.env?.GIT_CONFIG_GLOBAL).toBeUndefined();
+  expect(seen[0]?.env?.GIT_CONFIG_NOSYSTEM).toBeUndefined();
+  expect(seen[1]?.env?.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+  expect(seen[1]?.env?.GIT_CONFIG_NOSYSTEM).toBe("1");
+});
 test.skipIf(process.platform !== "darwin")("无真实writer句柄或绑定落盘失败时关闭transport，不交付可运行ACP连接", async () => {
   const value = await boundary(), groups = new WriterProcessGroups(() => false); let closed = 0;
   const stream = acp.ndJsonStream(new WritableStream<Uint8Array>(), new ReadableStream<Uint8Array>());
