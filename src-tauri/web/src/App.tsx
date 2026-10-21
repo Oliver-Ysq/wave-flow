@@ -463,6 +463,23 @@ export function App() {
     }
     wasWorkflowOpen.current = workflowPanelOpen;
   }, [workflowPanelOpen, harness?.harnessRunId]);
+  // 大弹窗支持 Esc 返回对话；其上若还有别的弹层（预置选择、清理确认等），先让内层处理。
+  useEffect(() => {
+    if (!workflowPanelOpen) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (
+        document.querySelector(
+          ".connection-backdrop, .connection-nested-backdrop, .restart-backdrop, .workflow-source-backdrop, .exit-confirm",
+        )
+      )
+        return;
+      event.preventDefault();
+      setRoute({ kind: "conversation" });
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [workflowPanelOpen]);
   const centralScroll = useRef<HTMLElement | null>(null);
   const pageKey =
     route.kind === "workflow"
@@ -1621,6 +1638,17 @@ export function App() {
             }}
           />
         )}
+      {/**
+        * 工作流详情是覆盖全窗的大弹窗：遮罩固定在最上层，卡片限宽限高并自滚。
+        * 不再用 hidden 属性，改为遮罩类名驱动透明度/位移过渡，退场同样可见。
+        */}
+      <div
+        className={`workflow-modal${workflowPanelOpen ? " open" : ""}`}
+        role="presentation"
+        onPointerDown={(event) => {
+          if (event.target === event.currentTarget) setWorkflowPanelOpen(false);
+        }}
+      >
       <aside
         ref={centralScroll}
         onScroll={() => {
@@ -1628,7 +1656,9 @@ export function App() {
             detailPositions.set(pageKey, centralScroll.current.scrollTop);
         }}
         className="central-workflow"
-        hidden={!workflowPanelOpen}
+        role="dialog"
+        aria-modal="true"
+        aria-label="工作流详情"
       >
         <WorkflowPanelErrorBoundary onClose={() => setWorkflowPanelOpen(false)}>
           <header className="workflow-page-header">
@@ -2050,6 +2080,7 @@ export function App() {
           ) : null}
         </WorkflowPanelErrorBoundary>
       </aside>
+      </div>
       {creatingProject && (
         <ProjectCreateDialog
           onClose={() => setCreatingProject(false)}
@@ -3988,19 +4019,22 @@ function HistoricalResults({
       />
       {value && (
         <p role="status">
-          {value.status
-            ? ((
-                {
-                  completed: "执行结束",
-                  cancelled: "已停止",
-                  interrupted: "已中断",
-                  running: "执行中",
-                  paused: "已暂停",
-                  pausing: "正在暂停",
-                  recovering: "正在恢复",
-                } as Record<string, string>
-              )[value.status] ?? value.status)
-            : "未保存结束状态"}
+          {/* 状态以颜色徽章呈现：中断/停止等异常态不再与说明文字同层级。 */}
+          <span className={`wf-status-text ${value.status}`}>
+            {value.status
+              ? ((
+                  {
+                    completed: "执行结束",
+                    cancelled: "已停止",
+                    interrupted: "已中断",
+                    running: "执行中",
+                    paused: "已暂停",
+                    pausing: "正在暂停",
+                    recovering: "正在恢复",
+                  } as Record<string, string>
+                )[value.status] ?? value.status)
+              : "未保存结束状态"}
+          </span>
         </p>
       )}
       <ImpactSummaryPanel
@@ -4222,14 +4256,17 @@ function ImpactSummaryPanel({
     <article aria-label="执行总结">
       <h2>执行总结</h2>
       <p role="status">
-        {
+        {/* 总结义务状态同样用颜色徽章，中断重试不再被当作普通说明。 */}
+        <span className={`wf-status-text ${obligation.status}`}>
           {
-            pending: "准备总结",
-            running: "正在总结",
-            interrupted: "总结中断，须重试",
-            completed: "总结已保存",
-          }[obligation.status]
-        }
+            {
+              pending: "准备总结",
+              running: "正在总结",
+              interrupted: "总结中断，须重试",
+              completed: "总结已保存",
+            }[obligation.status]
+          }
+        </span>
       </p>
       {obligation.status !== "completed" && (
         <p>
@@ -4539,19 +4576,32 @@ function ExecutionDetail({
                   : ""}
               </small>
             )}
-            <ExecutionDiagnostics
-              executionId={detail.execution.executionId}
-              sourceHash={detail.execution.sourceHash}
-              runtimeVersion={detail.execution.runtimeVersion}
-              currentAttempt={detail.snapshot.currentExecutionAttemptId}
-              fallbackRuntimeId={
-                detail.execution.config?.fallbackRuntimeId ?? null
-              }
-            />
+            {/* 有 Git 检查点时诊断并入同一折叠块，避免两个相邻的“高级 / 诊断”入口。 */}
+            {!detail.workspaceEvidence && (
+              <ExecutionDiagnostics
+                executionId={detail.execution.executionId}
+                sourceHash={detail.execution.sourceHash}
+                runtimeVersion={detail.execution.runtimeVersion}
+                currentAttempt={detail.snapshot.currentExecutionAttemptId}
+                fallbackRuntimeId={
+                  detail.execution.config?.fallbackRuntimeId ?? null
+                }
+              />
+            )}
           </div>
           {detail.workspaceEvidence && (
             <details className="execution-workspace-evidence">
-              <summary>高级 / 诊断 · 内部 Git 检查点</summary>
+              <summary>高级 / 诊断信息</summary>
+              <ExecutionDiagnostics
+                bare
+                executionId={detail.execution.executionId}
+                sourceHash={detail.execution.sourceHash}
+                runtimeVersion={detail.execution.runtimeVersion}
+                currentAttempt={detail.snapshot.currentExecutionAttemptId}
+                fallbackRuntimeId={
+                  detail.execution.config?.fallbackRuntimeId ?? null
+                }
+              />
               {detail.workspaceEvidence.map((item) => (
                 <article key={item.nodeId}>
                   <strong>{item.nodeId}</strong>

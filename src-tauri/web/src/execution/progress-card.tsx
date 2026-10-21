@@ -63,11 +63,13 @@ export function ExecutionProgressCard({
           const mark = itemMark(item.status);
           return (
             <li key={item.id} className={mark.className}>
-              <span className="wf-progress-check" aria-hidden="true">
+              {/* key 绑状态：状态变化会重建勾选框，完成时弹出一次，之后保持静态。 */}
+              <span key={item.status} className={`wf-progress-check${item.status === "completed" ? " filled" : ""}`} aria-hidden="true">
                 {item.status === "completed" ? "✓" : ""}
               </span>
               <span className="wf-progress-label">{item.label}</span>
-              <em>{mark.text}</em>
+              {/* 已完成已由 ✓ 勾选框表达，不再重复文字；非完成态保留文字状态。 */}
+              {item.status !== "completed" && <em>{mark.text}</em>}
             </li>
           );
         })}

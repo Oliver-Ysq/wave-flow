@@ -36,7 +36,11 @@ test("整工作区授权并入确认运行，显式diff合入，内部检查点�
  expect(app).toContain("<ChangesPanel");
  const review=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();expect(review).toContain("采用这些改动");expect(review).toContain("generation.current === token");
  expect(app).toContain("改动还没有整理好");
- expect(app).toContain("<summary>高级 / 诊断 · 内部 Git 检查点</summary>");
+ // 诊断与 Git 检查点合并为一个折叠入口，不再出现两个相邻的“高级 / 诊断”。
+ expect(app).toContain("<summary>高级 / 诊断信息</summary>");
+ expect(app).toContain("<ExecutionDiagnostics");
+ expect(app).toContain("bare");
+ expect(app).not.toContain("高级 / 诊断 · 内部 Git 检查点");
  expect(app).not.toContain("onDeliverSquash");
 });
 

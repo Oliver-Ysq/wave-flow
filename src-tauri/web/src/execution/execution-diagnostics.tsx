@@ -30,6 +30,7 @@ export function ExecutionDiagnostics({
   runtimeVersion,
   currentAttempt,
   fallbackRuntimeId,
+  bare = false,
 }: {
   /** Execution UUID；复制证据用。 */
   executionId: string;
@@ -41,26 +42,32 @@ export function ExecutionDiagnostics({
   currentAttempt: number;
   /** 启动前失败的回退 Runtime id；无分配配置时为 null。 */
   fallbackRuntimeId: string | null;
+  /** true 时只渲染字段列表：调用方已提供外层折叠容器，避免两个相邻的“高级 / 诊断”入口。 */
+  bare?: boolean;
 }) {
+  const fields = (
+    <dl>
+      <dt>executionId</dt>
+      <dd><code>{executionId}</code><CopyValue value={executionId} /></dd>
+      <dt>sourceHash</dt>
+      <dd><code>{sourceHash}</code><CopyValue value={sourceHash} /></dd>
+      <dt>Runtime 版本</dt>
+      <dd>v{runtimeVersion}</dd>
+      <dt>当前 attempt</dt>
+      <dd>#{currentAttempt}</dd>
+      {fallbackRuntimeId && (
+        <>
+          <dt>回退 Runtime</dt>
+          <dd><code>{fallbackRuntimeId}</code><CopyValue value={fallbackRuntimeId} /></dd>
+        </>
+      )}
+    </dl>
+  );
+  if (bare) return fields;
   return (
     <details className="execution-diagnostics">
       <summary>高级 / 诊断信息</summary>
-      <dl>
-        <dt>executionId</dt>
-        <dd><code>{executionId}</code><CopyValue value={executionId} /></dd>
-        <dt>sourceHash</dt>
-        <dd><code>{sourceHash}</code><CopyValue value={sourceHash} /></dd>
-        <dt>Runtime 版本</dt>
-        <dd>v{runtimeVersion}</dd>
-        <dt>当前 attempt</dt>
-        <dd>#{currentAttempt}</dd>
-        {fallbackRuntimeId && (
-          <>
-            <dt>回退 Runtime</dt>
-            <dd><code>{fallbackRuntimeId}</code><CopyValue value={fallbackRuntimeId} /></dd>
-          </>
-        )}
-      </dl>
+      {fields}
     </details>
   );
 }

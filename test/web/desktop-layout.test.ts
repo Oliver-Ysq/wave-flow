@@ -35,10 +35,11 @@ test('短历史记录仅压缩相邻记录，不压缩完整消息或结果卡',
  expect(css).toContain('.task-event { margin:0; padding:4px 0; line-height:1.6; }');
  expect(css).toContain('.workflow-timeline-item:has(> .task-event) + .workflow-timeline-item:has(> .task-event)');
 });
-test('版本入口脱离正文流，局部避让不遮挡原状态',async()=>{
+test('版本入口在卡片标题行右端，不与状态徽标重叠',async()=>{
  const css=await Bun.file('src-tauri/web/src/workbench.css').text();
- expect(css).toContain('.workflow-version-tools { position:absolute; right:0; top:0;');
- expect(css).toContain('.central-plan:has(.workflow-version-menu) .wf-plan-head { padding-right:116px;');
+ expect(css).toContain('.workflow-version-tools { position:absolute; right:22px; top:20px;');
+ expect(css).toContain('.agent-workbench .workflow-plan-content:has(.workflow-version-menu) .wf-plan-head { padding-right:110px;');
+ expect(css).toContain('.agent-workbench .workflow-plan-content .conversation-action { box-sizing:border-box; width:100%; max-width:none;');
 });
 test('macOS保留原生窗口装饰与安全拖动区，归档独立于任务导航',async()=>{
  const config=await Bun.file('src-tauri/tauri.conf.json').json();

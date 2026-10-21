@@ -415,7 +415,8 @@ export function TeamPanel({
             <section className={`wf-visit ${status === "进行中" ? "current" : ""}`} key={phase.title}>
               <header>
                 <strong>{phase.title}</strong>
-                <em>{status}</em>
+                {/* 与主路径一致：有节点时节点行自带状态，阶段头不再重复“已完成”。 */}
+                {status === "进行中" || phase.agents.length === 0 ? <em>{status}</em> : null}
               </header>
               <VisitBatches
                 visit={null}
@@ -456,7 +457,12 @@ export function TeamPanel({
                 {visit.title}
                 {visit.occurrence > 1 && <span className="wf-revisit">第 {visit.occurrence} 轮</span>}
               </strong>
-              <em>{waiting ? "等待你的回答" : current ? "进行中" : "已完成"}</em>
+              {/* 节点行已各自带状态；阶段级状态只在“等待你/进行中/没有节点”时补充，不与节点重复。 */}
+              {(() => {
+                const hasAgents = visit.batches.some((batch) => batch.agents.length > 0);
+                const label = waiting ? "等待你的回答" : current ? "进行中" : hasAgents ? null : "已完成";
+                return label ? <em>{label}</em> : null;
+              })()}
             </header>
             <VisitBatches
               visit={visit}
