@@ -167,6 +167,8 @@ export type HarnessSnapshot = {
   readonly executionHistory?:readonly ExecutionHistoryItem[];
   /** 此档案已应用事件数；用于展示快照防倒退，不是业务授权。 */
   readonly snapshotSequence?: number;
+  /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，不进入 Journal。缺省表示尚无会话或尚未收到目录。 */
+  readonly availableCommands?: readonly HarnessAvailableCommand[];
   /** Engine 当前活跃执行待答计数；只作轻量展示，历史缺省，不包含节点内容或授权。 */
   readonly executionAttention?: Readonly<Record<string,{readonly workerRequests:number;readonly scriptGates:number}>>;
   /** 自动编排元数据；历史 Harness 缺省，不补造卡身份。 */
@@ -405,11 +407,23 @@ export type HarnessDecision = {
   readonly answeredAt: string | null;
 };
 
+/** 当前 ACP 主控会话广告的斜杠命令/技能；仅内存态，不进入 Journal。 */
+export type HarnessAvailableCommand = {
+  /** Agent 提供的原始命令名；Codex 技能以 `$` 开头，其他 CLI 可能是普通名称。 */
+  readonly name: string;
+  /** Agent 提供的一行说明；超长时由展示层截断。 */
+  readonly description: string;
+  /** 命令参数提示；无参数时为 null。 */
+  readonly inputHint: string | null;
+};
+
 /** Pi adapter 向 HarnessService 公开的最小流事件；不暴露 Pi 原始对象。 */
 export type HarnessStreamEvent = (
   | { /** 最终标题耐久后通知UI重读，不携带生成过程。 */ readonly type:"title_changed" }
   | { readonly type: "reasoning_delta"; readonly delta: string }
   | { readonly type: "assistant_delta"; readonly delta: string }
+  /** 当前 ACP 会话广告的斜杠命令/技能集合；界面用于斜杠菜单，不写入 Journal。 */
+  | { readonly type: "commands_changed"; readonly commands: readonly HarnessAvailableCommand[] }
   /** 当前回合中 MCP 窄工具开始执行；仅供瞬时过程展示，不写入 Harness Journal。 */
   | { readonly type: "tool_started"; readonly toolCallId: string; readonly label: string }
   /** 当前回合中 MCP 窄工具已经结束；成功与否不暴露参数或完整结果。 */

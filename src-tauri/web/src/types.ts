@@ -150,9 +150,12 @@ export type HarnessThoughtEntry = HarnessConversationEntryBase & { kind: "though
 export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; callId: string; source: HarnessToolSource; name: string; toolKind: HarnessToolKind; target: string | null; paramsSummary: string | null; startedAt: string; finishedAt: string | null; status: HarnessConversationEntryStatus; output: string | null; outputTruncated: boolean; exitCode: number | null; hasDetail: boolean };
 /** 耐久对话条目；实时展示与重开回放同源。 */
 export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
+/** ACP 主控会话广告的斜杠命令/技能；只来自运行时事件，不进入 Journal。 */
+export type HarnessAvailableCommand = { name: string; description: string; inputHint: string | null };
 /** Engine 事件帧中的会话事件（耐久派生子集）。 */
 export type HarnessStreamEvent = (
   | { /** 最终标题耐久后重读快照。 */ type:"title_changed" }
+  | { /** ACP 命令/技能目录变化；仅内存态，不触发快照重读。 */ type: "commands_changed"; commands: HarnessAvailableCommand[] }
   | { type: "entry_started"; entry: HarnessConversationEntry }
   | { type: "entry_appended"; entryId: string; text: string; truncated: boolean }
   | { type: "entry_finished"; entry: HarnessConversationEntry }
@@ -253,12 +256,16 @@ export type ExecutionPlanResponse = {
 export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
 /** Desktop Engine 权威 Harness 会话快照。 */
 export type HarnessSnapshot = {
+  /** 创建时冻结的主控 runtime 来源；历史档案可能缺省。 */
+  runtime?: { runtimeId: string } | null;
   /** 原终态影响面义务；缺省为旧档案，不补造。 */
   impactSummaries?: import("../../../src/harness/types").ImpactSummary[];
   /** 原执行创建/终态的历史链接；attempt未知不猜测。 */
   executionHistory?:Array<{key:string;at:string;executionId:string;revision:number;attempt?:number;kind:"created"|"finished";status:RunStatus;diagnostic:string|null;summary:Record<string,unknown>|null}>;
   /** 此档案已应用事件数；仅用于迟到响应防倒退。历史兼容缺省。 */
   snapshotSequence?:number;
+  /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，缺省表示尚无会话或尚未收到。 */
+  availableCommands?: HarnessAvailableCommand[];
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
   executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
   task?: {
@@ -270,6 +277,8 @@ export type HarnessSnapshot = {
     workflowContract?:"single-workflow-v1";
     clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; messageQueue: HarnessQueuedMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
 export type HarnessRunResponse = { harness: HarnessSnapshot };
+/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Harness 或 Journal。 */
+export type HarnessCommandCatalogResponse = { commands: HarnessAvailableCommand[] };
 export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
 export type CliRuntime = { runtimeId: string; cli: RuntimeCli; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: RuntimeAdapterId; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };

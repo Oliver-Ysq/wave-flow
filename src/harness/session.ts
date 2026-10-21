@@ -18,6 +18,8 @@ export type HarnessSession = {
   prepare?(): Promise<void>;
   /** initialize 协商后的图片 prompt 能力；尚未协商时为 undefined，绝不把未知冒充支持。 */
   readonly promptImageCapable?: boolean;
+  /** 当前 ACP 会话广告的命令/技能；仅界面菜单使用，不进入 Journal；未提供表示不支持。 */
+  readonly availableCommands?: readonly import("./types").HarnessAvailableCommand[];
   /** 取消当前回合；不能将取消伪装成完整回答。 */
   abort(): void;
   /** 当前是否有尚未收敛的主控回合。 */

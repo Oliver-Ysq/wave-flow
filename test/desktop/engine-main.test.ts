@@ -585,3 +585,43 @@ test("EOF 排空有界：在途 action 不返回时 serve 仍按时结束", asyn
     expect(Date.now() - started).toBeLessThan(1_000);
   } finally { delete process.env.WF_ENGINE_DRAIN_BUDGET_MS; }
 });
+
+/** 设置 action 是 Engine 唯一设置入口：默认感知开启、非法值拒绝，更新成功后关闭空闲主控会话。 */
+test("Engine settings action 读写感知模式并在更新后关闭空闲主控会话", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-engine-settings-"))); roots.push(root);
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-engine-settings-project-"))); roots.push(cwd);
+  let closed = 0, running = false;
+  const session: HarnessSession = {
+    get isRunning() { return running; },
+    subscribe: () => () => {},
+    abort: () => {},
+    close: () => { closed += 1; },
+    prompt: async () => "回合完成",
+  };
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), settingsRoot: root, createHarnessSession: async () => session });
+  try {
+    // 设置文件缺失时默认感知模式开启；settingsRoot 显式注入，不读写真实用户目录。
+    expect(await engine.handleDesktopAction("settings.get", {})).toEqual({ perceptionMode: true });
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "设置变更前的会话" });
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const listed = await engine.handleDesktopAction("harnesses.list", {}) as { harnesses: { status: string }[] };
+      if (listed.harnesses.every((harness) => harness.status !== "running")) break;
+      await Bun.sleep(10);
+    }
+    // 会话自报仍有进行中回合时不能关闭，保证进行中的回合保持原模式。
+    running = true;
+    expect(await engine.handleDesktopAction("settings.update", { perceptionMode: false })).toEqual({ perceptionMode: false });
+    expect(closed).toBe(0);
+    // 空闲后更新成功即关闭会话，下一回合由 ensureSession 按新设置重建。
+    running = false;
+    expect(await engine.handleDesktopAction("settings.update", { perceptionMode: true })).toEqual({ perceptionMode: true });
+    expect(closed).toBe(1);
+    expect(JSON.parse(await Bun.file(join(root, "settings.json")).text())).toEqual({ perceptionMode: true });
+    // 非法更新在任何写盘或会话关闭前拒绝。
+    await expect(engine.handleDesktopAction("settings.update", { perceptionMode: "off" })).rejects.toMatchObject({ status: 400 });
+    await expect(engine.handleDesktopAction("settings.update", { unknown: true })).rejects.toMatchObject({ status: 400 });
+    expect(closed).toBe(1);
+    expect(await engine.handleDesktopAction("settings.get", {})).toEqual({ perceptionMode: true });
+  } finally { engine.shutdown(); }
+});

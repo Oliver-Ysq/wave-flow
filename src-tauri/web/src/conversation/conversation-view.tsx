@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  HarnessAvailableCommand,
   HarnessBodyEntry,
   HarnessMessageAttachment,
   HarnessQueuedMessage,
@@ -26,7 +27,7 @@ import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
 import {TimelineRecords,type TimelineItem} from './plan-updates';
-import { AutoGrowTextarea } from "./auto-grow-textarea";
+import { MentionComposer } from "./mention-composer";
 
 /** 会话内有界阅读位置；不落盘正文或参数。 */
 const conversationPositions = new Map<string, { top: number; stuck: boolean }>();
@@ -229,6 +230,8 @@ export function ConversationView({
   visible=true,
   draftContext,
   activity,
+  planPendingBar,
+  availableCommands = [],
 }: {
   /** 当前 Harness 会话权威快照。 */
   harness: HarnessSnapshot;
@@ -262,6 +265,8 @@ export function ConversationView({
   onOpenWorkflow: () => void;
   /** 是否已有可查看的 Workflow 执行。 */
   hasWorkflow: boolean;
+  /** 输入框上方的待确认方案条；由父层按最新版本与已读状态决定是否出现。 */
+  planPendingBar?: ReactNode;
   /** 当前进行中的工作台动作标识；用于禁用对应 header 按钮。 */
   busy: string | null;
   /** 最近一次条目事件到达时间（Date.now() 毫秒）；无事件时为 null。 */
@@ -276,6 +281,8 @@ export function ConversationView({
   visible?: boolean;
   /** 当前草稿绑定的方案版本提示；不修改输入内容或自动发送。 */ draftContext?:string;
   /** 当前工作与历史入口；位于滚动对话外，不改变运行权限。 */ activity?: ReactNode;
+  /** 当前 ACP 会话广告的斜杠命令/技能；缺省只显示 Wave Flow 的 /wave-flow。 */
+  availableCommands?: readonly HarnessAvailableCommand[];
 }) {
   const attachmentButton=useRef<HTMLButtonElement>(null);
   const running = harness.status === "running";
@@ -416,6 +423,7 @@ export function ConversationView({
           回到最新
         </button>
       )}
+      {harness.status !== "completed" && planPendingBar}
       {harness.status !== "completed" && (
         <div className="conversation-composer">
           {harness.messageQueue.length > 0 && (
@@ -469,30 +477,19 @@ export function ConversationView({
               ))}
             </ul>
           )}
-          <AutoGrowTextarea
+          <MentionComposer
             onLayout={maintainHistoryLayout}
             value={draft}
-            aria-label="补充要求或反馈"
-            onChange={(event) => onDraft(event.target.value)}
+            ariaLabel="补充要求或反馈"
+            onChange={onDraft}
             placeholder={running ? "可以补充要求 · 消息将排队发送" : harness.status === "interrupted" ? "回合已中断 · 发送消息继续" : "补充要求，或反馈执行结果…"}
-            onKeyDown={(event) => {
-              if (
-                onSendImmediate &&
-                event.key.toLowerCase() === "s" &&
-                event.ctrlKey &&
-                !event.metaKey &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault();
-                if (draft.trim()) onSendImmediate();
-                return;
-              }
-              if (shouldSubmitComposer(event)) {
-                event.preventDefault();
-                if (draft.trim()&&!attachmentBusy) onSend();
-              }
+            commands={availableCommands}
+            onSubmit={() => {
+              if (draft.trim() && !attachmentBusy) onSend();
             }}
+            onSubmitImmediate={onSendImmediate ? () => {
+              if (draft.trim()) onSendImmediate();
+            } : undefined}
           />
           <div className="composer-footer">
             <div className="composer-guidance">

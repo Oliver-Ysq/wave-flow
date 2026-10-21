@@ -148,6 +148,8 @@ export type HarnessProjectListResponse = { readonly projects: readonly HarnessPr
 
 /** Harness 主控会话的 Engine 权威响应。 */
 export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
+/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Harness 或 Journal。 */
+export type HarnessCommandCatalogResponse = { readonly commands: readonly import("../harness/types").HarnessAvailableCommand[] };
 /** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
 export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
 /** 发送一条用户消息；响应确认 Engine 已耐久接收，完整消息由后续快照读取。 */

@@ -116,6 +116,8 @@ export function applyHarnessEventToSnapshot(
         ),
       };
     }
+    case "commands_changed":
+      return { ...snapshot, availableCommands: [...event.commands] };
     default:
       return snapshot;
   }

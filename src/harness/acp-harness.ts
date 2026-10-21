@@ -1,10 +1,26 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { AcpSessionClient, type AcpLauncher } from "../adapters/acp-session";
-import type { HarnessAcpToolCall, HarnessAcpToolCallPatch, HarnessMessage, HarnessStreamEvent, HarnessToolKind } from "./types";
+import type { HarnessAcpToolCall, HarnessAcpToolCallPatch, HarnessAvailableCommand, HarnessMessage, HarnessStreamEvent, HarnessToolKind } from "./types";
 import type { HarnessPromptAttachment, HarnessSession } from "./session";
 
 /** ACP Harness 创建时注入的 session-private MCP server。 */
 export type HarnessMcpServer = acp.McpServer;
+
+/**
+ * 用户显式选择 `/wave-flow` 时附加给模型的宿主命令说明。
+ *
+ * 这段说明只在本次 prompt 中注入，不写入 Journal，也不能替代 `propose_workflow_revision`
+ * 的真实调用；模型仍须通过 Engine 工具提交草案。
+ */
+const WAVE_FLOW_COMMAND_INSTRUCTION = "【宿主命令 /wave-flow】用户已显式选择生成 Wave Flow Workflow。本轮必须调用 propose_workflow_revision 提交草案（source、goal、scope 齐全），不要只做文字分析，也不要用自然语言声称已提交或已执行。\n\n";
+
+/** 把包含独立 `/wave-flow` token 的用户消息转换为模型 prompt；其他消息原样返回。 */
+export function applyWaveFlowCommandInstruction(text: string): string {
+  const trimmed = text.trimStart();
+  // 允许与技能等其他命令共存：只要出现独立的 /wave-flow token 就注入。
+  if (!/(?:^|\s)\/wave-flow(?:\s|$)/.test(trimmed)) return text;
+  return `${WAVE_FLOW_COMMAND_INSTRUCTION}${text}`;
+}
 
 /**
  * 使用用户本机 CLI 的主控会话。每个 Harness 独立 ACP session，工具只来自
@@ -19,6 +35,8 @@ export class AcpHarnessSession implements HarnessSession {
   #reasoningText = "";
   #abort: AbortController | null = null;
   #primed = false;
+  /** 当前 ACP 会话最近一次广告的命令/技能；只作界面菜单内存态，不耐久。 */
+  #availableCommands: readonly HarnessAvailableCommand[] = [];
 
   constructor(
     launcher: AcpLauncher,
@@ -32,7 +50,14 @@ export class AcpHarnessSession implements HarnessSession {
     this.#client.subscribe(event => this.onUpdate(event.update));
   }
 
-  subscribe(listener: (event: HarnessStreamEvent) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  /** 当前 ACP 会话广告的命令/技能；尚未收到广告时为空数组。 */
+  get availableCommands(): readonly HarnessAvailableCommand[] { return this.#availableCommands; }
+  subscribe(listener: (event: HarnessStreamEvent) => void): () => void {
+    this.#listeners.add(listener);
+    // 命令目录可能先于订阅到达；新订阅者先收到缓存，避免首次发送后菜单空白。
+    if (this.#availableCommands.length > 0) listener({ type: "commands_changed", commands: this.#availableCommands });
+    return () => this.#listeners.delete(listener);
+  }
   get isRunning(): boolean { return this.#running; }
   /** initialize 协商后的图片能力；未协商返回 undefined，Engine 不得把未知当作支持。 */
   get promptImageCapable(): boolean | undefined { const image = this.#client.binding?.capabilities.promptCapabilities?.image; return image === undefined ? undefined : image === true; }
@@ -65,7 +90,7 @@ export class AcpHarnessSession implements HarnessSession {
     const controller = new AbortController(); this.#abort = controller;
     try {
       await this.prepare();
-      const prompt = this.#primed ? text : this.primePrompt(text);
+      const prompt = this.#primed ? applyWaveFlowCommandInstruction(text) : this.primePrompt(applyWaveFlowCommandInstruction(text));
       const turn = await this.#client.prompt(prompt, controller.signal, attachments.map((item) => ({ data: item.dataBase64, mimeType: item.mimeType })));
       // 某些 ACP CLI 的 cancel 会正常 resolve（stopReason: "cancelled"）而不是 reject；
       // 被取消回合累积的 partial 文本绝不能作为完整回答耐久化。
@@ -95,6 +120,15 @@ export class AcpHarnessSession implements HarnessSession {
     if (update.sessionUpdate === "agent_thought_chunk" && update.content.type === "text") { this.#reasoningText += update.content.text; this.emit({ type: "reasoning_delta", delta: update.content.text }); }
     if (update.sessionUpdate === "tool_call") { const call = normalizeToolCall(update); if (call) this.emit({ type: "acp_tool_call", call }); }
     if (update.sessionUpdate === "tool_call_update") { const patch = normalizeToolPatch(update); if (patch) this.emit({ type: "acp_tool_update", callId: update.toolCallId, patch }); }
+    if (update.sessionUpdate === "available_commands_update") {
+      // 命令目录由 Agent 权威提供；限制条数和文本长度，避免把超大目录塞进事件帧。
+      this.#availableCommands = update.availableCommands.slice(0, 200).map((command) => ({
+        name: command.name.slice(0, 120),
+        description: (command.description ?? "").slice(0, 300),
+        inputHint: command.input?.hint?.slice(0, 120) ?? null,
+      }));
+      this.emit({ type: "commands_changed", commands: this.#availableCommands });
+    }
   }
   private emit(event: HarnessStreamEvent): void { for (const listener of this.#listeners) listener(event); }
 }

@@ -6,7 +6,7 @@ import { readdir, realpath } from "node:fs/promises";
 import { HARNESS_JOURNAL_VERSION, HarnessJournal, HarnessProjection, interruptConversationEntry, validateDecisionAnswer, validateDecisionSchema, type HarnessManifest } from "./journal";
 import { TurnConversationRecorder, type EngineToolStart } from "./conversation-recorder";
 import type { HarnessSession } from "./session";
-import type { HarnessDecision, HarnessMessage, HarnessMessageAttachment, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
+import type { HarnessAvailableCommand, HarnessDecision, HarnessMessage, HarnessMessageAttachment, HarnessSnapshot, HarnessStreamEvent, WorkflowExecutionRecord } from "./types";
 import { harnessRunsRoot, validateRunId } from "../journal/paths";
 import {isJsonObject,type JsonObject} from "../shared/json";
 import { HARNESS_ACTION_TOOL_NAMES, type HarnessActionCallbacks } from "./action-tools";
@@ -185,6 +185,11 @@ export class HarnessService {
   readonly lifecycle = new TaskLifecycle();
   private readonly creations = new Map<string, { hash: string; promise: Promise<HarnessSnapshot> }>();
   #sessions = new Map<string, HarnessEntry>();
+  /**
+   * 会话模式代际：设置变更时递增。新建会话记录当时的代际；进行中的回合结束后，
+   * 下一回合发现代际不一致会关闭旧会话并按新设置重建，避免忙碌时切换被永久忽略。
+   */
+  #sessionEpoch = 0;
   /** 首次读取及旧预览补齐共享同一 Promise，避免并发快照重复打开或追加。 */
   #opening = new Map<string, Promise<HarnessEntry>>();
   /** 回合内 request_user_decision 的等待者；键为 harnessRunId:decisionId。 */
@@ -422,7 +427,46 @@ export class HarnessService {
     return this.snapshot(created.harnessRunId);
   }
 
-  async snapshot(harnessRunId: string): Promise<HarnessSnapshot> { return (await this.entry(harnessRunId)).projection.snapshot(); }
+  /** 临时 ACP 会话只发现命令目录；不创建 Harness/Task/Journal，也不派发 Worker。 */
+  private readonly commandCatalogCache = new Map<string, readonly HarnessAvailableCommand[]>();
+  async commandCatalog(cwd: string, runtimeId?: string): Promise<readonly HarnessAvailableCommand[]> {
+    const cacheKey = `${cwd}\0${runtimeId ?? "selected"}`;
+    const cached = this.commandCatalogCache.get(cacheKey);
+    if (cached) return cached;
+    const unavailable = async (): Promise<never> => { throw new Error("命令目录会话不执行主控工具。 "); };
+    const actions: HarnessActionCallbacks = {
+      proposeWorkflowRevision: unavailable,
+      inspectExecution: unavailable,
+      readRunCapsule: unavailable,
+      requestUserDecision: unavailable,
+    };
+    const session = await this.createSession("__command_catalog__", cwd, [], actions);
+    try {
+      await session.prepare?.();
+      // Codex 会分批广告内置命令与 `$` 技能；不能拿到第一批就关闭，否则草稿页只有内置命令。
+      let latest: readonly HarnessAvailableCommand[] = [];
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const commands = session.availableCommands;
+        if (commands && commands.length > 0) {
+          latest = commands;
+          if (commands.some((command) => command.name.startsWith("$"))) break;
+        }
+        await Bun.sleep(50);
+      }
+      if (latest.length > 0) this.commandCatalogCache.set(cacheKey, latest);
+      return latest;
+    } finally {
+      session.close?.();
+    }
+  }
+
+  async snapshot(harnessRunId: string): Promise<HarnessSnapshot> {
+    const entry = await this.entry(harnessRunId);
+    const snapshot = entry.projection.snapshot();
+    const commands = entry.session?.availableCommands;
+    // 命令目录是会话内存态；把它附加到快照，避免 Web 因错过一次性事件而在重开/首回合后空白。
+    return commands && commands.length > 0 ? { ...snapshot, availableCommands: commands } : snapshot;
+  }
   /** 列出当前用户已耐久的主控会话；损坏单个档案不影响其他会话。 */
   async list(): Promise<readonly HarnessSnapshot[]> {
     let ids: string[];
@@ -441,6 +485,23 @@ export class HarnessService {
     this.beginExit();
     for (const [harnessRunId, entry] of this.#sessions) {
       this.rejectDecisionWaiters(harnessRunId, "Engine 已关闭，Harness 主控决策不再等待。 ");
+      entry.session?.close?.();
+      entry.session = null;
+    }
+  }
+
+  /**
+   * 关闭没有进行中回合的主控会话，供用户设置变更后按新模式重建。
+   *
+   * 只释放内存中的原生 ACP 会话并置 null，不写 Journal、不改投影，历史仍由耐久
+   * capsule 续接。`turn` 或 `session.isRunning` 为真表示回合仍在进行，必须跳过，
+   * 让进行中的回合保持原模式；代际递增后，下一回合 ensureSession 会发现代际不一致
+   * 并关闭旧会话重建，因此忙碌时切换也不会被永久忽略。
+   */
+  closeIdleSessions(): void {
+    this.#sessionEpoch += 1;
+    for (const entry of this.#sessions.values()) {
+      if (entry.turn || entry.session?.isRunning) continue;
       entry.session?.close?.();
       entry.session = null;
     }
@@ -1097,8 +1158,28 @@ export class HarnessService {
       const identity=await this.resolveSessionIdentity();
       if(identity.runtime){const event={type:"harness.runtime_initialized" as const,at:new Date().toISOString(),harnessRunId,runtime:identity.runtime};await entry.journal.append(event);entry.projection.apply(event);}
     }
+    // 设置变更后，进行中的回合保持旧模式；回合结束后第一次发送在这里发现代际
+    // 不一致，关闭旧会话并按新设置重建。历史仍从耐久 capsule 续接。
+    if (entry.session && entry.sessionEpoch !== this.#sessionEpoch) {
+      entry.session.close?.();
+      entry.session = null;
+      entry.commandsSubscription?.();
+      entry.commandsSubscription = undefined;
+      entry.commandsSession = undefined;
+    }
     const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
     entry.session = session;
+    entry.sessionEpoch = this.#sessionEpoch;
+    // ACP 命令目录是会话态而非回合态：独立于 prompt 回合订阅，确保 UI 随时能拿到
+    // available_commands_update；AcpHarnessSession 会把先于订阅到达的目录缓存重放。
+    if (entry.commandsSession !== session) {
+      entry.commandsSubscription?.();
+      entry.commandsSubscription = session.subscribe((event) => {
+        if (event.type !== "commands_changed") return;
+        for (const listener of this.#globalListeners) listener(harnessRunId, event);
+      });
+      entry.commandsSession = session;
+    }
     return session;
   }
 
@@ -1166,6 +1247,12 @@ type HarnessEntry = {
   readonly journal: HarnessJournal;
   readonly projection: HarnessProjection;
   session: HarnessSession | null;
+  /** 创建当前 session 时的设置代际；与 #sessionEpoch 不一致时下一回合重建。 */
+  sessionEpoch?: number;
+  /** 独立于回合的命令目录订阅；会话重建时先解除旧订阅，避免向新会话重复转发。 */
+  commandsSubscription?: () => void;
+  /** 命令目录订阅所属的 ACP 会话；与当前 session 不同时必须重新订阅。 */
+  commandsSession?: HarnessSession;
   readonly listeners: Set<(event: HarnessStreamEvent) => void>;
   turn: Promise<void> | null;
   /** 当前回合的对话事实记录器；回合外为 null，崩溃恢复路径按投影孤儿条目收敛。 */

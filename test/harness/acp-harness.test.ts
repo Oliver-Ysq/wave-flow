@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type * as acp from "@agentclientprotocol/sdk";
-import { AcpHarnessSession } from "../../src/harness/acp-harness";
+import { AcpHarnessSession, applyWaveFlowCommandInstruction } from "../../src/harness/acp-harness";
 import type { AcpSessionClient } from "../../src/adapters/acp-session";
 import type { HarnessStreamEvent } from "../../src/harness/types";
 
@@ -95,4 +95,64 @@ test("主控 CLI 握手假死有界：prepare 超时断开而不是永久等待"
     const session = new AcpHarnessSession({ id: "codex-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "test", command: "fake", args: [], env: [] }, client);
     await expect(session.prepare()).rejects.toThrow("未响应");
   } finally { delete process.env.WF_HARNESS_PREPARE_BUDGET_MS; }
+});
+
+test("/wave-flow 在独立 token 时注入宿主提案说明，普通消息不注入", async () => {
+  const captured: string[] = [];
+  let listener: ((event: { update: acp.SessionUpdate }) => void) | null = null;
+  const client = {
+    subscribe(value: typeof listener) { listener = value; return () => {}; },
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "harness-session", capabilities: {} }; },
+    async prompt(value: string) {
+      captured.push(value);
+      listener?.({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "完成" } } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+  } as unknown as AcpSessionClient;
+  const session = new AcpHarnessSession({ id: "codex-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "test", command: "fake", args: [], env: [] }, client);
+  await session.prompt("/wave-flow 分析这个流程");
+  expect(captured[0]).toContain("宿主命令 /wave-flow");
+  expect(captured[0]).toContain("propose_workflow_revision");
+  await session.prompt("普通追问");
+  expect(captured[1]).toBe("普通追问");
+  // 只有 `/wave-flow` 独立 token 才算命令；前缀相似文本不能被误判。
+  expect(applyWaveFlowCommandInstruction("/waveflow 不是命令")).toBe("/waveflow 不是命令");
+  // 多命令共存时，/wave-flow 出现在中间也必须触发提案说明。
+  expect(applyWaveFlowCommandInstruction("$brainstorming /wave-flow 分析")).toContain("propose_workflow_revision");
+});
+
+test("ACP 命令目录归一化为 commands_changed，并缓存给后订阅者", async () => {
+  let listener: ((event: { update: acp.SessionUpdate }) => void) | null = null;
+  const client = {
+    subscribe(value: typeof listener) { listener = value; return () => {}; },
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "harness-session", capabilities: {} }; },
+    async prompt() {
+      listener?.({ update: { sessionUpdate: "available_commands_update", availableCommands: [
+        { name: "compact", description: "压缩上下文", input: null },
+        { name: "$brainstorming", description: "头脑风暴", input: null },
+        { name: "status", description: "查看状态", input: { hint: "[detail]" } },
+      ] } });
+      listener?.({ update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "完成" } } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+  } as unknown as AcpSessionClient;
+  const session = new AcpHarnessSession({ id: "codex-acp", command: "fake", args: [] }, "/workspace", "系统约束", [], { name: "test", command: "fake", args: [], env: [] }, client);
+  const events: HarnessStreamEvent[] = [];
+  session.subscribe((event) => events.push(event));
+  await session.prompt("加载命令");
+  const changed = events.find((event) => event.type === "commands_changed");
+  expect(changed).toEqual({ type: "commands_changed", commands: [
+    { name: "compact", description: "压缩上下文", inputHint: null },
+    { name: "$brainstorming", description: "头脑风暴", inputHint: null },
+    { name: "status", description: "查看状态", inputHint: "[detail]" },
+  ] });
+  // 命令可能先于服务层订阅到达；后订阅者必须立即得到缓存，不能空白。
+  const late: HarnessStreamEvent[] = [];
+  session.subscribe((event) => late.push(event));
+  expect(changed).toBeDefined();
+  expect(late).toEqual([changed!]);
 });

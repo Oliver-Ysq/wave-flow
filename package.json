@@ -21,6 +21,7 @@
     "@types/bun": "latest",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
+    "@types/react-mentions": "^4.4.1",
     "@vitejs/plugin-react": "^5.1.1",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
@@ -37,6 +38,7 @@
     "@tauri-apps/plugin-dialog": "^2.8.3",
     "ajv": "^8.17.1",
     "react-markdown": "^10.1.0",
+    "react-mentions": "^4.4.10",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1"
   }

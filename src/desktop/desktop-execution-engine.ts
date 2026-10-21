@@ -5,7 +5,7 @@ import { preflightLocalWorkflow, validateLocalInput } from "../workflow/prefligh
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
-import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessCommandCatalogResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
 import { ImpactSupplementRequiredError } from "../harness/impact-summary";
 import type { ControlServer } from "../control/control-server";
@@ -48,6 +48,7 @@ import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace-manager";
 import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
 import { WorkflowContractError } from "../workflow/errors";
+import { AppSettingsStore, type AppSettings } from "./app-settings";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
@@ -80,6 +81,11 @@ export type DesktopExecutionEngineOptions = {
   readonly storeRoot?: string;
   /** Harness 对话档案根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/harness-runs。 */
   readonly harnessRoot?: string;
+  /**
+   * 用户级设置根目录；省略时取 `harnessRoot` 的同级目录（生产等于 waveFlowHome()，
+   * 即 ~/.wave-flow）。仅测试或受控嵌入环境注入；设置文件为 `<settingsRoot>/settings.json`。
+   */
+  readonly settingsRoot?: string;
   /** 全局同时运行 Run 上限；生产默认保守值，测试可缩小。 */
   readonly maxActiveRuns?: number;
   /** 全局同时启动的真实 ACP Worker 上限。 */
@@ -110,6 +116,8 @@ export class DesktopExecutionEngine {
   #executions: HarnessExecutionService;
   /** 所有 ACP Worker 必须使用用户确认且启动前复核的本机 CLI Runtime。 */
   #cliRuntimes: CliRuntimeRegistry;
+  /** 用户级设置存储；每次创建主控会话时按当前感知模式选择原生/私有 Home 与写边界。 */
+  #settings: AppSettingsStore;
   /** 同一 Engine 内启动扫描单飞，避免并发页面加载重复握手和覆盖 Registry。 */
   #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
   /** 每条 Harness ACP session 的随机私有 MCP FIFO；只在 Engine 内存存活。 */
@@ -160,12 +168,20 @@ export class DesktopExecutionEngine {
     this.workspaceRoot=join(dirname(this.storeRoot),"workspaces");
     this.#projects = new HarnessProjectStore(dirname(harnessRoot));
     this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
+    // 生产设置与 Harness 档案同属 waveFlowHome；注入 harnessRoot 时默认取它的同级目录。
+    // 同一 root 也作为感知模式要保护的 Engine 状态目录，保证测试注入与生产语义一致。
+    const stateRoot = normalized.settingsRoot ?? dirname(harnessRoot);
+    this.#settings = new AppSettingsStore(stateRoot);
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
     this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((cli, input) => validateCliRuntime(cli, input));
     this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
     const harnessFactory = normalized.createHarnessSession ?? (this.deterministicForTest
       ? async () => new DeterministicHarnessSession()
       : async (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], _actions: import("../harness/action-tools").HarnessActionCallbacks, frozenRuntime?: import("../runtimes/types").RuntimeProvenance) => {
+      // 每次创建主控会话都读取当前设置：settings.update 会关闭空闲会话，下一回合因此
+      // 按新设置重建；读取失败（文件损坏）直接拒绝，不静默回退到默认模式。
+      const settings = await this.#settings.get();
+      const mode = settings.perceptionMode ? "perception" as const : "isolated" as const;
       const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
       const compiled = import.meta.dir.startsWith("/$bunfs/");
       const command = process.execPath;
@@ -178,7 +194,7 @@ export class DesktopExecutionEngine {
       ] } as any;
       assertAbsoluteMcpCommand(mcpServer);
       let session: AcpHarnessSession;
-      try { session = await createIsolatedHarness({ launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(), prior, mcp: mcpServer }); }
+      try { session = await createIsolatedHarness({ mode, engineHome: stateRoot, launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(mode), prior, mcp: mcpServer }); }
       catch (error) { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); throw error; }
       const close = session.close.bind(session); session.close = () => { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); close(); };
       return session;
@@ -248,7 +264,7 @@ export class DesktopExecutionEngine {
   /** 只发布耐久事实派生的事件；瞬时 delta 与 ACP 原始通知不上帧（已由条目事件承载）。 */
   private publishHarnessEvent(harnessRunId: string, event: import("../harness/types").HarnessStreamEvent): void {
     if (this.#eventSinks.size === 0) return;
-    if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed" && event.type !== "title_changed") return;
+    if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed" && event.type !== "title_changed" && event.type !== "commands_changed") return;
     const seq = (this.#harnessEventSeq.get(harnessRunId) ?? 0) + 1;
     this.#harnessEventSeq.set(harnessRunId, seq);
     const frame: EngineEventFrame = { type: "event", protocolVersion: 1, stream: "harness", harnessRunId, seq, event };
@@ -402,6 +418,12 @@ export class DesktopExecutionEngine {
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
   private async listProjects(): Promise<HarnessProjectListResponse> { return { projects: await this.#projects.list() }; }
+  /** 只发现当前主控 CLI 的斜杠命令/技能；不创建 Harness、Task 或 Journal。 */
+  private async harnessCommandCatalog(value: unknown): Promise<HarnessCommandCatalogResponse> {
+    const project = await this.#projects.get(requiredString(value, "projectId"));
+    const runtime = this.hasCustomHarnessSession ? undefined : await this.#cliRuntimes.resolveSelectedHarness();
+    return { commands: await this.#harness.commandCatalog(project.cwd, runtime?.runtimeId) };
+  }
   /** Worker 专属 MCP 只代理当前节点的 Control；token/capability 不会进入 Web 或 Journal。 */
   private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string): import("@agentclientprotocol/sdk").McpServer {
     const control = this.#controls.get(identity.runId);
@@ -747,6 +769,18 @@ export class DesktopExecutionEngine {
   }
 
   /**
+   * 更新用户级设置；只接受已知字段与布尔值，非法输入在写盘前拒绝。
+   * 成功后关闭空闲主控会话，使下一回合按新设置重建；进行中的回合保持原模式。
+   */
+  private async updateSettings(value: unknown): Promise<AppSettings> {
+    let settings: AppSettings;
+    try { settings = await this.#settings.update(value); }
+    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    this.#harness.closeIdleSessions();
+    return settings;
+  }
+
+  /**
    * Desktop 私有 action 入口。
    *
    * Tauri 只传递动作名与 JSON 参数，Engine 直接调用业务方法；这里不接收 URL、
@@ -759,6 +793,8 @@ export class DesktopExecutionEngine {
     const value = args ?? {};
     switch (action) {
       case "status": return this.status();
+      case "settings.get": return this.#settings.get();
+      case "settings.update": return this.updateSettings(value);
       case "runs.list": return this.listRuns();
       case "runs.create": return this.createRun(value);
       case "runs.inspect": return this.inspect(requiredString(value, "runId"));
@@ -795,6 +831,7 @@ export class DesktopExecutionEngine {
       case "harnesses.create": return this.createHarness(value);
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
       case "harnesses.get": return this.harnessSnapshot(requiredString(value, "harnessRunId"));
+      case "harnesses.commandCatalog": return this.harnessCommandCatalog(value);
       case "harnesses.renameTitle": return {harness:await this.#harness.renameTitle(requiredString(value,"harnessRunId"),requiredString(value,"title"))};
       case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
       case "harnesses.cancelQueued": return this.cancelQueuedHarnessMessage(requiredString(value, "harnessRunId"), value);

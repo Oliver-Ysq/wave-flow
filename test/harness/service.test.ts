@@ -116,6 +116,22 @@ describe("HarnessService", () => {
     expect(pi.closed).toBe(true);
     await expect(service.snapshot(created.harnessRunId)).resolves.toEqual(before);
   });
+  test("设置代际：关闭空闲会话后下一回合重建，历史从耐久消息续接", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-session-epoch-")); directories.push(cwd);
+    let created = 0;
+    const sessions: ClosablePi[] = [];
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => { created += 1; const pi = new ClosablePi(); sessions.push(pi); return pi; });
+    const task = await service.create(cwd);
+    await service.send(task.harnessRunId, "first");
+    await waitFor(async () => (await service.snapshot(task.harnessRunId)).status === "idle");
+    service.closeIdleSessions();
+    // 空闲会话按新设置关闭；旧 session 不能被下一回合复用。
+    expect(sessions[0]?.closed).toBe(true);
+    await service.send(task.harnessRunId, "second");
+    await waitFor(async () => (await service.snapshot(task.harnessRunId)).status === "idle");
+    expect(created).toBe(2);
+    expect((await service.snapshot(task.harnessRunId)).messages.filter(message => message.role === "user")).toHaveLength(2);
+  });
   test("Desktop 退出先将运行中主控回合耐久为 interrupted，再关闭 session", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-desktop-exit-")); directories.push(cwd);
     const pi = new DeferredPi();
@@ -598,6 +614,75 @@ describe("HarnessService", () => {
     await service.proposeWorkflowRevision(second.harnessRunId, source);
     await service.acceptWorkflowRevision(second.harnessRunId, 1);
     await expect(service.rejectWorkflowRevision(second.harnessRunId, 1)).rejects.toThrow("只能拒绝最新未接受且未拒绝草案");
+  });
+
+  test("命令目录只按 cwd + runtime 缓存，切换主控 runtime 必须重新发现", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-catalog-cache-")); directories.push(cwd);
+    let created = 0;
+    let closed = 0;
+    class CatalogPi implements HarnessSession {
+      isRunning = false;
+      readonly availableCommands = [{ name: "$brainstorming", description: "头脑风暴", inputHint: null }];
+      subscribe() { return () => {}; }
+      async prompt(): Promise<string> { throw new Error("目录会话不发送 prompt"); }
+      abort() {}
+      close() { closed += 1; }
+    }
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => { created += 1; return new CatalogPi(); });
+    expect((await service.commandCatalog("/workspace", "runtime-a"))[0]?.name).toBe("$brainstorming");
+    await service.commandCatalog("/workspace", "runtime-a");
+    expect(created).toBe(1);
+    await service.commandCatalog("/workspace", "runtime-b");
+    expect(created).toBe(2);
+    expect(closed).toBe(2);
+  });
+
+  test("ACP 命令目录经会话级订阅发布到全局事件，不依赖 prompt 回合订阅", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-commands-")); directories.push(cwd);
+    class CommandPi implements HarnessSession {
+      #listeners = new Set<(event: HarnessStreamEvent) => void>();
+      isRunning = false;
+      readonly availableCommands = [
+        { name: "$brainstorming", description: "头脑风暴", inputHint: null },
+        { name: "status", description: "查看状态", inputHint: null },
+      ];
+      subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        this.isRunning = true;
+        for (const listener of this.#listeners) listener({ type: "commands_changed", commands: [
+          { name: "$brainstorming", description: "头脑风暴", inputHint: null },
+          { name: "status", description: "查看状态", inputHint: null },
+        ] });
+        for (const listener of this.#listeners) listener({ type: "assistant_delta", delta: "完成" });
+        this.isRunning = false;
+        return "完成";
+      }
+      abort() {}
+    }
+    const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new CommandPi());
+    const events: HarnessStreamEvent[] = [];
+    const unsubscribe = service.addEventListener((_id, event) => events.push(event));
+    let harnessRunId = "";
+    try {
+      const created = await service.create(cwd);
+      harnessRunId = created.harnessRunId;
+      await service.send(created.harnessRunId, "加载命令");
+      await waitFor(async () => (await service.snapshot(created.harnessRunId)).status === "idle");
+    } finally {
+      unsubscribe();
+    }
+    expect(events.find((event) => event.type === "commands_changed")).toEqual({
+      type: "commands_changed",
+      commands: [
+        { name: "$brainstorming", description: "头脑风暴", inputHint: null },
+        { name: "status", description: "查看状态", inputHint: null },
+      ],
+    });
+    // 一次性事件可能被 Web 错过；快照必须带上同一会话的命令目录。
+    expect((await service.snapshot(harnessRunId)).availableCommands).toEqual([
+      { name: "$brainstorming", description: "头脑风暴", inputHint: null },
+      { name: "status", description: "查看状态", inputHint: null },
+    ]);
   });
 });
 

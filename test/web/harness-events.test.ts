@@ -388,3 +388,9 @@ test("结果卡显示门只由总结首个非空正文打开，pending/思考/�
  expect(summaryBodyStartedAt({...snapshot,conversationEntries:[body]},key)).toBeNull();
  expect(summaryBodyStartedAt({...snapshot,conversationEntries:[{...body,text:"执"}]},key)).toBe(at);
 });
+
+test("命令目录事件只增量更新快照，不触发回合重读",()=>{
+ const next=applyHarnessEventToSnapshot(makeSnapshot(),{type:"commands_changed",commands:[{name:"$brainstorming",description:"头脑风暴",inputHint:null}]});
+ expect(next.availableCommands).toEqual([{name:"$brainstorming",description:"头脑风暴",inputHint:null}]);
+ expect(next.conversationEntries).toEqual([]);
+});
