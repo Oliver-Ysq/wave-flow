@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -25,13 +24,14 @@ import { summaryBodyStartedAt } from "./conversation/harness-event-merge";
 import { Markdown as MessageBody } from "./conversation/markdown";
 import {
   ConversationView,
-  shouldSubmitComposer as conversationShouldSubmitComposer,
 } from "./conversation/conversation-view";
-import { AutoGrowTextarea } from "./conversation/auto-grow-textarea";
+import { MentionComposer } from "./conversation/mention-composer";
 import { WorkflowRevisionCard } from "./conversation/revision-card";
 import {
   WorkflowExecutionSummary,
+  latestExecutionEntries,
   proposalTitle,
+  revisionSummaryState,
 } from "./conversation/workflow-summary";
 import { AbandonedPlan } from "./conversation/abandoned-plan";
 import {
@@ -42,7 +42,7 @@ import {
 } from "./conversation/task-activity";
 import { PreviousRecords } from "./execution/previous-records";
 import { planUpdateLabel } from "./conversation/plan-updates";
-import { WorkflowVersions } from "./conversation/workflow-versions";
+import { WorkflowVersions, versionLabel, visibleVersion } from "./conversation/workflow-versions";
 import {
   workflowCells,
   editableRevision,
@@ -57,6 +57,28 @@ import {
   UnreadTracker,
 } from "./workbench-state";
 import { ViewCache } from "./workbench-state";
+const COMMAND_CACHE_KEY = "wave-flow.available-commands.v1";
+
+/** 跨草稿缓存最近一次 ACP 命令目录；新任务首条消息前也能展示技能。 */
+function readCachedCommands(): HarnessAvailableCommand[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(COMMAND_CACHE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is HarnessAvailableCommand => Boolean(item) && typeof item === "object"
+      && typeof (item as HarnessAvailableCommand).name === "string"
+      && typeof (item as HarnessAvailableCommand).description === "string"
+      && (typeof (item as HarnessAvailableCommand).inputHint === "string" || (item as HarnessAvailableCommand).inputHint === null));
+  } catch { return []; }
+}
+/** 判断目录是否含真实技能；普通 ACP 内置命令不能覆盖 ACP 技能目录。 */
+function hasSkillCommands(commands: readonly HarnessAvailableCommand[]): boolean {
+  return commands.some((command) => command.name.startsWith("$"));
+}
+
+function rememberCommands(commands: readonly HarnessAvailableCommand[]): void {
+  if (commands.length === 0) return;
+  try { localStorage.setItem(COMMAND_CACHE_KEY, JSON.stringify(commands)); } catch { /* 缓存失败不影响当前菜单。 */ }
+}
 const detailPositions = new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
@@ -76,6 +98,7 @@ import type {
   DesktopStatusResponse,
   ExecutionResponse,
   HarnessDecision,
+  HarnessAvailableCommand,
   HarnessProject,
   HarnessSnapshot,
   PhaseVisit,
@@ -115,6 +138,13 @@ function announceFirstFrame(): void {
   window.dispatchEvent(new Event("wave-flow:first-frame"));
 }
 
+/** 执行摘要展示用版本序号；缺失方案时返回 null，不从 revision 数字冒充展示版本。 */
+function executionVersion(task: HarnessSnapshot, revision: number): number | null {
+  const found = task.workflowRevisions.find((item) => item.revision === revision);
+  return found ? visibleVersion(task, found) : null;
+}
+
+
 export function App() {
   const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
   const [projects, setProjects] = useState<HarnessProject[]>([]);
@@ -140,6 +170,12 @@ export function App() {
     };
   };
   const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
+  /** 已打开过的最新方案身份；输入框上方的待确认条只对尚未打开的新版本出现。 */
+  const [openedPlanKey, setOpenedPlanKey] = useState<string | null>(null);
+  /** 上一次看到的最新方案身份；用于识别“正在看旧版时新版本到达”。 */
+  const latestPlanKeyRef = useRef<string | null>(null);
+  /** 当前主控 ACP 会话广告的斜杠命令/技能；只来自事件，不进入快照。 */
+  const [availableCommands, setAvailableCommands] = useState<HarnessAvailableCommand[]>(readCachedCommands);
   const [archiveConfirmation, setArchiveConfirmation] = useState<{
     harnessRunId: string;
     count: number;
@@ -178,6 +214,7 @@ export function App() {
   useEffect(() => setArchiveConfirmation(null), [harness?.harnessRunId]);
   /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
+
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useProjectExpanded("section");
   const [route, setRoute] = useState<WorkbenchRoute>({ kind: "conversation" });
@@ -441,6 +478,37 @@ export function App() {
       );
   }, [route, harness?.harnessRunId, draftProjectId]);
   const workflowPanelOpen = route.kind === "workflow";
+  useEffect(() => {
+    // 切换 Task 时清空“已看过”和增量基线，避免把另一个任务的旧版本误判为新到达。
+    setOpenedPlanKey(null);
+    const latest = harness?.workflowRevisions.at(-1);
+    latestPlanKeyRef.current = latest
+      ? `${harness!.harnessRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
+      : null;
+  }, [harness?.harnessRunId]);
+  useEffect(() => {
+    const latest = harness?.workflowRevisions.at(-1);
+    const latestKey = latest
+      ? `${harness!.harnessRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
+      : null;
+    const previous = latestPlanKeyRef.current;
+    latestPlanKeyRef.current = latestKey;
+    if (!latest || !latestKey || !previous || previous === latestKey) return;
+    // 用户正在看旧版方案时新修订到达：直接关闭详情，再打开默认落到最新版。
+    if (!workflowPanelOpen || route.kind !== "workflow" || route.section !== "plan") return;
+    const viewed = harness!.workflowRevisions.find(
+      (item) =>
+        (item.cardId ?? `legacy:${item.revision}`) === route.cardId &&
+        item.revision === route.revision,
+    );
+    if (
+      viewed &&
+      (viewed.cardId ?? null) === (latest.cardId ?? null) &&
+      latest.revision > viewed.revision
+    ) {
+      setWorkflowPanelOpen(false);
+    }
+  }, [harness, route, workflowPanelOpen]);
   /** 变更审阅属于整个详情弹窗，不随正文滚动；页签或执行身份变化即关闭。 */
   const [changesView, setChangesView] = useState<{
     taskId: string;
@@ -535,6 +603,7 @@ export function App() {
     const next: WorkbenchRoute =
       !section &&
       saved?.kind === "workflow" &&
+      saved.revision === revision.revision &&
       task.workflowRevisions.some((item) => item.revision === saved.revision)
         ? saved
         : {
@@ -548,6 +617,7 @@ export function App() {
     setRoute(next);
     setNavOpen(false);
     setSelectedExecutionId(next.executionId ?? null);
+    if (next.section === "plan") setOpenedPlanKey(`${task.harnessRunId}:${cardId}:${revision.revision}`);
     setExecutionDetail(null);
   }
   const [harnessText, setHarnessText] = useState("");
@@ -576,6 +646,47 @@ export function App() {
   /** Runtime 列表只来自 Engine；页面不能把发现结果当作已验证或默认选择。 */
   const [runtimeState, setRuntimeState] =
     useState<CliRuntimeListResponse | null>(null);
+  const harnessRuntimeId = runtimeState?.harnessRuntimeId ?? null;
+  /** 命令目录与运行时绑定；切换主控 CLI 后必须丢弃旧缓存并重新发现。 */
+  const catalogProbe = useRef<string | null>(null);
+  const previousHarnessRuntimeId = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (previousHarnessRuntimeId.current === undefined) {
+      previousHarnessRuntimeId.current = harnessRuntimeId;
+      // 启动时缓存没有 runtime 身份；清掉后按当前 runtime 重新发现，避免沿用旧 CLI 的技能。
+      setAvailableCommands([]);
+      catalogProbe.current = null;
+      try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞启动。 */ }
+      return;
+    }
+    if (previousHarnessRuntimeId.current === harnessRuntimeId) return;
+    previousHarnessRuntimeId.current = harnessRuntimeId;
+    setAvailableCommands([]);
+    catalogProbe.current = null;
+    try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞切换。 */ }
+  }, [harnessRuntimeId]);
+  useEffect(() => {
+    const known = harnesses
+      .filter((item) => !harnessRuntimeId || item.runtime?.runtimeId === harnessRuntimeId)
+      .flatMap((item) => item.availableCommands ?? []);
+    if (known.length > 0) {
+      setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(known) ? current : known);
+      if (hasSkillCommands(known)) rememberCommands(known);
+    }
+  }, [harnesses, harnessRuntimeId]);
+  useEffect(() => {
+    const projectId = draftProjectId ?? selectedProjectId;
+    const probeKey = `${harnessRuntimeId ?? "none"}:${projectId ?? "none"}`;
+    if (!projectId || harness || availableCommands.length > 0 || catalogProbe.current === probeKey) return;
+    catalogProbe.current = probeKey;
+    let cancelled = false;
+    void api.harnessCommandCatalog(projectId).then((response) => {
+      if (cancelled || response.commands.length === 0) return;
+      setAvailableCommands([...response.commands]);
+      rememberCommands(response.commands);
+    }).catch(() => { /* 目录发现失败时保留 /wave-flow；不阻塞任务创建。 */ });
+    return () => { cancelled = true; };
+  }, [draftProjectId, selectedProjectId, harness, availableCommands.length, harnessRuntimeId]);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
   const runtimeScanStarted = useRef(false);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(
@@ -785,6 +896,12 @@ export function App() {
           setHarness((current) =>
             current ? newerTaskSnapshot(current, response.harness) : current,
           );
+          // 命令目录是瞬时字段，防倒退合并可能保留旧快照；从权威响应刷新并跨草稿缓存。
+          if (response.harness.availableCommands?.length) {
+            const nextCommands = response.harness.availableCommands;
+            setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(nextCommands) ? current : [...nextCommands]);
+            if (hasSkillCommands(nextCommands)) rememberCommands(nextCommands);
+          }
           setLastEventAt(Date.now());
         })
         .catch(() => {});
@@ -804,6 +921,15 @@ export function App() {
       }
       const event = envelope.frame.event;
       requestFence.current.begin(`task:${harnessRunId}`);
+      if (event.type === "commands_changed") {
+        // ACP 命令目录是会话内存态，不触发快照重读；只更新斜杠菜单数据源。
+        if (event.commands.length > 0) {
+          setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(event.commands) ? current : [...event.commands]);
+          if (hasSkillCommands(event.commands)) rememberCommands(event.commands);
+        }
+        setLastEventAt(Date.now());
+        return;
+      }
       if (
         event.type === "turn_finished" ||
         event.type === "turn_interrupted" ||
@@ -1168,6 +1294,41 @@ export function App() {
       ? executionDetail.sourceEvidence?.applied
       : undefined;
 
+  const latestPlanRevision = harness?.workflowRevisions.at(-1) ?? null;
+  const pendingPlanRevision =
+    harness &&
+    harness.status !== "completed" &&
+    latestPlanRevision &&
+    revisionSummaryState(harness, latestPlanRevision).status === "待确认"
+      ? latestPlanRevision
+      : null;
+  const pendingPlanVersion =
+    harness && pendingPlanRevision ? visibleVersion(harness, pendingPlanRevision) : null;
+  const pendingPlanBar =
+    harness &&
+    pendingPlanRevision &&
+    openedPlanKey !==
+      `${harness.harnessRunId}:${pendingPlanRevision.cardId ?? `legacy:${pendingPlanRevision.revision}`}:${pendingPlanRevision.revision}` ? (
+      <div className="plan-pending-bar">
+        <i aria-hidden="true" />
+        <span role="status">
+          {pendingPlanVersion ? `第 ${pendingPlanVersion} 版方案待确认` : "方案待确认"}
+          <em>，确认后才会开始执行</em>
+        </span>
+        <button
+          type="button"
+          onClick={() =>
+            openWorkflow(
+              harness,
+              pendingPlanRevision,
+              "plan",
+            )
+          }
+        >
+          去确认方案
+        </button>
+      </div>
+    ) : null;
   return (
     <main
       className={`agent-workbench theme-${theme} ${navOpen ? "nav-open" : ""} ${"__TAURI_INTERNALS__" in window && /Mac/.test(navigator.platform) ? "native-titlebar" : ""}`}
@@ -1394,7 +1555,28 @@ export function App() {
               }}
             />
           ))}
-          {projects.length === 0 && <p>还没有项目，请从侧边栏创建。</p>}
+          {projects.length === 0 && (
+            <div className="project-empty">
+              <span className="project-empty-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M3.4 7.2V5.4h5.2l1.8 1.8h10.2v11.4H3.4z" />
+                  <path d="M12 11.7v4.9M9.55 14.15h4.9" />
+                </svg>
+              </span>
+              <strong>还没有项目</strong>
+              <p>绑定本地文件夹，任务按项目归档。</p>
+              <button
+                type="button"
+                className="project-empty-action"
+                onClick={() => setCreatingProject(true)}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M8 3.2v9.6M3.2 8h9.6" />
+                </svg>
+                新建项目
+              </button>
+            </div>
+          )}
         </nav>
         <footer>
           <span></span>
@@ -1427,6 +1609,7 @@ export function App() {
       >
         {!harness ? (
           <DraftConversation
+            availableCommands={availableCommands}
             project={
               projects.find(
                 (project) =>
@@ -1438,6 +1621,8 @@ export function App() {
             onSend={() => void sendHarness()}
             onTemplate={() => setTemplatePicker(true)}
             onLocal={() => setLocalPreview(true)}
+            hasProjects={projects.length > 0}
+            onCreateProject={() => setCreatingProject(true)}
             pendingAttachments={pendingAttachments}
             attachmentBusy={stagingOwner === attachmentOwner}
             attachmentError={attachmentError}
@@ -1452,6 +1637,7 @@ export function App() {
         ) : (
           <HarnessConversation
             harness={harness}
+            planPendingBar={pendingPlanBar}
             text={harnessText}
             onText={updateHarnessText}
             onSend={() => void sendHarness()}
@@ -1580,6 +1766,7 @@ export function App() {
                 ? `针对${adjustContext.abandoned ? "已放弃的" : ""}第 ${adjustContext.revision} 版方案`
                 : undefined
             }
+            availableCommands={availableCommands.length > 0 ? availableCommands : (harness.runtime?.runtimeId === harnessRuntimeId ? (harness.availableCommands ?? []) : [])}
             onAdjustRevision={(revision) =>
               prepareRevisionDraft(harness, revision, !!revision.abandonedAt)
             }
@@ -1820,6 +2007,7 @@ export function App() {
             route.kind === "workflow" &&
             routeMatchesTask(harness, route) && (
               <div className="workflow-page-nav">
+                <div className="workflow-page-nav-row">
                 <div
                   className="workflow-page-tabs"
                   role="tablist"
@@ -1905,6 +2093,51 @@ export function App() {
                     结果
                   </button>
                 </div>
+                {route.section === "plan" &&
+                  (() => {
+                    const planRevision = harness.workflowRevisions.find(
+                      (item) =>
+                        (item.cardId ?? `legacy:${item.revision}`) ===
+                          route.cardId && item.revision === route.revision,
+                    );
+                    if (!planRevision) return null;
+                    const planState = revisionSummaryState(harness, planRevision);
+                    const statusClass = planRevision.rejectedAt
+                      ? "rejected"
+                      : planRevision.acceptedAt
+                        ? "accepted"
+                        : "pending";
+                    const versionText = versionLabel(harness, planRevision);
+                    const planRevisions = harness.workflowRevisions.filter(
+                      (item) =>
+                        (item.cardId ?? `legacy:${item.revision}`) === route.cardId,
+                    );
+                    return (
+                      <div className="workflow-page-status">
+                        {versionText && (
+                          <span className="workflow-page-version">{versionText}</span>
+                        )}
+                        <em className={`wf-plan-status ${statusClass}`}>
+                          {planState.status}
+                        </em>
+                        <WorkflowVersions
+                          versions={planRevisions}
+                          selected={route.revision}
+                          onSelect={(selected) => {
+                            setSelectedExecutionId(null);
+                            setExecutionDetail(null);
+                            setRoute({
+                              ...route,
+                              revision: selected,
+                              executionId: undefined,
+                              attempt: undefined,
+                            });
+                          }}
+                        />
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
             )}
           <div
@@ -1964,26 +2197,11 @@ export function App() {
                     if (!revision) return <p>方案不存在，请返回对话。</p>;
                     return (
                       <div className="workflow-plan-content">
-                        <div className="workflow-version-tools">
-                          <WorkflowVersions
-                            versions={revisions}
-                            selected={revision.revision}
-                            onSelect={(selected) => {
-                              setSelectedExecutionId(null);
-                              setExecutionDetail(null);
-                              setRoute({
-                                ...route,
-                                revision: selected,
-                                executionId: undefined,
-                                attempt: undefined,
-                              });
-                            }}
-                          />
-                        </div>
                         <WorkflowRevisionCard
                           key={`${route.taskId}:${revision.revision}`}
                           revision={revision}
                           harness={harness}
+                          hideHead
                           onLocalRevision={
                             revision.localOrigin
                               ? () => {
@@ -2616,6 +2834,14 @@ function RuntimeConnectionPanel({
   const [engineStatusError, setEngineStatusError] = useState<string | null>(
     null,
   );
+  /** 感知模式设置值；null 表示尚未读取成功，此时不猜测开关状态。 */
+  const [perceptionMode, setPerceptionMode] = useState<boolean | null>(null);
+  /** 感知模式读取/写入失败的中文提示；只在本行就地显示，不阻塞其他设置。 */
+  const [perceptionError, setPerceptionError] = useState<string | null>(null);
+  /** 感知模式请求类型；读取与写入期间禁用开关，避免旧请求覆盖新选择。 */
+  const [perceptionBusy, setPerceptionBusy] = useState<"load" | "save" | null>(
+    null,
+  );
   const selected =
     runtimeState.runtimes.find(
       (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
@@ -2658,6 +2884,44 @@ function RuntimeConnectionPanel({
   useEffect(() => {
     if (section === "diagnostics") void loadEngineStatus();
   }, [section, loadEngineStatus]);
+  const loadPerceptionMode = useCallback(async () => {
+    setPerceptionBusy("load");
+    try {
+      const loaded = await api.settings();
+      setPerceptionMode(loaded.perceptionMode);
+      setPerceptionError(null);
+    } catch (cause) {
+      setPerceptionMode(null);
+      setPerceptionError(
+        `读取感知模式失败：${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    } finally {
+      setPerceptionBusy(null);
+    }
+  }, []);
+  useEffect(() => {
+    // gate 模式不展示通用分区，避免在 CLI 门禁阶段请求无关设置。
+    if (!gateMode && section === "general") void loadPerceptionMode();
+  }, [gateMode, section, loadPerceptionMode]);
+  /** 切换感知模式；失败恢复到上次已确认值并就地提示，其他设置不受影响。 */
+  async function togglePerceptionMode(enabled: boolean) {
+    if (perceptionBusy) return;
+    const previous = perceptionMode;
+    setPerceptionMode(enabled);
+    setPerceptionBusy("save");
+    setPerceptionError(null);
+    try {
+      const updated = await api.updateSettings({ perceptionMode: enabled });
+      setPerceptionMode(updated.perceptionMode);
+    } catch (cause) {
+      setPerceptionMode(previous);
+      setPerceptionError(
+        `更新感知模式失败：${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    } finally {
+      setPerceptionBusy(null);
+    }
+  }
   async function scan() {
     // PATH 扫描护栏：进行中禁止重复触发；结果写回 App 级 runtimeState，
     // 扫描期间切换分区不会丢弃返回结果。探测结论单独展示，不能把
@@ -3128,6 +3392,42 @@ function RuntimeConnectionPanel({
                     浅色
                   </label>
                 </div>
+                <div className="section-row settings-perception">
+                  <div>
+                    <strong>感知模式</strong>
+                    <span>
+                      默认开启：主控可使用本机 skill/MCP/CLI 读取信息；
+                      项目文件仍不可写，修改项目必须走 Workflow。
+                      关闭后主控只能使用原生读取与四个控制工具。
+                      设置对新建或空闲重开的主控会话生效。
+                    </span>
+                  </div>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={perceptionMode === true}
+                      disabled={perceptionBusy !== null}
+                      onChange={(event) =>
+                        void togglePerceptionMode(event.target.checked)
+                      }
+                    />
+                    {perceptionBusy === "load"
+                      ? "正在读取…"
+                      : perceptionBusy === "save"
+                        ? "正在保存…"
+                        : perceptionMode === true
+                          ? "已开启"
+                          : perceptionMode === false
+                            ? "已关闭"
+                            : "未读取"}
+                  </label>
+                </div>
+                {perceptionError && (
+                  <div className="manual-runtime-error" role="alert">
+                    <span>!</span>
+                    <p>{perceptionError}</p>
+                  </div>
+                )}
               </section>
             )}
             {section === "cli" && cliContent}
@@ -3434,12 +3734,15 @@ function DraftConversation({
   onSend,
   onTemplate,
   onLocal,
+  hasProjects,
+  onCreateProject,
   pendingAttachments,
   onAddAttachments,
   onRemoveAttachment,
   attachmentBusy = false,
   attachmentError,
   onDismissAttachmentError,
+  availableCommands = [],
 }: {
   project: HarnessProject | null;
   text: string;
@@ -3447,12 +3750,18 @@ function DraftConversation({
   onSend: () => void;
   /** 打开预置来源；不创建任务。 */ onTemplate: () => void;
   /** 打开零执行的项目内本地Workflow预检。 */ onLocal?: () => void;
+  /** 是否已登记任何项目；仅决定空态文案与是否展示创建入口。 */
+  hasProjects: boolean;
+  /** 打开创建项目对话框；空态下的唯一可执行动作。 */
+  onCreateProject: () => void;
   /** 首条消息待发送的图片暂存描述；选择不发送。 */ pendingAttachments: import("./types").StagedAttachment[];
   /** 当前草稿正在选图/暂存，防止重复打开。 */ attachmentBusy?: boolean;
   /** 原草稿的选图错误，不随后台轮询清除。 */ attachmentError?: string | null;
   /** 仅关闭原草稿错误提示。 */ onDismissAttachmentError?: () => void;
   /** 打开已有系统图片选择器。 */ onAddAttachments: () => void;
   /** 仅移除尚未发送的指定附件。 */ onRemoveAttachment: (id: string) => void;
+  /** 最近一次 ACP 会话广告的技能；草稿页也用它提前展示技能菜单。 */
+  availableCommands?: readonly HarnessAvailableCommand[];
 }) {
   const ready = project !== null;
   const attachmentButton = useRef<HTMLButtonElement>(null);
@@ -3488,19 +3797,50 @@ function DraftConversation({
     <div className="conversation draft-conversation">
       <div className="conversation-scroll">
         <div className="draft-welcome">
-          <h2>
-            {ready
-              ? `你想在 ${project.title} 中完成什么？`
-              : "选择一个项目，开始任务"}
-          </h2>
-          {!ready && <p>从左侧选择或创建本地项目。</p>}
+          {ready ? (
+            <>
+              <h2>你想在「{project.title}」中完成什么？</h2>
+              <p>描述目标与约束；Workflow 草案确认后才会开始执行。</p>
+            </>
+          ) : (
+            <>
+              <h2>{hasProjects ? "选择一个项目，开始任务" : "创建一个项目，开始任务"}</h2>
+              <p>
+                {hasProjects
+                  ? "从左侧项目列表选中一个项目，或创建新的本地项目。"
+                  : "项目绑定本机文件夹，任务与执行记录都归档在这里。"}
+              </p>
+              <button
+                type="button"
+                className="draft-welcome-primary"
+                onClick={onCreateProject}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M8 3.2v9.6M3.2 8h9.6" />
+                </svg>
+                新建项目
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className="draft-input-region">
+        {!ready && (
+          <p className="draft-locked-note" id="draft-locked-note">
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+              <rect x="5" y="10.5" width="14" height="9" rx="2.4" />
+              <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+            </svg>
+            {hasProjects
+              ? "选择项目后即可使用预置与本地工作流"
+              : "创建项目后即可使用预置与本地工作流"}
+          </p>
+        )}
         <div
           className="draft-quick-actions"
           role="group"
           aria-label="任务快捷入口"
+          hidden={!ready}
         >
           <span className="draft-project-name" title={project?.cwd}>
             <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -3581,18 +3921,23 @@ function DraftConversation({
               ))}
             </ul>
           )}
-          <AutoGrowTextarea
+          <MentionComposer
             autoFocus
-            aria-label="描述任务目标"
+            ariaLabel="描述任务目标"
+            ariaDescribedBy={ready ? undefined : "draft-locked-note"}
             value={text}
             disabled={!ready}
-            onChange={(event) => onText(event.target.value)}
-            placeholder={ready ? "描述目标和要求…" : "请先选择项目"}
-            onKeyDown={(event) => {
-              if (shouldSubmitComposer(event)) {
-                event.preventDefault();
-                if (text.trim() && ready && !attachmentBusy) onSend();
-              }
+            onChange={onText}
+            placeholder={
+              ready
+                ? "描述目标和要求…"
+                : hasProjects
+                  ? "选择项目后即可描述任务"
+                  : "创建项目后即可描述任务"
+            }
+            commands={availableCommands}
+            onSubmit={() => {
+              if (text.trim() && ready && !attachmentBusy) onSend();
             }}
           />
           <div className="composer-footer">
@@ -3612,7 +3957,11 @@ function DraftConversation({
                 </svg>
               </button>
               {attachmentBusy && <small role="status">正在添加图片…</small>}
-              <small>⌘/Ctrl + Enter 发送 · Enter 换行</small>
+              <small>
+                {ready
+                  ? "⌘/Ctrl + Enter 发送 · Enter 换行"
+                  : "选定项目后输入框才会启用"}
+              </small>
             </div>
             <button
               className="send-message"
@@ -3631,6 +3980,7 @@ function DraftConversation({
 
 function HarnessConversation({
   harness,
+  planPendingBar,
   text,
   onText,
   onSend,
@@ -3664,8 +4014,11 @@ function HarnessConversation({
   visible,
   onRead,
   draftContext,
+  availableCommands = [],
 }: {
   harness: HarnessSnapshot;
+  /** 输入框上方待确认方案条；父层按最新版本与已读状态计算。 */
+  planPendingBar?: ReactNode;
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
@@ -3705,6 +4058,8 @@ function HarnessConversation({
   /** 只准备原版本修改上下文并聚焦输入，不发送消息。 */
   onAdjustRevision: (revision: import("./types").WorkflowRevision) => void;
   /** 输入草稿关联版本，不覆盖用户内容。 */ draftContext?: string;
+  /** 当前 ACP 会话广告的斜杠命令/技能；缺省只显示 /wave-flow。 */
+  availableCommands?: readonly HarnessAvailableCommand[];
   onAnswerDecision: (
     decisionId: string,
     answer: Record<string, unknown>,
@@ -3724,10 +4079,18 @@ function HarnessConversation({
     if (!harness.diagnostic || harness.status === "running")
       setRetryError(null);
   }, [harness.harnessRunId, harness.diagnostic, harness.status]);
+  const latestExecutionId = (() => {
+    const history = latestExecutionEntries(harness);
+    if (history.length) return history.at(-1)!.executionId;
+    return [...harness.executions]
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+      .at(-1)?.executionId ?? null;
+  })();
   return (
     <ConversationView
       key={harness.harnessRunId}
       harness={harness}
+      planPendingBar={planPendingBar}
       draft={text}
       onDraft={onText}
       onSend={onSend}
@@ -3749,6 +4112,7 @@ function HarnessConversation({
       visible={visible}
       onRead={onRead}
       draftContext={draftContext}
+      availableCommands={availableCommands}
       activity={
         <div className="task-activity-region">
           <TaskActivity
@@ -3788,7 +4152,7 @@ function HarnessConversation({
           ),
         })),
         ...(harness.executionHistory?.length
-          ? harness.executionHistory.flatMap((item) => {
+          ? latestExecutionEntries(harness).flatMap((item) => {
               const execution = harness.executions.find(
                 (execution) => execution.executionId === item.executionId,
               );
@@ -3815,7 +4179,7 @@ function HarnessConversation({
                 : undefined;
               return [
                 {
-                  key: item.key,
+                  key: `execution:${item.executionId}`,
                   at: firstBody ?? item.at,
                   beforeTurnId: obligation
                     ? (body?.turnId ??
@@ -3827,16 +4191,22 @@ function HarnessConversation({
                       attempt={item.attempt}
                       execution={{
                         ...execution,
-                        status: item.status,
+                        status:
+                          item.status === "running" && execution.finishedAt
+                            ? execution.status
+                            : item.status,
                         diagnostic: item.diagnostic,
                         summary: item.summary,
                       }}
+                      featured={item.executionId === latestExecutionId}
                       revision={harness.workflowRevisions.find(
                         (revision) => revision.revision === item.revision,
                       )}
+                      version={executionVersion(harness, item.revision)}
                       onOpen={() =>
                         onSelectExecution(item.executionId, item.attempt)
                       }
+                      onOpenResults={() => onSelectResults(item.executionId)}
                     />
                   ) : null,
                 },
@@ -3851,7 +4221,10 @@ function HarnessConversation({
                   revision={harness.workflowRevisions.find(
                     (revision) => revision.revision === execution.revision,
                   )}
+                  version={executionVersion(harness, execution.revision)}
+                  featured={execution.executionId === latestExecutionId}
                   onOpen={() => onSelectExecution(execution.executionId)}
+                  onOpenResults={() => onSelectResults(execution.executionId)}
                 />
               ),
             }))),
@@ -3909,17 +4282,6 @@ function HarnessConversation({
         ))}
     </ConversationView>
   );
-}
-
-/**
- * 裸 Enter 始终留给 textarea 与 IME：它可确认中文候选、切换输入状态或换行。
- * 发送只接受显式的 ⌘/Ctrl + Enter，且 composition 期间一律不拦截事件。
- * 实现复用 conversation 模块的同一判定。
- */
-function shouldSubmitComposer(
-  event: ReactKeyboardEvent<HTMLTextAreaElement>,
-): boolean {
-  return conversationShouldSubmitComposer(event);
 }
 
 function HarnessDecisionCard({

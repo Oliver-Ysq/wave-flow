@@ -100,7 +100,7 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
  const titles=revision.preview?.phaseTitles??[];
  return <section className="workflow-design"><h3>执行步骤</h3>{groupWorkersByPhase(titles,plan?.previewAgents??revision.preview?.previewAgents??[]).map(group=><section key={group.key}><h4>{group.title}</h4>{group.workers.map(worker=><div className="workflow-design-row" key={worker.key}><strong>{worker.name}{worker.loop&&<small>循环/批量调用</small>}</strong>{cliSelect(worker.nodeId??"*",worker.name)}</div>)}</section>)}
    {workspaceSummary()}
-   {!!plan?.dynamicCount&&!revision.localOrigin&&<div className="workflow-design-row"><span>其余动态 Worker 默认使用</span>{cliSelect("*","动态Worker")}</div>}
+   {!!plan?.dynamicCount&&!revision.localOrigin&&<section className="workflow-design-default"><div className="workflow-design-row"><span>其余动态 Worker 默认使用</span>{cliSelect("*","动态Worker")}</div></section>}
    {plan&&plan.pool.length===1&&editable&&<small>需要更多选择时，先在执行底座设置中验证其他 CLI。</small>}
    {error&&<p role="alert">{error}</p>}
    {checking&&<small role="status">正在检查执行配置，参数和 CLI 选择已保留…</small>}

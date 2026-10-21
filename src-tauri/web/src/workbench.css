@@ -20,6 +20,8 @@
   --wf-faint: #7c7c84;
   --wf-accent: #9fa9ff;
   --wf-accent-strong: #7d89f5;
+  /* 强调色前景：深色底直接用 accent，浅色底改用更深的 accent-strong 以满足正文 4.5:1。 */
+  --wf-accent-text: #9fa9ff;
   --wf-accent-wash: rgb(159 169 255 / 10%);
   --wf-grid: transparent;
   --wf-danger-bg: rgb(51 29 38 / 97%);
@@ -51,6 +53,7 @@
   --wf-faint: #9a9aa4;
   --wf-accent: #6868dc;
   --wf-accent-strong: #5856c9;
+  --wf-accent-text: #5856c9;
   --wf-accent-wash: rgb(104 104 220 / 10%);
   --wf-grid: transparent;
   --wf-danger-bg: rgb(255 250 251 / 97%);
@@ -161,7 +164,6 @@
 .agent-workbench .wf-summary-result { max-height:6.6em; overflow:auto; }
 @media(max-width:900px) { .agent-workbench .conversation-scroll > .wf-chat-summary { width:100%; margin:0; }.agent-workbench .wf-chat-summary { padding:14px; } }
 .agent-workbench .draft-welcome { margin:13vh auto 0; width:min(640px, 100%); text-align:center; }
-.agent-workbench .draft-welcome-mark { display:grid; place-items:center; width:52px; height:52px; margin:0 auto 18px; border:1px solid var(--wf-line); border-radius:16px; background:var(--wf-panel); box-shadow:0 10px 24px var(--wf-composer-shadow); color:var(--wf-accent); font-size:20px; font-weight:800; }
 .agent-workbench .draft-welcome h2 { margin:0 0 8px; color:var(--wf-ink); font-size:26px; letter-spacing:-.6px; }
 .agent-workbench .draft-welcome > p { margin:0 auto 26px; max-width:460px; color:var(--wf-muted); font-size:13px; line-height:1.7; }
 .agent-workbench .task-source-options { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; margin:0 0 18px; }
@@ -178,10 +180,13 @@
 .agent-workbench .draft-title-field span i { font-style:normal; opacity:.7; }
 .agent-workbench .draft-title-field input { padding:10px 12px; border:1px solid var(--wf-line); border-radius:9px; background:var(--wf-input); color:var(--wf-ink); font-size:13px; }
 @media (max-width:900px) { .agent-workbench .task-source-options { grid-template-columns:1fr; }.agent-workbench .draft-welcome { margin-top:8vh; } }
-.agent-workbench .workflow-design-actions { position:sticky; bottom:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:10px; padding:10px 0 6px; border-top:1px solid var(--wf-line-soft); background:var(--wf-page); }
+.agent-workbench .workflow-design-actions { position:sticky; bottom:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:12px; padding:12px 0 16px; border-top:1px solid var(--wf-line-soft); background:var(--wf-page); }
+/* 正文底部内边距会让 sticky 行动栏停在离底边 44px 处，露出下方滚动的正文；方案页由行动栏自己留白。 */
+.agent-workbench .workflow-page-body:has(.workflow-design-actions) { padding-bottom:0; }
 .agent-workbench .workflow-design-actions small { display:block; margin:0; flex:1 1 auto; color:var(--wf-faint); font-size:11px; line-height:1.55; }
-.agent-workbench .workflow-design-actions .button-primary { flex:0 0 auto; min-height:38px; padding:0 20px; }
 .agent-workbench .workflow-design-actions .actions-group { display:flex; align-items:center; flex:0 0 auto; gap:8px; }
+.agent-workbench .workflow-design-actions .actions-group > button { min-width:104px; min-height:36px; padding:0 16px; border-radius:9px; font-size:12px; }
+.agent-workbench .workflow-design-actions .actions-group > .button-primary { flex:0 0 auto; padding:0 18px; }
 .agent-workbench .workflow-design-row .cli-pending { color:var(--wf-faint); }
 .navigation-toggle { display:none; }
 .plan-update-group { margin:8px 0; color:var(--wf-muted); font-size:12px; }
@@ -230,7 +235,7 @@
 .agent-workbench .harness-tabs { display:flex; align-items:center; gap:3px; }
 .agent-workbench .task-section-title .harness-tabs button { padding:5px 7px; border-radius:6px; color:var(--wf-faint); font-size:11px; font-weight:600; }
 .agent-workbench .task-section-title .harness-tabs button:hover { background:var(--wf-accent-wash); color:var(--wf-ink); }
-.agent-workbench .task-section-title .harness-tabs button.active { background:var(--wf-accent-wash); color:var(--wf-accent); }
+.agent-workbench .task-section-title .harness-tabs button.active { background:var(--wf-accent-wash); color:var(--wf-accent-text); }
 .agent-workbench .task-list { display:flex; flex-direction:column; align-items:stretch; gap:3px; min-width:0; overflow:auto; padding:0 9px 10px; }
 .agent-workbench .task-list[hidden], .agent-workbench .task-section-title[hidden], .agent-workbench .project-conversations[hidden] { display:none; }
 .projects-section-header { display:flex; align-items:center; justify-content:space-between; margin:14px 18px 0; border-radius:6px; }
@@ -268,7 +273,17 @@
 .agent-workbench .task-presence { display:block; width:6px; height:6px; margin:0; border-radius:50%; background:#7d8490; }
 .agent-workbench .task-presence.running { background:#4b9cff; }.agent-workbench .task-presence.interrupted { background:#de6973; }
 .agent-workbench .task-presence.completed { background:#4dc78b; }
-.agent-workbench .project-empty { margin:0 12px 8px; padding:8px; border:0; border-radius:7px; background:transparent; color:var(--wf-faint); font-size:11px; text-align:left; }
+/* 空项目列表：说明项目绑定本地目录的作用，并提供唯一可执行入口，不再只留一行提示。 */
+.agent-workbench .project-empty { display:grid; justify-items:start; margin:2px 0 4px; padding:15px 14px 13px; border:1px solid var(--wf-line); border-radius:12px; background:var(--wf-panel); text-align:left; }
+.agent-workbench .project-empty-mark { display:grid; place-items:center; width:32px; height:32px; margin:0 0 11px; border:1px solid color-mix(in srgb, var(--wf-accent) 22%, var(--wf-line)); border-radius:9px; background:var(--wf-accent-wash); color:var(--wf-accent-text); }
+.agent-workbench .project-empty-mark svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
+.agent-workbench .project-empty strong { color:var(--wf-ink); font-size:13px; font-weight:600; line-height:1.4; }
+.agent-workbench .project-empty p { margin:4px 0 12px; color:var(--wf-muted); font-size:11.5px; line-height:1.65; }
+.agent-workbench .project-empty-action { display:flex; align-items:center; justify-content:center; gap:6px; width:100%; height:32px; padding:0 10px; border:1px solid color-mix(in srgb, var(--wf-accent) 28%, var(--wf-line)); border-radius:8px; background:var(--wf-accent-wash); color:var(--wf-accent-text); font:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:background-color var(--wf-t-fast) ease, border-color var(--wf-t-fast) ease, transform var(--wf-t-fast) var(--wf-ease-out); }
+.agent-workbench .project-empty-action:hover { border-color:color-mix(in srgb, var(--wf-accent) 46%, var(--wf-line)); background:color-mix(in srgb, var(--wf-accent) 19%, transparent); }
+.agent-workbench .project-empty-action:active { transform:scale(.98); }
+.agent-workbench .project-empty-action:focus-visible { outline:2px solid var(--wf-accent); outline-offset:2px; }
+.agent-workbench .project-empty-action svg { width:14px; height:14px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
 .agent-workbench .legacy-project { margin-top:12px; padding:12px 14px; border-top:1px solid var(--wf-line-soft); }.agent-workbench .legacy-project > span { color:var(--wf-faint); font-size:11px; }
 .agent-workbench .task-rail footer { display:flex; justify-content:space-between; margin:10px 22px 17px; padding-top:13px; border-top:1px solid var(--wf-line-soft); color:var(--wf-faint); font-size:10px; }
 
@@ -425,9 +440,15 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .task-current { position:sticky; top:0; z-index:1; margin:-12px -30px 0; padding:12px 30px; background:var(--wf-page); }
 .task-current-copy strong { font-size:14px; font-weight:600; overflow-wrap:anywhere; }
 .task-current-copy span { font-size:12px; color:var(--wf-muted); }
+/* 顶部状态也可点击进入当前方案；保持文字外观，不额外制造一枚按钮。 */
+.agent-workbench .task-state { padding:0; border:0; background:transparent; color:var(--wf-muted); cursor:pointer; font:inherit; }
+.agent-workbench .task-state span { font-size:12px; color:inherit; }
+.agent-workbench .task-state:hover span { color:var(--wf-ink); }
+.agent-workbench .task-state:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; border-radius:4px; }
 .task-current-actions,.task-history-links { display:flex; gap:8px; flex-shrink:0; }
 .task-activity button { font-size:12px; padding:7px 10px; border:1px solid var(--wf-line); border-radius:7px; background:transparent; color:var(--wf-ink); cursor:pointer; }
-.task-activity button.button-primary { background:var(--wf-accent-wash); color:var(--wf-accent); border-color:transparent; }
+.task-activity button.button-primary { background:var(--wf-accent-strong); color:#fff; border-color:var(--wf-accent-strong); }
+.task-activity button.button-primary:hover:not(:disabled) { filter:brightness(1.08); }
 .task-history { margin-top:16px; }
 .task-history ul { list-style:none; margin:8px 0; padding:0; }
 .task-history li { padding:10px 0; border-bottom:1px solid var(--wf-line-soft); }
@@ -437,6 +458,32 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .task-history summary { cursor:pointer; padding:8px 0; }
 .task-event { color:var(--wf-muted); font-size:12px; padding:6px 0; }
 .task-event button { border:0; background:none; color:var(--wf-accent); cursor:pointer; padding:4px; font:inherit; }
+/* 运行中的执行是当前活动，不是历史记录：卡片 + 呼吸态，状态点与描边同步呼吸。 */
+.agent-workbench .execution-live-card { position:relative; display:flex; align-items:center; gap:12px; width:100%; min-width:0; margin:2px 0; padding:11px 13px; border:1px solid color-mix(in srgb, var(--wf-accent) 26%, var(--wf-line)); border-radius:14px; background:linear-gradient(135deg, color-mix(in srgb, var(--wf-accent) 7%, var(--wf-panel)), var(--wf-panel)); color:var(--wf-ink); text-align:left; font:inherit; cursor:pointer; transition:border-color var(--wf-t-fast) ease, background-color var(--wf-t-fast) ease; }
+.agent-workbench .execution-live-card::after { content:""; position:absolute; inset:-1px; border:1px solid var(--wf-accent); border-radius:15px; opacity:.16; pointer-events:none; }
+.agent-workbench .execution-live-card.is-live::after { animation:wf-live-breathe 3.2s ease-in-out infinite; }
+.agent-workbench .execution-live-card.is-finished { border-color:var(--wf-line); background:var(--wf-panel); }
+.agent-workbench .execution-live-card.is-finished::after { display:none; }
+.agent-workbench .execution-live-card.is-finished .execution-live-icon { border-color:var(--wf-line); background:var(--wf-panel-raised); color:var(--wf-muted); }
+.agent-workbench .execution-live-card.status-success .execution-live-dot { background:var(--wf-success); box-shadow:none; }
+.agent-workbench .execution-live-card.status-interrupted .execution-live-dot { background:var(--wf-danger-ink); box-shadow:none; }
+.agent-workbench .execution-live-card.status-cancelled .execution-live-dot { background:var(--wf-faint); box-shadow:none; }
+.agent-workbench .execution-live-card.status-cancelled .execution-live-action { color:var(--wf-muted); }
+.agent-workbench .execution-live-card:hover { border-color:color-mix(in srgb, var(--wf-accent) 55%, var(--wf-line)); }
+.agent-workbench .execution-live-card:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; }
+.agent-workbench .execution-live-icon { display:grid; place-items:center; width:38px; height:38px; flex:0 0 38px; border:1px solid color-mix(in srgb, var(--wf-accent) 24%, var(--wf-line)); border-radius:10px; background:var(--wf-accent-wash); color:var(--wf-accent); }
+.agent-workbench .execution-live-icon svg { width:21px; height:21px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+.agent-workbench .execution-live-copy { display:grid; gap:3px; min-width:0; }
+.agent-workbench .execution-live-copy strong { overflow:hidden; color:var(--wf-ink); font-size:14px; font-weight:650; line-height:1.45; text-overflow:ellipsis; white-space:nowrap; }
+.agent-workbench .execution-live-copy small { display:flex; align-items:center; gap:6px; color:var(--wf-muted); font-size:12px; line-height:1.5; }
+.agent-workbench .execution-live-dot { width:6px; height:6px; flex:0 0 6px; border-radius:50%; background:var(--wf-accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--wf-accent) 12%, transparent); }
+.agent-workbench .execution-live-card.is-live .execution-live-dot { animation:wf-live-dot 2.4s ease-in-out infinite; }
+.agent-workbench .execution-live-action { display:flex; align-items:center; gap:5px; flex:0 0 auto; margin-left:auto; color:var(--wf-accent); font-size:12px; font-weight:600; white-space:nowrap; }
+.agent-workbench .execution-live-action span { transition:transform var(--wf-t-fast) var(--wf-ease-out); }
+.agent-workbench .execution-live-card:hover .execution-live-action span { transform:translateX(2px); }
+@keyframes wf-live-breathe { 0%,100% { opacity:.12; } 50% { opacity:.42; } }
+@keyframes wf-live-dot { 0%,100% { opacity:1; box-shadow:0 0 0 3px color-mix(in srgb, var(--wf-accent) 12%, transparent); } 50% { opacity:.55; box-shadow:0 0 0 2px color-mix(in srgb, var(--wf-accent) 18%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .agent-workbench .execution-live-card.is-live::after, .agent-workbench .execution-live-card.is-live .execution-live-dot { animation:none; } .agent-workbench .execution-live-card.is-live::after { opacity:.22; } }
 .task-summary-notice { padding:0 30px 10px; }
 .summary-compact { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; }
 .summary-compact small,.summary-compact summary { color:var(--wf-muted); }
@@ -532,8 +579,16 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 @media (prefers-reduced-motion: reduce) { .agent-workbench .harness-tool.running summary > span { animation:none; } }
 
 .agent-workbench .conversation-composer { width:min(860px, calc(100% - 48px)); margin:0 auto 18px; padding:0; border:1px solid var(--wf-line-soft); border-radius:14px; background:var(--wf-input); box-shadow:0 4px 14px var(--wf-composer-shadow); transition:border-color .16s ease, box-shadow .16s ease; }
+/* 最新方案待确认且尚未打开时，在输入框上方提供唯一行动点；打开后由父层隐藏。 */
+.agent-workbench .plan-pending-bar { display:flex; align-items:center; gap:10px; width:min(860px, calc(100% - 48px)); margin:0 auto 10px; padding:9px 12px; border:1px solid color-mix(in srgb, var(--wf-accent) 30%, var(--wf-line)); border-radius:10px; background:var(--wf-accent-wash); }
+.agent-workbench .plan-pending-bar > i { width:7px; height:7px; flex:0 0 7px; border-radius:50%; background:var(--wf-accent); }
+.agent-workbench .plan-pending-bar > span { min-width:0; color:var(--wf-ink); font-size:12px; line-height:1.5; }
+.agent-workbench .plan-pending-bar > span em { color:var(--wf-muted); font-style:normal; }
+.agent-workbench .plan-pending-bar > button { flex:0 0 auto; min-height:28px; margin-left:auto; padding:0 12px; border:1px solid var(--wf-accent-strong); border-radius:8px; background:var(--wf-accent-strong); color:#fff; font-size:12px; font-weight:650; cursor:pointer; }
+.agent-workbench .plan-pending-bar > button:hover { filter:brightness(1.08); }
+.agent-workbench .plan-pending-bar > button:focus-visible { outline:2px solid var(--wf-accent); outline-offset:2px; }
 .agent-workbench .conversation-composer:focus-within { border-color:color-mix(in srgb, var(--wf-accent) 65%, var(--wf-line)); box-shadow:0 0 0 3px color-mix(in srgb, var(--wf-accent-wash) 65%, transparent); }
-.agent-workbench .conversation-composer textarea { display:block; box-sizing:border-box; min-height:72px; max-height:none; overflow-y:hidden; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif, system-ui; resize:none; }
+.agent-workbench .conversation-composer textarea { display:block; box-sizing:border-box; min-height:72px; max-height:none; overflow-y:hidden; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif, system-ui; resize:none; }
 .agent-workbench .conversation-composer textarea::placeholder { color:var(--wf-faint); }
 .agent-workbench .conversation-composer .composer-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px; margin:0; padding:0 10px 8px 14px; border-top:1px solid color-mix(in srgb, var(--wf-line-soft) 78%, transparent); }
 .agent-workbench .composer-guidance { display:flex; align-items:center; min-width:0; gap:10px; color:var(--wf-faint); }
@@ -585,7 +640,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .message-attachment img { max-width:220px; max-height:160px; border:1px solid var(--wf-line-soft); border-radius:10px; object-fit:contain; }
 .agent-workbench .message-attachment figcaption { margin-top:4px; color:var(--wf-faint); font-size:10px; }
 .agent-workbench .message-attachment .attachment-placeholder { display:inline-block; padding:12px 16px; border:1px dashed var(--wf-line); border-radius:10px; color:var(--wf-faint); font-size:11px; }
-@media (max-width:900px) { .agent-workbench .conversation-composer { width:calc(100% - 32px); margin-bottom:16px; }.agent-workbench .conversation-scroll { padding:28px 22px 20px; }.agent-workbench .conversation > header { min-height:64px; padding:0 18px; }.agent-workbench .conversation-actions { display:none; } }
+@media (max-width:900px) { .agent-workbench .plan-pending-bar { width:calc(100% - 32px); }.agent-workbench .conversation-composer { width:calc(100% - 32px); margin-bottom:16px; }.agent-workbench .conversation-scroll { padding:28px 22px 20px; }.agent-workbench .conversation > header { min-height:64px; padding:0 18px; }.agent-workbench .conversation-actions { display:none; } }
 
 /* Sidebar row geometry: the project row is the shared reference for all four row kinds. */
 .agent-workbench .task-rail { --wf-sidebar-row-height:40px; --wf-sidebar-row-radius:10px; --wf-sidebar-row-inset:9px; --wf-sidebar-row-highlight:var(--wf-panel-raised); }
@@ -832,9 +887,24 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .conversation { position:relative; }
 .agent-workbench .conversation.draft-conversation { grid-template-rows:minmax(0,1fr) auto; }
 .agent-workbench .draft-conversation .conversation-scroll { display:grid; place-items:center; align-content:normal; padding:36px; }
-.agent-workbench .draft-conversation .draft-welcome { width:min(760px,100%); margin:0; transform:translateY(20px); }
-.agent-workbench .draft-conversation .draft-welcome h2 { margin:0; font-size:clamp(22px,2.2vw,30px); font-weight:400; line-height:1.5; letter-spacing:-.5px; text-wrap:balance; }
-.agent-workbench .draft-conversation .draft-welcome p { margin:12px 0 0; font-size:14px; color:var(--wf-muted); }
+/* 空草稿页：标题、说明与主按钮构成一个居中的首次启动入口；标题用 600 字重撑起层级。 */
+.agent-workbench .draft-conversation .draft-welcome { display:grid; justify-items:center; width:min(620px,100%); margin:0; transform:translateY(6px); text-align:center; }
+.agent-workbench .draft-conversation .draft-welcome h2 { margin:0; color:var(--wf-ink); font-size:clamp(23px,2.1vw,29px); font-weight:600; line-height:1.35; letter-spacing:-.4px; text-wrap:balance; }
+.agent-workbench .draft-conversation .draft-welcome p { max-width:460px; margin:10px 0 0; color:var(--wf-muted); font-size:13.5px; line-height:1.7; text-wrap:pretty; }
+.agent-workbench .draft-conversation .draft-welcome-primary { display:inline-flex; align-items:center; gap:7px; height:38px; margin-top:22px; padding:0 18px; border:1px solid transparent; border-radius:10px; background:var(--wf-ink); color:var(--wf-page); font:inherit; font-size:13px; font-weight:650; cursor:pointer; transition:opacity var(--wf-t-fast) ease, transform var(--wf-t-fast) var(--wf-ease-out); }
+.agent-workbench .draft-conversation .draft-welcome-primary:hover:not(:disabled) { opacity:.86; }
+.agent-workbench .draft-conversation .draft-welcome-primary:active:not(:disabled) { transform:scale(.98); }
+.agent-workbench .draft-conversation .draft-welcome-primary:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; }
+.agent-workbench .draft-conversation .draft-welcome-primary svg { width:15px; height:15px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
+/* 未确定项目时，来源开关不可用；用一行锁提示替代三个禁用控件，避免空态里堆叠灰按钮。 */
+.agent-workbench .draft-conversation .draft-locked-note { display:flex; align-items:center; gap:7px; margin:2px 0 9px; padding:0 8px; color:var(--wf-muted); font-size:12px; line-height:1.5; }
+.agent-workbench .draft-conversation .draft-locked-note svg { width:14px; height:14px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+@media (prefers-reduced-motion: no-preference) {
+  .agent-workbench .draft-conversation .draft-welcome > * { animation:wf-welcome-in var(--wf-t-slow) var(--wf-ease-out) both; }
+  .agent-workbench .draft-conversation .draft-welcome > *:nth-child(2) { animation-delay:36ms; }
+  .agent-workbench .draft-conversation .draft-welcome > *:nth-child(3) { animation-delay:72ms; }
+}
+@keyframes wf-welcome-in { from { opacity:0; transform:translateY(8px); } }
 .agent-workbench .draft-conversation .draft-input-region { width:min(760px,calc(100% - 48px)); margin:0 auto 42px; min-width:0; }
 .agent-workbench .draft-conversation .draft-quick-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 8px; }
 .draft-project-name,.draft-project-branch { display:inline-flex; align-items:center; gap:7px; color:var(--wf-muted); font-size:13px; padding:7px 8px; overflow-wrap:anywhere; }
@@ -991,6 +1061,11 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .settings-section .runtime-status, .agent-workbench .settings-section .runtime-actions, .agent-workbench .settings-section .runtime-list { padding-left:0; padding-right:0; }
 .agent-workbench .settings-theme { display:flex; gap:18px; margin-top:12px; }
 .agent-workbench .settings-theme label { display:flex; align-items:center; gap:7px; color:var(--wf-text); font-size:12px; }
+.agent-workbench .settings-perception { margin-top:22px; padding-top:20px; border-top:1px solid var(--wf-line-soft); }
+.agent-workbench .settings-toggle { display:flex; flex:0 0 auto; align-self:flex-start; align-items:center; gap:7px; padding:6px 10px; border:1px solid var(--wf-line); border-radius:8px; color:var(--wf-text); font-size:12px; white-space:nowrap; cursor:pointer; }
+.agent-workbench .settings-toggle input { width:14px; height:14px; margin:0; accent-color:var(--wf-accent-strong); }
+.agent-workbench .settings-toggle:has(input:disabled) { cursor:default; opacity:.6; }
+.agent-workbench .settings-perception + .manual-runtime-error { margin-top:12px; }
 .agent-workbench .settings-diag-list { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 14px; margin:12px 0 18px; font-size:12px; }
 .agent-workbench .settings-diag-list dt { color:var(--wf-text-dim); }
 .agent-workbench .settings-diag-list dd { margin:0; color:var(--wf-text); overflow-wrap:anywhere; }
@@ -1064,9 +1139,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .workflow-version-toolbar select { padding:7px 30px 7px 10px; border:1px solid var(--wf-line); border-radius:7px; background:var(--wf-panel); color:var(--wf-ink); font-size:13px; }
 .agent-workbench .workflow-version-toolbar small { font-size:12px; }
 .agent-workbench .workflow-plan-content { position:relative; }
-.workflow-version-tools { position:absolute; right:22px; top:20px; z-index:10; min-height:0; margin:0; }
 .workflow-version-menu { position:relative; margin:0; font-size:12px; }
-.agent-workbench .central-plan:has(.workflow-version-menu) .wf-plan-head { min-height:36px; }
 .workflow-version-menu > summary { cursor:pointer; color:var(--wf-muted); padding:6px 10px; border:1px solid var(--wf-line-soft); border-radius:8px; list-style:none; }
 .workflow-version-options { position:absolute; right:0; top:calc(100% + 6px); z-index:10; width:220px; max-height:320px; overflow:auto; padding:6px; border:1px solid var(--wf-line-soft); border-radius:10px; background:var(--wf-panel); box-shadow:0 12px 30px var(--wf-shadow-deep); }
 .workflow-version-options button { display:block; width:100%; text-align:left; padding:10px 12px; border:0; border-radius:6px; background:transparent; color:var(--wf-ink); font:inherit; cursor:pointer; }
@@ -1287,10 +1360,18 @@ details.execution-workspace-evidence>article{margin-top:10px}
 
 /* 方案详情收敛为一条阅读列，不再铺满弹窗宽度。 */
 .agent-workbench .workflow-plan-content { position:relative; max-width:820px; margin:0 auto; }
-.agent-workbench .workflow-plan-content .conversation-action { box-sizing:border-box; width:100%; max-width:none; gap:14px; padding:20px 22px; border-radius:14px; }
+.agent-workbench .workflow-plan-content .conversation-action { box-sizing:border-box; width:100%; max-width:none; gap:14px; padding:16px 22px 20px; border-radius:14px; }
+/* 方案状态与版本号上移到页签行右端：详情页正文从“目标”开始，不再用一整行空槽放一个小徽标。 */
+.agent-workbench .workflow-page-nav-row { display:flex; align-items:center; justify-content:space-between; gap:16px; max-width:820px; margin:0 auto; }
+.agent-workbench .workflow-modal .workflow-page-nav-row .workflow-page-tabs { max-width:none; margin:0; }
+.agent-workbench .workflow-page-status { display:flex; flex:0 0 auto; align-items:center; gap:10px; }
+.agent-workbench .workflow-page-status .workflow-version-menu > summary { padding:4px 9px; border-radius:7px; font-size:12px; }
+.agent-workbench .workflow-page-status .workflow-version-options { top:calc(100% + 6px); }
+.agent-workbench .workflow-page-version { color:var(--wf-muted); font-size:12px; white-space:nowrap; }
+.agent-workbench .workflow-plan-content .conversation-action > .wf-plan-goal { margin-top:0; }
+@media(max-width:900px) { .agent-workbench .workflow-page-version { display:none; } }
 
 /* 历史版本入口定位到卡片标题行右端，与版本标签/状态徽标同一行。 */
-.agent-workbench .workflow-plan-content:has(.workflow-version-menu) .wf-plan-head { padding-right:110px; }
 
 /* 版本/状态一行：版本标签与状态徽标同列对齐，不再漂移。 */
 .agent-workbench .wf-plan-head { gap:10px; }
@@ -1315,7 +1396,11 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .agent-workbench .workflow-design-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:30px; padding:4px 0; border-bottom:0; }
 .agent-workbench .workflow-design-row strong { display:flex; align-items:baseline; gap:8px; min-width:0; color:var(--wf-text); font-size:13px; }
 .agent-workbench .workflow-design-row strong small { display:inline; margin:0; flex:0 0 auto; color:var(--wf-text-dim); font-size:11px; font-weight:400; }
-.agent-workbench .workflow-design-row > span, .agent-workbench .workflow-design-row > select { flex:0 0 auto; max-width:280px; color:var(--wf-text-dim); font-size:12px; }
+.agent-workbench .workflow-design-row > span { flex:0 1 auto; min-width:0; color:var(--wf-text-dim); font-size:12px; }
+/* 所有 CLI 下拉同宽右对齐，阶段行与“其余动态 Worker”行共用同一右缘。 */
+.agent-workbench .workflow-design-row > select { flex:0 0 180px; width:180px; max-width:180px; color:var(--wf-text-dim); font-size:12px; }
+.agent-workbench .workflow-design > section.workflow-design-default { margin-top:10px; padding:10px 12px; }
+.agent-workbench .workflow-design-default .workflow-design-row { min-height:34px; padding:2px 0; }
 .agent-workbench .workflow-design > small { color:var(--wf-text-dim); font-size:11px; }
 
 /* 卡片底部的诊断折叠：收为附录样式，与正文拉开层级。 */
@@ -1360,3 +1445,28 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .agent-workbench .workflow-page-body > p[role="status"] { max-width:820px; margin-left:auto; margin-right:auto; }
 
 .agent-workbench .wf-status-text.pending { background:var(--wf-raised); color:var(--wf-text-dim); }
+
+/* 暗色下轨道底色与面板几乎同值；空态卡片改用抬升面板，避免只剩一条边框。 */
+:root[data-theme="dark"] .agent-workbench .project-empty { background:var(--wf-panel-raised); }
+
+/* react-mentions textarea 叠层：mention 是整块高亮，Backspace 按库的 mention 边界整条删除。 */
+.agent-workbench .conversation-composer > .composer-mentions { display:block; width:100%; margin:0; }
+.agent-workbench .composer-mentions { position:relative; width:100%; text-align:left; }
+.agent-workbench .composer-mentions__control { position:relative; width:100%; }
+.agent-workbench .composer-mentions__highlighter { box-sizing:border-box; width:100%; min-height:72px; padding:14px 16px 7px; position:relative; z-index:2; color:transparent !important; -webkit-text-fill-color:currentColor; border:0 !important; font:14px/1.55 ui-sans-serif,system-ui; white-space:pre-wrap; overflow-wrap:anywhere; pointer-events:none; }
+.agent-workbench .composer-mentions__highlighter span { visibility:visible !important; }
+.agent-workbench .composer-mentions__input { display:block; box-sizing:border-box; width:100%; min-height:72px; max-height:220px; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif,system-ui; resize:none; overflow-y:hidden; }
+.agent-workbench .composer-mentions__input::placeholder { color:var(--wf-faint); }
+.agent-workbench .composer-mentions__mention { position:relative; color:var(--wf-accent-strong); -webkit-text-stroke:0.45px var(--wf-accent-strong); }
+.agent-workbench .composer-mentions__mention::before { content:""; position:absolute; left:0; top:50%; width:12px; height:12px; transform:translateY(-50%); background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237d89f5' stroke-width='1.4'%3E%3Cpath d='M8 1.8 14 5v6L8 14.2 2 11V5z'/%3E%3Cpath d='M2 5l6 3.2L14 5M8 8.2V14'/%3E%3C/svg%3E") center/contain no-repeat; }
+[data-theme="light"] .agent-workbench .composer-mentions__mention { color:var(--wf-accent-strong); }
+.agent-workbench .composer-mentions__suggestions { position:absolute !important; right:0 !important; bottom:calc(100% + 8px) !important; left:0 !important; top:auto !important; z-index:40; box-sizing:border-box; width:auto !important; max-width:100% !important; max-height:min(360px,46vh); margin:0; padding:6px; overflow:auto; border:1px solid var(--wf-line); border-radius:12px; background:var(--wf-panel-raised); box-shadow:0 14px 38px rgb(0 0 0 / 22%); list-style:none; }
+.agent-workbench .composer-mentions__suggestions__list { width:100%; max-height:min(360px,46vh); margin:0; padding:0; overflow:auto; list-style:none; }
+.agent-workbench .composer-mentions__suggestions__item { box-sizing:border-box; width:100%; padding:0; border-radius:8px; }
+.agent-workbench .composer-mentions__suggestions__item--focused { background:var(--wf-accent-wash); }
+.agent-workbench .composer-mentions__suggestions__item:hover { background:var(--wf-panel); }
+.agent-workbench .composer-mention-suggestion { display:flex; align-items:center; gap:10px; padding:8px 9px; }
+.agent-workbench .composer-mention-suggestion::before { content:""; flex:0 0 auto; width:14px; height:14px; background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237d89f5' stroke-width='1.4'%3E%3Cpath d='M8 1.8 14 5v6L8 14.2 2 11V5z'/%3E%3Cpath d='M2 5l6 3.2L14 5M8 8.2V14'/%3E%3C/svg%3E") center/contain no-repeat; }
+.agent-workbench .composer-mention-suggestion code { flex:0 0 auto; color:var(--wf-accent); font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.agent-workbench .composer-mention-suggestion span { min-width:0; overflow:hidden; color:var(--wf-muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.agent-workbench .composer-mention-suggestion small { flex:0 0 auto; color:var(--wf-faint); font-size:10px; }

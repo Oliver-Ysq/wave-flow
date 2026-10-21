@@ -2,6 +2,7 @@ import { useRef,useState } from "react";
 import {HistorySidebar} from "./history-sidebar";
 import type { HarnessSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
 import { proposalTitle } from "./workflow-summary";
+import { visibleVersion } from "./workflow-versions";
 
 /** 原执行状态的人话名称；不以总结成功推断目标验收。 */
 export function executionLabel(execution: WorkflowExecution): string {
@@ -71,11 +72,19 @@ export function TaskActivity({ task, visible=true, onPlan, onExecution, onResult
   const state = current ? needsAnswer ? "需要你的回答" : current.finishedAt && summary ? summary.status === "interrupted" ? "总结未完成" : summary.status === "pending" ? "准备总结" : "正在总结" : executionLabel(current) : revision ? proposalLabel(task, revision).replace(" · 未执行", "") : task.status === "running" ? "正在准备方案" : "尚无方案";
   const ended = Boolean(current?.finishedAt);
   const canAdjust = revision && !revision.localOrigin && !execution && !active && task.status === "idle";
+  const revisionVersion = revision ? visibleVersion(task, revision) : null;
+  // 只有“待确认”的方案才把主按钮文案改成去确认；执行中/已确认仍叫查看方案。
+  const pendingRevision = !current && state === "待确认";
+  const planActionLabel = revision?.abandonedAt
+    ? "查看原方案"
+    : pendingRevision
+      ? `去确认方案${revisionVersion ? `（第 ${revisionVersion} 版）` : ""}`
+      : "查看方案";
   return <section className="task-activity" aria-label="当前工作与历史">
     <div className="task-current">
-      <div className="task-current-copy"><strong>{revision ? proposalTitle(revision) : "通过对话描述目标"}</strong><span role="status">{state}</span></div>
+      <div className="task-current-copy"><strong>{revision ? proposalTitle(revision) : "通过对话描述目标"}</strong>{!current && revision ? <button type="button" className="task-state" title="查看当前方案" aria-label={`查看当前方案（${state}）`} onClick={() => onPlan(revision)}><span role="status">{state}</span></button> : <span role="status">{state}</span>}</div>
       <div className="task-current-actions">
-        {current ? <button className="button-primary" onClick={() => needsAnswer || !ended ? onExecution(current.executionId) : onResults(current.executionId)}>{needsAnswer ? "去回答" : ended ? "查看结果" : "查看进度"}</button> : revision && <button className="button-primary" onClick={() => onPlan(revision)}>{revision.abandonedAt ? "查看原方案" : "查看方案"}</button>}
+        {current ? <button className="button-primary" onClick={() => needsAnswer || !ended ? onExecution(current.executionId) : onResults(current.executionId)}>{needsAnswer ? "去回答" : ended ? "查看结果" : "查看进度"}</button> : revision && <button className="button-primary" onClick={() => onPlan(revision)}>{planActionLabel}</button>}
         {canAdjust && <button onClick={() => onAdjust(revision)}>{revision.abandonedAt ? "重新设计" : "调整"}</button>}
         {revision?.abandonedAt && !task.executions.length && task.status !== "completed" && <button onClick={onTemplate}>选择预置</button>}
         <button ref={historyButton} aria-expanded={history} onClick={() => history?closeHistory():setHistory(true)}>历史{task.executions.length ? ` · ${task.executions.length}` : ""}</button>

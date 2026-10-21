@@ -108,3 +108,14 @@ test("总结待办使用原工作名而非后续方案名",()=>{
   expect(summaryWorkLabel(task,"A")).toBe("方案2");
   expect(summaryWorkLabel(task,"unknown")).toBe("历史执行");
 });
+
+test("待确认方案在顶部工具条用去确认文案并带版本号",()=>{
+ const pending={...task,status:"idle",executions:[],workflowRevisions:[revision(1),revision(2)],impactSummaries:[],executionAttention:{}} as HarnessSnapshot;
+ const html=renderToStaticMarkup(<TaskActivity task={pending} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
+ expect(html).toContain("去确认方案（第 2 版）");
+ expect(html).toContain('class="task-state"');
+ const single={...task,status:"idle",executions:[],workflowRevisions:[revision(1)]} as HarnessSnapshot;
+ const singleHtml=renderToStaticMarkup(<TaskActivity task={single} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
+ expect(singleHtml).toContain("去确认方案");
+ expect(singleHtml).not.toContain("（第 1 版）");
+});

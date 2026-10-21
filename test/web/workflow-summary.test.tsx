@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { executionResultExcerpt, proposalTitle, revisionSummaryState, WorkflowProposalSummary, WorkflowExecutionSummary } from "../../src-tauri/web/src/conversation/workflow-summary";
+import { executionResultExcerpt, latestExecutionEntries, proposalTitle, revisionSummaryState, WorkflowProposalSummary, WorkflowExecutionSummary } from "../../src-tauri/web/src/conversation/workflow-summary";
 import type { HarnessSnapshot, WorkflowRevision, WorkflowExecution } from "../../src-tauri/web/src/types";
 import { WorkflowRevisionCard } from "../../src-tauri/web/src/conversation/revision-card";
 
@@ -68,4 +68,40 @@ test("中央旧版显示取代而不是冻结，禁止审批与启动且保留�
   expect(html).not.toContain("已冻结"); expect(html).not.toContain("配置并运行");
   expect(html).toContain("执行步骤"); expect(html).toContain("只读核验算术结果");
   expect(html).not.toContain("确认并运行");
+});
+
+test("运行中的执行显示为带呼吸态的可进入进度卡片",async()=>{
+ const css=await Bun.file("src-tauri/web/src/workbench.css").text();
+ const running={revision:2,status:"running",finishedAt:null,summary:null} as WorkflowExecution;
+ const html=renderToStaticMarkup(<WorkflowExecutionSummary execution={running} revision={revision(2)} version={2} onOpen={()=>{}} />);
+ expect(html).toContain("execution-live-card");
+ expect(html).toContain("is-live");
+ expect(html).toContain("已启动");
+ expect(html).toContain("第 2 版方案");
+ expect(html).toContain("查看进度");
+ expect(html).not.toContain("历史记录：");
+ expect(css).toContain("@keyframes wf-live-breathe");
+ expect(css).toContain(".agent-workbench .execution-live-card.is-live::after");
+ expect(css).toContain("@media (prefers-reduced-motion: reduce) { .agent-workbench .execution-live-card.is-live::after");
+});
+
+test("执行结束后卡片原位变为查看结果，且同一执行不重复出现历史行",()=>{
+ const done={revision:2,status:"completed",finishedAt:"2026-10-18T03:00:00Z",summary:{ok:true}} as WorkflowExecution;
+ const card=renderToStaticMarkup(<WorkflowExecutionSummary execution={done} revision={revision(2)} version={2} featured onOpen={()=>{}} onOpenResults={()=>{}} />);
+ expect(card).toContain("is-finished");
+ expect(card).not.toContain("is-live");
+ expect(card).toContain("执行结束");
+ expect(card).toContain("查看结果");
+ expect(card).not.toContain("查看进度");
+ expect(card).not.toContain("历史记录：");
+ const older=renderToStaticMarkup(<WorkflowExecutionSummary execution={{...done,revision:1}} revision={revision(1)} onOpen={()=>{}} />);
+ expect(older).toContain("历史记录：执行结束");
+ expect(older).not.toContain("execution-live-card");
+ const taskWithHistory={harnessRunId:"t",executionHistory:[
+  {key:"execution-created:e1",at:"2026-10-18T01:00:00Z",executionId:"e1",revision:2,attempt:1,kind:"created",status:"running",diagnostic:null,summary:null},
+  {key:"execution-finished:e1",at:"2026-10-18T02:00:00Z",executionId:"e1",revision:2,attempt:1,kind:"finished",status:"completed",diagnostic:null,summary:{ok:true}},
+  {key:"execution-created:e2",at:"2026-10-19T01:00:00Z",executionId:"e2",revision:1,attempt:1,kind:"created",status:"running",diagnostic:null,summary:null},
+ ]} as unknown as import("../../src-tauri/web/src/types").HarnessSnapshot;
+ const latest=latestExecutionEntries(taskWithHistory);
+ expect(latest.map(item=>[item.executionId,item.status])).toEqual([["e1","completed"],["e2","running"]]);
 });

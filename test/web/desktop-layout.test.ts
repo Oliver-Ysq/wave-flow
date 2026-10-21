@@ -35,11 +35,17 @@ test('短历史记录仅压缩相邻记录，不压缩完整消息或结果卡',
  expect(css).toContain('.task-event { margin:0; padding:4px 0; line-height:1.6; }');
  expect(css).toContain('.workflow-timeline-item:has(> .task-event) + .workflow-timeline-item:has(> .task-event)');
 });
-test('版本入口在卡片标题行右端，不与状态徽标重叠',async()=>{
+test('版本入口在页签行右端，不悬浮在正文上',async()=>{
+ const app=await Bun.file('src-tauri/web/src/App.tsx').text();
  const css=await Bun.file('src-tauri/web/src/workbench.css').text();
- expect(css).toContain('.workflow-version-tools { position:absolute; right:22px; top:20px;');
- expect(css).toContain('.agent-workbench .workflow-plan-content:has(.workflow-version-menu) .wf-plan-head { padding-right:110px;');
- expect(css).toContain('.agent-workbench .workflow-plan-content .conversation-action { box-sizing:border-box; width:100%; max-width:none;');
+ const nav=app.indexOf('workflow-page-nav-row');
+ const menu=app.indexOf('<WorkflowVersions',nav);
+ const body=app.indexOf('className="workflow-page-body"',nav);
+ expect(nav).toBeGreaterThan(-1);
+ expect(menu).toBeGreaterThan(nav);
+ expect(menu).toBeLessThan(body);
+ expect(css).toContain('.agent-workbench .workflow-page-status .workflow-version-menu > summary');
+ expect(css).not.toContain('.workflow-version-tools { position:absolute');
 });
 test('macOS保留原生窗口装饰与安全拖动区，归档独立于任务导航',async()=>{
  const config=await Bun.file('src-tauri/tauri.conf.json').json();

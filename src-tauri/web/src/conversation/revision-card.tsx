@@ -42,6 +42,7 @@ export function WorkflowRevisionCard({
   onAdjustViaChat,
   onAbandonCard,
   hideGoal=false,
+  hideHead=false,
 }: {
   /** 不可变草案记录。 */
   revision: WorkflowRevision;
@@ -59,6 +60,8 @@ export function WorkflowRevisionCard({
   onAbandonCard?:()=>Promise<void>;
   /** 详情页页头已有目标时隐藏重复标题；对话内独立卡片缺省仍展示。 */
   hideGoal?:boolean;
+  /** 详情页把版本/状态上移到页签行时隐藏卡片首行，避免顶部留出空状态槽。 */
+  hideHead?:boolean;
 }) {
   const rejected = revision.rejectedAt != null;
   const accepted = revision.acceptedAt !== null;
@@ -101,12 +104,12 @@ export function WorkflowRevisionCard({
 
   return (
     <article className={`conversation-action workflow-revision ${rejected ? "rejected" : ""}`}>
-      <div className="wf-plan-head">
+      {!hideHead&&<div className="wf-plan-head">
         {versionLabel(harness,revision)&&<span>{versionLabel(harness,revision)}</span>}
         <em className={`wf-plan-status ${rejected ? "rejected" : accepted ? "accepted" : "pending"}`}>
           {status}
         </em>
-      </div>
+      </div>}
       {!hideGoal&&<p className="wf-plan-goal"><span className="wf-plan-label">目标：</span>{revision.goal ?? "历史方案未保存独立目标"}</p>}
       <p className="wf-plan-scope"><span className="wf-plan-label">范围：</span>{revision.scope ?? "历史方案未保存独立范围"}</p>
       {canReviseTemplate&&onSaved&&<button disabled={saving} onClick={()=>void prepareParameters().catch(error=>setTransferError(String(error)))}>准备参数新版本</button>}

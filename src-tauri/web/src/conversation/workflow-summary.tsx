@@ -71,16 +71,61 @@ export function executionResultExcerpt(result: WorkflowExecution["summary"]): st
 }
 
 /** 执行摘要与方案摘要采用同一信息层级；状态来自原 Execution。 */
-export function WorkflowExecutionSummary({ execution, revision, onOpen,attempt }: {
+export function WorkflowExecutionSummary({ execution, revision, onOpen, onOpenResults, attempt, version, featured=false }: {
   /** 原执行登记，未读取节点详情。 */
   execution: WorkflowExecution;
   /** 原执行冻结的方案；历史缺失时不猜归属。 */
   revision?: WorkflowRevision;
-  /** 仅打开所属执行。 */
+  /** 运行中进入进度；终态默认进入原执行页。 */
   onOpen: () => void;
+  /** 终态直接打开结果页；缺失时退回执行页。 */
+  onOpenResults?: () => void;
   /** 原历史事件尝试号；未知不推断。 */
   attempt?:number;
+  /** 展示用方案版本序号；仅多版本时提供，不参与执行身份。 */
+  version?:number|null;
+  /** 是否为最近一次执行；只有最近一次用卡片，旧执行保持一行历史。 */
+  featured?:boolean;
 }) {
   const labels: Record<WorkflowExecution["status"], string> = { running:"已启动", paused:"已暂停", pausing:"正在暂停", recovering:"正在恢复", completed:"执行结束", cancelled:"已停止", interrupted:"已中断" };
-  return <p className="task-event">历史记录：{labels[execution.status]} · <button onClick={onOpen}>{revision ? proposalTitle(revision) : "查看执行"}</button></p>;
+  const title = revision ? proposalTitle(revision) : "查看执行";
+  const statusLabel = labels[execution.status];
+  const live = execution.status === "running" || execution.status === "recovering";
+  const active = live || execution.status === "paused" || execution.status === "pausing";
+  const finished = !active;
+  // 最近一次执行无论进行中还是已结束都保持同一张卡片，避免结束后再出现一条重复的历史记录。
+  if (featured || execution.status === "running") {
+    const meta = [statusLabel, version ? `第 ${version} 版方案` : null, attempt && attempt > 1 ? `第 ${attempt} 次尝试` : null].filter(Boolean).join(" · ");
+    const action = finished ? (execution.status === "completed" ? "查看结果" : "查看记录") : "查看进度";
+    const tone = execution.status === "completed" ? "success" : execution.status === "interrupted" ? "interrupted" : execution.status === "cancelled" ? "cancelled" : active ? "active" : "neutral";
+    const open = finished && execution.status === "completed" && onOpenResults ? onOpenResults : onOpen;
+    return <button type="button" className={`execution-live-card ${live ? "is-live" : "is-finished"} status-${tone}`} onClick={open} aria-label={`${action}：${title}（${meta}）`}>
+      <span className="execution-live-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M12 3v3.2" />
+          <rect x="4.4" y="6.8" width="15.2" height="11.4" rx="3.2" />
+          <circle cx="9.1" cy="12.2" r="1" />
+          <circle cx="14.9" cy="12.2" r="1" />
+          <path d="M9.6 15.7h4.8" />
+        </svg>
+      </span>
+      <span className="execution-live-copy">
+        <strong>{title}</strong>
+        <small><i className="execution-live-dot" aria-hidden="true" />{meta}</small>
+      </span>
+      <span className="execution-live-action" aria-hidden="true">{action} <span>→</span></span>
+    </button>;
+  }
+  return <p className="task-event">历史记录：{statusLabel} · <button onClick={onOpen}>{title}</button></p>;
+}
+
+export type ExecutionHistoryEntry = NonNullable<HarnessSnapshot["executionHistory"]>[number];
+/** 同一执行会同时留下 created 与 finished 历史；只保留最新一条，避免“已启动”卡片在结束后残留。 */
+export function latestExecutionEntries(task: HarnessSnapshot): ExecutionHistoryEntry[] {
+  const byExecution = new Map<string, ExecutionHistoryEntry>();
+  for (const item of task.executionHistory ?? []) {
+    const current = byExecution.get(item.executionId);
+    if (!current || Date.parse(item.at) >= Date.parse(current.at)) byExecution.set(item.executionId, item);
+  }
+  return [...byExecution.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
 }
