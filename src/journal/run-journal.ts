@@ -242,7 +242,7 @@ function isWorkflowMeta(value: unknown): boolean {
 }
 
 function isNormalizedRequest(value: unknown): boolean {
-  if (!isPlainObject(value) || typeof value.id !== "string" || (value.cli !== "codex" && value.cli !== "kimi") || (value.sandbox !== "read-only" && value.sandbox !== "workspace-write") || typeof value.cwd !== "string" || typeof value.prompt !== "string") return false;
+  if (!isPlainObject(value) || typeof value.id !== "string" || (value.cli !== "codex" && value.cli !== "kimi" && value.cli !== "claude" && value.cli !== "dsh") || (value.sandbox !== "read-only" && value.sandbox !== "workspace-write") || typeof value.cwd !== "string" || typeof value.prompt !== "string") return false;
   return (value.phase === undefined || typeof value.phase === "string") && (value.input === undefined || isJsonObject(value.input));
 }
 
@@ -252,7 +252,7 @@ function isRunStatus(value: unknown): boolean { return value === "running" || va
 function isAcpBinding(value: unknown): value is { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: import("../runtimes/types").RuntimeProvenance } {
   if (!value || typeof value !== "object" || typeof (value as { launcherId?: unknown }).launcherId !== "string" || !(value as { launcherId: string }).launcherId.trim() || typeof (value as { sessionId?: unknown }).sessionId !== "string" || !(value as { sessionId: string }).sessionId.trim() || !(value as { capabilities?: unknown }).capabilities || typeof (value as { capabilities: unknown }).capabilities !== "object") return false;
   const runtime = (value as { runtime?: unknown }).runtime;
-  return runtime === undefined || !!runtime && typeof runtime === "object" && ((runtime as { cli?: unknown }).cli === "codex" || (runtime as { cli?: unknown }).cli === "kimi") && typeof (runtime as { runtimeId?: unknown }).runtimeId === "string" && typeof (runtime as { executablePath?: unknown }).executablePath === "string" && (runtime as { executablePath: string }).executablePath.startsWith("/") && typeof (runtime as { version?: unknown }).version === "string" && ((runtime as { adapterId?: unknown }).adapterId === "codex-acp" || (runtime as { adapterId?: unknown }).adapterId === "kimi-acp") && typeof (runtime as { adapterVersion?: unknown }).adapterVersion === "string" && typeof (runtime as { verifiedAt?: unknown }).verifiedAt === "string";
+  return runtime === undefined || !!runtime && typeof runtime === "object" && ((runtime as { cli?: unknown }).cli === "codex" || (runtime as { cli?: unknown }).cli === "kimi" || (runtime as { cli?: unknown }).cli === "claude" || (runtime as { cli?: unknown }).cli === "dsh") && typeof (runtime as { runtimeId?: unknown }).runtimeId === "string" && typeof (runtime as { executablePath?: unknown }).executablePath === "string" && (runtime as { executablePath: string }).executablePath.startsWith("/") && typeof (runtime as { version?: unknown }).version === "string" && ((runtime as { adapterId?: unknown }).adapterId === "codex-acp" || (runtime as { adapterId?: unknown }).adapterId === "kimi-acp" || (runtime as { adapterId?: unknown }).adapterId === "claude-acp" || (runtime as { adapterId?: unknown }).adapterId === "dsh-acp") && typeof (runtime as { adapterVersion?: unknown }).adapterVersion === "string" && typeof (runtime as { verifiedAt?: unknown }).verifiedAt === "string";
 }
 
 function isAcpRecovery(value: unknown): value is { readonly launcherId: string; readonly sessionId: string } {

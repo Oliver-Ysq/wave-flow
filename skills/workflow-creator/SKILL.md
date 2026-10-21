@@ -60,8 +60,8 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 
 Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。整worktree v2授权保存实际tracked与非ignored untracked（排除未跟踪node_modules），不预填paths；独立分支可修改同一文件，必须显式集成。完成后冻结唯一完整ready来源，用户读diff后明确squash合入本机目标分支，不自动合入/push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
-把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（当前已验证的 CLI 是 `codex`
-与 `kimi`），而不是一次文本补全：
+把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 允许 `codex` / `kimi` / `claude` / `dsh`；
+四者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
 
 - 每个 prompt 必须自包含：任务、范围、相关上游结果、约束与期望产出。Agent 不会自动
   继承另一个 Agent 的对话内容。
@@ -139,7 +139,7 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 1. 形态正确：受信任模块有 `import`/`export`；受限草案没有任何 `import`/`export`。
 2. `meta` 是纯字面量，含 kebab-case `name`、单行 `description`、唯一非空 `phases`。
 3. 每个 `phase()` 调用精确匹配某个 `meta.phases[].title`；`phase()` 不在并发分支内。
-4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` 或 `"kimi"`；`sandbox` 只取 `read-only`/`workspace-write`。
+4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` / `"kimi"` / `"claude"` / `"dsh"` 之一（四者均已完成真实双角色验收，均可设为主控）；`sandbox` 只取 `read-only`/`workspace-write`。
 5. `parallel()` 每项都是零参数函数；并发结果在使用前判空。
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
 7. 脚本级人工决策使用 `decisionGate`（仅受限草案）；prompt 不含完成上报指令。

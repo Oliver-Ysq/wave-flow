@@ -39,3 +39,16 @@ test("PATH 中同时发现 codex 与 kimi 并按 cli 标注", async () => {
     expect(candidate.discoveredFrom).toBe("shell-path");
   }
 });
+
+test("PATH 中发现 claude 与 dsh 并按 cli 标注", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-discovery-new-")); roots.push(root);
+  for (const name of ["claude", "dsh"]) { const path = join(root, name); await writeFile(path, `#!/bin/sh\necho ${name}\n`, { mode: 0o700 }); await chmod(path, 0o700); }
+  const discovery = new ShellPathDiscovery(async () => ({ stdout: `__WAVE_FLOW_PATH_a__\nPATH=${root}\n__WAVE_FLOW_PATH_a__`, stderr: "", exitCode: 0 }), "", async () => []);
+  const candidates = await discovery.discover();
+  expect(candidates.map(item => item.cli).sort()).toEqual(["claude", "dsh"]);
+  const canonical = await realpath(root);
+  for (const candidate of candidates) {
+    expect(candidate.executablePath).toBe(join(canonical, candidate.cli));
+    expect(candidate.discoveredFrom).toBe("shell-path");
+  }
+});

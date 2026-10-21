@@ -80,7 +80,9 @@ import type {
   HarnessSnapshot,
   PhaseVisit,
   RunSnapshot,
+  RuntimeCli,
 } from "./types";
+import { CLI_KINDS, cliDisplayName, cliIcon } from "./cli-meta";
 
 const terminal = new Set(["completed", "cancelled", "interrupted"]);
 const localeTime = (value: string | null) =>
@@ -2346,7 +2348,7 @@ function RuntimeConnectionPanel({
   onTheme?: (theme: ColorTheme) => void;
 }) {
   const [manualPath, setManualPath] = useState("");
-  const [manualCli, setManualCli] = useState<"codex" | "kimi">("codex");
+  const [manualCli, setManualCli] = useState<RuntimeCli>("codex");
   const [manualOpen, setManualOpen] = useState(false);
   const settingsPanel = useRef<HTMLElement>(null),
     manualPanel = useRef<HTMLElement>(null),
@@ -2448,7 +2450,7 @@ function RuntimeConnectionPanel({
     if (manualError) manualErrorRef.current?.focus();
   }, [manualError]);
   /** 上次扫描中未得到可用候选的 CLI 及探测结论；只影响说明文案。 */
-  const [scanFailures, setScanFailures] = useState<Partial<Record<"codex" | "kimi", "absent" | "timeout" | "exec_failed" | "limit_reached">>>({});
+  const [scanFailures, setScanFailures] = useState<Partial<Record<RuntimeCli, "absent" | "timeout" | "exec_failed" | "limit_reached">>>({});
   /** 扫描本身失败（Engine 不可达等）；与“某个 CLI 没探测到”分开呈现。 */
   const [scanFailure, setScanFailure] = useState<string | null>(null);
   const [runtimeOperation, setRuntimeOperation] = useState<
@@ -2608,11 +2610,11 @@ function RuntimeConnectionPanel({
     return (
       <article key={runtime.runtimeId} className={isDefault ? "selected" : ""}>
         <span className={`runtime-icon ${runtime.cli}`} aria-hidden="true">
-          {runtime.cli === "codex" ? "C" : "K"}
+          {cliIcon(runtime.cli)}
         </span>
         <div>
           <strong>
-            {runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+            {cliDisplayName(runtime.cli)}
             {isDefault && <em className="runtime-badge">默认</em>}
             {statusLabel && <em className="runtime-badge warn">{statusLabel}</em>}
           </strong>
@@ -2653,7 +2655,7 @@ function RuntimeConnectionPanel({
               className="button-secondary"
               disabled={runtimeBusy}
               onClick={() => void removeRuntime(runtime)}
-              aria-label={`移除 ${runtime.cli === "codex" ? "Codex CLI" : "Kimi CLI"} 安装 ${runtime.executablePath}`}
+              aria-label={`移除 ${cliDisplayName(runtime.cli)} 安装 ${runtime.executablePath}`}
             >
               {confirmRemoveId === runtime.runtimeId ? "确认移除？" : "移除"}
             </button>
@@ -2743,7 +2745,7 @@ function RuntimeConnectionPanel({
           <ul className="runtime-scan-reasons">
             {Object.entries(scanFailures).map(([cli, status]) => (
               <li key={cli}>
-                {cli === "codex" ? "Codex CLI" : "Kimi CLI"}：{probeFailureLabels[status!]}
+                {cliDisplayName(cli as RuntimeCli)}：{probeFailureLabels[status!]}
               </li>
             ))}
           </ul>
@@ -2794,12 +2796,15 @@ function RuntimeConnectionPanel({
                   disabled={runtimeBusy}
                   value={manualCli}
                   onChange={(event) => {
-                    setManualCli(event.target.value as "codex" | "kimi");
+                    setManualCli(event.target.value as RuntimeCli);
                     setManualError(null);
                   }}
                 >
-                  <option value="codex">Codex CLI</option>
-                  <option value="kimi">Kimi CLI</option>
+                  {CLI_KINDS.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {cliDisplayName(kind)}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label className="connection-field">
@@ -2816,12 +2821,18 @@ function RuntimeConnectionPanel({
                     // Kimi 二进制留在“Codex CLI”选项上直到验证才失败。
                     const base = value.trim().split("/").pop()?.toLowerCase() ?? "";
                     if (base.includes("kimi")) setManualCli("kimi");
+                    else if (base.includes("claude")) setManualCli("claude");
+                    else if (base.includes("dsh")) setManualCli("dsh");
                     else if (base.includes("codex")) setManualCli("codex");
                   }}
                   placeholder={
                     manualCli === "kimi"
                       ? "/Users/you/.kimi-code/bin/kimi"
-                      : "/Users/you/.local/bin/codex"
+                      : manualCli === "claude"
+                        ? "/Users/you/.npm-global/bin/claude"
+                        : manualCli === "dsh"
+                          ? "/Users/you/.npm-global/bin/dsh"
+                          : "/Users/you/.local/bin/codex"
                   }
                   spellCheck={false}
                 />
@@ -3017,7 +3028,7 @@ function RuntimeConnectionPanel({
                   <dl className="settings-diag-list">
                     <dt>CLI</dt>
                     <dd>
-                      {selected.cli === "codex" ? "Codex CLI" : "Kimi CLI"}
+                      {cliDisplayName(selected.cli)}
                     </dd>
                     <dt>路径</dt>
                     <dd>

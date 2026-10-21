@@ -2,7 +2,7 @@
 
 **让任务有章可循，让不同 Agent 发挥所长。**
 
-Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / Kimi Agent 分阶段执行，你可以随时查看进度、回答问题或停止任务。
+Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / Kimi / DeepSeek Harness / Claude Code Agent 分阶段执行，你可以随时查看进度、回答问题或停止任务。
 
 把任务交给可控的流程，把不同工作交给合适的 Agent。不必让一段越来越长的对话，承担从规划到交付的所有事情。
 
@@ -31,7 +31,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ### 不押注一个 Agent，让不同 CLI 各展所长
 
-把 Codex、Kimi 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。也可以结合各自模型、工具与 CLI 能力分配工作，让擅长分析的分析、擅长实现的实现。
+把 Codex、Kimi、DeepSeek Harness、Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。也可以结合各自模型、工具与 CLI 能力分配工作，让擅长分析的分析、擅长实现的实现。
 
 每个 Worker 绑定独立真实 ACP 会话，使用你选择的本机 CLI 及其默认模型。多 CLI 协作利用不同模型与 Harness 的互补性，降低单一路径的盲区；当前由用户分配 CLI，不提供自动模型路由。
 
@@ -59,7 +59,8 @@ Wave Flow 仍在早期开发，欢迎试用，也请留意：
 
 - 本地 Workflow 是用户明确选择的受信任扩展；不支持 URL 下载工作流、可视化流程编辑、远程控制或云同步。
 - 主控保留 OS 文件写隔离与四个窄工具；Worker 使用可信原生 CLI 配置与权限，不额外施加 Wave Flow OS 文件隔离。worktree/cwd 只分离正常工作现场，不能阻止 Worker 修改其他目录、其他 worktree、共享 Git 或凭据；任务意图不是安全保证。不同 worktree 可修改同一文件，冲突由显式集成处理。Git diff 不证明工作区外影响，也不替代敏感内容审阅。
-- 完整集成且 ready 后可查看成果 diff 并明确 squash 合入目标本机分支，不自动 push。目标分支漂移或未提交内容存在覆盖风险时拒绝。原生 CLI 仍使用 `~/.codex`、`~/.kimi-code`；配置与凭据也可能被模型工具修改。
+- 完整集成且 ready 后可查看成果 diff 并明确 squash 合入目标本机分支，不自动 push。目标分支漂移或未提交内容存在覆盖风险时拒绝。原生 CLI 仍使用 `~/.codex`、`~/.kimi-code`、`~/.dsh`、`~/.claude`；配置与凭据也可能被模型工具修改。
+- DeepSeek Harness 与 Claude Code 均已完成主控与 Worker 双角色真实验收，可在设置页设为默认主控。主控使用各自私有隔离 Home：Claude 只继承认证/模型 env（用户 hooks/permissions 不进入主控）；DeepSeek Harness 使用出厂 profile 骨架且清空用户 patch，凭据仅软链引用。DeepSeek Harness 需在 `$DSH_HOME` 配置 provider key，且其 CLI 要求 Node ≥ 24 运行时（Node ≤ 22 下会静默退出，无任何输出）。Claude Code 的验收验证的是 harness 兼容性（Claude Code 2.1.304 + claude-agent-acp 0.94.0），模型侧由用户 `~/.claude/settings.json` 的认证配置决定（验收使用 Anthropic 兼容端点，非 Anthropic 模型）。
 - 完整总结、当前现场补充及 writer 安全交接是修订启动的前置条件。新版所有实际节点重新工作，不跨 Execution 缓存旧完成结果。新 Task 使用单链契约，旧多卡记录不自动迁移。
 - 中断恢复只复用同一执行内严格匹配的已完成前缀；不会回滚文件或撤销外部副作用。
 - Worker 原生会话持续五分钟没有事件时，执行器会记录停滞诊断并中断，不自动重发任务；等待人工答案、用户暂停与控制操作不计入窗口。静默和 read-only 意图都不能证明没有副作用。

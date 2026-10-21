@@ -51,6 +51,20 @@ function testConfig(): import("../../src/harness/types").ExecutionConfigSnapshot
   return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: "test-runtime", ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("w1"), assignment("w2")] };
 }
 
+test("分配快照白名单已拓宽到 claude 与 dsh，可耐久并重新列出", async () => {
+  const { harness, executions, harnessRunId } = await fixture();
+  await harness.proposeWorkflowRevision(harnessRunId, SIMPLE_SOURCE);
+  await harness.acceptWorkflowRevision(harnessRunId, 1);
+  const assignment = (agentId: string, cli: "claude" | "dsh", adapterId: "claude-acp" | "dsh-acp"): import("../../src/harness/types").WorkerAssignment => ({ agentId, cli, model: "cli-default", source: "user", runtimeId: `${cli}-runtime`, adapterId, adapterVersion: "1.0" });
+  const config = { ...testConfig(), defaultAssignment: assignment("*", "claude", "claude-acp"), assignments: [assignment("w1", "dsh", "dsh-acp"), assignment("w2", "claude", "claude-acp")] };
+  const created = await executions.createExecution(harnessRunId, 1, {}, config);
+  await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
+  const listed = (await executions.listExecutions(harnessRunId))[0];
+  expect(listed.executionId).toBe(created.execution.executionId);
+  expect(listed.config?.assignments.map((item) => [item.cli, item.adapterId])).toEqual([["dsh", "dsh-acp"], ["claude", "claude-acp"]]);
+  expect(listed.config?.defaultAssignment).toMatchObject({ cli: "claude", adapterId: "claude-acp" });
+});
+
 const SIMPLE_SOURCE = `const meta = { name: "exec-simple", description: "简单执行", phases: [{ title: "工作" }] };
 async function run(args) {
   phase("工作");

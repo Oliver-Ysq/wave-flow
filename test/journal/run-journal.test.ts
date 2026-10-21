@@ -167,6 +167,21 @@ describe("RunJournal", () => {
     expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", acp: expect.objectContaining({ launcherId: "kimi-acp", runtime: expect.objectContaining({ cli: "kimi", adapterId: "kimi-acp" }) }) }));
   });
 
+  test("接受 claude/dsh runtime provenance 与新 cli 的 agent.created 事实，未知 cli 仍拒绝", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    for (const [index, [cli, adapterId, path]] of ([["claude", "claude-acp", "/Users/test/.nvm/bin/claude"], ["dsh", "dsh-acp", "/Users/test/.nvm/bin/dsh"]] as const).entries()) {
+      await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: `node-${cli}`, agentSessionId: null, diagnostic: null, sequence: index + 1, phase: "scan", request: { id: `node-${cli}`, cli, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" } });
+      await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: `node-${cli}`, agentSessionId: `session-${cli}`, diagnostic: null, status: "running" });
+      await journal.append({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: `node-${cli}`, agentSessionId: `session-${cli}`, diagnostic: null, delivery: "acp", acp: { launcherId: adapterId, sessionId: `s-${cli}`, capabilities: {}, runtime: { runtimeId: "33333333-3333-4333-8333-333333333333", cli, executablePath: path, version: `${cli} 1.0`, adapterId, adapterVersion: "1.0", verifiedAt: "2026-10-20T00:00:00.000Z" } } });
+    }
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events.filter((event) => event.type === "agent.session")).toHaveLength(2);
+    // 未知 cli 的 provenance 仍被校验拒绝。
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "agent.session", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "node-dsh", agentSessionId: "session-dsh", diagnostic: null, delivery: "acp", acp: { launcherId: "dsh-acp", sessionId: "s-dsh", capabilities: {}, runtime: { runtimeId: "33333333-3333-4333-8333-333333333333", cli: "traex", executablePath: "/usr/local/bin/traex", version: "1.0", adapterId: "dsh-acp", adapterVersion: "1.0", verifiedAt: "2026-10-20T00:00:00.000Z" } } })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow();
+  });
+
   test("重开时拒绝缺少 ACP 坐标的 agent.recovered 事实", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));

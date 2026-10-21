@@ -7,7 +7,7 @@ AsyncLocalStorage 隔离的 `agent()`、`phase()`、`parallel()`、`pipeline()` 
 真实 Worker 路径固定为：
 
 ```text
-Runtime → RuntimeAcpWorkerExecutor → 本机 CLI ACP（Codex / Kimi） → Control → Journal
+Runtime → RuntimeAcpWorkerExecutor → 本机 CLI ACP（经内置 Adapter Catalog：codex / kimi / claude / dsh） → Control → Journal
 ```
 
 - `runtime/`：Run 调度、暂停与显式 resume、停滞检测、Replay 与 Worker 进程控制。

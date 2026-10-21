@@ -6,7 +6,7 @@ import { AcpSessionClient, type AcpLauncher, type AcpTransportFactory } from "..
 import { adapterForCli } from "./adapter-catalog";
 import { verifyExecutable } from "./identity";
 import { readCliVersion } from "./cli-version";
-import { resolveNodeRuntime } from "./node-runtime";
+import { resolveNodeRuntime, assertNodeMinimumVersion } from "./node-runtime";
 import type { CliRuntimeRecord, RuntimeCli, RuntimeDiscoverySource, VerifiedCliRuntime } from "./types";
 
 /** 探针 MCP 由 Engine 自身承载：编译态是 `__mcp-probe` 子命令，开发态直接 spawn 引擎入口脚本。 */
@@ -27,7 +27,9 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
   const entry = adapterForCli(cli);
   const executable = await verifyExecutable(input.executablePath);
   const pinnedNode = input.nodeExecutablePath ? await verifyExecutable(input.nodeExecutablePath) : null;
-  const node = entry.requiresNodeRuntime ? pinnedNode ? {executablePath:pinnedNode.executablePath,executableIdentity:pinnedNode.identity} : await resolveNodeRuntime(input.discoveredShell) : null;
+  const node = entry.requiresNodeRuntime ? pinnedNode ? {executablePath:pinnedNode.executablePath,executableIdentity:pinnedNode.identity} : await resolveNodeRuntime(input.discoveredShell, entry.minNodeVersion) : null;
+  // 声明了 minNodeVersion 的 CLI（如 dsh）在旧 node 下会静默退出零输出，必须先拦在验证阶段。
+  if (node && entry.minNodeVersion !== undefined) await assertNodeMinimumVersion({ executablePath: node.executablePath, executableIdentity: node.executableIdentity }, entry.minNodeVersion, entry.displayName);
   const version = await readCliVersion(executable.executablePath, entry.displayName, node ? [dirname(node.executablePath)] : []);
   const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-validate-"));
   try {

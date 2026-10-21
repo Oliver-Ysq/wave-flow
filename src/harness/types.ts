@@ -327,7 +327,7 @@ export type WorkerAssignment = {
   /** 分配目标；必须是 Registry 中已验证的 Runtime。 */
   readonly runtimeId: string;
   /** 分配目标已验证 adapter 标识；创建时与 Registry 核对一致。 */
-  readonly adapterId: "codex-acp" | "kimi-acp";
+  readonly adapterId: "codex-acp" | "kimi-acp" | "claude-acp" | "dsh-acp";
   /** 分配目标已验证 adapter 版本；replay provenance 复核按它比对。 */
   readonly adapterVersion: string;
 };

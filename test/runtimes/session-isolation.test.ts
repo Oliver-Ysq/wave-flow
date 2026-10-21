@@ -23,12 +23,21 @@ test("未声明能力或角色未启用时不调用prepare、不回退普通启�
   expect(calls).toBe(0);
 });
 
-test("当前Adapter隔离能力在Catalog声明，未知CLI未自动开放", () => {
+test("当前Adapter隔离能力在Catalog声明，未知CLI未自动开放", async () => {
   expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
   expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
-  expect(adapterById("codex-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
-  expect(adapterById("kimi-acp")?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
-  expect(adapterById("claude-acp")).toBeNull();
+  // claude/dsh 已完成主控隔离验收：声明 profile 与 harnessTools，未知 CLI 仍 fail closed。
+  for (const id of ["claude-acp", "dsh-acp"] as const) {
+    const entry = adapterById(id);
+    expect(entry).not.toBeNull();
+    expect(entry?.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+    expect(entry?.capabilities.harnessTools).toBe(true);
+    // 私有 Home 的具体结构由 cli-session-home.test.ts 用夹具验证；此处只锁定 Catalog 声明。
+    expect(typeof entry?.sessionIsolation?.prepare).toBe("function");
+    expect(typeof entry?.sessionIsolation?.readOnlyPaths).toBe("function");
+  }
+  await expect(prepareIsolatedLauncher(undefined, { id: "unknown-acp", command: "/fixture/agent", args: [] }, "/fixture/scratch", "harness")).rejects.toThrow("拒绝普通启动回退");
+  expect(adapterById("unknown-acp")).toBeNull();
 });
 
 test("当前Adapter开放各自原生目录，生成的主控配置仍受保护但凭据可原子刷新", ()=>{

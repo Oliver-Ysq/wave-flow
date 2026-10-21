@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CliRuntime, CliRuntimeListResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, ScanCliRuntimesResponse } from "./types";
+import type { CliRuntime, CliRuntimeListResponse, DesktopStatusResponse, DiscoveredCliCandidate, EngineEventEnvelope, ExecutionConfigSnapshot, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessProjectListResponse, HarnessProjectResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, RuntimeCli, ScanCliRuntimesResponse } from "./types";
 
 /** WebView 只能调用当前 Tauri 持有的 Engine；没有浏览器 HTTP fallback。 */
 async function action<T>(name: string, args: Record<string, unknown> = {}, timeoutSecs?: number): Promise<T> {
@@ -62,7 +62,7 @@ export const api = {
   cliRuntimes: () => action<CliRuntimeListResponse>("runtimes.list"),
   discoverCliRuntimes: () => action<{ candidates: DiscoveredCliCandidate[] }>("runtimes.discover"),
   scanCliRuntimes: () => action<ScanCliRuntimesResponse>("runtimes.scan"),
-  validateCliRuntime: (executablePath: string, cli: "codex" | "kimi", discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual" = "manual", discoveredShell: string | null = null) => action<{ runtime: CliRuntime }>("runtimes.validate", { executablePath, cli, discoveredFrom, discoveredShell }),
+  validateCliRuntime: (executablePath: string, cli: RuntimeCli, discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual" = "manual", discoveredShell: string | null = null) => action<{ runtime: CliRuntime }>("runtimes.validate", { executablePath, cli, discoveredFrom, discoveredShell }),
   selectCliRuntime: (runtimeId: string) => action<{ runtime: CliRuntime }>("runtimes.select", { runtimeId }),
   deleteCliRuntime: (runtimeId: string) => action<{ deleted: true }>("runtimes.delete", { runtimeId }),
   phaseVisits: (runId: string, options: { cursor?: number; includeEmpty?: boolean; attempt?: number } = {}) => {

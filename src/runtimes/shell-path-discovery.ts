@@ -43,7 +43,7 @@ export class ShellPathDiscovery {
    */
   private async withInstallDirFallback(candidates: ReadonlyMap<string, DiscoveredCliCandidate>): Promise<readonly DiscoveredCliCandidate[]> {
     const present = new Set([...candidates.values()].map((item) => item.cli));
-    const missing = (["codex", "kimi"] as const).filter((cli) => !present.has(cli));
+    const missing = (["codex", "kimi", "claude", "dsh"] as const).filter((cli) => !present.has(cli));
     if (missing.length === 0) return [...candidates.values()];
     const directories = await this.installDirectories();
     return [...(await mergeCandidates(directories.flatMap((directory) => missing.map((cli) => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source: "install-dir" as const, shell: null, cli }))), candidates)).values()];
@@ -100,7 +100,7 @@ export function extractPath(output: string): string | null {
 }
 
 function candidatePaths(pathValue: string, source: DiscoverySource, shell: string | null): Array<{ path: string; source: DiscoverySource; shell: string | null; cli: RuntimeCli }> {
-  return pathValue.split(delimiter).filter(Boolean).flatMap(directory => (["codex", "kimi"] as const).map(cli => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source, shell, cli }))).filter(item => item.path.startsWith("/"));
+  return pathValue.split(delimiter).filter(Boolean).flatMap(directory => (["codex", "kimi", "claude", "dsh"] as const).map(cli => ({ path: `${directory.replace(/\/$/, "")}/${cli}`, source, shell, cli }))).filter(item => item.path.startsWith("/"));
 }
 
 async function mergeCandidates(items: readonly { path: string; source: DiscoverySource; shell: string | null; cli: RuntimeCli }[], seed: ReadonlyMap<string, DiscoveredCliCandidate> = new Map()): Promise<Map<string, DiscoveredCliCandidate>> {
@@ -108,9 +108,9 @@ async function mergeCandidates(items: readonly { path: string; source: Discovery
   for (const item of items) {
     try {
       const verified = await verifyExecutable(item.path); const canonical = verified.executablePath;
-      // realpath 目标可能不再以 codex/kimi 结尾；以 canonical basename 优先判定种类。
+      // realpath 目标可能不再以 CLI 名结尾；以 canonical basename 优先判定种类。
       const name = canonical.slice(canonical.lastIndexOf("/") + 1);
-      const cli: RuntimeCli = name === "codex" || name === "kimi" ? name : item.cli;
+      const cli: RuntimeCli = name === "codex" || name === "kimi" || name === "claude" || name === "dsh" ? name : item.cli;
       const key = `${cli}\0${canonical}`;
       const existing = result.get(key);
       const aliases = [...new Set([...(existing?.aliases ?? []), item.path])];

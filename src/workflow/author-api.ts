@@ -83,7 +83,7 @@ export function log(message: string): void {
 function validateAgentOptions(options: AgentOptions): void {
   if (!options || typeof options !== "object") throw new WorkflowContractError("agent() 必须提供 options。");
   if (!agentId.test(options.id)) throw new WorkflowContractError("agent() 的 id 必须为 1-120 位允许字符。");
-  if (options.cli !== "codex" && options.cli !== "kimi") throw new WorkflowContractError("agent() 的 cli 当前仅支持 codex 或 kimi。");
+  if (options.cli !== "codex" && options.cli !== "kimi" && options.cli !== "claude" && options.cli !== "dsh") throw new WorkflowContractError("agent() 的 cli 当前仅支持 codex、kimi、claude 或 dsh。");
   if (options.label !== undefined && (typeof options.label !== "string" || options.label.trim() === "")) throw new WorkflowContractError("agent() 的 label 必须为非空字符串。");
   if (options.cwd !== undefined && (typeof options.cwd !== "string" || options.cwd.trim() === "")) throw new WorkflowContractError("agent() 的 cwd 必须为非空字符串。");
   if (options.model !== undefined && (typeof options.model !== "string" || options.model.trim() === "")) throw new WorkflowContractError("agent() 的 model 必须为非空字符串。");

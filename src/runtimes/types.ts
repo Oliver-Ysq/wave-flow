@@ -1,5 +1,5 @@
 /** 当前支持的用户本机 Coding CLI；新 CLI 只在其 ACP Adapter、测试与能力验证完成后加入。 */
-export type RuntimeCli = "codex" | "kimi";
+export type RuntimeCli = "codex" | "kimi" | "claude" | "dsh";
 
 /** 发现候选时的来源；仅用于用户展示与审计，不保存 PATH 或 shell 环境。 */
 export type RuntimeDiscoverySource = "shell-path" | "gui-path" | "install-dir" | "manual";
@@ -22,7 +22,7 @@ export type ExecutableIdentity = {
 /** 内置 ACP adapter 的验证来源。 */
 export type VerifiedAdapter = {
   /** 固定 adapter 标识；只允许 Adapter Catalog 中已声明的内置 adapter。 */
-  readonly adapterId: "codex-acp" | "kimi-acp";
+  readonly adapterId: "codex-acp" | "kimi-acp" | "claude-acp" | "dsh-acp";
   /** lockfile 中 adapter 版本。 */
   readonly adapterVersion: string;
   /** 握手确认的 ACP 协议版本。 */
@@ -41,7 +41,7 @@ export type CliRuntimeRecord = {
   readonly executablePath: string;
   /** 写入时冻结的文件身份。 */
   readonly executableIdentity: ExecutableIdentity;
-  /** Codex JavaScript 入口使用的 node；仅 requiresNodeRuntime 的 adapter 必须存在；旧记录可缺失，首次启动时受控补解析。 */
+  /** JavaScript 入口 CLI 使用的 node；仅 requiresNodeRuntime 的 adapter 必须存在；旧记录可缺失，首次启动时受控补解析。 */
   readonly nodeExecutable?: { readonly path: string; readonly identity: ExecutableIdentity };
   /** 固定 argv `--version` 返回的规范化版本摘要。 */
   readonly version: string;
@@ -77,7 +77,7 @@ export type CliRuntimeRegistryFile = {
 /** 通过启动前身份复核、可安全注入 Worker 的运行时。 */
 export type VerifiedCliRuntime = Omit<CliRuntimeRecord, "nodeExecutable" | "status"> & {
   readonly status: "verified";
-  /** 仅 requiresNodeRuntime 的 adapter（当前为 codex-acp）保证存在；kimi 等自包含 CLI 不写该字段。 */
+  /** 仅 requiresNodeRuntime 的 adapter（codex-acp、dsh-acp）保证存在；claude 原生二进制与 kimi 等自包含 CLI 不写该字段。 */
   readonly nodeExecutable?: { readonly path: string; readonly identity: ExecutableIdentity };
 };
 
@@ -92,7 +92,7 @@ export type RuntimeProvenance = {
   /** 经验证的版本摘要。 */
   readonly version: string;
   /** adapter id。 */
-  readonly adapterId: "codex-acp" | "kimi-acp";
+  readonly adapterId: "codex-acp" | "kimi-acp" | "claude-acp" | "dsh-acp";
   /** adapter 锁定版本。 */
   readonly adapterVersion: string;
   /** 最后完整验证时间。 */

@@ -1,7 +1,7 @@
 import type { AcpLauncher } from "../adapters/acp-session";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { prepareCodexSessionHome, prepareKimiSessionHome } from "../workspace/cli-session-home";
+import { claudeConfigDir, dshHome, prepareClaudeSessionHome, prepareCodexSessionHome, prepareDshSessionHome, prepareKimiSessionHome } from "../workspace/cli-session-home";
 import { WorkflowContractError } from "../workflow/errors";
 
 /** 宿主角色决定OS边界；Adapter只负责运行目录与原生启动配置，不决定业务权限。 */
@@ -42,4 +42,28 @@ export const kimiSessionIsolation: SessionIsolationProfile = {
   },
   writableRoots: () => [join(homedir(), ".kimi-code")],
   readOnlyPaths: launcher => launcher.env?.KIMI_CODE_HOME ? ["config.toml", "mcp.json", "plugins", "hooks", "skills", "AGENTS.md", "empty-skills"].map(path=>join(launcher.env!.KIMI_CODE_HOME,path)) : [],
+};
+
+/** Claude 主控私有状态启动：CLAUDE_CONFIG_DIR 指向只含认证/模型 env 的私有 settings，
+ * 用户 hooks/statusLine/permissions 不进入主控；原生目录仍由用户授权写入。 */
+export const claudeSessionIsolation: SessionIsolationProfile = {
+  enabledRoles: ["harness"],
+  prepare: async (launcher, scratch) => {
+    const home = await prepareClaudeSessionHome(scratch);
+    return { ...launcher, env: { ...launcher.env, CLAUDE_CONFIG_DIR: home } };
+  },
+  writableRoots: () => [claudeConfigDir()],
+  readOnlyPaths: launcher => launcher.env?.CLAUDE_CONFIG_DIR ? ["settings.json", ".credentials.json"].map(path=>join(launcher.env!.CLAUDE_CONFIG_DIR!,path)) : [],
+};
+
+/** dsh 主控私有状态启动：DSH_HOME 指向复制自出厂骨架且清空用户 patch 的私有 profile，
+ * 凭据文件软链引用；用户插件与覆盖配置不进入主控。 */
+export const dshSessionIsolation: SessionIsolationProfile = {
+  enabledRoles: ["harness"],
+  prepare: async (launcher, scratch) => {
+    const home = await prepareDshSessionHome(scratch);
+    return { ...launcher, env: { ...launcher.env, DSH_HOME: home } };
+  },
+  writableRoots: () => [dshHome()],
+  readOnlyPaths: launcher => launcher.env?.DSH_HOME ? [".credentials.yaml", "profiles/acp/cordis.yml", "profiles/acp/cordis.patch.yml", "profiles/acp/package.json"].map(path=>join(launcher.env!.DSH_HOME!,path)) : [],
 };

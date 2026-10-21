@@ -34,7 +34,7 @@ export function isRevisionPreview(value: unknown): value is RevisionPreview {
     if (!agent || typeof agent !== "object" || Array.isArray(agent)) return false;
     const entry = agent as Record<string, unknown>;
     if(entry.nodeId!==undefined&&entry.nodeId!==null&&(typeof entry.nodeId!=="string"||!entry.nodeId.trim()))return false;
-    if (typeof entry.key !== "string" || !entry.key || keys.has(entry.key) || typeof entry.name !== "string" || !entry.name.trim() || ![null, "codex", "kimi"].includes(entry.cli as never) || typeof entry.loop !== "boolean" || (entry.phaseTitle !== null && typeof entry.phaseTitle !== "string")) return false;
+    if (typeof entry.key !== "string" || !entry.key || keys.has(entry.key) || typeof entry.name !== "string" || !entry.name.trim() || ![null, "codex", "kimi", "claude", "dsh"].includes(entry.cli as never) || typeof entry.loop !== "boolean" || (entry.phaseTitle !== null && typeof entry.phaseTitle !== "string")) return false;
     keys.add(entry.key);
     return true;
   });
