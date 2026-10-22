@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
 
+/** 源码断言忽略空白：格式化工具不应让语义相同的实现断言失败。 */
+const compact = (text: string) => text.replace(/\s+/g, "");
+
 test("Web 通过 Engine settings action 读写应用设置，且不引入 Engine 运行时依赖", async () => {
   const source = await Bun.file("src-tauri/web/src/api.ts").text();
   expect(source).toContain(
     'import type { AppSettings } from "../../../src/desktop/app-settings"',
   );
   expect(source).toContain('settings: () => action<AppSettings>("settings.get")');
-  expect(source).toContain(
-    'updateSettings: (patch: { perceptionMode?: boolean }) => action<AppSettings>("settings.update", patch)',
+  expect(compact(source)).toContain(
+    compact('updateSettings: (patch: { perceptionMode?: boolean }) => action<AppSettings>("settings.update", patch)'),
   );
   // 只允许 import type；值导入会把 Engine 的 node:fs 模块带进 Web 打包。
   expect(source).not.toContain("import { AppSettings }");

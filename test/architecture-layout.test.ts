@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/** 源码断言忽略空白：格式化工具不应让语义相同的实现断言失败。 */
+const compact = (text: string) => text.replace(/\s+/g, "");
+
 /** 架构规定的职责目录；目录是后续实现的唯一落点，而非能力已经可用的声明。 */
 const requiredDirectories = [
   "src/workflow",
@@ -25,9 +28,10 @@ describe("新架构目录与历史实现边界", () => {
     expect(show).toContain("window.show()?");
     expect(show).toContain("window.set_focus()?");
     expect(show).not.toContain("ensure_engine");
-    const tray = desktop.slice(desktop.indexOf('TrayIconBuilder::with_id("wave-flow-tray")'), desktop.indexOf('}).on_window_event'));
-    expect(tray).toContain('"open" => { let _ = show_main_window(app); }');
-    const close = desktop.slice(desktop.indexOf('}).on_window_event'), desktop.indexOf('.invoke_handler'));
+    const onWindowEvent = desktop.indexOf(".on_window_event");
+    const tray = desktop.slice(desktop.indexOf('TrayIconBuilder::with_id("wave-flow-tray")'), onWindowEvent);
+    expect(compact(tray)).toContain(compact('"open" => { let _ = show_main_window(app); }'));
+    const close = desktop.slice(onWindowEvent, desktop.indexOf(".invoke_handler"));
     expect(close).toContain("api.prevent_close()");
     expect(close).toContain("window.hide()");
     expect(close).not.toContain("shutdown_engine");
@@ -62,15 +66,15 @@ describe("新架构目录与历史实现边界", () => {
     expect(JSON.parse(tauriConfig).identifier).toBe("com.wave-flow.desktop");
     expect(desktop).toContain('sidecar("wave-flow-desktop-engine")');
     expect(desktop).toContain("generation.fetch_add(1, Ordering::AcqRel)");
-    expect(desktop).toContain("generation.load(Ordering::Acquire) != generation");
+    expect(compact(desktop)).toContain(compact("generation.load(Ordering::Acquire) != generation"));
     expect(desktop).toContain('.set_process_group(true)');
     expect(desktop).toContain('engine_request');
     expect(desktop).toContain('exit_desktop');
-    expect(desktop).toContain('dispatch_with_timeout(&app, request, std::time::Duration::from_secs(3))');
+    expect(compact(desktop)).toContain(compact('dispatch_with_timeout(&app, request, std::time::Duration::from_secs(3))'));
     expect(desktop).toContain('RunEvent::ExitRequested');
     expect(desktop).toContain('api.prevent_exit()');
     expect(desktop).toContain('app.set_menu');
-    expect(desktop).toContain('Submenu::with_items(app, "Wave Flow"');
+    expect(compact(desktop)).toContain(compact('Submenu::with_items(app, "Wave Flow"'));
     expect(desktop).not.toContain('ensure_daemon');
     expect(desktop).not.toContain('restart_daemon');
     expect(desktop).toContain('"WAVE_FLOW_HOME"');
