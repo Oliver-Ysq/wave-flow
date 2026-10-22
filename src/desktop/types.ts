@@ -220,7 +220,7 @@ export type ExecutionResponse = {
     /** 受管分支短名。 */ readonly branch:string;
     /** worktree当前HEAD；已清理为null。 */ readonly head:string|null;
     /** 当前仍存活的本Execution writer租约。 */ readonly leases:readonly { readonly nodeId:string; readonly attempt:number }[];
-    /** 该worktree累计被显式resume释放的旧Engine租约数（含其他接续Execution）。 */ readonly staleLeases:number;
+    /** 该worktree累计被显式恢复终止或确认退出的旧writer数（含其他接续Execution）。 */ readonly closedWriters:number;
     /** worktree是否已安全清理。 */ readonly cleaned:boolean;
   };
   /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */

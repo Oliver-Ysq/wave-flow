@@ -69,7 +69,7 @@ test("恢复受管 worktree 清理入口：确认弹窗后调用 Engine 并回�
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
   const api = await Bun.file("src-tauri/web/src/api.ts").text();
   expect(api).toContain("executions.cleanupWorkspaces");
-  expect(api).toContain("authorized:true");
+  expect(api.replace(/\s+/g, "")).toContain("authorized:true");
   expect(app).toContain("function WorkspaceCleanupConfirmation");
   expect(app).toContain("<WorkspaceCleanupConfirmation");
   expect(app).toContain("api.cleanupWorkspaces(");
@@ -98,8 +98,10 @@ test("方案页说明主工作区脏时自动应用会被确定性跳过，并�
   expect(design).toContain("完成后自动应用到主工作区");
 });
 
-test("staleLeases 文案标明 worktree 累计，避免误读为本次 Execution 独占", async () => {
+test("closedWriters 文案标明 worktree 累计与核验语义，避免误读为本次 Execution 独占", async () => {
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(app).toContain("该受管 worktree 累计，含其他接续 Execution");
+  expect(app).toContain("已在恢复前完成核验（终止 / 已退出 / 从未启动）");
   expect(app).not.toContain("个重启前租约已在显式恢复时释放");
+  expect(app).not.toContain("staleLeases");
 });

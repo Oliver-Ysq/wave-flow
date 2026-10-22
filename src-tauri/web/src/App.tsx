@@ -5314,9 +5314,9 @@ function ExecutionDetail({
                     writer 锁 · {lease.nodeId} · attempt #{lease.attempt}
                   </span>
                 ))}
-                {detail.workspaceEvidence.staleLeases > 0 && (
+                {detail.workspaceEvidence.closedWriters > 0 && (
                   <small>
-                    {detail.workspaceEvidence.staleLeases} 个重启前租约已释放（该受管 worktree 累计，含其他接续 Execution）；现场改动保留
+                    {detail.workspaceEvidence.closedWriters} 个旧 attempt 的 writer 已在恢复前完成核验（终止 / 已退出 / 从未启动）；该受管 worktree 累计，含其他接续 Execution；现场改动保留
                   </small>
                 )}
                 <small>

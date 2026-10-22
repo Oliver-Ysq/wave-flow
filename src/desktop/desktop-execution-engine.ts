@@ -685,7 +685,7 @@ export class DesktopExecutionEngine {
         sourceDiagnostic=await manager.inspectSourceDiagnostic(executionId)??undefined;
         const value=await manager.inspect(execution.config.workspaces.workspaceId);
         const head=value.cleanedAt?null:(await (await GitRepository.open(value.cwd)).inspect()).head;
-        workspaceEvidence={workspaceId:value.workspaceId,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),staleLeases:value.staleReleases?.length??0,cleaned:value.cleanedAt!==null};
+        workspaceEvidence={workspaceId:value.workspaceId,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
         } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
       }
       return { execution, workspaceEvidence, workspaceDiagnostic, sourceEvidence, sourceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };

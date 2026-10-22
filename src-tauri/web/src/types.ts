@@ -303,8 +303,8 @@ export type ExecutionResponse = {
     /** 已自动写入主工作区，或记录未应用原因。 */ applied:{at:string;paths:string[]}|{skippedAt:string;reason:string};
   };
   /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
-  /** 共享worktree与租约投影。 */
-  workspaceEvidence?:{workspaceId:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;staleLeases:number;cleaned:boolean};
+  /** 共享worktree与租约投影；closedWriters 为恢复前终止或确认退出的旧writer数。 */
+  workspaceEvidence?:{workspaceId:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;closedWriters:number;cleaned:boolean};
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };

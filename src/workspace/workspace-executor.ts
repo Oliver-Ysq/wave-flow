@@ -2,12 +2,12 @@ import type { AgentNodeExecutor, AgentNodeSnapshot, AgentRecovery } from "../run
 import type { JsonObject } from "../shared/json";
 import type { ControlServer } from "../control/control-server";
 import { WorkflowContractError } from "../workflow/errors";
-import { WorkspaceManager, type WorkspaceLease, type WriterVerifier } from "./workspace-manager";
+import { WorkspaceManager, type WorkspaceLease, type WriterBindingEvidence, type WriterVerifier } from "./workspace-manager";
 
 /** 能证明写边界和退出的真实节点执行器；普通ACP close不能充当该证明。 */
 export type ManagedWriterExecutor = AgentNodeExecutor & {
-  /** 实际启动进程时在任何业务投递前耐久绑定writer证明身份。 */
-  readonly bindWriter: (identity: string) => Promise<void>;
+  /** 实际启动进程时在任何业务投递前耐久绑定writer证明身份与进程组证据。 */
+  readonly bindWriter: (identity: string, evidence: WriterBindingEvidence) => Promise<void>;
   /** 真实进程组退出核验；不得按业务complete、cancelled或close推断。 */
   readonly verifyExited: WriterVerifier;
   /** 与普通真实执行器相同，仍只经原ControlServer完成业务。 */
@@ -31,7 +31,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     /** 只读节点执行器；不使用写workspace租约。 */
     private readonly readOnly: AgentNodeExecutor,
     /** 已验证隔离启动器工厂，创建时尚不启动业务。 */
-    private readonly createWriter: (node: AgentNodeSnapshot, binding: { readonly cwd: string; readonly scratch: string; readonly commonDirectory: string; readonly gitDirectory: string; readonly lease: WorkspaceLease; readonly bindWriter: (identity: string) => Promise<void> }) => Promise<ManagedWriterExecutor> | ManagedWriterExecutor,
+    private readonly createWriter: (node: AgentNodeSnapshot, binding: { readonly cwd: string; readonly scratch: string; readonly commonDirectory: string; readonly gitDirectory: string; readonly lease: WorkspaceLease; readonly bindWriter: (identity: string, evidence: WriterBindingEvidence) => Promise<void> }) => Promise<ManagedWriterExecutor> | ManagedWriterExecutor,
     /** 原Engine证明不可用时的显式核查；缺省一律拒绝，不自动认领旧PID。 */
     private readonly verifyRecoveredWriter: WriterVerifier = async () => false,
   ) {}
@@ -53,7 +53,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     const workspace = await this.manager.inspect(this.workspaceId);
     const lease = await this.manager.acquire(this.workspaceId, { runId: this.runId, nodeId: node.id, attempt: node.executionAttemptId });
     let current = lease;
-    const bindWriter = async (identity: string) => { current = await this.manager.bindWriter(current, identity); };
+    const bindWriter = async (identity: string, evidence: WriterBindingEvidence) => { current = await this.manager.bindWriter(current, identity, evidence); };
     let writer: ManagedWriterExecutor;
     try {
       const scratch = await this.manager.createScratch(lease.leaseId);

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitRepository } from "../../src/workspace/git-repository";
 import { SourcePersistenceError, isRetryableSourceError, WorkspaceManager, type WorkspaceAuthorization } from "../../src/workspace/workspace-manager";
+import { captureWriterStartedAt, nodeWriterProcessControl, type WriterProcessControl } from "../../src/workspace/writer-process-control";
 import { WorkflowContractError } from "../../src/workflow/errors";
 import { WorkspaceExecutor } from "../../src/workspace/workspace-executor";
 import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
@@ -46,8 +47,8 @@ test("交付重试按错误类型分类，安全契约拒绝不误当临时失�
 test("同一共享worktree可并行持有多个writer租约，释放需独立退出证明", async () => {
   const { manager, workspaceId, authorization, runId } = await fixture();
   await manager.create(workspaceId, authorization);
-  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group-a");
-  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "b", attempt: 1 }), "group-b");
+  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group-a", { pgid: 54321, startedAt: "test-fingerprint" });
+  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "b", attempt: 1 }), "group-b", { pgid: 54321, startedAt: "test-fingerprint" });
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(2);
   await expect(manager.acquire(workspaceId, { runId, nodeId: "ghost", attempt: 1 })).rejects.toThrow("未获");
   await expect(manager.release(first, async () => false)).rejects.toThrow("退出不可核验");
@@ -63,7 +64,7 @@ test("同一共享worktree可并行持有多个writer租约，释放需独立退
 test("Execution收尾一次性封存共享worktree并自动应用，主工作区保持未提交", async () => {
   const { manager, workspaceId, authorization, runId, cwd, git } = await fixture();
   await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join((await manager.inspect(workspaceId)).cwd, "a.txt"), "result\n");
   await manager.release(lease, async () => true);
   const source = await manager.finalizeSource(runId, config(workspaceId, authorization), ["a", "b"]);
@@ -79,7 +80,7 @@ test("Execution收尾一次性封存共享worktree并自动应用，主工作区
 test("主工作区dirty时记录未应用原因，处理后重试补应用", async () => {
   const { manager, workspaceId, authorization, runId, cwd } = await fixture();
   await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join((await manager.inspect(workspaceId)).cwd, "a.txt"), "result\n");
   await manager.release(lease, async () => true);
   await writeFile(join(cwd, "user.txt"), "keep");
@@ -97,7 +98,7 @@ test("续作复用同一worktree，并在上次自动应用的未提交现场上
   const { manager, workspaceId, authorization, runId, cwd } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   await manager.prepareExecution(runId, config(workspaceId, authorization));
-  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first");
+  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "one\n");
   await manager.release(first, async () => true);
   const prior = await manager.finalizeSource(runId, config(workspaceId, authorization));
@@ -107,7 +108,7 @@ test("续作复用同一worktree，并在上次自动应用的未提交现场上
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head: prior.commit });
   await manager.prepareExecution(nextRun, nextConfig);
   await expect(manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 })).rejects.toThrow("旧执行");
-  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "second");
+  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "second", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "b.txt"), "two\n");
   await manager.release(second, async () => true);
   const source = await manager.finalizeSource(nextRun, nextConfig, ["repair"]);
@@ -124,7 +125,7 @@ test("续作拒绝旧批准、HEAD漂移与未退出writer；冻结后不能换H
   const nextRun = crypto.randomUUID(), renewed = { ...authorization, authorizationId: crypto.randomUUID(), nodes: [{ nodeId: "repair" }] };
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head: authorization.baseCommit });
   await expect(manager.prepareExecution(nextRun, { ...nextConfig, authorization: { ...renewed, authorizationId: authorization.authorizationId } })).rejects.toThrow("独立新授权");
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await expect(manager.prepareExecution(nextRun, nextConfig)).rejects.toThrow("writer未交接");
   await manager.release(lease, async () => true);
   const drifted = { ...nextConfig, continuation: { ...nextConfig.continuation!, head: "b".repeat(40) } };
@@ -134,26 +135,140 @@ test("续作拒绝旧批准、HEAD漂移与未退出writer；冻结后不能换H
   expect((await manager.inspect(workspaceId)).executionAuthorizations).toHaveLength(2);
 });
 
-test("显式resume释放旧Engine租约并保留共享worktree改动，不伪装自动重连", async () => {
+test("显式resume终止并核验旧Engine writer租约，保留共享worktree改动", async () => {
   const { root, manager, workspaceId, authorization, runId } = await fixture();
   await manager.create(workspaceId, authorization);
   await manager.prepareExecution(runId, config(workspaceId, authorization));
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "old-group");
+  const evidence = { pgid: 4242, startedAt: "Wed Oct 22 09:00:02 2026" };
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "old-group", evidence);
   const workspace = await manager.inspect(workspaceId);
   await writeFile(join(workspace.cwd, "a.txt"), "partial\n");
 
-  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID());
+  const killed: number[] = [];
+  const control: WriterProcessControl = {
+    probe: async (pgid) => killed.includes(pgid) ? { state: "absent" } : { state: "present", startedAt: evidence.startedAt },
+    killGroup: async (pgid) => { killed.push(pgid); },
+  };
+  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), control);
   await restarted.prepareResume(config(workspaceId, authorization), runId);
   const resumed = await restarted.inspect(workspaceId);
   expect(resumed.leases).toHaveLength(0);
-  expect(resumed.staleReleases).toHaveLength(1);
-  expect(resumed.staleReleases?.[0]?.leaseId).toBe(lease.leaseId);
+  expect(resumed.closedReleases).toHaveLength(1);
+  expect(resumed.closedReleases?.[0]).toMatchObject({ leaseId: lease.leaseId, nodeId: "a", attempt: 1, outcome: "killed" });
+  expect(killed).toEqual([4242]);
   expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("partial\n");
-  const next = await restarted.bindWriter(await restarted.acquire(workspaceId, { runId, nodeId: "a", attempt: 2 }), "new-group");
+  const next = await restarted.bindWriter(await restarted.acquire(workspaceId, { runId, nodeId: "a", attempt: 2 }), "new-group", { pgid: 54321, startedAt: "test-fingerprint" });
   await restarted.release(next, async () => true);
   const newer = crypto.randomUUID(), renewal = { ...authorization, authorizationId: crypto.randomUUID(), nodes: [{ nodeId: "repair" }] };
   await restarted.prepareExecution(newer, config(workspaceId, renewal, { executionId: runId, workspaceId, head: authorization.baseCommit }));
   await expect(restarted.prepareResume(config(workspaceId, authorization), runId)).rejects.toThrow("旧版恢复只读");
+});
+
+test("真实进程组：resume 用真实 kill 终止旧 writer，租约释放且现场保留", async () => {
+  const { root, manager, workspaceId, authorization, runId } = await fixture();
+  await manager.create(workspaceId, authorization);
+  await manager.prepareExecution(runId, config(workspaceId, authorization));
+  const child = Bun.spawn(["/bin/sh", "-c", "sleep 120"], { detached: true, stdout: "ignore", stderr: "ignore" });
+  try {
+    const evidence = { pgid: child.pid, startedAt: await captureWriterStartedAt(child.pid) };
+    const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "real-group", evidence);
+    const workspace = await manager.inspect(workspaceId);
+    await writeFile(join(workspace.cwd, "a.txt"), "partial-real\n");
+    const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), nodeWriterProcessControl());
+    await restarted.prepareResume(config(workspaceId, authorization), runId);
+    const resumed = await restarted.inspect(workspaceId);
+    expect(resumed.leases).toHaveLength(0);
+    expect(resumed.closedReleases?.[0]).toMatchObject({ leaseId: lease.leaseId, nodeId: "a", outcome: "killed" });
+    expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("partial-real\n");
+    const control = nodeWriterProcessControl();
+    const deadline = Date.now() + 5_000;
+    let probe = await control.probe(child.pid);
+    while (probe.state !== "absent" && Date.now() < deadline) { await Bun.sleep(20); probe = await control.probe(child.pid); }
+    expect(probe.state).toBe("absent");
+  } finally {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* 已退出 */ }
+  }
+}, 20_000);
+
+test("旧writer进程组无法核验时拒绝恢复，租约与现场原样保留", async () => {
+  const { root, manager, workspaceId, authorization, runId } = await fixture();
+  await manager.create(workspaceId, authorization);
+  await manager.prepareExecution(runId, config(workspaceId, authorization));
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "old-group", { pgid: 5151, startedAt: "fp" });
+  let killed = 0;
+  const control: WriterProcessControl = {
+    probe: async () => ({ state: "unknown", reason: "ps 输出异常" }),
+    killGroup: async () => { killed += 1; },
+  };
+  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), control);
+  await expect(restarted.prepareResume(config(workspaceId, authorization), runId)).rejects.toThrow("无法核验");
+  const record = await restarted.inspect(workspaceId);
+  expect(record.leases.map(item => item.leaseId)).toEqual([lease.leaseId]);
+  expect(record.closedReleases).toBeUndefined();
+  expect(killed).toBe(0);
+});
+
+test("历史租约缺少进程证据时拒绝恢复；启动指纹不一致视为PID复用且不误杀", async () => {
+  const { root, manager, workspaceId, authorization, runId } = await fixture();
+  await manager.create(workspaceId, authorization);
+  await manager.prepareExecution(runId, config(workspaceId, authorization));
+  await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "legacy", { pgid: 54321, startedAt: "test-fingerprint" });
+  // 模拟本能力上线前的旧租约：有 writer 身份，但没有进程组/启动时间字段。
+  const recordPath = join(root, "state", "records", `${workspaceId}.json`);
+  const legacy = JSON.parse(await Bun.file(recordPath).text());
+  delete legacy.leases[0].writerPgid;
+  delete legacy.leases[0].writerStartedAt;
+  await writeFile(recordPath, JSON.stringify(legacy));
+  const noEvidence = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), { probe: async () => ({ state: "absent" }), killGroup: async () => {} });
+  await expect(noEvidence.prepareResume(config(workspaceId, authorization), runId)).rejects.toThrow("缺少进程证据");
+
+  const second = await fixture();
+  await second.manager.create(second.workspaceId, second.authorization);
+  await second.manager.prepareExecution(second.runId, config(second.workspaceId, second.authorization));
+  await second.manager.bindWriter(await second.manager.acquire(second.workspaceId, { runId: second.runId, nodeId: "a", attempt: 1 }), "reused-pid", { pgid: 6161, startedAt: "old-fingerprint" });
+  let killed = 0;
+  const reused = await WorkspaceManager.open(join(second.root, "state"), crypto.randomUUID(), {
+    probe: async () => ({ state: "present", startedAt: "different-fingerprint" }),
+    killGroup: async () => { killed += 1; },
+  });
+  await reused.prepareResume(config(second.workspaceId, second.authorization), second.runId);
+  const closed = await reused.inspect(second.workspaceId);
+  expect(closed.closedReleases?.[0]).toMatchObject({ outcome: "exited" });
+  expect(killed).toBe(0);
+});
+
+test("损坏的writer进程证据或终止记录拒绝读取", async () => {
+  const { root, manager, workspaceId, authorization, runId } = await fixture();
+  await manager.create(workspaceId, authorization);
+  await manager.prepareExecution(runId, config(workspaceId, authorization));
+  await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "damaged", { pgid: 9191, startedAt: "fp" });
+  const path = join(root, "state", "records", `${workspaceId}.json`);
+  const rewrite = async (mutate: (record: Record<string, unknown>) => void) => {
+    const record = JSON.parse(await Bun.file(path).text());
+    mutate(record);
+    await writeFile(path, JSON.stringify(record));
+  };
+  await rewrite(record => { (record.leases as Record<string, unknown>[])[0]!.writerPgid = "not-a-pid"; });
+  await expect(manager.inspect(workspaceId)).rejects.toThrow("进程组记录损坏");
+  await rewrite(record => { (record.leases as Record<string, unknown>[])[0]!.writerPgid = 9191; record.closedReleases = [{ at: new Date().toISOString(), leaseId: crypto.randomUUID(), nodeId: "a", attempt: 1, outcome: "unknown", reason: "x" }]; });
+  await expect(manager.inspect(workspaceId)).rejects.toThrow("终止记录损坏");
+});
+
+test("leader 已退出但进程组仍存在（孤儿组）时仍按原 writer 终止", async () => {
+  const { root, manager, workspaceId, authorization, runId } = await fixture();
+  await manager.create(workspaceId, authorization);
+  await manager.prepareExecution(runId, config(workspaceId, authorization));
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "orphan-group", { pgid: 8282, startedAt: "leader-fingerprint" });
+  const killed: number[] = [];
+  const control: WriterProcessControl = {
+    probe: async (pgid) => killed.includes(pgid) ? { state: "absent" } : { state: "present", startedAt: null },
+    killGroup: async (pgid) => { killed.push(pgid); },
+  };
+  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), control);
+  await restarted.prepareResume(config(workspaceId, authorization), runId);
+  const resumed = await restarted.inspect(workspaceId);
+  expect(resumed.closedReleases?.[0]).toMatchObject({ leaseId: lease.leaseId, outcome: "killed" });
+  expect(killed).toEqual([8282]);
 });
 
 test("WorkspaceExecutor共享cwd、逐节点只释放租约；Execution收尾才封存并自动应用", async () => {
@@ -165,7 +280,7 @@ test("WorkspaceExecutor共享cwd、逐节点只释放租约；Execution收尾才
     bindControl() {},
     bindWriter: binding.bindWriter,
     verifyExited: async () => true,
-    execute: async actual => { calls += 1; expect(actual.cwd).toBe(workspace.cwd); await binding.bindWriter("test-group"); await writeFile(join(actual.cwd, "a.txt"), "managed\n"); return { ok: true }; },
+    execute: async actual => { calls += 1; expect(actual.cwd).toBe(workspace.cwd); await binding.bindWriter("test-group", { pgid: 4321, startedAt: "test-fingerprint" }); await writeFile(join(actual.cwd, "a.txt"), "managed\n"); return { ok: true }; },
   }));
   executor.bindControl({} as never);
   expect(await executor.execute(nodeSnapshot)).toEqual({ ok: true });
@@ -203,7 +318,7 @@ test("清理只接受已封存且干净checkout；锁、未封存与ignored内�
   const workspace = await manager.create(workspaceId, authorization);
   await expect(manager.cleanup(workspaceId, runId, false)).rejects.toThrow("明确授权");
   await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("尚无最终封存");
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("锁");
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
   await manager.release(lease, async () => true);
@@ -232,7 +347,7 @@ test("首次dirty基线拒绝；显式排除后创建且同身份重试不重复
 test("封存成功但来源关联失败保留Git证据，重试只补关联", async () => {
   const { manager, workspaceId, authorization, runId } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "saved\n");
   await manager.release(lease, async () => true);
   const write = spyOn(manager as unknown as { write: (...args: unknown[]) => Promise<void> }, "write").mockRejectedValueOnce(new Error("association failed"));
@@ -246,7 +361,7 @@ test("封存成功但来源关联失败保留Git证据，重试只补关联", as
 test("清理意图已耐久但checkout先被移除时，重试只补关联不重复删除", async () => {
   const { root, manager, workspaceId, authorization, runId, cwd } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group");
+  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
   await manager.release(lease, async () => true);
   await manager.finalizeSource(runId, config(workspaceId, authorization));
@@ -280,16 +395,16 @@ test("续作resume先释放旧租约再补交接，顺序颠倒会拒绝派发",
   const { root, manager, workspaceId, authorization, runId } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   await manager.prepareExecution(runId, config(workspaceId, authorization));
-  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first");
+  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "one\n");
   await manager.release(first, async () => true);
   const prior = await manager.finalizeSource(runId, config(workspaceId, authorization));
   const nextRun = crypto.randomUUID(), renewed = { ...authorization, authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), nodes: [{ nodeId: "repair" }] };
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head: prior.commit });
   await manager.prepareExecution(nextRun, nextConfig);
-  const leaked = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "crashed");
+  const leaked = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "crashed", { pgid: 7373, startedAt: "fp-crashed" });
   expect(leaked.leaseId).toBeTruthy();
-  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID());
+  const restarted = await WorkspaceManager.open(join(root, "state"), crypto.randomUUID(), { probe: async () => ({ state: "absent" }), killGroup: async () => {} });
   await expect(restarted.prepareExecution(nextRun, nextConfig)).rejects.toThrow("writer");
   await restarted.prepareResume(nextConfig, nextRun);
   await expect(restarted.prepareExecution(nextRun, nextConfig)).resolves.toBeUndefined();
@@ -337,7 +452,7 @@ test("旧执行跳过应用后，较新接续已应用时重试不会回退新�
   const { manager, workspaceId, authorization, runId, cwd } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   await manager.prepareExecution(runId, config(workspaceId, authorization));
-  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first");
+  const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "one\n");
   await manager.release(first, async () => true);
   // 主工作区 dirty：E1 记录未应用原因。
@@ -350,7 +465,7 @@ test("旧执行跳过应用后，较新接续已应用时重试不会回退新�
   const nextRun = crypto.randomUUID(), renewed = { ...authorization, authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), nodes: [{ nodeId: "repair" }] };
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head: skipped.commit });
   await manager.prepareExecution(nextRun, nextConfig);
-  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "second");
+  const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "second", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "b.txt"), "two\n");
   await manager.release(second, async () => true);
   const applied = await manager.finalizeSource(nextRun, nextConfig, ["repair"]);

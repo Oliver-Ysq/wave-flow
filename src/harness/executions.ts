@@ -106,7 +106,7 @@ export class HarnessExecutionService {
       try{
         const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
         const workspace=await manager.inspect(execution.config.workspaces.workspaceId);
-        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,source:await manager.inspectSource(executionId),sourceDiagnostic:await manager.inspectSourceDiagnostic(executionId),workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,leases:workspace.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),staleReleases:workspace.staleReleases??[],cleanedAt:workspace.cleanedAt},limitation:"共享worktree的Git证据只覆盖受管文件与所执行验证；不提供逐节点归因，也不证明外部系统已回滚或无副作用"};
+        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,source:await manager.inspectSource(executionId),sourceDiagnostic:await manager.inspectSourceDiagnostic(executionId),workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,leases:workspace.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedReleases:workspace.closedReleases??[],cleanedAt:workspace.cleanedAt},limitation:"共享worktree的Git证据只覆盖受管文件与所执行验证；不提供逐节点归因，也不证明外部系统已回滚或无副作用"};
       }catch(error){workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,status:"受管Git证据不可读取",diagnostic:error instanceof Error?error.message:String(error),limitation:"缺失不代表没有改动"};}
     }
     return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence,nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,hint:node.hint??null,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
@@ -142,7 +142,7 @@ export class HarnessExecutionService {
       project: await (await GitRepository.open(task.cwd)).sceneFingerprint(),
       source: await manager.inspectSource(executionId),
       sourceDiagnostic: await manager.inspectSourceDiagnostic(executionId),
-      workspace: { workspaceId: workspace.workspaceId, leases: workspace.leases, staleReleases: workspace.staleReleases ?? [], cleanedAt: workspace.cleanedAt, scene: workspace.cleanedAt ? null : await (await GitRepository.open(workspace.cwd)).sceneFingerprint() },
+      workspace: { workspaceId: workspace.workspaceId, leases: workspace.leases, closedReleases: workspace.closedReleases ?? [], cleanedAt: workspace.cleanedAt, scene: workspace.cleanedAt ? null : await (await GitRepository.open(workspace.cwd)).sceneFingerprint() },
       limitation: "Git可见文件证据，不锁定外部系统或无限制外部修改",
     };
   }

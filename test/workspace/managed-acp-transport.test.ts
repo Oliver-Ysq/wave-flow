@@ -9,11 +9,11 @@ import type { AcpLauncher, AcpTransport } from "../../src/adapters/acp-session";
 
 const paths: string[] = [];
 test("可信Worker保留原生launcher及HOME，但投递前必须绑定真实进程证明",async()=>{
- const groups=new WriterProcessGroups(()=>false);let launched:AcpLauncher|null=null,bound="";
+ const groups=new WriterProcessGroups(()=>false);let launched:AcpLauncher|null=null,bound="",evidence:unknown;
  const stream=acp.ndJsonStream(new WritableStream<Uint8Array>(),new ReadableStream<Uint8Array>());
  const launcher={id:"test",command:"/bin/true",args:["native"],env:{HOME:"/native/home",CODEX_HOME:"/native/home/.codex"}};
- const factory=ownedAcpTransport({groups,bindWriter:async identity=>{bound=identity;},transport:async value=>{launched=value;return {stream,exited:Promise.resolve(0),close(){},writerProcess:{pid:43210,exited:Promise.resolve(0),terminate(){}}};}});
- const transport=await factory(launcher,new AbortController().signal);expect(launched as AcpLauncher|null).toEqual(launcher);expect(bound).not.toBe("");await transport.verifyClosed!();expect(groups.hasExited(bound)).toBe(true);
+ const factory=ownedAcpTransport({groups,bindWriter:async (identity,value)=>{bound=identity;evidence=value;},readWriterStartedAt:async()=>"Wed Oct 22 09:00:02 2026",transport:async value=>{launched=value;return {stream,exited:Promise.resolve(0),close(){},writerProcess:{pid:43210,exited:Promise.resolve(0),terminate(){}}};}});
+ const transport=await factory(launcher,new AbortController().signal);expect(launched as AcpLauncher|null).toEqual(launcher);expect(bound).not.toBe("");expect(evidence).toEqual({pgid:43210,startedAt:"Wed Oct 22 09:00:02 2026"});await transport.verifyClosed!();expect(groups.hasExited(bound)).toBe(true);
 });
 afterEach(async () => { for (const path of paths.splice(0)) await rm(path, { recursive: true, force: true }); });
 async function boundary() {

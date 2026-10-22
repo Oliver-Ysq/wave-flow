@@ -5,6 +5,7 @@ import { GitCommandError, GitEvidenceLimitError, GitRepository, type GitSavedRes
 import type { ExecutionWorkspaceConfig } from "./execution-workspaces";
 import { validateExecutionWorkspaces } from "./execution-workspaces";
 import { WorkflowContractError } from "../workflow/errors";
+import { nodeWriterProcessControl, type WriterProcessControl } from "./writer-process-control";
 
 /** Git已封存但证据未耐久；允许同请求重试关联，绝不重跑Worker。 */
 export class SourcePersistenceError extends Error {}
@@ -52,6 +53,34 @@ export type WorkspaceLease = WorkspaceNodeIdentity & {
   readonly engineInstanceId: string;
   /** writer 尚未启动为 null；启动后使用可核验的进程组证明身份。 */
   readonly writerIdentity: string | null;
+  /** writer 进程组 leader PID；未启动为 null。跨 Engine 恢复时用它定位进程组。 */
+  readonly writerPgid?: number | null;
+  /** 启动时读取的 leader 启动时间指纹；用于区分 PID 复用，未启动为 null。 */
+  readonly writerStartedAt?: string | null;
+};
+
+/** 绑定 writer 时必须提供的真实进程证据；缺失即拒绝，不留下不可核验的租约。 */
+export type WriterBindingEvidence = {
+  /** detached 启动的进程组 leader PID（同时是 pgid）。 */
+  readonly pgid: number;
+  /** leader 启动时间指纹；恢复时比对，不一致视为 PID 复用。 */
+  readonly startedAt: string;
+};
+
+/** 单条旧租约在恢复期的收尾证据；outcome 是核验结果，不是业务状态。 */
+export type ClosedWorkspaceRelease = {
+  /** 核验与释放时间。 */
+  readonly at: string;
+  /** 原租约 UUID。 */
+  readonly leaseId: string;
+  /** 原节点 id。 */
+  readonly nodeId: string;
+  /** 原 executionAttempt。 */
+  readonly attempt: number;
+  /** 判定结果：SIGKILL 终止 / 确认已退出 / 从未启动。 */
+  readonly outcome: "killed" | "exited" | "not-started";
+  /** 可读原因。 */
+  readonly reason: string;
 };
 
 /** 工作区成果事实；只记录 Git 及锁，不复制业务 complete 状态。 */
@@ -77,8 +106,8 @@ export type ManagedWorkspace = {
   readonly authorization: WorkspaceAuthorization;
   /** 当前仍存活的writer租约；多写者共享同一目录。 */
   readonly leases: readonly WorkspaceLease[];
-  /** 显式resume时释放的旧Engine租约证据；不假装核验过原进程退出。 */
-  readonly staleReleases?: readonly { /** 释放时间。 */ readonly at: string; /** 原租约UUID。 */ readonly leaseId: string; /** 原节点id。 */ readonly nodeId: string; /** 原attempt。 */ readonly attempt: number; /** 释放原因。 */ readonly reason: string }[];
+  /** 恢复前已终止并核验的旧 Engine 租约证据；每条都记录判定结果。 */
+  readonly closedReleases?: readonly ClosedWorkspaceRelease[];
   /** 最近一次成功写入主工作区的封存commit；用于允许接续执行在完全相同的未提交现场上更新。 */
   readonly lastApplied?: { /** 写入的Execution UUID。 */ readonly executionId: string; /** 已写入的封存commit。 */ readonly commit: string; /** 写入时间。 */ readonly at: string };
   /** 自动应用的耐久意图；崩溃或Git失败后用于识别宿主自己的部分改动，不误判为用户现场。 */
@@ -118,10 +147,11 @@ export type WorkspaceSource = GitSourceResult & {
 export class WorkspaceManager {
   /** 同状态根目录的多个Execution共享入场仲裁，不能各自独立抢writer/外部资源。 */
   private static readonly mutationTails = new Map<string, Promise<unknown>>();
-  private constructor(readonly root: string, readonly engineInstanceId: string) {}
+  readonly #control: WriterProcessControl;
+  private constructor(readonly root: string, readonly engineInstanceId: string, control: WriterProcessControl) { this.#control = control; }
 
   /** 创建安全状态根目录；重启沿用记录但不认领旧 writer。 */
-  static async open(root: string, engineInstanceId: string): Promise<WorkspaceManager> {
+  static async open(root: string, engineInstanceId: string, control: WriterProcessControl = nodeWriterProcessControl()): Promise<WorkspaceManager> {
     assertUuid(engineInstanceId);
     await mkdir(root, { recursive: true, mode: 0o700 });
     const info = await lstat(root);
@@ -134,7 +164,7 @@ export class WorkspaceManager {
       const child = await lstat(join(canonical, name));
       if (!child.isDirectory() || child.isSymbolicLink() || (child.mode & 0o077) || (process.getuid && child.uid !== process.getuid())) fail("Workspace子目录必须为当前用户私有真实目录。");
     }
-    return new WorkspaceManager(canonical, engineInstanceId);
+    return new WorkspaceManager(canonical, engineInstanceId, control);
   }
 
   /** 建立受管分支；分配身份由调用者保留，响应丢失同身份重试不创建第二分支。 */
@@ -189,12 +219,18 @@ export class WorkspaceManager {
     });
   }
 
-  /** 必须在真正启动 writer 前耐久绑定由执行器生成的证明身份。 */
-  bindWriter(lease: WorkspaceLease, writerIdentity: string): Promise<WorkspaceLease> {
+  /**
+   * 必须在真正启动 writer 前耐久绑定由执行器生成的证明身份与进程证据。
+   *
+   * 证据是必填参数而不是可选：每条已绑定租约都必须能在跨 Engine 恢复时被定位和
+   * 核验；漏传会在编译期失败，不会等到用户恢复时才以"缺少进程证据"暴露。
+   */
+  bindWriter(lease: WorkspaceLease, writerIdentity: string, evidence: WriterBindingEvidence): Promise<WorkspaceLease> {
     return this.exclusive(async () => {
       const record = await this.requireLease(lease);
       if (lease.engineInstanceId !== this.engineInstanceId || lease.writerIdentity !== null || !writerIdentity.trim()) fail("writer 绑定必须来自本 Engine 的新租约。");
-      const bound = { ...lease, writerIdentity };
+      if (!Number.isSafeInteger(evidence.pgid) || evidence.pgid <= 1 || !evidence.startedAt.trim()) fail("writer 绑定缺少可核验的进程证据。");
+      const bound = { ...lease, writerIdentity, writerPgid: evidence.pgid, writerStartedAt: evidence.startedAt };
       await this.write(lease.workspaceId, { ...record, leases: record.leases.map(item => item.leaseId === lease.leaseId ? bound : item) }); return bound;
     });
   }
@@ -261,8 +297,11 @@ export class WorkspaceManager {
   }
 
   /**
-   * 用户显式 resume 前的现场核验：原 Execution 已不在本 Engine 中运行，
-   * 无法核验的旧 writer 租约在此耐久释放；共享worktree中已存在的改动保留，不回滚。
+   * 用户显式 resume 前的现场核验与旧 writer 收尾。
+   *
+   * Wave Flow 新增设计（2026-10-22）：跨 attempt 交接前必须终止并核验上一个
+   * executionAttempt 的全部 writer，不能"记录后放行"。任何一条无法核验即拒绝
+   * 恢复；共享 worktree 中已存在的改动保留，不回滚。
    */
   prepareResume(rawConfig: ExecutionWorkspaceConfig, executionId: string): Promise<void> {
     return this.exclusive(async () => {
@@ -276,10 +315,52 @@ export class WorkspaceManager {
       if (state.conflicts.length) fail("原版恢复现场存在未解决冲突；请在受管worktree处理后再 resume。");
       const stale = record.leases.filter(lease => lease.runId === executionId);
       if (!stale.length) return;
-      const at = new Date().toISOString(), reason = "Engine 重启后无法跨进程核验原 writer 退出；用户显式 resume 释放租约，现场改动保留。";
-      const releases = stale.map(lease => ({ at, leaseId: lease.leaseId, nodeId: lease.nodeId, attempt: lease.attempt, reason }));
-      await this.write(config.workspaceId, { ...record, leases: record.leases.filter(lease => lease.runId !== executionId), staleReleases: [...(record.staleReleases ?? []), ...releases] });
+      // 先逐条终止并核验，全部通过后才写记录；中途失败保留原租约与现场。
+      const at = new Date().toISOString(), closed: ClosedWorkspaceRelease[] = [];
+      for (const lease of stale) closed.push(await this.closeStaleWriter(lease, at));
+      await this.write(config.workspaceId, { ...record, leases: record.leases.filter(lease => lease.runId !== executionId), closedReleases: [...(record.closedReleases ?? []), ...closed] });
     });
+  }
+
+  /**
+   * 单条旧租约的终止与核验。
+   *
+   * 判定顺序：无进程证据 → 拒绝；进程组不存在 → 已退出；启动指纹不同 → PID
+   * 复用、原 writer 已退出且不得误杀；指纹一致或 leader 已退出但组仍存在 →
+   * SIGKILL 整组并轮询到消失。任何一步不可读都抛出，不当成已退出。
+   */
+  private async closeStaleWriter(lease: WorkspaceLease, at: string): Promise<ClosedWorkspaceRelease> {
+    const base = { at, leaseId: lease.leaseId, nodeId: lease.nodeId, attempt: lease.attempt };
+    if (!lease.writerIdentity) return { ...base, outcome: "not-started", reason: "writer 从未启动，无需核验进程退出。" };
+    const pgid = lease.writerPgid ?? null, startedAt = lease.writerStartedAt ?? null;
+    if (pgid === null || startedAt === null) fail(`节点 ${lease.nodeId} 的旧 writer 缺少进程证据，无法核验退出；拒绝恢复。`);
+    if (pgid === process.pid || pgid === process.ppid) fail("旧 writer 进程组与本 Engine 重叠；拒绝终止，避免误杀。");
+    const probe = await this.#control.probe(pgid);
+    if (probe.state === "unknown") fail(`节点 ${lease.nodeId} 的旧 writer 进程组无法核验：${probe.reason}；拒绝恢复。`);
+    if (probe.state === "absent") return { ...base, outcome: "exited", reason: "进程组已不存在，原 writer 已退出。" };
+    if (probe.startedAt !== null && probe.startedAt !== startedAt) return { ...base, outcome: "exited", reason: "进程组号已被其他进程复用，原 writer 已退出。" };
+    await this.#control.killGroup(pgid);
+    await this.awaitWriterGroupGone(pgid, lease.nodeId);
+    return { ...base, outcome: "killed", reason: "已 SIGKILL 整个进程组并确认消失。" };
+  }
+
+  /**
+   * SIGKILL 后在有界预算内轮询到进程组消失。
+   *
+   * 终止瞬间 leader 可能进入 zombie（`kill` 仍成功但读不到启动指纹），因此
+   * 预算内的 unknown/存在都视为"尚未消失"继续等待；到预算上限仍未消失或仍不可
+   * 核验才拒绝恢复。进入本方法前的首次探测仍是严格模式。
+   */
+  private async awaitWriterGroupGone(pgid: number, nodeId: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    let last = "进程组仍存在";
+    for (;;) {
+      if (Date.now() >= deadline) fail(`节点 ${nodeId} 的旧 writer 进程组未在预算内确认消失（${last}）；保留锁与现场，拒绝恢复。`);
+      const probe = await this.#control.probe(pgid);
+      if (probe.state === "absent") return;
+      last = probe.state === "unknown" ? probe.reason : "进程组仍存在";
+      await Bun.sleep(20);
+    }
   }
 
   /** 只读交付记录；不存在返回null，不在查询中执行Git写入。 */
@@ -467,6 +548,15 @@ export class WorkspaceManager {
       for (const lease of record.leases) {
         validateIdentity(lease);
         if (lease.workspaceId !== id || typeof lease.leaseId !== "string" || !/^[0-9a-f-]{36}$/.test(lease.leaseId) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(lease.startCommit) || (lease.writerIdentity !== null && (typeof lease.writerIdentity !== "string" || !lease.writerIdentity.trim()))) fail("Workspace租约记录损坏。");
+        // writer 进程证据可缺省（旧记录/未启动），一旦存在必须是可核验形态；损坏即拒绝恢复。
+        if (lease.writerPgid !== undefined && lease.writerPgid !== null && (!Number.isSafeInteger(lease.writerPgid) || lease.writerPgid <= 1)) fail("Workspace租约进程组记录损坏。");
+        if (lease.writerStartedAt !== undefined && lease.writerStartedAt !== null && (typeof lease.writerStartedAt !== "string" || !lease.writerStartedAt.trim())) fail("Workspace租约启动时间记录损坏。");
+      }
+      if (record.closedReleases !== undefined) {
+        if (!Array.isArray(record.closedReleases)) fail("Workspace恢复终止记录损坏。");
+        for (const entry of record.closedReleases) {
+          if (!entry || typeof entry !== "object" || !Number.isFinite(Date.parse(entry.at)) || typeof entry.leaseId !== "string" || !/^[0-9a-f-]{36}$/.test(entry.leaseId) || typeof entry.nodeId !== "string" || !entry.nodeId.trim() || !Number.isSafeInteger(entry.attempt) || entry.attempt < 1 || !["killed", "exited", "not-started"].includes(entry.outcome) || typeof entry.reason !== "string" || !entry.reason.trim()) fail("Workspace恢复终止记录损坏。");
+        }
       }
       if (new Set(record.leases.map(lease => lease.leaseId)).size !== record.leases.length) fail("Workspace租约重复。");
       if (record.lastApplied !== undefined) {

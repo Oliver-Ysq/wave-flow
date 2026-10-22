@@ -1,6 +1,8 @@
 import { bunAcpTransport, type AcpTransportFactory } from "../adapters/acp-session";
 import { WorkflowContractError } from "../workflow/errors";
 import { macosWriteProfile, type MacosWriteBoundary } from "./macos-write-sandbox";
+import type { WriterBindingEvidence } from "./workspace-manager";
+import { captureWriterStartedAt } from "./writer-process-control";
 import type { WriterProcessGroups } from "./writer-process-group";
 
 /** 可信Worker的原生stdio传输；不改变HOME/CLI配置，不施加OS文件隔离。
@@ -8,14 +10,20 @@ import type { WriterProcessGroups } from "./writer-process-group";
  */
 export function ownedAcpTransport(options: {
   /** 当前Engine真实进程组，不能认领旧PID。 */ readonly groups: WriterProcessGroups;
-  /** 业务投递前耐久绑定writer身份；只读Worker无需Git租约。 */ readonly bindWriter: (identity: string) => Promise<void>;
-  /** 独立测试底层stdio的注入点。 */ readonly transport?: AcpTransportFactory;
+  /** 业务投递前耐久绑定writer身份；只读Worker无需Git租约。 */
+  readonly bindWriter: (identity: string, evidence: WriterBindingEvidence) => Promise<void>;
+  /** 独立测试底层stdio的注入点。 */
+  readonly transport?: AcpTransportFactory;
+  /** 启动时间指纹读取；缺省读真实进程，自动测试注入固定值。 */
+  readonly readWriterStartedAt?: (pid: number) => Promise<string>;
 }): AcpTransportFactory {
   return async (launcher, signal) => {
     const transport = await (options.transport ?? bunAcpTransport)(launcher, signal);
     if (!transport.writerProcess) { transport.close(); throw new WorkflowContractError("ACP transport没有真实进程组，拒绝启动Worker。"); }
     const identity = options.groups.register(transport.writerProcess);
-    try { await options.bindWriter(identity); } catch (error) { transport.close(); throw error; }
+    const readStartedAt = options.readWriterStartedAt ?? captureWriterStartedAt;
+    // 启动时间指纹必须与身份一起耐久；读不到就拒绝启动，不留下不可核验的租约。
+    try { await options.bindWriter(identity, { pgid: transport.writerProcess.pid, startedAt: await readStartedAt(transport.writerProcess.pid) }); } catch (error) { transport.close(); throw error; }
     return { ...transport, verifyClosed: () => options.groups.closeAndVerify(identity) };
   };
 }
