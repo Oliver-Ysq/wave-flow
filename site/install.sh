@@ -32,4 +32,4 @@ echo "· 安装到 /Applications…"
 cp -R "$TMP/mnt/Wave Flow.app" /Applications/
 
 echo "✓ 安装完成：/Applications/Wave Flow.app"
-echo "  首次启动后，请在设置页选择一个已登录的本机 CLI（Codex / Kimi / DeepSeek Harness / Claude Code）。"
+echo "  首次启动后，请在设置页选择一个已登录的本机 CLI（Codex / DeepSeek Harness / Claude Code）。"

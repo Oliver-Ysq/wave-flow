@@ -95,7 +95,7 @@
       <article class="prose">
         <section id="intro">
           <h2>介绍</h2>
-          <p>Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。你用对话描述目标，主控提出工作流方案；确认后，由真实的 Codex、Kimi、DeepSeek Harness 或 Claude Code 会话按阶段执行。</p>
+          <p>Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。你用对话描述目标，主控提出工作流方案；确认后，由真实的 Codex、DeepSeek Harness 或 Claude Code 会话按阶段执行。</p>
           <p>它不是把多个聊天窗口拼在一起。阶段、依赖、并行与完成条件写在 Workflow 里；每个 Agent 节点绑定一条独立的 ACP 会话，下游不会隐式继承上游聊天历史。</p>
           <div class="arch" aria-label="运行时分层">
             <span>桌面工作台</span><i>→</i>
@@ -113,7 +113,7 @@
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
             <li>Rust 工具链与 Xcode Command Line Tools</li>
-            <li>至少一个已登录的本机 CLI：Codex、Kimi、DeepSeek Harness 或 Claude Code</li>
+            <li>至少一个已登录的本机 CLI：Codex、DeepSeek Harness 或 Claude Code</li>
           </ul>
           <p>克隆仓库并以开发模式启动桌面应用：</p>
           <div class="code">
@@ -182,7 +182,7 @@ bun run desktop:dev</code></pre>
       id: <span class="tok-str">"codex-review"</span>, cli: <span class="tok-str">"codex"</span>,
     }),
     () =&gt; <span class="tok-fn">agent</span>(<span class="tok-str">"从安全与副作用角度复核。"</span>, {
-      id: <span class="tok-str">"kimi-review"</span>, cli: <span class="tok-str">"kimi"</span>,
+      id: <span class="tok-str">"dsh-review"</span>, cli: <span class="tok-str">"dsh"</span>,
     }),
   ]);
 
@@ -249,7 +249,7 @@ bun run desktop:dev</code></pre>
 
         <section id="cli">
           <h2>支持的 CLI</h2>
-          <p>四个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。当前由你手动分配 CLI，不提供自动模型路由。</p>
+          <p>三个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。当前由你手动分配 CLI，不提供自动模型路由。</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -257,7 +257,6 @@ bun run desktop:dev</code></pre>
               </thead>
               <tbody>
                 <tr><td><code>codex</code></td><td>使用本机 Codex 登录与配置。</td></tr>
-                <tr><td><code>kimi</code></td><td>使用本机 <code>~/.kimi-code</code> 配置。</td></tr>
                 <tr><td><code>dsh</code></td><td>DeepSeek Harness。需在 <code>$DSH_HOME</code> 配置 provider key，并要求 Node ≥ 24；Node ≤ 22 会静默退出。</td></tr>
                 <tr><td><code>claude</code></td><td>Claude Code。主控只继承认证与模型环境变量；模型侧由 <code>~/.claude/settings.json</code> 决定。</td></tr>
               </tbody>
@@ -317,8 +316,8 @@ bun run desktop:dev</code></pre>
         </nav>
       </div>
       <div class="site-footer__bottom">
-        <span>© 2026 Oliver-Ysq</span>
-        <span>为一个可控、可恢复的 Agent 工作流而构建</span>
+        <span>© 2026 Oliver-Ysq · MIT License</span>
+        <span>本项目仅供学习与研究，不涉及任何商业化。</span>
       </div>
     </div>
   </footer>
