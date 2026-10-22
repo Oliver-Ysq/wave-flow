@@ -68,9 +68,11 @@ describe("新架构目录与历史实现边界", () => {
     expect(desktop).toContain("generation.fetch_add(1, Ordering::AcqRel)");
     expect(compact(desktop)).toContain(compact("generation.load(Ordering::Acquire) != generation"));
     expect(desktop).toContain('.set_process_group(true)');
-    expect(desktop).toContain('engine_request');
+    expect(desktop).toContain('engine_write');
     expect(desktop).toContain('exit_desktop');
-    expect(compact(desktop)).toContain(compact('dispatch_with_timeout(&app, request, std::time::Duration::from_secs(3))'));
+    // 协议配对/超时在 Web；Rust 只保留退出握手。
+    expect(desktop).toContain("shutdown_ack");
+    expect(compact(desktop)).toContain(compact("tokio::time::timeout(std::time::Duration::from_secs(3), receiver)"));
     expect(desktop).toContain('RunEvent::ExitRequested');
     expect(desktop).toContain('api.prevent_exit()');
     expect(desktop).toContain('app.set_menu');

@@ -46,9 +46,10 @@ stdin/stdout 的 JSONL 通信：
 
 ## IPC 命令
 
-`ensure_engine`、`engine_request`、`reveal_main_window`、`update_tray_summary`、
+`ensure_engine`、`engine_write`、`reveal_main_window`、`update_tray_summary`、
 `take_menu_action`、`exit_desktop`、`set_window_theme`。业务 action 名由 Web 与 Engine
-共同约定，Tauri 只转发，不解释 Run/Execution 语义。
+共同约定：Tauri 只把 Web 生成的整行 JSONL 写入 Engine stdin、把响应行原样转发，
+请求配对与超时在 Web 完成，不解释 Run/Execution 语义。
 
 ## 构建与签名
 

@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
@@ -11,38 +9,22 @@ use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
+use tokio::sync::oneshot;
 
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const ENGINE_ENV_KEYS: &[&str] = &["WAVE_FLOW_HOME"];
+/** 退出握手的固定 requestId；其余请求身份由 Web 生成并经 engine-line 配对。 */
+const EXIT_REQUEST_ID: &str = "desktop-exit";
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EngineRequest<'a> {
-    request_id: String,
-    method: &'a str,
-    action: Option<&'a str>,
-    args: Option<serde_json::Value>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EngineResponse {
-    request_id: String,
-    ok: bool,
-    result: Option<serde_json::Value>,
-    error: Option<String>,
-}
-
-/** Tauri 是 Engine 的唯一父进程，持有私有 stdin/stdout 与请求关联表。 */
+/** Tauri 是 Engine 的唯一父进程：持有 child、原始 stdout 缓冲、就绪状态与退出握手。 */
 struct EngineState {
     child: Mutex<Option<CommandChild>>,
     /** 每次 spawn 的单调代号；迟到的旧 stdout/Terminated 不能影响新 Engine。 */
     generation: AtomicU64,
     ready: Mutex<bool>,
-    /** 仅保留 Tauri 已登记、尚未超时的响应，迟到 JSONL 不得泄漏进内存。 */
-    pending: Mutex<HashSet<String>>,
-    responses: Mutex<HashMap<String, EngineResponse>>,
     startup_error: Mutex<Option<String>>,
     stdout_buffer: Mutex<Vec<u8>>,
+    /** 退出握手唤醒器：收到 engine.shutdown 响应或子进程终止时唤醒 exit_desktop。 */
+    shutdown_ack: Mutex<Option<oneshot::Sender<()>>>,
 }
 struct TrayState {
     summary: Mutex<MenuItem<tauri::Wry>>,
@@ -53,6 +35,8 @@ struct PendingMenuAction {
 /** 仅在 Engine 已完成 durable-first 取消后允许系统真正结束应用。 */
 struct ExitState {
     approved: AtomicBool,
+    /** 退出流程去重：并发或重复确认时只允许一个流程写 shutdown / kill / exit。 */
+    exiting: AtomicBool,
 }
 
 #[tauri::command]
@@ -69,32 +53,63 @@ fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
     show_main_window(&app).map_err(|error| error.to_string())
 }
 
-/** React 的私有 Engine action 代理；不通过 TCP、HTTP 或 URL 路由。 */
-#[tauri::command]
-async fn engine_request(
-    app: tauri::AppHandle,
-    action: String,
-    args: Option<serde_json::Value>,
-    timeout_secs: Option<u64>,
-) -> Result<serde_json::Value, String> {
-    if action.trim().is_empty() {
-        return Err("桌面 action 无效。".to_string());
+/** 校验并规整 Web 传来的 JSONL 行：非空、单行、不超过 8 MiB。 */
+fn validate_engine_line(line: &str) -> Result<&str, String> {
+    let line = line.trim();
+    // JSONL 协议要求单行；含换行会把一条请求拆成两条，必须拒绝而不是静默截断语义。
+    if line.is_empty()
+        || line.contains('\n')
+        || line.contains('\r')
+        || line.len() > 8 * 1024 * 1024
+    {
+        return Err("Engine 请求行无效。".to_string());
     }
+    Ok(line)
+}
+
+/**
+ * 把 Web 生成的一整行 JSONL 原样写入 Engine stdin，并返回本次写入所属的
+ * Engine generation。
+ *
+ * generation 让 Web 在 `engine-exited` 到达时只拒绝发给已退出 Engine 的请求，
+ * 不会误伤新 Engine 的在途请求。Tauri 本身不解析 action、不配对响应。
+ */
+#[tauri::command]
+async fn engine_write(app: tauri::AppHandle, line: String) -> Result<u64, String> {
+    let line = validate_engine_line(&line)?;
     start_engine(&app).await?;
-    // 个别长动作（如分配规则解析，Engine 侧允许 120 秒）由调用方显式给出更长
-    // 超时；默认 60 秒，上限 600 秒防止无限悬挂。
-    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60).clamp(1, 600));
-    dispatch_with_timeout(
-        &app,
-        EngineRequest {
-            request_id: request_id(),
-            method: "engine.action",
-            action: Some(&action),
-            args,
-        },
-        timeout,
-    )
-    .await
+    let state = app.state::<EngineState>();
+    // 启动阶段 stderr 仍是 Rust 侧诊断；仅就绪前把原因带回给首个请求。就绪后残留的
+    // 启动噪音不能永久毒化后续请求（例如非致命 warning 写入过一次 startup_error）。
+    let ready = state
+        .ready
+        .lock()
+        .map_err(|_| "Engine 状态锁不可用。".to_string())?
+        .to_owned();
+    if !ready {
+        if let Some(message) = state
+            .startup_error
+            .lock()
+            .map_err(|_| "Engine 状态锁不可用。".to_string())?
+            .clone()
+        {
+            return Err(message);
+        }
+    }
+    // 持有 child 锁读取 generation：spawn 在同一把锁内递增，保证返回的代号与本次
+    // 实际写入的 Engine 一致（Web 用它过滤已退出 Engine 的迟到请求）。
+    let mut child_slot = state
+        .child
+        .lock()
+        .map_err(|_| "Engine 状态锁不可用。".to_string())?;
+    let process = child_slot
+        .as_mut()
+        .ok_or_else(|| "Desktop Engine 未运行。".to_string())?;
+    let generation = state.generation.load(Ordering::Acquire);
+    process
+        .write(format!("{line}\n").as_bytes())
+        .map_err(|error| format!("无法发送 Engine 请求：{error}"))?;
+    Ok(generation)
 }
 
 #[tauri::command]
@@ -123,20 +138,45 @@ async fn exit_desktop(app: tauri::AppHandle) -> Result<(), String> {
     // 写入异常或管道失联，绝不能把用户困在“正在退出”：强制退出会在下次启动时按
     // 异常路径收敛为 interrupted，而不是伪造 cancelled。崩溃的 Engine 不再复活，
     // 启动收敛由下次应用启动的 convergeStaleAcpWorkers 完成。
-    let alive = app
-        .state::<EngineState>()
-        .child
-        .lock()
-        .map(|value| value.is_some())
-        .unwrap_or(false);
-    if alive {
-        let request = EngineRequest {
-            request_id: request_id(),
-            method: "engine.shutdown",
-            action: None,
-            args: None,
+    if app
+        .state::<ExitState>()
+        .exiting
+        .swap(true, Ordering::AcqRel)
+    {
+        // 并发/重复确认：已有退出流程在收尾，直接返回，避免二次 shutdown/kill。
+        return Ok(());
+    }
+    let (sender, receiver) = oneshot::channel();
+    let state = app.state::<EngineState>();
+    let waiting = {
+        let mut child_slot = match state.child.lock() {
+            Ok(child_slot) => child_slot,
+            Err(_) => {
+                app.state::<ExitState>()
+                    .exiting
+                    .store(false, Ordering::Release);
+                return Err("Engine 状态锁不可用。".to_string());
+            }
         };
-        let _ = dispatch_with_timeout(&app, request, std::time::Duration::from_secs(3)).await;
+        match child_slot.as_mut() {
+            Some(process) => {
+                if let Ok(mut slot) = state.shutdown_ack.lock() {
+                    *slot = Some(sender);
+                }
+                let line = format!(
+                    "{{\"requestId\":\"{EXIT_REQUEST_ID}\",\"method\":\"engine.shutdown\"}}\n"
+                );
+                process.write(line.as_bytes()).is_ok()
+            }
+            None => false,
+        }
+    };
+    if waiting {
+        // 最多等 3 秒确认 Engine 已耐久写入 cancelled；超时仍强制退出。
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), receiver).await;
+    }
+    if let Ok(mut slot) = app.state::<EngineState>().shutdown_ack.lock() {
+        *slot = None;
     }
     shutdown_engine(&app);
     app.state::<ExitState>()
@@ -202,16 +242,6 @@ async fn start_engine(app: &tauri::AppHandle) -> Result<(), String> {
         .lock()
         .map_err(|_| "Engine 状态锁不可用。".to_string())?
         .clear();
-    state
-        .responses
-        .lock()
-        .map_err(|_| "Engine 状态锁不可用。".to_string())?
-        .clear();
-    state
-        .pending
-        .lock()
-        .map_err(|_| "Engine 状态锁不可用。".to_string())?
-        .clear();
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
@@ -244,16 +274,35 @@ async fn start_engine(app: &tauri::AppHandle) -> Result<(), String> {
                 CommandEvent::Error(error) => {
                     let state = handle.state::<EngineState>();
                     if let Ok(mut value) = state.startup_error.lock() {
-                        *value = Some(error.clone());
+                        *value = Some(format!("Desktop Engine 管道错误：{error}"));
                     }
-                    fail_pending(&state, format!("Desktop Engine 管道错误：{error}"));
+                    // 唤醒正在等待退出握手的调用，避免退出流程被失联管道卡住。
+                    let ack = state.shutdown_ack.lock();
+                    if let Ok(mut ack) = ack {
+                        ack.take();
+                    }
                 }
                 CommandEvent::Terminated(_) => {
                     let state = handle.state::<EngineState>();
                     if let Ok(mut child) = state.child.lock() {
                         *child = None;
                     }
-                    fail_pending(&state, "Desktop Engine 已退出。".to_string());
+                    let ack = state.shutdown_ack.lock();
+                    if let Ok(mut ack) = ack {
+                        ack.take();
+                    }
+                    let ready = state.ready.lock().map(|value| *value).unwrap_or(false);
+                    if !ready {
+                        if let Ok(mut value) = state.startup_error.lock() {
+                            *value = Some("Desktop Engine 在就绪前退出。".to_string());
+                        }
+                    }
+                    let generation = state.generation.load(Ordering::Acquire);
+                    // Web 用该事件立即拒绝所有在途请求，不必等到各自超时。
+                    let _ = handle.emit(
+                        "engine-exited",
+                        serde_json::json!({ "generation": generation }),
+                    );
                 }
                 _ => {}
             }
@@ -263,27 +312,6 @@ async fn start_engine(app: &tauri::AppHandle) -> Result<(), String> {
     // 等待会形成“等待 ready 而无法读取 ready”的死锁。首个业务请求会等待其响应。
     Ok(())
 }
-/** Engine 终止后立即唤醒所有调用方，不能让它们误等常规 action 超时。 */
-fn fail_pending(state: &tauri::State<'_, EngineState>, error: String) {
-    let ids = match state.pending.lock() {
-        Ok(mut pending) => pending.drain().collect::<Vec<_>>(),
-        Err(_) => return,
-    };
-    if let Ok(mut responses) = state.responses.lock() {
-        for request_id in ids {
-            responses.insert(
-                request_id.clone(),
-                EngineResponse {
-                    request_id,
-                    ok: false,
-                    result: None,
-                    error: Some(error.clone()),
-                },
-            );
-        }
-    }
-}
-
 /** Shell stdout 事件可能切在 UTF-8 字符内部，先按字节缓冲/换行分帧后再解码。 */
 fn process_stdout(app: &tauri::AppHandle, bytes: &[u8]) {
     let state = app.state::<EngineState>();
@@ -304,10 +332,12 @@ fn process_stdout(app: &tauri::AppHandle, bytes: &[u8]) {
         }
     }
 }
+/**
+ * 只做两件事：置 ready 标志，把非事件 JSONL 行原样转发给 Web。
+ *
+ * 请求配对、超时与错误翻译全部在 Web 侧完成；Tauri 不保存请求表。
+ */
 fn process_line(app: &tauri::AppHandle, line: &str) {
-    // 先按帧形状分流：EngineReady 只有 type/protocolVersion 两个字段，serde 会忽略
-    // 未知字段，若先尝试反序列化 EngineReady，事件帧（type: "event"）也会被成功解析
-    // 并在这里被 return 吞掉，整条事件通道静默失效。
     let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
@@ -321,87 +351,28 @@ fn process_line(app: &tauri::AppHandle, line: &str) {
         }
         return;
     }
-    // 事件帧与请求响应分流：事件帧没有 requestId，type 恒为 "event"。Tauri 附加当前
-    // Engine generation 后转发给 Web；旧 Engine 的迟到帧已在 stdout 消费层被丢弃。
+    let generation = app
+        .state::<EngineState>()
+        .generation
+        .load(Ordering::Acquire);
+    // 事件帧保持既有 engine-event 通道，事件消费者不需要改动。
     if frame_type == Some("event") && protocol == Some(1) {
-        let generation = app
-            .state::<EngineState>()
-            .generation
-            .load(Ordering::Acquire);
         let _ = app.emit(
             "engine-event",
             serde_json::json!({ "generation": generation, "frame": frame }),
         );
         return;
     }
-    if let Ok(response) = serde_json::from_str::<EngineResponse>(line) {
-        let state = app.state::<EngineState>();
-        let accepted = state
-            .pending
-            .lock()
-            .map(|mut pending| pending.remove(&response.request_id))
-            .unwrap_or(false);
-        if accepted {
-            if let Ok(mut responses) = state.responses.lock() {
-                responses.insert(response.request_id.clone(), response);
-            }
+    // 退出握手由 Rust 独占（Web 不参与该响应配对）；其余响应行交给 Web。
+    if frame.get("requestId").and_then(|value| value.as_str()) == Some(EXIT_REQUEST_ID) {
+        if let Ok(mut slot) = app.state::<EngineState>().shutdown_ack.lock() {
+            slot.take();
         }
     }
-}
-async fn dispatch_with_timeout(
-    app: &tauri::AppHandle,
-    request: EngineRequest<'_>,
-    timeout: std::time::Duration,
-) -> Result<serde_json::Value, String> {
-    let id = request.request_id.clone();
-    let bytes = format!(
-        "{}\n",
-        serde_json::to_string(&request).map_err(|error| error.to_string())?
-    )
-    .into_bytes();
-    let state = app.state::<EngineState>();
-    state
-        .pending
-        .lock()
-        .map_err(|_| "Engine 状态锁不可用。".to_string())?
-        .insert(id.clone());
-    if let Err(error) = state
-        .child
-        .lock()
-        .map_err(|_| "Engine 状态锁不可用。".to_string())?
-        .as_mut()
-        .ok_or_else(|| "Desktop Engine 未运行。".to_string())?
-        .write(&bytes)
-    {
-        let _ = state.pending.lock().map(|mut pending| pending.remove(&id));
-        return Err(format!("无法发送 Engine 请求：{error}"));
-    }
-    // Runtime 验证与首个 ACP session 投递分别允许 15 秒和 30 秒；5 秒会把正常
-    // 慢启动误报成 Engine 失联。超时后 pending 被移除，迟到 JSONL 不会占用内存。
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if let Some(response) = state
-            .responses
-            .lock()
-            .map_err(|_| "Engine 状态锁不可用。".to_string())?
-            .remove(&id)
-        {
-            return if response.ok {
-                Ok(response.result.unwrap_or(serde_json::Value::Null))
-            } else {
-                Err(response
-                    .error
-                    .unwrap_or_else(|| "Desktop Engine 拒绝请求。".to_string()))
-            };
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let _ = state.pending.lock().map(|mut pending| pending.remove(&id));
-    let _ = state
-        .responses
-        .lock()
-        .map(|mut responses| responses.remove(&id));
-    Err("Desktop Engine 请求超时。".to_string())
+    let _ = app.emit(
+        "engine-line",
+        serde_json::json!({ "generation": generation, "line": line }),
+    );
 }
 fn engine_env() -> Vec<(String, String)> {
     ENGINE_ENV_KEYS
@@ -413,12 +384,6 @@ fn engine_env() -> Vec<(String, String)> {
                 .map(|value| ((*key).to_string(), value))
         })
         .collect()
-}
-fn request_id() -> String {
-    format!(
-        "engine-{}",
-        REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
 }
 fn shutdown_engine(app: &tauri::AppHandle) {
     if let Some(mut child) = app
@@ -497,10 +462,9 @@ fn main() {
                 child: Mutex::new(None),
                 generation: AtomicU64::new(0),
                 ready: Mutex::new(false),
-                pending: Mutex::new(HashSet::new()),
-                responses: Mutex::new(HashMap::new()),
                 startup_error: Mutex::new(None),
                 stdout_buffer: Mutex::new(Vec::new()),
+                shutdown_ack: Mutex::new(None),
             });
             app.manage(TrayState {
                 summary: Mutex::new(summary),
@@ -510,6 +474,7 @@ fn main() {
             });
             app.manage(ExitState {
                 approved: AtomicBool::new(false),
+                exiting: AtomicBool::new(false),
             });
             // 兜底：Web 因脚本错误或 Engine 握手悬挂没有调用 reveal 时，2.5 秒后仍显示窗口，
             // 让恢复页/错误页可见，绝不把应用永久留在不可见状态。
@@ -550,7 +515,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             ensure_engine,
-            engine_request,
+            engine_write,
             update_tray_summary,
             take_menu_action,
             exit_desktop,
@@ -573,4 +538,35 @@ fn main() {
                 let _ = show_main_window(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_engine_line;
+
+    /** 正常请求：外围空白被规整，内容原样保留。 */
+    #[test]
+    fn accepts_single_line_json() {
+        assert_eq!(
+            validate_engine_line("  {\"requestId\":\"a\",\"method\":\"engine.action\"}\n")
+                .expect("单行 JSON 应通过"),
+            "{\"requestId\":\"a\",\"method\":\"engine.action\"}"
+        );
+    }
+
+    /** 空行、纯空白与多行都会被拒绝；多行不能静默拆成两条 JSONL。 */
+    #[test]
+    fn rejects_empty_and_multiline() {
+        assert!(validate_engine_line("").is_err());
+        assert!(validate_engine_line("   ").is_err());
+        assert!(validate_engine_line("{\"a\":1}\n{\"b\":2}").is_err());
+        assert!(validate_engine_line("{\r\n}").is_err());
+    }
+
+    /** 超限请求拒绝，避免无界内存/管道写入。 */
+    #[test]
+    fn rejects_oversized_line() {
+        let oversized = format!("{{\"x\":\"{}\"}}", "a".repeat(8 * 1024 * 1024));
+        assert!(validate_engine_line(&oversized).is_err());
+    }
 }

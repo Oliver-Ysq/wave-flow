@@ -20,6 +20,26 @@ import type {
   ScanCliRuntimesResponse,
 } from "./types";
 import type { AppSettings } from "../../../src/desktop/app-settings";
+import { createEngineClient, type EngineLine } from "./engine-client";
+
+/** Tauri 只原样转发响应行；配对、超时与 generation 过滤在 engine-client。 */
+type EngineLineEnvelope = {
+  readonly generation: number;
+  readonly line: EngineLine;
+};
+type EngineExitEnvelope = { readonly generation: number };
+
+const engineClient = createEngineClient({
+  write: (line) => invoke<number>("engine_write", { line }),
+  subscribeLine: (handler) =>
+    listen<EngineLineEnvelope>("engine-line", (event) => {
+      if (typeof event.payload?.line === "string") handler(event.payload.line);
+    }),
+  subscribeExit: (handler) =>
+    listen<EngineExitEnvelope>("engine-exited", (event) => {
+      handler(Number(event.payload?.generation ?? 0));
+    }),
+});
 
 /** WebView 只能调用当前 Tauri 持有的 Engine；没有浏览器 HTTP fallback。 */
 async function action<T>(
@@ -29,7 +49,7 @@ async function action<T>(
 ): Promise<T> {
   if (!("__TAURI_INTERNALS__" in window))
     throw new Error("Wave Flow 工作台只能在 Desktop 应用中运行。 ");
-  return invoke<T>("engine_request", { action: name, args, timeoutSecs });
+  return engineClient.action<T>(name, args, timeoutSecs);
 }
 
 export const api = {
