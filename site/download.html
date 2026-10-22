@@ -71,7 +71,7 @@
       <div class="wrap">
         <p class="docs-hero__label">下载</p>
         <h1>先把 Wave Flow 跑起来。</h1>
-        <p>首个版本 v0.1.0 已发布：macOS 12+ / Apple Silicon。当前为 ad-hoc 签名、未公证，首次打开如遇「已损坏」提示，在终端执行一行命令即可。</p>
+        <p>首个版本 v0.1.0 已发布：macOS 12+ / Apple Silicon。推荐终端一行安装，命令行下载不触发 Gatekeeper，装完即可打开。</p>
         <div class="download-hero__actions">
           <a class="btn btn--paper" href="#source">从源码运行</a>
           <a class="btn btn--ghost" href="https://github.com/Oliver-Ysq/wave-flow/releases">查看 GitHub Releases</a>
@@ -83,15 +83,21 @@
       <div class="release-grid">
         <div class="release-card">
           <div class="release-card__top"><i aria-hidden="true"></i>推荐方式 · Apple Silicon</div>
-          <h2>预编译安装包</h2>
-          <p>v0.1.0 正式 dmg（33 MiB）。macOS 12+；ad-hoc 签名、未公证，首次打开如遇「已损坏」提示，按下方步骤处理一次。</p>
-          <a class="btn btn--paper btn--small" href="https://github.com/Oliver-Ysq/wave-flow/releases/download/v0.1.0/Wave.Flow_0.1.0_aarch64.dmg">下载 dmg</a>
+          <h2>终端一键安装</h2>
+          <p>在终端粘贴一行命令：curl 下载不触发 Gatekeeper 隔离标记，装完即可打开，无需任何额外处理。</p>
+          <div class="code">
+            <div class="code__head">
+              <span>Terminal</span>
+              <button class="code__copy" type="button" data-copy>复制</button>
+            </div>
+            <pre><code>curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh</code></pre>
+          </div>
         </div>
         <div class="release-card release-card--muted">
-          <div class="release-card__top"><i aria-hidden="true"></i>开发者方式</div>
-          <h2>从源码运行</h2>
-          <p>使用 Bun 安装依赖，Tauri 启动桌面壳与随包的 Engine sidecar。适合开发、试用与参与共建。</p>
-          <a class="btn btn--ghost btn--small" href="#source">查看命令</a>
+          <div class="release-card__top"><i aria-hidden="true"></i>备选 · 手动安装</div>
+          <h2>预编译安装包</h2>
+          <p>v0.1.0 正式 dmg（33 MiB）。浏览器下载的文件会被系统隔离，如遇「已损坏」提示，按下方步骤处理一次。</p>
+          <a class="btn btn--ghost btn--small" href="https://github.com/Oliver-Ysq/wave-flow/releases/download/v0.1.0/Wave.Flow_0.1.0_aarch64.dmg">下载 dmg</a>
         </div>
       </div>
 
