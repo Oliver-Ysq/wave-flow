@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wave Flow · AI 长任务，按流程执行，凭证据交付</title>
+  <meta name="description" content="Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。把长任务变成低幻觉、可恢复的流程：脚本化执行，完成由证据定义，需要你时 Agent 显式停下来。">
+  <meta name="theme-color" content="#121214">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Wave Flow · AI 长任务，按流程执行，凭证据交付">
+  <meta property="og:description" content="脚本化执行 · 完成由证据定义 · 中断可恢复 · 需要你时 Agent 显式停下来。">
+  <meta property="og:url" content="https://oliver-ysq.github.io/wave-flow/">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css?v=20261022b">
+</head>
+<body class="home">
+  <a class="skip-link" href="#main">跳到正文</a>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <button class="icon-btn menu-btn" type="button" data-open-drawer aria-label="打开导航" aria-expanded="false" aria-controls="site-drawer">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+          <path d="M3 6h14M3 10h14M3 14h9"/>
+        </svg>
+      </button>
+      <a class="brand" href="index.html" aria-label="Wave Flow 首页">
+        <img src="assets/favicon.svg" alt="" width="26" height="26">
+        <span>Wave Flow</span>
+      </a>
+      <nav class="header-nav" aria-label="主导航">
+        <a href="docs.html">文档</a>
+        <a href="download.html">下载</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/Oliver-Ysq/wave-flow" aria-label="GitHub 仓库">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+          </svg>
+        </a>
+        <a class="btn btn--small btn--paper" href="download.html">下载</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="drawer-scrim" data-drawer-scrim hidden></div>
+  <aside class="site-drawer" id="site-drawer" data-drawer aria-hidden="true" aria-label="站点导航">
+    <div class="site-drawer__top">
+      <a class="brand" href="index.html">
+        <img src="assets/favicon.svg" alt="" width="26" height="26">
+        <span>Wave Flow</span>
+      </a>
+      <button class="icon-btn" type="button" data-drawer-close aria-label="关闭导航">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+          <path d="m5 5 10 10M15 5 5 15"/>
+        </svg>
+      </button>
+    </div>
+    <nav class="site-drawer__nav" aria-label="站点页面">
+      <p class="drawer-label">页面</p>
+      <a href="index.html">首页 <span>01</span></a>
+      <a href="docs.html">文档 <span>02</span></a>
+      <a href="download.html">下载 <span>03</span></a>
+      <p class="drawer-label">外部</p>
+      <a href="https://github.com/Oliver-Ysq/wave-flow">GitHub 仓库 <span>↗</span></a>
+    </nav>
+    <div class="site-drawer__foot">
+      <span>v0.1.0 · MIT</span>
+      <a href="mailto:oliver.ysq@gmail.com">联系作者</a>
+    </div>
+  </aside>
+
+  <main id="main">
+    <section class="home-hero">
+      <div class="wrap home-hero__grid">
+        <div class="home-hero__copy">
+          <p class="home-hero__label">AI Agent 工作流 · 本机运行</p>
+          <h1>AI 长任务，<br>按流程执行，<br>凭证据交付。</h1>
+          <p class="home-hero__sub">方案先经你确认，再由 Codex、Claude Code 等 Agent CLI 分阶段执行。中断可以恢复，需要你时 Agent 会显式停下来。</p>
+          <div class="home-hero__actions">
+            <a class="btn btn--paper" href="docs.html">快速开始</a>
+            <a class="btn btn--ghost" href="download.html">去下载</a>
+          </div>
+          <button class="cmd" type="button" data-cmd aria-label="复制克隆命令">
+            <span class="cmd__dollar" aria-hidden="true">$</span>
+            <span class="cmd__text" data-cmd-text>git clone https://github.com/Oliver-Ysq/wave-flow.git</span>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="ic-copy">
+                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>
+                <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/>
+              </g>
+              <g class="ic-check">
+                <path d="m3.5 8.5 3 3 6-6"/>
+              </g>
+            </svg>
+          </button>
+        </div>
+
+        <figure class="shot">
+          <img src="assets/app.png" alt="Wave Flow 工作台截图：在 projectX 项目中通过 /wave-flow 让主控基于目标生成 Workflow 草案" width="2048" height="1376" loading="lazy" decoding="async">
+        </figure>
+      </div>
+    </section>
+
+    <section class="home-features" aria-label="优势">
+      <div class="wrap home-features__grid">
+        <article class="feature">
+          <span class="feature__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 12.2 11.3 14.5 15.5 10"/>
+              <rect x="4" y="4" width="16" height="16" rx="4.5"/>
+            </svg>
+          </span>
+          <h3>低幻觉交付</h3>
+          <p>「完成」要经过结构校验并写入执行记录；审查类 Agent 只报告带证据的问题，一句自信的总结不算数。</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 12a8 8 0 1 0 2.3-5.7"/>
+              <path d="M4 3.5V7.5h4"/>
+            </svg>
+          </span>
+          <h3>可恢复的长任务</h3>
+          <p>关窗不停止，重启后显式恢复；只复用严格匹配的已完成部分，不回滚、不悄悄重跑。</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m8 7-4.5 5L8 17"/>
+              <path d="m16 7 4.5 5L16 17"/>
+            </svg>
+          </span>
+          <h3>脚本化执行</h3>
+          <p>阶段、并行与完成条件写在 TypeScript 里，编排漂移由结构兜底，不靠模型记住计划。</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="8" r="3.2"/>
+              <path d="M5.5 19.5c1-3 3.4-4.5 6.5-4.5s5.5 1.5 6.5 4.5"/>
+            </svg>
+          </span>
+          <h3>人工介入</h3>
+          <p>子代理需要输入时显式停下来等你，答案交回原 Agent 继续判断；随时可暂停或停止。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="home-footer">
+    <div class="wrap home-footer__inner">
+      <span>© 2026 Oliver-Ysq · MIT License · 仅供学习与研究，不涉及任何商业化</span>
+      <nav aria-label="页脚导航">
+        <a href="docs.html">文档</a>
+        <a href="download.html">下载</a>
+        <a href="https://github.com/Oliver-Ysq/wave-flow">GitHub</a>
+        <a href="mailto:oliver.ysq@gmail.com">联系作者</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script src="assets/site.js?v=20261022b" defer></script>
+</body>
+</html>

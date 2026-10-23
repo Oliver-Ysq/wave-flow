@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文档 · Wave Flow</title>
+  <meta name="description" content="Wave Flow 文档：安装与运行、第一次任务、Workflow 作者 API、运行语义与支持的本机 CLI。">
+  <meta name="theme-color" content="#0a0b0f">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css?v=20261022a">
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#main">跳到正文</a>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <button class="icon-btn menu-btn" type="button" data-docs-toggle aria-label="切换文档导航" aria-expanded="true" aria-controls="docs-sidebar">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+          <path d="M3 6h14M3 10h14M3 14h9"/>
+        </svg>
+      </button>
+      <a class="brand" href="index.html" aria-label="Wave Flow 首页">
+        <img src="assets/favicon.svg" alt="" width="26" height="26">
+        <span>Wave Flow</span>
+      </a>
+      <nav class="header-nav" aria-label="主导航">
+        <a href="index.html">首页</a>
+        <a href="docs.html">文档</a>
+        <a href="download.html">下载</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/Oliver-Ysq/wave-flow" aria-label="GitHub 仓库">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+          </svg>
+        </a>
+        <a class="btn btn--small btn--paper" href="download.html">下载</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="docs-scrim" data-docs-scrim hidden></div>
+
+  <div class="docs-wrap">
+    <aside class="docs-sidebar" id="docs-sidebar" data-docs-sidebar aria-label="文档导航">
+      <div class="docs-sidebar__head">
+        <span>文档</span>
+        <button class="icon-btn" type="button" data-docs-close aria-label="关闭文档导航">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+            <path d="m5 5 10 10M15 5 5 15"/>
+          </svg>
+        </button>
+      </div>
+      <nav class="docs-nav">
+        <div class="docs-nav__group">
+          <p>开始</p>
+          <a href="#intro" class="is-active">介绍</a>
+          <a href="#install">安装与运行</a>
+          <a href="#first-run">第一次任务</a>
+        </div>
+        <div class="docs-nav__group">
+          <p>工作流</p>
+          <a href="#workflow">编写 Workflow</a>
+          <a href="#author-api">作者 API</a>
+          <a href="#parallel-write">并行与写入</a>
+        </div>
+        <div class="docs-nav__group">
+          <p>运行</p>
+          <a href="#states">状态与完成</a>
+          <a href="#resume">暂停与恢复</a>
+          <a href="#cli">支持的 CLI</a>
+        </div>
+        <div class="docs-nav__group">
+          <p>参考</p>
+          <a href="#limits">边界</a>
+        </div>
+      </nav>
+      <div class="docs-sidebar__foot">
+        <a href="index.html">回到首页</a>
+      </div>
+    </aside>
+
+    <main class="docs-main" id="main">
+      <header class="docs-hero">
+        <p class="docs-hero__label">文档</p>
+        <h1>从目标到交付。</h1>
+        <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
+        <div class="docs-meta">
+          <span>适用于 v0.1.0</span>
+          <span>macOS 12+</span>
+          <span>更新于 2026-10</span>
+        </div>
+      </header>
+
+      <article class="prose">
+        <section id="intro">
+          <h2>介绍</h2>
+          <p>Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。你用对话描述目标，主控提出工作流方案；确认后，由真实的 Codex、DeepSeek Harness 或 Claude Code 会话按阶段执行。</p>
+          <p>它不是把多个聊天窗口拼在一起。阶段、依赖、并行与完成条件写在 Workflow 里；每个 Agent 节点绑定一条独立的 ACP 会话，下游不会隐式继承上游聊天历史。</p>
+          <div class="arch" aria-label="运行时分层">
+            <span>桌面工作台</span><i>→</i>
+            <span>Engine / Runtime</span><i>→</i>
+            <span>ACP Adapter</span><i>→</i>
+            <span>本机 CLI 会话</span>
+          </div>
+          <p>Web 只展示和控制 Run；Runtime 负责动态调度与节点状态；ACP Adapter 负责经 stdio 启动本地 Agent 并管理会话与流式事件。每一层都不越过自己的职责。</p>
+        </section>
+
+        <section id="install">
+          <h2>安装与运行</h2>
+          <p>当前面向 macOS，尚未发布预编译安装包。需要先准备以下环境：</p>
+          <ul>
+            <li>macOS 12.0 或更高版本</li>
+            <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
+            <li>Rust 工具链与 Xcode Command Line Tools</li>
+            <li>至少一个已登录的本机 CLI：Codex、DeepSeek Harness 或 Claude Code</li>
+          </ul>
+          <p>克隆仓库并以开发模式启动桌面应用：</p>
+          <div class="code">
+            <div class="code__head">
+              <span>Terminal</span>
+              <button class="code__copy" type="button" data-copy>复制</button>
+            </div>
+            <pre><code>git clone https://github.com/Oliver-Ysq/wave-flow.git
+cd wave-flow
+bun install
+bun run desktop:dev</code></pre>
+          </div>
+          <p>开发模式使用独立的窗口配置与 bundle id，不会覆盖正式安装的应用。只迭代工作台界面时，可以运行 <code>bun run web:dev</code>。</p>
+          <p>构建可运行的 macOS 应用：</p>
+          <div class="code">
+            <div class="code__head">
+              <span>Terminal</span>
+              <button class="code__copy" type="button" data-copy>复制</button>
+            </div>
+            <pre><code>bun run desktop:build</code></pre>
+          </div>
+          <p>产物位于 <code>src-tauri/target/release/bundle/</code>。当前 <code>desktop:prepare</code> 只产出 Apple Silicon（<code>aarch64-apple-darwin</code>）的 Engine sidecar；Intel 构建需要另加目标并验证。开发机没有证书时使用 ad-hoc 签名；正式分发仍需单独配置签名与公证。</p>
+        </section>
+
+        <section id="first-run">
+          <h2>第一次任务</h2>
+          <ol>
+            <li><strong>描述目标。</strong>在项目中新建任务，用一段话说明要完成什么、范围在哪、哪些事情不能做。在输入框输入 <code>/</code> 可以打开命令菜单，用 <code>/wave-flow</code> 让主控直接基于目标生成 Workflow 草案。</li>
+            <li><strong>先看方案。</strong>主控会把目标整理成 Workflow 提案；你可以继续对话，调整阶段、Prompt 或 CLI 分配。</li>
+            <li><strong>确认后启动。</strong>在方案页确认输入参数、每个节点的 CLI，以及写入任务需要的 Git 授权。</li>
+            <li><strong>按阶段查看。</strong>执行页按 Phase → Agent 展示状态、流式正文和工具活动；点击节点可以看到当前动作。</li>
+            <li><strong>结束并复核。</strong>执行结束后查看结构化交付与执行总结。需要你输入时，Agent 会显式 <code>block</code>，答案只会唤醒原命令，是否继续仍由原 Agent 决定。</li>
+          </ol>
+          <div class="callout">
+            <p><strong>不要把“跑完”当成“验收”。</strong>Schema 校验通过只证明结果结构合法，不证明答案正确。写入类任务应在流程末尾安排可验证的检查或人工复核。</p>
+          </div>
+        </section>
+
+        <section id="workflow">
+          <h2>编写 Workflow</h2>
+          <p>本地 Workflow 是项目内你明确选择的受信任 <code>.ts</code> 文件。它是 ESM 模块：导入作者 API、导出纯字面量 <code>meta</code>、默认导出一个 <code>run(args)</code>。新任务还必须声明纯字面量的 <code>meta.inputSchema</code>，它是 JSON-safe 对象参数 Schema，不是节点结果 Schema。</p>
+          <div class="code">
+            <div class="code__head">
+              <span>cross-review.ts</span>
+              <button class="code__copy" type="button" data-copy>复制</button>
+            </div>
+            <pre><code><span class="tok-kw">import</span> { agent, log, parallel, phase } <span class="tok-kw">from</span> <span class="tok-str">"wave-flow"</span>;
+
+<span class="tok-kw">export const</span> meta = {
+  name: <span class="tok-str">"cross-review"</span>,
+  description: <span class="tok-str">"多 Agent 交叉代码审查"</span>,
+  phases: [{ title: <span class="tok-str">"独立审查"</span> }, { title: <span class="tok-str">"集中复核"</span> }],
+  inputSchema: {
+    type: <span class="tok-str">"object"</span>,
+    properties: { target: { type: <span class="tok-str">"string"</span>, minLength: 1 } },
+    required: [<span class="tok-str">"target"</span>],
+    additionalProperties: <span class="tok-kw">false</span>,
+  },
+};
+
+<span class="tok-kw">export default async function</span> <span class="tok-fn">run</span>(args: { target: string }) {
+  <span class="tok-fn">phase</span>(<span class="tok-str">"独立审查"</span>);
+  <span class="tok-fn">log</span>(<span class="tok-str">`审查目标：${args.target}`</span>);
+  <span class="tok-kw">const</span> reviews = <span class="tok-kw">await</span> <span class="tok-fn">parallel</span>([
+    () =&gt; <span class="tok-fn">agent</span>(<span class="tok-str">"独立审查变更，只报告有证据的问题。"</span>, {
+      id: <span class="tok-str">"codex-review"</span>, cli: <span class="tok-str">"codex"</span>,
+    }),
+    () =&gt; <span class="tok-fn">agent</span>(<span class="tok-str">"从安全与副作用角度复核。"</span>, {
+      id: <span class="tok-str">"dsh-review"</span>, cli: <span class="tok-str">"dsh"</span>,
+    }),
+  ]);
+
+  <span class="tok-fn">phase</span>(<span class="tok-str">"集中复核"</span>);
+  <span class="tok-kw">return</span> <span class="tok-fn">agent</span>(<span class="tok-str">"比较两份结论，标出冲突与未验证假设。"</span>, {
+    id: <span class="tok-str">"verdict"</span>, cli: <span class="tok-str">"claude"</span>,
+  });
+}</code></pre>
+          </div>
+          <h3>meta 契约</h3>
+          <ul>
+            <li><code>name</code> 使用 kebab-case，例如 <code>deep-research</code>。</li>
+            <li><code>description</code> 是非空单行说明，用于方案标题，不要把完整目标塞进去。</li>
+            <li><code>phases</code> 是非空有序数组，标题唯一；每次 <code>phase(title)</code> 必须精确匹配其中一项。</li>
+            <li><code>exampleArgs</code> 可选，键必须对应 <code>run(args)</code> 实际读取的字段。</li>
+            <li><code>meta</code> 必须是纯字面量：不能含变量、调用、展开、计算属性或模板字符串。</li>
+          </ul>
+          <p>保存方案时会重新预检：只读取文件、校验形状与 Schema，不会运行脚本。主控提交的受限草案不是模块，禁止任何 <code>import</code> / <code>export</code>，只能使用运行时注入的 API；两种形态不要混用。</p>
+        </section>
+
+        <section id="author-api">
+          <h2>作者 API</h2>
+          <p>优先使用下面五个原语表达依赖关系。不要臆造嵌套 <code>workflow()</code>、重试或预算字段。</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>API</th><th>用途</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>agent(prompt, options)</code></td><td>启动一次受管 CLI 会话。每个节点必须提供 Run 内唯一且稳定的 <code>id</code> 与 <code>cli</code>；需要解析结果时提供 <code>schema</code>。</td></tr>
+                <tr><td><code>phase(title)</code></td><td>声明当前阶段，进入并发前调用一次。绝不在 <code>parallel()</code> 任务或 <code>pipeline()</code> 阶段内调用。</td></tr>
+                <tr><td><code>parallel(tasks)</code></td><td>并行执行零参数任务并汇合。失败项返回 <code>null</code>，使用前必须过滤或判空。</td></tr>
+                <tr><td><code>pipeline(items, ...stages)</code></td><td>让每个 item 独立经过同一组阶段，适合逐项处理。</td></tr>
+                <tr><td><code>log(message)</code></td><td>实时状态通道。进入阶段、开始较慢任务、扇出与汇总前说明进展。</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p><code>agent()</code> 的 <code>sandbox</code> 只支持 <code>read-only</code>（默认）与 <code>workspace-write</code>。它不是安全沙箱，只约束 Adapter 启动的 CLI，不约束 Workflow JavaScript。</p>
+          <p>需要解析的 Agent 结果应同时提供 JSON-safe <code>schema</code> 与对应的 TypeScript 类型。直接 <code>await</code> 的失败会把节点标记为 <code>interrupted</code>；并发任务失败时结果为 <code>null</code>。</p>
+        </section>
+
+        <section id="parallel-write">
+          <h2>并行与写入</h2>
+          <p>并行写共享同一工作现场，宿主不做冲突检测或自动合并。任务分配必须按模块或文件分区：同一文件、同一函数或同一配置块只能有一个 writer；依赖前序结果的写入放到后续 phase。</p>
+          <p>写入类 Workflow 使用独立 Git worktree，执行不会自动 commit、合并或 push；最终改动由宿主统一封存后落到主工作区（保持未提交），内部检查点只用于恢复与诊断。</p>
+          <div class="callout">
+            <p><strong>worktree 不是安全边界。</strong>它只分离正常工作现场，不能阻止 Worker 修改其他目录、其他 worktree、共享 Git 或凭据。Git diff 也不证明工作区外没有副作用。</p>
+          </div>
+        </section>
+
+        <section id="states">
+          <h2>状态与完成</h2>
+          <p>业务状态只由受管会话中的 <code>wave-flow complete</code>、<code>block</code>、<code>continue</code> 改变；<code>wave-flow answer</code> 只交付信息，不能直接改变节点状态。不能从终端 ANSI、自然语言“完成”或空闲提示推断状态。</p>
+          <p><code>complete</code> 只有在 JSON 结果、Schema 校验记录与 Journal 都耐久落盘后才生效。用户停止记为 <code>cancelled</code>；未知进程或会话异常记为 <code>interrupted</code>，不存在 Agent 主动上报的业务失败状态。</p>
+          <p>Agent 上报会携带 Run、节点、会话标识与当前 Engine 颁发的 capability。稳定三元组只用于定位候选会话；Engine 还会验证 Journal、ACP session binding 与节点状态。</p>
+        </section>
+
+        <section id="resume">
+          <h2>暂停与恢复</h2>
+          <p>关闭窗口不会停止 Engine 或 Agent。Engine 重启后不会跨进程认领 ACP 会话：旧的 active 节点一律收敛为 <code>interrupted</code>，只有你在执行页显式恢复才会创建新 attempt。</p>
+          <p>恢复只复用同一 Execution 内严格匹配的已完成前缀。匹配项包括 Workflow hash、cwd、Runtime 版本、id、调用顺序、CLI、输入、sandbox、model 与 Schema 指纹；第一个重启节点之后的下游节点不会复用旧结果。</p>
+          <p>Journal 是执行证据，不是虚拟机快照：恢复不会回滚文件，也不会撤销外部副作用。Worker 原生会话持续五分钟无实质进展（正文/工具/计划事件）时，执行器只记录一条停滞诊断提示，不自动中断、不重发任务，唯一出口是你显式停止。</p>
+        </section>
+
+        <section id="cli">
+          <h2>支持的 CLI</h2>
+          <p>三个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。当前由你手动分配 CLI，不提供自动模型路由。</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>CLI</th><th>说明</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>codex</code></td><td>使用本机 Codex 登录与配置。</td></tr>
+                <tr><td><code>dsh</code></td><td>DeepSeek Harness。需在 <code>$DSH_HOME</code> 配置 provider key，并要求 Node ≥ 24；Node ≤ 22 会静默退出。</td></tr>
+                <tr><td><code>claude</code></td><td>Claude Code。主控只继承认证与模型环境变量；模型侧由 <code>~/.claude/settings.json</code> 决定。</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>每个 Agent 节点绑定独立会话，使用你选择的 CLI 及其默认模型。下游不会隐式复用上游聊天历史，因此每个 prompt 都必须自包含任务、范围、相关上游结果与期望产出。</p>
+        </section>
+
+        <section id="limits">
+          <h2>边界</h2>
+          <ul>
+            <li>一期是本机单用户桌面产品：不做登录、多人协作、云端同步、远程控制或可视化 Workflow 编辑。</li>
+            <li>Workflow 只允许本地加载；不支持 URL、自动下载或未知来源。它是受信任扩展模块，不是不可信代码沙箱。</li>
+            <li>主控默认开启感知模式：可读取项目内容与已登录工具，但不会写入当前项目；修改项目仍必须提出 Workflow 并经你确认。感知模式可在设置中关闭。Worker 使用可信原生 CLI 配置与权限，不额外施加 Wave Flow OS 文件隔离。</li>
+            <li>写入类任务使用独立 worktree；不自动合并或 push。worktree 不能阻止跨目录写入，Git 记录也不覆盖工作区外影响。</li>
+            <li>模型请求仍由所选 CLI 发送给其服务商；本地运行不代表离线推理或数据不出本机。</li>
+            <li>完整执行总结、当前现场补充与 writer 安全交接是修订启动的前置条件；Schema 通过不是验收。</li>
+            <li>中断恢复只复用同一执行内严格匹配的已完成前缀；不会回滚文件或撤销外部副作用。</li>
+          </ul>
+        </section>
+      </article>
+    </main>
+
+    <aside class="docs-toc" aria-label="本页目录">
+      <p>目录</p>
+      <a href="#intro" class="is-active">介绍</a>
+      <a href="#install">安装与运行</a>
+      <a href="#first-run">第一次任务</a>
+      <a href="#workflow">编写 Workflow</a>
+      <a href="#author-api">作者 API</a>
+      <a href="#parallel-write">并行与写入</a>
+      <a href="#states">状态与完成</a>
+      <a href="#resume">暂停与恢复</a>
+      <a href="#cli">支持的 CLI</a>
+      <a href="#limits">边界</a>
+      <div class="docs-toc__edit">
+        <a href="https://github.com/Oliver-Ysq/wave-flow">在 GitHub 查看源码</a>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="site-footer__inner">
+        <div>
+          <div class="site-footer__brand">
+            <img src="assets/favicon.svg" alt="" width="22" height="22">
+            <span>Wave Flow</span>
+          </div>
+          <p>让任务有章可循，让不同 Agent 发挥所长。本机运行，MIT License。</p>
+        </div>
+        <nav class="site-footer__links" aria-label="页脚导航">
+          <a href="index.html">首页</a>
+          <a href="download.html">下载</a>
+          <a href="https://github.com/Oliver-Ysq/wave-flow">GitHub</a>
+          <a href="mailto:oliver.ysq@gmail.com">联系作者</a>
+        </nav>
+      </div>
+      <div class="site-footer__bottom">
+        <span>© 2026 Oliver-Ysq · MIT License</span>
+        <span>本项目仅供学习与研究，不涉及任何商业化。</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="assets/site.js?v=20261022a" defer></script>
+</body>
+</html>

@@ -8,6 +8,8 @@ Give long tasks a controlled workflow and each job the right agent. An ever-grow
 
 [中文](./README.md) | English
 
+> This project is for learning and research only; it is not a commercial product.
+
 ## One goal. A coordinated workflow.
 
 For example: “Review this project, have another agent independently verify the findings, and report only evidence-backed issues.”

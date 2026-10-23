@@ -15,7 +15,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": ["app", "dmg"],
     "icon": ["icons/icon.png"],
     "externalBin": ["binaries/wave-flow-desktop-engine"],
     "macOS": { "minimumSystemVersion": "12.0" }
