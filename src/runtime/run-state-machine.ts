@@ -73,6 +73,9 @@ export class RunStateMachine {
       case "log.written":
         this.#applyLogWritten(event);
         return;
+      case "agent.hint":
+        this.#applyAgentHint(event);
+        return;
       case "agent.created":
         this.#applyAgentCreated(event);
         return;
@@ -291,6 +294,14 @@ export class RunStateMachine {
    * Run 级日志保持原有忽略语义。节点未知时也忽略，保证旧档案可只读重放。
    */
   #applyLogWritten(event: Extract<JournalEvent, { type: "log.written" }>): void {
+    if (event.nodeId === null) return;
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent) return;
+    this.#agents.set(event.nodeId, { ...agent, hint: event.message });
+  }
+
+  /** 旧版 agent.hint 的只读回放；规则与节点级 log.written 完全一致。 */
+  #applyAgentHint(event: Extract<JournalEvent, { type: "agent.hint" }>): void {
     if (event.nodeId === null) return;
     const agent = this.#agents.get(event.nodeId);
     if (!agent) return;

@@ -20,7 +20,7 @@ import { mkdir, realpath } from "node:fs/promises";
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 
-test("Engine重启仅补completed来源证据，自动应用不重跑业务", async () => {
+test("Engine重启仅补completed来源证据，不写主工作区、不重跑业务", async () => {
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-auto-delivery-")));roots.push(root);
  const cwd=join(root,"repo");await mkdir(cwd);
  const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Test","-c","user.email=test@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
@@ -60,9 +60,9 @@ test("Engine重启仅补completed来源证据，自动应用不重跑业务", as
   expect(detail.sourceEvidence?.commit).toBe(savedRef);
   expect(detail.sourceDiagnostic).toBeUndefined();
   expect(await git("show","-s","--format=%P",detail.sourceEvidence!.commit)).toBe(base);
-  // 最终树自动应用到主工作区，保持未提交、不移动分支。
-  expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("final\n");
-  expect(await git("diff","--cached","--name-only")).toBe("");expect(await git("status","--porcelain")).toBe("M a.txt");
+  // 结果只保留在受管 worktree；主工作区不动。
+  expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
+  expect(await git("diff","--cached","--name-only")).toBe("");expect(await git("status","--porcelain")).toBe("");
   await engine.convergeStaleAcpWorkers();expect(await manager.inspectSource(execution.executionId)).toEqual(detail.sourceEvidence!);expect(calls).toBe(1);
   const identity={harnessRunId:task.harnessRunId,executionId:execution.executionId};
   const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
@@ -329,14 +329,14 @@ test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", a
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-harness-switch-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-switch-project-")); roots.push(cwd);
   const registry = new CliRuntimeRegistry(root);
-  const runtimeRecord = async (name: string, cli: "codex" | "kimi", harnessTools: boolean): Promise<CliRuntimeRecord> => {
+  const runtimeRecord = async (name: string, cli: "codex" | "claude", harnessTools: boolean): Promise<CliRuntimeRecord> => {
     const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho cli\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
     const executable = await verifyExecutable(executablePath);
-    return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${cli} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "kimi" ? "kimi-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${cli} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "claude" ? "claude-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
   };
   const first = await registry.saveVerified(await runtimeRecord("codex-a", "codex", true));
-  const second = await registry.saveVerified(await runtimeRecord("kimi-b", "kimi", true));
-  const workerOnly = await registry.saveVerified(await runtimeRecord("kimi-c", "kimi", false));
+  const second = await registry.saveVerified(await runtimeRecord("kimi-b", "claude", true));
+  const workerOnly = await registry.saveVerified(await runtimeRecord("kimi-c", "claude", false));
   let release: (() => void) | null = null;
   const session: HarnessSession = {
     isRunning: true,
@@ -368,19 +368,19 @@ test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", a
 test("Engine runtimes.validate 走统一验证器入口", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-validate-")); roots.push(root);
   const seen: { cli: string; executablePath: string }[] = [];
-  const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push({ cli, executablePath: input.executablePath });
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
-    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "kimi" }) as { runtime: { cli: string } };
-    expect(response.runtime.cli).toBe("kimi");
-    expect(seen).toEqual([{ cli: "kimi", executablePath }]);
+    const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "claude" }) as { runtime: { cli: string } };
+    expect(response.runtime.cli).toBe("claude");
+    expect(seen).toEqual([{ cli: "claude", executablePath }]);
     const listed = await engine.handleDesktopAction("runtimes.list", {}) as { runtimes: { cli: string }[] };
     expect(listed.runtimes).toHaveLength(1);
   } finally { engine.shutdown(); }
@@ -390,19 +390,19 @@ test("Engine runtimes.validate 走统一验证器入口", async () => {
 test("Engine runtimes.validate 按文件名识别真实 CLI 种类", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-detect-")); roots.push(root);
   const seen: string[] = [];
-  const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+  const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push(cli);
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
     const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" }) as { runtime: { cli: string } };
-    expect(response.runtime.cli).toBe("kimi");
-    expect(seen).toEqual(["kimi"]);
+    expect(response.runtime.cli).toBe("claude");
+    expect(seen).toEqual(["claude"]);
   } finally { engine.shutdown(); }
 });
 
@@ -449,7 +449,7 @@ test("Engine runtimes.validate 未识别种类时按 Catalog 全部种类回退"
   try {
     const response = await engine.handleDesktopAction("runtimes.validate", { executablePath, cli: "codex" }) as { runtime: { cli: string } };
     expect(response.runtime.cli).toBe("dsh");
-    expect(seen).toEqual(["codex", "kimi", "claude", "dsh"]);
+    expect(seen).toEqual(["codex", "claude", "dsh"]);
   } finally { engine.shutdown(); }
 });
 
@@ -489,7 +489,8 @@ test("扫描在探测无结论时仍完整验证首个候选，并清掉失败�
     const result = await engine.handleDesktopAction("runtimes.scan", {}) as { verified: number; failures: Record<string, string> };
     expect(result.verified).toBe(1);
     expect(result.failures.codex).toBeUndefined();
-    expect(result.failures.kimi).toBe("absent");
+    // 暂时下线的 CLI 不进入扫描，也不伪装成“未安装”。
+    expect(result.failures.kimi).toBeUndefined();
   } finally { engine.shutdown(); }
 });
 

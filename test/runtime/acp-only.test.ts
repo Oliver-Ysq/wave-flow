@@ -55,7 +55,7 @@ test("空心ACP事件不续命停滞提示，超窗只诊断一次且不中断�
   let diagnostics: JournalEvent[] = [];
   for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
     await Bun.sleep(10);
-    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
   }
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
@@ -66,7 +66,7 @@ test("空心ACP事件不续命停滞提示，超窗只诊断一次且不中断�
   finishTurn();
   await expect(pending).resolves.toEqual({});
   expect(prompts).toBe(1); expect(closed).toBe(1);
-  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written")).toHaveLength(1);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null)).toHaveLength(1);
 });
 
 test("停滞计时只认可正文、工具与计划类ACP进展", () => {
@@ -99,7 +99,7 @@ test("原生ACP静默停滞只耐久提示一次，不自动中断；显式compl
   let diagnostics: JournalEvent[] = [];
   for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
     await Bun.sleep(10);
-    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
   }
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
@@ -111,7 +111,7 @@ test("原生ACP静默停滞只耐久提示一次，不自动中断；显式compl
   await expect(pending).resolves.toEqual({});
   expect(prompts).toBe(1); expect(closed).toBe(1); expect(unsubscribed).toBe(1);
   const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
-  expect(events.filter(event => event.type === "log.written")).toHaveLength(1);
+  expect(events.filter(event => event.type === "log.written" && event.diagnostic !== null)).toHaveLength(1);
   expect(events.filter(event => event.type === "agent.session")).toHaveLength(1);
   expect(events.filter(event => event.type === "agent.completed")).toHaveLength(1);
 });
@@ -134,7 +134,7 @@ test("真实会话事件持续刷新停滞窗口，complete仍只由Control决�
   const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 35);
   executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({});
-  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written" && event.diagnostic !== null)).toBe(false);
 });
 
 test("等待原block答案跨越停滞窗口不重发、不制造中断", async () => {
@@ -162,7 +162,7 @@ test("等待原block答案跨越停滞窗口不重发、不制造中断", async 
   await value.control.answer({ blockRequestId, answer: { ok: true } });
   await expect(pending).resolves.toEqual({});
   expect(prompts).toBe(1);
-  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written" && event.diagnostic !== null)).toBe(false);
 });
 
 for (const operation of ["block", "complete"] as const) test(`Control ${operation}落盘跨停滞窗口属于控制等待，不制造诊断`, async () => {
@@ -209,7 +209,7 @@ for (const operation of ["block", "complete"] as const) test(`Control ${operatio
       await value.control.answer({ blockRequestId, answer: {} });
     }
     await expect(pending).resolves.toEqual({});
-    expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+    expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written" && event.diagnostic !== null)).toBe(false);
   } finally { release(); appendSpy.mockRestore(); resultSpy.mockRestore(); }
 });
 
@@ -237,7 +237,7 @@ test("原session暂停跨窗口后recover重置计时且只发送现场检查回
   await expect(pending).resolves.toEqual({});
   expect(prompts).toHaveLength(2);
   expect(prompts[1]).toContain("不要重发原始任务");
-  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written")).toBe(false);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.some(event => event.type === "log.written" && event.diagnostic !== null)).toBe(false);
 });
 
 test("其他session事件不能掩盖当前Worker停滞", async () => {
@@ -257,7 +257,7 @@ test("其他session事件不能掩盖当前Worker停滞", async () => {
   let diagnostics: JournalEvent[] = [];
   for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
     await Bun.sleep(10);
-    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written");
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
   }
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ diagnostic: expect.stringContaining("停滞") });
@@ -523,4 +523,36 @@ test("真实 Worker 创建带私有 MCP 的 session 时等待其启动完成", a
   executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
   expect(startupWait).toBe(10_000);
+});
+
+test("ACP 启动 initialize 超时会中断节点并留下启动阶段诊断", async () => {
+  const value = await fixture();
+  let closed = 0;
+  const session: AcpWorkerSession = {
+    binding: null,
+    initialize() { return new Promise(() => {}); },
+    async createSession() { throw new Error("不应到达 session/new"); },
+    async prompt() { throw new Error("不应到达 prompt"); },
+    async cancel() {},
+    close() { closed += 1; },
+  };
+  const executor = new AcpWorkerExecutor(
+    { id: "codex-acp", command: "fake", args: [] },
+    () => session,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    20,
+    undefined,
+    undefined,
+    50,
+  );
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).rejects.toThrow("启动超时");
+  expect(closed).toBe(1);
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  expect(events.some(event => event.type === "log.written" && event.nodeId === "node" && event.message.includes("启动中"))).toBe(true);
+  expect(events.some(event => event.type === "log.written" && event.diagnostic?.includes("启动超时"))).toBe(true);
+  expect(value.state.agent("node").hint).toContain("正在自动恢复");
 });

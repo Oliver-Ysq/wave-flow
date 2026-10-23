@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { runsRoot } from "../journal/paths";
 import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../journal/types";
@@ -8,6 +9,7 @@ import type { WorkflowModule } from "../shared/workflow-types";
 import { executeWorkflow } from "../workflow/execute-workflow";
 import { PolicyEnforcingHost } from "./policy-host";
 import { RunRuntimeHost } from "./run-runtime-host";
+import { readSkillLibraryDigest } from "../skills/library";
 import { RunStateMachine } from "./run-state-machine";
 import type { AgentNodeExecutor, RunSnapshot } from "./run-types";
 import { ControlServer } from "../control/control-server";
@@ -87,7 +89,9 @@ export class RunRuntime {
    * 用户显式 resume 后，从 Workflow 起点重放调用轨迹。Host 以 sequence=0 开始逐项
    * 比对 Journal；只复用连续匹配的 completed 节点。
    */
-  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot(), executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null): Promise<RunRuntime> {
+  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot(), executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null, skillsRoot?: string): Promise<RunRuntime> {
+    // 技能库非法时拒绝恢复，避免用残缺技能环境重跑；空库返回 null，维持旧行为。
+    const skillsDigest = await readSkillLibraryDigest(skillsRoot ?? join(dirname(storeRoot), "skills"));
     const opened = await RunJournal.open(runId, storeRoot);
     if (opened.journal.manifest.runtimeVersion !== RUNTIME_VERSION) throw new Error(`resume 仅支持当前 Runtime v${RUNTIME_VERSION} 的 Run；历史 v${opened.journal.manifest.runtimeVersion} 只能读取。`);
     const state = new RunStateMachine(opened.journal.manifest);
@@ -104,6 +108,7 @@ export class RunRuntime {
       true,
       resumeInterrupted,
       executionConfig,
+      skillsDigest,
     ));
   }
 

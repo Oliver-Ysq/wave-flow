@@ -89,6 +89,11 @@ export type JournalEvent = JournalBase & ({
   /** 可读说明；节点诊断同时保存diagnostic及定位身份。 */
   readonly message: string;
 } | {
+  /** 旧版绑定节点的瞬时提示；只读兼容，当前写入改为节点级 log.written。 */
+  readonly type: "agent.hint";
+  /** 面向用户的短提示；不保存 prompt、文件内容或凭据。 */
+  readonly message: string;
+} | {
   readonly type: "agent.created";
   /** Journal 展示顺序；动态分支的新节点从历史最大值继续。 */
   readonly sequence: number;

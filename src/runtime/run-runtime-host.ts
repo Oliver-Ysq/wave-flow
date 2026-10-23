@@ -41,6 +41,13 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly resumeInterrupted = false,
     /** 受限 Execution 冻结的分配快照；受信任 Run 为 null，脚本 cli/model 直接生效。 */
     private readonly executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null,
+    /**
+     * 本次 attempt 启动时的技能库摘要；空库为 null。
+     *
+     * 只用于回放复用判定：与节点耐久 provenance 的 skills.digest 不一致时，
+     * 旧 completed 结果不得复用，从该节点起重跑。它不参与业务完成判定。
+     */
+    private readonly skillsDigest: string | null = null,
   ) {
     this.#journalSequence = initialJournalSequence;
     if (!replay) this.#logicalSequence = initialJournalSequence;
@@ -177,7 +184,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     }
     const node = this.state.agent(nodeId);
     try {
-      const result = await this.executor.execute(node);
+      const result = await this.executeWithStartupRecovery(nodeId, node);
       // 真实执行器的 complete 已由 ControlServer 按证据顺序写入 Journal；不能重复写入。
       const current = this.state.agent(nodeId);
       if (current.status === "completed") {
@@ -208,6 +215,33 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
         this.state.apply(event);
       });
       throw error;
+    }
+  }
+
+  /**
+   * 启动超时发生在 agent.session 耐久前，没有业务副作用。先给用户友好提示，
+   * 再让执行器自动重试一次；不把“如何恢复”交给用户，也不重发已投递任务。
+   */
+  private async executeWithStartupRecovery(nodeId: string, node: import("./run-types").AgentNodeSnapshot): Promise<JsonObject | null> {
+    try {
+      return await this.executor.execute(node);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = this.state.agent(nodeId);
+      // 只读 Runtime 自己已有启动重试；宿主只兜底写 Worker，避免同一错误重试两层。
+      if (node.sandbox === "read-only" || !message.includes("ACP Worker 启动超时") || this.#stopping.has(nodeId) || this.state.hasNodeSession(nodeId, current.agentSessionId)) throw error;
+      await this.durableApply(this.event({ type: "log.written", nodeId, agentSessionId: current.agentSessionId, diagnostic: null, message: "本地执行环境正在自动恢复，请稍候…" }));
+      try {
+        return await this.executor.execute(this.state.agent(nodeId));
+      } catch (retryError) {
+        const after = this.state.agent(nodeId);
+        // 第二次已经建立 session（可能已投递任务）后失败，错误必须原样上抛；不能
+        // 用“启动失败可重试”掩盖可能已有副作用的 prompt 失败。
+        if (this.state.hasNodeSession(nodeId, after.agentSessionId)) throw retryError;
+        // 首次是启动超时且 session 未建立；重试若因租约/清理等任何原因失败，仍按
+        // 启动失败向用户呈现一个可执行动作，不把底层清理细节推到主界面。
+        throw new Error("本地执行环境暂时不可用，已自动恢复仍未成功。请重试。");
+      }
     }
   }
 
@@ -307,10 +341,12 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
 
   /** 当前节点的分配与已耐久 session provenance 是否一致；缺任一证据时不否决复用。 */
   private assignmentProvenanceMatches(nodeId: string): boolean {
-    const config = this.executionConfig;
-    if (!config) return true;
     const recorded = this.state.nodeSessionRuntime(nodeId);
     if (!recorded) return true;
+    // 技能库变化优先于分配快照：同一 CLI 下更换 skill 内容也不能复用旧结果。
+    if ((recorded.skills?.digest ?? null) !== this.skillsDigest) return false;
+    const config = this.executionConfig;
+    if (!config) return true;
     const assignment = config.assignments.find((item) => item.agentId === nodeId) ?? config.defaultAssignment;
     return recorded.runtimeId === assignment.runtimeId && recorded.adapterId === assignment.adapterId && recorded.adapterVersion === assignment.adapterVersion;
   }

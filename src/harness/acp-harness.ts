@@ -1,5 +1,5 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { AcpSessionClient, type AcpLauncher } from "../adapters/acp-session";
+import { AcpSessionClient, type AcpLauncher, type AcpSessionOptions } from "../adapters/acp-session";
 import type { HarnessAcpToolCall, HarnessAcpToolCallPatch, HarnessAvailableCommand, HarnessMessage, HarnessStreamEvent, HarnessToolKind } from "./types";
 import type { HarnessPromptAttachment, HarnessSession } from "./session";
 
@@ -12,7 +12,7 @@ export type HarnessMcpServer = acp.McpServer;
  * 这段说明只在本次 prompt 中注入，不写入 Journal，也不能替代 `propose_workflow_revision`
  * 的真实调用；模型仍须通过 Engine 工具提交草案。
  */
-const WAVE_FLOW_COMMAND_INSTRUCTION = "【宿主命令 /wave-flow】用户已显式选择生成 Wave Flow Workflow。本轮必须调用 propose_workflow_revision 提交草案（source、goal、scope 齐全），不要只做文字分析，也不要用自然语言声称已提交或已执行。\n\n";
+const WAVE_FLOW_COMMAND_INSTRUCTION = "【宿主命令 /wave-flow】用户已显式选择生成 Wave Flow Workflow。用户在本命令之后点名的 skill（`$name`、`/name` 或“使用 X 技能”）默认表示 Worker 节点的执行依赖，不是要求主控现在立即调用；除非用户明确要求主控执行，否则不要把这些技能当成本轮主控要执行的任务。请把该提示写进相应 Worker 节点的 prompt（例如“建议使用托管技能 X，按其 SKILL.md 执行”），仅作为任务提示，不做额外校验或阻塞。主控仍可按自己的判断自由调用 skill 做设计、读取或准备。请在本轮 goal/scope 中说明主控与 Worker 的分工。本轮必须调用 propose_workflow_revision 提交草案（source、goal、scope 齐全），不要只做文字分析，也不要用自然语言声称已提交或已执行。\n\n";
 
 /** 把包含独立 `/wave-flow` token 的用户消息转换为模型 prompt；其他消息原样返回。 */
 export function applyWaveFlowCommandInstruction(text: string): string {
@@ -45,6 +45,8 @@ export class AcpHarnessSession implements HarnessSession {
     private readonly priorMessages: readonly HarnessMessage[],
     private readonly mcpServer: HarnessMcpServer,
     client?: AcpSessionClient,
+    /** 技能注入等宿主级 session/new 参数；只是本次会话启动配置，不进入 Journal。 */
+    private readonly sessionOptions?: AcpSessionOptions,
   ) {
     this.#client = client ?? new AcpSessionClient(launcher, undefined, "deny");
     this.#client.subscribe(event => this.onUpdate(event.update));
@@ -75,7 +77,7 @@ export class AcpHarnessSession implements HarnessSession {
     const timer = setTimeout(() => controller.abort(), budget);
     try {
       await this.#client.initialize(controller.signal);
-      await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000);
+      await this.#client.createSession(this.cwd, controller.signal, [this.mcpServer], 10_000, this.sessionOptions);
       this.#initialized = true;
     } catch (error) {
       if (controller.signal.aborted) throw new Error(`主控 CLI 启动握手超过 ${Math.round(budget / 1000)} 秒未响应，已断开连接；请检查本机 CLI 状态后重试。 `);

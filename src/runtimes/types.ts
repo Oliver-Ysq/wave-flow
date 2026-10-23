@@ -97,6 +97,13 @@ export type RuntimeProvenance = {
   readonly adapterVersion: string;
   /** 最后完整验证时间。 */
   readonly verifiedAt: string;
+  /**
+   * 本会话执行期注入的技能证据；未注入时省略。
+   *
+   * 参与 Replay 判定：库摘要变化时旧 completed 结果不得复用。它只证明环境已变化，
+   * 不证明模型实际使用了某个 skill。
+   */
+  readonly skills?: import("../skills/types").SkillEvidence;
 };
 
 /** 仅在设置页展示的 runtime 字段；文件身份绝不返回浏览器。 */

@@ -21,21 +21,21 @@ const SOURCE = `const meta = { name: "assign-demo", description: "分配演示",
 async function run(args) {
   phase("工作");
   const a = await agent("甲", { id: "w1", cli: "codex" });
-  const b = await agent("乙", { id: "w2", cli: "kimi" });
+  const b = await agent("乙", { id: "w2", cli: "claude" });
   return { a, b };
 }`;
 
-async function runtimeRecord(root: string, name: string, cli: "codex" | "kimi", harnessTools: boolean): Promise<CliRuntimeRecord> {
+async function runtimeRecord(root: string, name: string, cli: "codex" | "claude", harnessTools: boolean): Promise<CliRuntimeRecord> {
   const executablePath = join(root, name); await writeFile(executablePath, `#!/bin/sh\necho ${name}\n`, { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${name} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "kimi" ? "kimi-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${name} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "claude" ? "claude-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 async function fixture(session?: HarnessSession): Promise<{ engine: DesktopExecutionEngine; harnessRunId: string; kimi: CliRuntimeRecord; codex: CliRuntimeRecord }> {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-assignment-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-assignment-project-")); roots.push(cwd);
   const registry = new CliRuntimeRegistry(root);
-  const kimi = await registry.saveVerified(await runtimeRecord(root, "kimi", "kimi", true));
+  const kimi = await registry.saveVerified(await runtimeRecord(root, "claude", "claude", true));
   const codex = await registry.saveVerified(await runtimeRecord(root, "codex", "codex", false));
   await registry.select(kimi.runtimeId);
   const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true, ...(session ? { createHarnessSession: async () => session } : {}) });
@@ -182,7 +182,7 @@ describe("Engine executions.plan / randomize / create 校验", () => {
       const source = `const meta = { name: 'preview-literals', description: '${"x".repeat(2200)}', phases: [{ title: '分析' }, { title: '验证' }] };
 async function run(args) {
   phase('验证');
-  await agent('只读验证', { id: 'verify', cli: 'kimi' });
+  await agent('只读验证', { id: 'verify', cli: 'claude' });
   return {};
 }`;
       const author = fixtureServices.get(harnessRunId)!;
@@ -196,7 +196,7 @@ async function run(args) {
         const plan = await reopened.handleDesktopAction("executions.plan", {harnessRunId, revision:2}) as ExecutionPlanResponse;
         expect(plan.phaseTitles).toEqual(["分析", "验证"]);
         expect(plan.workers).toMatchObject([{id:"verify",phaseTitle:"验证"}]);
-        expect(plan.previewAgents).toMatchObject([{name:"verify",phaseTitle:"验证",cli:"kimi"}]);
+        expect(plan.previewAgents).toMatchObject([{name:"verify",phaseTitle:"验证",cli:"claude"}]);
         expect(await reopened.handleDesktopAction("executions.list", {harnessRunId})).toMatchObject({executions:[]});
       } finally { reopened.shutdown(); }
     } finally { engine.shutdown(); }
@@ -214,13 +214,13 @@ async function run(args) {
     try {
       await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1 })).rejects.toMatchObject({ status: 400 });
       // 未知 runtimeId
-      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "kimi", model: "cli-default", source: "random", runtimeId: crypto.randomUUID(), adapterId: "kimi-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
+      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "claude", model: "cli-default", source: "random", runtimeId: crypto.randomUUID(), adapterId: "claude-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
       // cli 与 Runtime 记录不一致
-      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "codex", model: "cli-default", source: "random", runtimeId: kimi.runtimeId, adapterId: "kimi-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
+      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "codex", model: "cli-default", source: "random", runtimeId: kimi.runtimeId, adapterId: "claude-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
       // 未枚举的 Worker id
-      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "ghost", cli: "kimi", model: "cli-default", source: "random", runtimeId: kimi.runtimeId, adapterId: "kimi-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
+      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "ghost", cli: "claude", model: "cli-default", source: "random", runtimeId: kimi.runtimeId, adapterId: "claude-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
       // 模型覆盖本期不允许
-      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "kimi", model: "k2" as never, source: "random", runtimeId: kimi.runtimeId, adapterId: "kimi-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
+      await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { assignments: [{ agentId: "w1", cli: "claude", model: "k2" as never, source: "random", runtimeId: kimi.runtimeId, adapterId: "claude-acp", adapterVersion: "1.0" }] }) })).rejects.toMatchObject({ status: 400 });
       // 回退目标必须是当前主控 Runtime
       await expect(engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config: configOf(kimi, codex, { fallbackRuntimeId: codex.runtimeId }) })).rejects.toMatchObject({ status: 400 });
       const listed = await engine.handleDesktopAction("executions.list", { harnessRunId }) as { executions: unknown[] };
@@ -233,7 +233,7 @@ async function run(args) {
     try {
       const config = configOf(kimi, codex, { assignments: [
         { agentId: "w1", cli: codex.cli, model: "cli-default", source: "rule", runtimeId: codex.runtimeId, adapterId: "codex-acp", adapterVersion: "1.0" },
-        { agentId: "w2", cli: kimi.cli, model: "cli-default", source: "rule", runtimeId: kimi.runtimeId, adapterId: "kimi-acp", adapterVersion: "1.0" },
+        { agentId: "w2", cli: kimi.cli, model: "cli-default", source: "rule", runtimeId: kimi.runtimeId, adapterId: "claude-acp", adapterVersion: "1.0" },
       ], ruleText: "甲用 codex，乙用 kimi" });
       const created = await engine.handleDesktopAction("executions.create", { harnessRunId, revision: 1, config }) as { execution: { executionId: string; config: ExecutionConfigSnapshot }; snapshot: { status: string; phases: { agents: { id: string; cli: string; request: { assignedRuntimeId?: string } }[] }[] } };
       expect(created.execution.config.fallbackRuntimeId).toBe(kimi.runtimeId);
@@ -245,7 +245,7 @@ async function run(args) {
       }
       const agents = detail.snapshot.phases[0].agents;
       expect(agents.find((node) => node.id === "w1")).toMatchObject({ cli: "codex", request: { assignedRuntimeId: codex.runtimeId } });
-      expect(agents.find((node) => node.id === "w2")).toMatchObject({ cli: "kimi", request: { assignedRuntimeId: kimi.runtimeId } });
+      expect(agents.find((node) => node.id === "w2")).toMatchObject({ cli: "claude", request: { assignedRuntimeId: kimi.runtimeId } });
       // 登记事实重读后仍携带同一冻结快照。
       const listed = await engine.handleDesktopAction("executions.list", { harnessRunId }) as { executions: { config?: ExecutionConfigSnapshot }[] };
       expect(listed.executions[0].config?.ruleText).toBe("甲用 codex，乙用 kimi");

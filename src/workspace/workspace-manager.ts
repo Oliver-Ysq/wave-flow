@@ -126,12 +126,12 @@ export type ManagedWorkspace = {
 /** owned ACP执行器提供的退出证明；没有证明即不释放锁。 */
 export type WriterVerifier = (lease: WorkspaceLease) => Promise<boolean>;
 
-/** 最终自动应用状态；失败只记录原因，不覆盖用户现场。 */
+/** 最终封存结果的保留状态；当前只记录结果留在 worktree，不写主工作区。 */
 export type WorkspaceApplyState =
   | { /** 已写入主工作区的时间。 */ readonly at: string; /** 实际写入路径；与封存diff一致。 */ readonly paths: readonly string[] }
   | { /** 未能自动应用的时间。 */ readonly skippedAt: string; /** 用户可读原因；不代表业务失败。 */ readonly reason: string };
 
-/** 一次Execution的最终封存与自动应用证据；不移动主分支引用。 */
+/** 一次Execution的最终封存证据；不移动主分支引用、不写主工作区。 */
 export type WorkspaceSource = GitSourceResult & {
   /** 已完成的Execution UUID，同时作为幂等请求身份。 */ readonly executionId: string;
   /** 唯一受管工作区UUID。 */ readonly workspaceId: string;
@@ -139,7 +139,7 @@ export type WorkspaceSource = GitSourceResult & {
   /** 冻结基准完整oid。 */ readonly baseCommit: string;
   /** 最终封存commit。 */ readonly commit: string;
   /** 相对基准的全部变更路径，供变更面板展示。 */ readonly paths: readonly string[];
-  /** 主工作区自动应用结果；未应用时保留原因。 */ readonly applied: WorkspaceApplyState;
+  /** 结果保留状态；当前固定记录未写主工作区的原因。 */ readonly applied: WorkspaceApplyState;
   /** 证据耐久写入时间，ISO格式。 */ readonly savedAt: string;
 };
 
@@ -394,7 +394,7 @@ export class WorkspaceManager {
         return value.retryable !== false;
       } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
     }
-    return "skippedAt" in source.applied;
+    return false;
   }
 
   private async clearSourceDiagnostic(executionId: string): Promise<void> {
@@ -417,8 +417,8 @@ export class WorkspaceManager {
   }
 
   /**
-   * 最终封存：把共享worktree封存为一个受管commit，并自动把结果写入主工作区（保持未提交）。
-   * 调用者必须先确认Execution已completed；未应用只记录原因，不回滚、不重跑业务。
+   * 最终封存：把共享worktree封存为一个受管commit，结果留在受管worktree。
+   * 不自动写入主工作区；调用者必须先确认Execution已completed。
    */
   finalizeSource(executionId: string, rawConfig: ExecutionWorkspaceConfig, actualNodeIds?: readonly string[]): Promise<WorkspaceSource> {
     return this.exclusive(async () => {
@@ -430,19 +430,7 @@ export class WorkspaceManager {
       const previous = await this.inspectSource(executionId);
       if (previous) {
         if (previous.workspaceId !== config.workspaceId || previous.authorizationId !== config.authorization.authorizationId || previous.baseCommit !== config.authorization.baseCommit || previous.branch !== workspace.branch) fail("耐久交付记录与Git证据冲突。");
-        if (!("skippedAt" in previous.applied)) return previous;
-        // 较新的接续执行已把不同现场写入主工作区时，旧执行的补应用会把新改动回退；
-        // 只允许补应用仍是当前已应用现场的那份封存，其他情况保持未应用原因。
-        const latest = workspace.lastApplied;
-        if (latest && latest.commit !== previous.commit) return previous;
-        // 上次未自动应用：仅在主工作区重新满足条件时补应用；仍不满足则保留原因。
-        const retried = await this.apply(main, workspace, executionId, previous.commit, previous.baseCommit);
-        if (!retried.ok) return previous;
-        await this.markApplied(workspace, executionId, previous.commit);
-        const updated = { ...previous, applied: retried.state };
-        await this.write(executionId, updated, "source");
-        await this.clearSourceDiagnostic(executionId);
-        return updated;
+        return previous;
       }
       if (workspace.leases.length) fail("writer锁仍在，不能最终封存。");
       if (workspace.cleanedAt) fail("受管worktree已清理且没有该Execution的交付记录。");
@@ -450,43 +438,17 @@ export class WorkspaceManager {
       const request: GitSealRequest = { requestId: executionId, baseCommit: config.authorization.baseCommit, startCommit: handover?.startCommit ?? config.authorization.baseCommit };
       const sealed = await (await this.repository(workspace)).seal(request);
       const paths = await main.changedBetween(config.authorization.baseCommit, sealed.commit);
-      const applied = await this.apply(main, workspace, executionId, sealed.commit, config.authorization.baseCommit);
-      if (applied.ok) await this.markApplied(workspace, executionId, sealed.commit);
       const result: WorkspaceSource = {
         executionId, requestId: executionId, workspaceId: workspace.workspaceId, authorizationId: config.authorization.authorizationId,
         baseCommit: config.authorization.baseCommit, commit: sealed.commit, branch: workspace.branch,
-        paths, applied: applied.ok ? applied.state : { skippedAt: new Date().toISOString(), reason: applied.reason }, savedAt: new Date().toISOString(),
+        paths,
+        applied: { skippedAt: new Date().toISOString(), reason: "改动已保留在受管 worktree，未应用到主工作区。" },
+        savedAt: new Date().toISOString(),
       };
       try { await this.write(executionId, result, "source"); await this.clearSourceDiagnostic(executionId); }
       catch (error) { throw new SourcePersistenceError(`Git封存已创建，但证据关联未能耐久；可重试宿主收尾：${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
       return result;
     });
-  }
-
-  /** 尝试自动应用；契约条件不满足时返回原因并保留未应用，绝不覆盖用户现场。 */
-  private async apply(main: GitRepository, workspace: ManagedWorkspace, executionId: string, commit: string, baseCommit: string): Promise<{ readonly ok: true; readonly state: { readonly at: string; readonly paths: readonly string[] } } | { readonly ok: false; readonly reason: string }> {
-    // 同一Execution崩溃重试优先使用登记的应用意图：它记录了应用前的期望现场；续作则以上次应用结果为准。
-    const intentMatches = workspace.applyIntent?.executionId === executionId && workspace.applyIntent.commit === commit;
-    const expectedWorktree = intentMatches ? workspace.applyIntent!.expectedWorktree : workspace.lastApplied?.commit;
-    const pending: ManagedWorkspace = { ...workspace, applyIntent: { executionId, commit, ...(expectedWorktree ? { expectedWorktree } : {}), at: new Date().toISOString() } };
-    // 先耐久应用意图，再改用户现场：崩溃或部分写入后可识别为宿主动作，而不是把残留误判成用户改动。
-    await this.write(workspace.workspaceId, pending);
-    try {
-      return { ok: true, state: { at: new Date().toISOString(), paths: await main.applyCommit(commit, baseCommit, expectedWorktree) } };
-    }
-    catch (error) {
-      // Git命令故障、证据读取超限与真实IO错误必须抛出；应用意图保留，提示现场可能已部分写入。
-      if (error instanceof GitCommandError || error instanceof GitEvidenceLimitError || !(error instanceof WorkflowContractError)) throw error;
-      // 契约拒绝（dirty/HEAD漂移/ignored冲突）在任何写入前发生：清除意图并记录用户可读原因。
-      await this.write(workspace.workspaceId, { ...workspace, applyIntent: undefined });
-      const reason = intentMatches ? `上次自动应用未完成或现场已被改动，请人工检查主工作区后重试：${error.message}` : error.message;
-      return { ok: false, reason };
-    }
-  }
-
-  /** 记录最近一次成功写入主工作区的封存commit；同时清除应用意图。 */
-  private async markApplied(workspace: ManagedWorkspace, executionId: string, commit: string): Promise<void> {
-    await this.write(workspace.workspaceId, { ...workspace, lastApplied: { executionId, commit, at: new Date().toISOString() }, applyIntent: undefined });
   }
 
   /** 显式安全清理checkout；不删除分支/commit，不清理未封存或未知现场。 */

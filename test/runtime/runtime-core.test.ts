@@ -18,7 +18,7 @@ async function create(executor: AgentNodeExecutor): Promise<RunRuntime> { const 
 
 describe("RunRuntime ACP-neutral core", () => {
   test("并行resume在首个重跑调用处立即关闭旧结果前缀，不复用后续completed节点", async () => {
-    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a", { id: "a", cli: "codex" }), agent("b", { id: "b", cli: "kimi" })]); } };
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a", { id: "a", cli: "codex" }), agent("b", { id: "b", cli: "claude" })]); } };
     let releaseFirst!: () => void;
     const firstPending = new Promise<void>(resolve => { releaseFirst = resolve; });
     const initial = await create({ execute: async node => { if (node.id === "a") { await firstPending; return null; } return { version: "old", id: node.id }; } });
@@ -39,7 +39,7 @@ describe("RunRuntime ACP-neutral core", () => {
     expect(resumed.state.listPhaseVisits(2).items.flatMap(visit=>visit.batches.flatMap(batch=>batch.agents)).map(node=>node.result)).toEqual([{version:"new",id:"a"},{version:"new",id:"b"}]);
   });
   test("并行resume只初始化一个attempt，两个分支均启动而不丢下游", async () => {
-    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a",{id:"a",cli:"codex"}),agent("b",{id:"b",cli:"kimi"})]); } };
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a",{id:"a",cli:"codex"}),agent("b",{id:"b",cli:"claude"})]); } };
     let settled!: () => void; let count = 0;
     const initialNodes = new Promise<void>(resolve => { settled = resolve; });
     const initial = await create({execute:async()=>{if(++count===2)settled();return null;}});

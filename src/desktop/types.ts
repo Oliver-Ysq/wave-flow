@@ -217,6 +217,7 @@ export type ExecutionResponse = {
   /** 受管Git成果投影；只展示共享worktree与租约事实，不改变Run业务状态。 */
   readonly workspaceEvidence?: {
     /** 本Execution唯一受管worktree UUID。 */ readonly workspaceId:string;
+    /** 受管worktree的绝对路径；供用户定位成果，不改变文件。 */ readonly cwd:string;
     /** 受管分支短名。 */ readonly branch:string;
     /** worktree当前HEAD；已清理为null。 */ readonly head:string|null;
     /** 当前仍存活的本Execution writer租约。 */ readonly leases:readonly { readonly nodeId:string; readonly attempt:number }[];
@@ -225,7 +226,7 @@ export type ExecutionResponse = {
   };
   /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
   readonly workspaceDiagnostic?: string;
-  /** 最终封存与自动应用证据；缺省表示尚未收尾。 */
+  /** 最终封存证据；缺省表示尚未收尾。 */
   readonly sourceEvidence?: import("../workspace/workspace-manager").WorkspaceSource;
   /** 最终收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
   readonly sourceDiagnostic?: string;

@@ -150,6 +150,12 @@ export class ControlServer {
     return this.state.hasNodeSession(nodeId, agentSessionId);
   }
 
+  /** 节点已进入终态或 Run 已停止时，启动重试不得再创建新 Worker。 */
+  isNodeStopped(nodeId: string): boolean {
+    const node = this.state.agent(nodeId);
+    return this.state.snapshot().status !== "running" || ["cancelled", "interrupted", "completed"].includes(node.status);
+  }
+
   /** 停滞采样的等待豁免：Run控制转换或原节点非running时不计时；不授权任何操作。 */
   isWorkerWaiting(nodeId: string, agentSessionId: string): boolean {
     const node = this.state.agent(nodeId);
@@ -169,6 +175,14 @@ export class ControlServer {
       const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId})}:null;
       return structuredClone({status:node.status as "running"|"blocked",resultSchema:node.request.schema??null,block});
     });
+  }
+
+  /** 绑定节点的瞬时提示；只更新 UI hint，不进入诊断日志、不改变业务状态。 */
+  async recordExecutorHint(message: string, nodeId: string, agentSessionId: string): Promise<void> {
+    if (this.state.agent(nodeId).agentSessionId !== agentSessionId) throw new Error("提示会话已过期。");
+    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic: null, message };
+    await this.journal.append(event);
+    this.state.apply(event);
   }
 
   /** 执行器诊断耐久写入；可绑定当前节点/会话，缺省Run级，不改变业务状态。 */

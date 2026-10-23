@@ -15,10 +15,10 @@ async function record(root: string, name = "codex"): Promise<CliRuntimeRecord> {
   return { runtimeId: crypto.randomUUID(), cli: "codex", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
-async function kimiRecord(root: string, name: string): Promise<CliRuntimeRecord> {
-  const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+async function claudeRecord(root: string, name: string): Promise<CliRuntimeRecord> {
+  const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli: "kimi", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 describe("CliRuntimeRegistry", () => {
@@ -101,7 +101,7 @@ describe("CliRuntimeRegistry", () => {
 
   test("未声明 harnessTools 的 runtime 不能设为主控", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-no-harness-tools-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
+    const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     await expect(registry.select(saved.runtimeId)).rejects.toThrow("主控窄工具");
     await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: null });
   });
@@ -115,15 +115,15 @@ describe("CliRuntimeRegistry", () => {
     await expect(new CliRuntimeRegistry(root).resolveSelectedHarness()).rejects.toThrow("未选择");
   });
 
-  test("旧 kimi 记录在读取时按 Catalog 回填 harnessTools 能力", async () => {
+  test("旧 claude 记录在读取时按 Catalog 回填 harnessTools 能力", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-capability-")); roots.push(root);
-    const legacy = await kimiRecord(root, "kimi"); const { harnessTools: _removed, ...adapter } = legacy.verifiedAdapter;
+    const legacy = await claudeRecord(root, "kimi"); const { harnessTools: _removed, ...adapter } = legacy.verifiedAdapter;
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: {}, runtimes: [{ ...legacy, verifiedAdapter: adapter }] })}\n`);
     await chmod(join(root, "runtimes.json"), 0o600);
     const registry = new CliRuntimeRegistry(root);
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: legacy.runtimeId, verifiedAdapter: { harnessTools: true } }] });
     await registry.select(legacy.runtimeId);
-    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, cli: "kimi" });
+    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, cli: "claude" });
   });
 
   test("旧记录携带的废弃 workerEnabled 字段在读取时剥离", async () => {
@@ -141,32 +141,32 @@ describe("CliRuntimeRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-resolve-worker-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
     // 主控选择同时是该 cli 的 Worker 偏好；harnessTools 仅约束主控，不影响 Worker 候选。
-    const harnessCapable = { ...(await kimiRecord(root, "kimi")), verifiedAdapter: { adapterId: "kimi-acp" as const, adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true } };
+    const harnessCapable = { ...(await claudeRecord(root, "kimi")), verifiedAdapter: { adapterId: "claude-acp" as const, adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true } };
     const first = await registry.saveVerified(harnessCapable);
-    await expect(registry.resolveWorker("kimi")).resolves.toMatchObject({ runtimeId: first.runtimeId, cli: "kimi" });
+    await expect(registry.resolveWorker("claude")).resolves.toMatchObject({ runtimeId: first.runtimeId, cli: "claude" });
     await expect(registry.hasWorkerCandidate()).resolves.toBe(true);
-    const second = await registry.saveVerified(await kimiRecord(root, "kimi-second"));
-    await expect(registry.resolveWorker("kimi")).rejects.toThrow("仅保留一个已验证候选");
+    const second = await registry.saveVerified(await claudeRecord(root, "kimi-second"));
+    await expect(registry.resolveWorker("claude")).rejects.toThrow("仅保留一个已验证候选");
     await registry.select(first.runtimeId);
-    await expect(registry.resolveWorker("kimi")).resolves.toMatchObject({ runtimeId: first.runtimeId });
+    await expect(registry.resolveWorker("claude")).resolves.toMatchObject({ runtimeId: first.runtimeId });
     await registry.remove(first.runtimeId);
-    await expect(registry.resolveWorker("kimi")).resolves.toMatchObject({ runtimeId: second.runtimeId });
+    await expect(registry.resolveWorker("claude")).resolves.toMatchObject({ runtimeId: second.runtimeId });
   });
 
   test("Worker 候选身份漂移时耐久 needs-revalidation 并拒绝启动", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-worker-drift-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
+    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     await Bun.sleep(5); await writeFile(saved.executablePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(saved.executablePath, 0o700);
-    await expect(registry.resolveWorker("kimi")).rejects.toThrow("自动检查失败");
+    await expect(registry.resolveWorker("claude")).rejects.toThrow("自动检查失败");
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
     await expect(registry.hasWorkerCandidate()).resolves.toBe(false);
   });
 
-  test("kimi runtime 记录解析往返，不携带 node 依赖", async () => {
+  test("claude runtime 记录解析往返，不携带 node 依赖", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
+    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     const listed = (await new CliRuntimeRegistry(root).list()).runtimes.find(item => item.runtimeId === saved.runtimeId)!;
-    expect(listed).toMatchObject({ cli: "kimi", verifiedAdapter: { adapterId: "kimi-acp", harnessTools: false } });
+    expect(listed).toMatchObject({ cli: "claude", verifiedAdapter: { adapterId: "claude-acp", harnessTools: false } });
     expect(JSON.stringify(listed)).not.toContain("nodeExecutable");
     await expect(new CliRuntimeRegistry(root).resolveSelectedHarness()).rejects.toThrow("未选择");
   });
@@ -174,17 +174,17 @@ describe("CliRuntimeRegistry", () => {
   test("resolveWorkerById 按分配快照直接解析已验证 runtime", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-by-id-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const first = await registry.saveVerified(await kimiRecord(root, "kimi"));
-    const second = await registry.saveVerified(await kimiRecord(root, "kimi-second"));
+    const first = await registry.saveVerified(await claudeRecord(root, "kimi"));
+    const second = await registry.saveVerified(await claudeRecord(root, "kimi-second"));
     // 多个同 cli 候选并存时按 id 解析不受偏好与数量影响。
-    await expect(registry.resolveWorkerById(second.runtimeId)).resolves.toMatchObject({ runtimeId: second.runtimeId, cli: "kimi" });
+    await expect(registry.resolveWorkerById(second.runtimeId)).resolves.toMatchObject({ runtimeId: second.runtimeId, cli: "claude" });
     await expect(registry.resolveWorkerById(first.runtimeId)).resolves.toMatchObject({ runtimeId: first.runtimeId });
     await expect(registry.resolveWorkerById(crypto.randomUUID())).rejects.toThrow("不存在或未验证");
   });
 
   test("resolveWorkerById 身份漂移时耐久 needs-revalidation 并 fail closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-by-id-drift-")); roots.push(root);
-    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await kimiRecord(root, "kimi"));
+    const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     await Bun.sleep(5); await writeFile(saved.executablePath, "#!/bin/sh\necho changed\n", { mode: 0o700 }); await chmod(saved.executablePath, 0o700);
     await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
@@ -233,9 +233,28 @@ async function dshRecord(root: string, name: string, nodeVersion: string): Promi
 test("并发 saveVerified 不丢更新", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-concurrent-")); roots.push(root);
   const registry = new CliRuntimeRegistry(root);
-  const records = await Promise.all([...Array(8)].map((_, index) => kimiRecord(root, `kimi-${index}`)));
+  const records = await Promise.all([...Array(8)].map((_, index) => claudeRecord(root, `kimi-${index}`)));
   await Promise.all(records.map((item) => registry.saveVerified(item)));
   const listed = await registry.list();
   expect(listed.runtimes).toHaveLength(8);
   expect(new Set(listed.runtimes.map((item) => item.runtimeId)).size).toBe(8);
+
+
 });
+
+  test("暂时下线的 kimi 记录保留在磁盘但不进入设置列表", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-hidden-")); roots.push(root);
+    const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+    const executable = await verifyExecutable(executablePath);
+    const legacy: CliRuntimeRecord = { runtimeId: crypto.randomUUID(), cli: "kimi", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { kimi: legacy.runtimeId }, harnessRuntimeId: legacy.runtimeId, runtimes: [legacy] })}\n`);
+    await chmod(join(root, "runtimes.json"), 0o600);
+    const registry = new CliRuntimeRegistry(root);
+    const listed = await registry.list();
+    expect(listed.runtimes).toEqual([]);
+    expect(listed.harnessRuntimeId).toBeNull();
+    await expect(registry.resolveSelectedHarness()).rejects.toThrow("支持已暂时下线");
+    await expect(registry.resolveByIdHarness(legacy.runtimeId)).rejects.toThrow("支持已暂时下线");
+    await expect(registry.resolveWorkerById(legacy.runtimeId)).rejects.toThrow("支持已暂时下线");
+    expect(await Bun.file(join(root, "runtimes.json")).text()).toContain(legacy.runtimeId);
+  });

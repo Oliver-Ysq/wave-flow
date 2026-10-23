@@ -3,6 +3,7 @@ import type { CliRuntimeView } from "../runtimes/types";
 import type { ExtractedAgentWorker } from "../workflow/restricted/extract-agents";
 import { validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 import { adapterById } from "../runtimes/adapter-catalog";
+import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
 
 /**
  * 分配卡的纯函数助手：把已枚举 Worker、已验证 Runtime 池与用户选择组装成可冻结的
@@ -43,6 +44,7 @@ export function validateExecutionConfig(value: unknown, workers: readonly Extrac
     if (typeof assignment.runtimeId !== "string") throw new Error("执行配置快照指派缺少 runtimeId。 ");
     const runtime = byId.get(assignment.runtimeId);
     if (!runtime) throw new Error(`执行配置快照引用了不存在或未验证的 Runtime：${assignment.runtimeId}。 `);
+    if (!isCliSelectable(runtime.cli)) throw new Error(cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。");
     if (assignment.cli !== runtime.cli) throw new Error("执行配置快照指派的 cli 与 Runtime 记录不一致。 ");
     if (assignment.adapterId !== runtime.verifiedAdapter.adapterId || assignment.adapterVersion !== runtime.verifiedAdapter.adapterVersion) throw new Error("执行配置快照指派的 adapter 与 Runtime 记录不一致。 ");
     return assignment as unknown as WorkerAssignment;
