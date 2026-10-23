@@ -285,6 +285,7 @@ export function ConversationView({
   availableCommands?: readonly HarnessAvailableCommand[];
 }) {
   const attachmentButton=useRef<HTMLButtonElement>(null);
+  const stopButton=useRef<HTMLButtonElement>(null);
   const running = harness.status === "running";
   const turns = composeConversationTurns(harness);
   const messageTimes=[...harness.messages.map(message=>message.createdAt),...harness.conversationEntries.filter(entry=>entry.kind==='body'&&entry.text.trim()).map(entry=>entry.startedAt)];
@@ -359,9 +360,19 @@ export function ConversationView({
     const timer = window.setInterval(() => tick((value) => value + 1), 1_000);
     return () => window.clearInterval(timer);
   }, [running]);
+  /** 停止是破坏性动作：先确认，避免误点中断当前回合。 */
+  const [confirmStop, setConfirmStop] = useState(false);
+  useEffect(() => { if (!running) setConfirmStop(false); }, [running]);
   const waitingBase = lastEventAt ?? Date.parse(harness.createdAt);
-  const waiting =
-    running && Number.isFinite(waitingBase) && Date.now() - waitingBase > 3_000;
+  const waitingSeconds = Number.isFinite(waitingBase) ? Math.max(0, Math.floor((Date.now() - waitingBase) / 1_000)) : 0;
+  const streamingBody = harness.conversationEntries.some(entry => entry.kind === "body" && !entry.completed && entry.finishedAt === null);
+  const waiting = running && !streamingBody && Number.isFinite(waitingBase) && Date.now() - waitingBase > 3_000;
+  // 一次安静等待只在"开始出现新正文"或回合结束时收起；工具进展不应该让提示反复闪烁。
+  const [waitingVisible, setWaitingVisible] = useState(false);
+  useEffect(() => {
+    if (!running || streamingBody) { setWaitingVisible(false); return; }
+    if (waiting) setWaitingVisible(true);
+  }, [running, streamingBody, waiting]);
 
   return (
     <div
@@ -405,7 +416,12 @@ export function ConversationView({
             <p>{userFacingText(harness.diagnostic)}</p>
           </article>
         )}
-        {waiting && <div className="wf-waiting">等待新的输出</div>}
+        {waitingVisible && (
+          <div className="wf-waiting" role="status">
+            仍在处理
+            {waitingSeconds >= 60 ? ` · 已等待 ${formatWaitTime(waitingSeconds)}` : ""}
+          </div>
+        )}
         {children}
       </div>
       {!stuck && pendingNew && (
@@ -552,9 +568,38 @@ export function ConversationView({
                   >
                     ↑
                   </button>
-                  <button className="stop-turn" onClick={onAbort}>
-                    停止
-                  </button>
+                  {confirmStop ? (
+                    <span
+                      className="stop-confirm"
+                      role="alertdialog"
+                      aria-label="确认停止当前回合"
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.stopPropagation();
+                          setConfirmStop(false);
+                        }
+                      }}
+                    >
+                      <span>停止后本轮未完成内容会中断，已完成内容保留。</span>
+                      <button type="button" autoFocus onClick={() => {
+                        setConfirmStop(false);
+                        requestAnimationFrame(() => stopButton.current?.focus());
+                      }}>
+                        继续等待
+                      </button>
+                      <button type="button" className="danger" onClick={() => {
+                        setConfirmStop(false);
+                        onAbort();
+                        requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".conversation-composer textarea")?.focus());
+                      }}>
+                        确认停止
+                      </button>
+                    </span>
+                  ) : (
+                    <button ref={stopButton} className="stop-turn" onClick={() => setConfirmStop(true)}>
+                      停止
+                    </button>
+                  )}
                 </>
               ) : (
                 <button
@@ -572,6 +617,13 @@ export function ConversationView({
       )}
     </div>
   );
+}
+
+/** 长等待只展示已用时间，不替用户判断是否卡住。 */
+function formatWaitTime(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
 }
 
 /** 会话标题：第一条用户消息前 28 字，退化为目录名。 */

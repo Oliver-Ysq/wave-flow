@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { droppedProjectPath } from "../../src-tauri/web/src/project-navigation";
+import { droppedProjectPath, projectExpanded } from "../../src-tauri/web/src/project-navigation";
 test("项目标题整行 hover 高亮，侧栏移除手动刷新但保留自动刷新", async () => {
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
@@ -15,6 +15,15 @@ test("生产组件回调在受控宿主下拒绝重入/提前创建，失败恢�
   expect({ code: await child.exited, errors }).toEqual({ code: 0, errors: "" });
   expect(output).toContain("project-dialog async boundaries passed");
 });
+test("空项目不进入展开态，展开区隐藏而不留空白", async () => {
+  expect(projectExpanded(false, true)).toBe(false);
+  expect(projectExpanded(true, false)).toBe(false);
+  expect(projectExpanded(true, true)).toBe(true);
+  const app = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(app).toContain("projectExpanded(harnesses.length > 0, expandedPref)");
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
+  expect(css).toContain(".agent-workbench .project-conversations[hidden] { display:none; }");
+});
 test("拖入只接纳单一绝对路径，不能从扩展名猜目录", () => {
   expect(droppedProjectPath(["/tmp/project"])).toBe("/tmp/project");
   expect(droppedProjectPath(["C:\\project"])).toBe("C:\\project");
@@ -25,7 +34,7 @@ test("项目两级折叠不导航，创建入口独立且拖入不自动提交",
   const dialog = await Bun.file("src-tauri/web/src/project-create-dialog.tsx").text();
   expect(app).toContain('aria-controls="project-list"');
   expect(app).toContain('aria-label="创建项目"');
-  expect(app).toContain('onClick={() => setExpanded(!expanded)}');
+  expect(app).toContain('if (harnesses.length > 0) setExpanded(!expanded);');
   expect(app).not.toContain('className="project-chevron"');
   expect(app).toContain('aria-controls={`project-tasks-${project.projectId}`}');
   expect(app).toContain('className="project-new-session"');

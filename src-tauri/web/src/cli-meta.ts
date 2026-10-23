@@ -1,4 +1,5 @@
 import type { RuntimeCli } from "./types";
+import { isCliSelectable } from "../../../src/shared/cli-availability";
 
 /** 单个 CLI 种类的展示元信息。 */
 type CliMeta = {
@@ -19,8 +20,8 @@ const CLI_META: Record<RuntimeCli, CliMeta> = {
   dsh: { displayName: "DeepSeek Harness", icon: "D" },
 };
 
-/** 手动添加下拉框的固定顺序；只影响展示顺序，不代表能力差异。 */
-export const CLI_KINDS: readonly RuntimeCli[] = ["codex", "kimi", "claude", "dsh"];
+/** 手动添加下拉框的固定顺序；只展示当前产品可选的 CLI，暂时下线的种类保留元信息但不进入入口。 */
+export const CLI_KINDS: readonly RuntimeCli[] = (["codex", "kimi", "claude", "dsh"] as const).filter(isCliSelectable);
 
 /** 按种类取显示名；未知种类显示原值而不是错名字。 */
 export function cliDisplayName(cli: RuntimeCli): string {

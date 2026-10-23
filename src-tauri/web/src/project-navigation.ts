@@ -13,6 +13,11 @@ export function useProjectExpanded(identity: string) {
   }] as const;
 }
 
+/** 空项目没有可展开的子项：展开只会留出一段空白，因此空项目恒为收起。 */
+export function projectExpanded(hasContent: boolean, preferred: boolean): boolean {
+  return hasContent && preferred;
+}
+
 /** 拖入仅接纳一个绝对路径；文件/目录身份由Engine只读核验，不靠扩展名猜测。 */
 export function droppedProjectPath(paths: readonly string[]): string {
   if (paths.length !== 1) throw new Error("请一次拖入一个文件夹。");

@@ -42,21 +42,21 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
  const [checking,setChecking]=useState(false),[checkAttempt,setCheckAttempt]=useState(0);
  const [planError,setPlanError]=useState<string|null>(null);
  const local=!!revision.localOrigin;
- useEffect(()=>{let live=true;if(editable){setChecking(true);const timeout=setTimeout(()=>{if(live){setPlanError("执行配置检查超时（如果 macOS 刚弹出文件夹访问授权——常见于项目位于桌面、文稿等受保护目录——请点允许后重新检查；也可能正与其他窗口/进程抢占执行环境）。参数和 CLI 选择已保留。");setChecking(false);}},15_000);const done=()=>clearTimeout(timeout);void api.planExecution(taskId,revision.revision).then(result=>{done();if(live){plans.set(identity,result);setPlan(result);setPlanError(local||result.harnessRuntime?null:"尚未设置已验证的 Wave Flow CLI，请在执行环境设置中选择。");}}).catch(error=>{done();if(live&&!String(error).includes("主控必须空闲"))setPlanError(userFacingText(error instanceof Error?error.message:String(error)));}).finally(()=>{if(live)setChecking(false);});}else setChecking(false);return()=>{live=false;};},[taskId,revision.revision,editable,identity,checkAttempt]);
+ useEffect(()=>{let live=true;if(editable){setChecking(true);setPlanError(null);const timeout=setTimeout(()=>{if(!live)return;if(checkAttempt===0){setChecking(true);setCheckAttempt(attempt=>attempt+1);return;}setPlanError("执行环境准备较慢。参数和工具选择已保留，请稍后重新检查。");setChecking(false);},15_000);const done=()=>clearTimeout(timeout);void api.planExecution(taskId,revision.revision).then(result=>{done();if(live){plans.set(identity,result);setPlan(result);setPlanError(local||result.harnessRuntime?null:"还没有选择可用的本地执行工具。请打开右上角执行环境设置完成连接。");}}).catch(error=>{done();if(live&&!String(error).includes("主控必须空闲"))setPlanError(userFacingText(error instanceof Error?error.message:String(error)));}).finally(()=>{if(live)setChecking(false);});}else setChecking(false);return()=>{live=false;};},[taskId,revision.revision,editable,identity,checkAttempt]);
  function cliSelect(id:string,label:string){
-   if(revision.localOrigin){const cli=(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;return <span>{cli ? cliDisplayName(cli) : "运行时决定"}</span>;}
-   if(execution){const assignment=execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment;return <span>{assignment?cliDisplayName(assignment.cli):"历史CLI配置未知"}</span>;}
+   if(revision.localOrigin){const cli=(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;return <span>{cli ? cliDisplayName(cli) : "自动选择"}</span>;}
+   if(execution){const assignment=execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment;return <span>{assignment?cliDisplayName(assignment.cli):"历史记录未保存工具"}</span>;}
    if(!editable&&!blockedConfirmReason){
      const cli=revision.preview?.previewAgents.find(worker=>worker.nodeId===id)?.cli;
      return <span>{cli?cliDisplayName(cli):'运行时决定'}</span>;
    }
    if(!plan){
-     if(checking)return <span className="cli-pending" role="status">正在检查可用 CLI…</span>;
+     if(checking)return <span className="cli-pending" role="status">正在准备执行环境…</span>;
      if(planError)return <span>检查未完成 · 见下方错误</span>;
-     return <span className="cli-pending">Wave Flow 处理结束后显示可用 CLI</span>;
+     return <span className="cli-pending">处理结束后显示可用工具</span>;
    }
    const options=oneRuntimePerCli(plan);
-   if(options.length===0)return <span>没有已验证的 CLI</span>;
+   if(options.length===0)return <span>还没有可用的执行工具</span>;
    if(options.length===1){const only=options[0]!;return <span>{cliDisplayName(only.cli)}</span>;}
    const preferred=choices[id]&&options.some(runtime=>runtime.runtimeId===choices[id])?choices[id]:options.find(runtime=>runtime.runtimeId===plan.harnessRuntime?.runtimeId)?.runtimeId??options[0]!.runtimeId;
    return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{cliDisplayName(runtime.cli)}</option>)}</select>;
@@ -64,16 +64,13 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
  function workspaceSummary(){
    if(!plan?.workspacePlan)return null;
    const continuation=plan.continuationPlan;
-   const dirtyPaths=plan.workspacePlan.dirtyPaths;
    return <p className="workflow-workspace-summary">
      {plan.workspacePlan.diagnostic
        ? plan.workspacePlan.diagnostic
        : continuation
-         ? `接续上次执行的工作区（${continuation.head.slice(0, 12)}）；所有写节点共享同一 worktree。`
-         : `基准 ${plan.workspacePlan.baseCommit?.slice(0, 12) ?? "不可用"}；所有写节点共享同一 worktree。`}
-     {dirtyPaths.length
-       ? ` ${dirtyPaths.length} 项未提交改动不纳入（保留不动）；主工作区不干净时首次自动应用会被确定性跳过，请先提交或暂存这些改动，再到执行页点“重新整理改动”（不会重新执行 Workflow）。`
-       : " 完成后自动应用到主工作区，保持未提交、不 push。"}
+         ? `接续上次执行的工作区（版本 ${continuation.head.slice(0, 12)}）；本次执行共用一个工作区。`
+         : `基于版本 ${plan.workspacePlan.baseCommit?.slice(0, 12) ?? "不可用"}；本次执行共用一个工作区。`}
+      完成后改动保留在工作区，不会自动写入项目目录。
    </p>;
  }
  async function run(){
@@ -95,7 +92,7 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
        const confirmation=confirmations.get(identity,input,choices,plan,workspaces);result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input,plan.sceneEvidenceHash):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash);
      }
      onCreated(result);
-   }catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
+   }catch(error){setError(userFacingText(error instanceof Error?error.message:String(error)));}finally{setBusy(false);}
  }
  const titles=revision.preview?.phaseTitles??[];
  return <section className="workflow-design"><h3>执行步骤</h3>{groupWorkersByPhase(titles,plan?.previewAgents??revision.preview?.previewAgents??[]).map(group=><section key={group.key}><h4>{group.title}</h4>{group.workers.map(worker=><div className="workflow-design-row" key={worker.key}><strong>{worker.name}{worker.loop&&<small>循环/批量调用</small>}</strong>{cliSelect(worker.nodeId??"*",worker.name)}</div>)}</section>)}
@@ -104,7 +101,7 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
    {plan&&plan.pool.length===1&&editable&&<small>需要更多选择时，先在执行底座设置中验证其他 CLI。</small>}
    {error&&<p role="alert">{error}</p>}
    {checking&&<small role="status">正在检查执行配置，参数和 CLI 选择已保留…</small>}
-   {planError&&<><p role="alert">执行配置检查未完成：{planError}。参数与选择已保留，请重新检查后运行。</p>{editable&&<button type="button" className="button-secondary" disabled={checking||busy} onClick={()=>setCheckAttempt(attempt=>attempt+1)}>重新检查执行配置</button>}</>}
-   {(editable||blockedConfirmReason)&&<div className="workflow-design-actions"><small>{editable?(plan?.workspacePlan?(plan.workspacePlan.dirtyPaths.length?"确认后锁定方案并开始执行；主工作区有未提交改动，本次自动应用会被确定性跳过，执行页可继续整理。":"确认后锁定方案并开始执行；完成后自动应用到主工作区（未提交、不 push）。"):"确认后锁定方案并开始执行。"):blockedConfirmReason}</small><div className="actions-group">{onAdjustViaChat&&<button type="button" className="button-secondary" onClick={onAdjustViaChat}>通过对话调整</button>}{onAbandonCard&&<button type="button" className="button-secondary" onClick={()=>void onAbandonCard()}>放弃此方案</button>}<button type="button" className="button-primary" disabled={!editable||busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime} onClick={()=>void run()}>{busy?"正在启动…":"确认并运行"}</button></div></div>}
+   {planError&&<><p role="alert">{planError}</p>{editable&&<button type="button" className="button-secondary" disabled={checking||busy} onClick={()=>setCheckAttempt(attempt=>attempt+1)}>重新检查执行环境</button>}</>}
+   {(editable||blockedConfirmReason)&&<div className="workflow-design-actions"><small>{editable?(plan?.workspacePlan?"确认后开始执行；完成后改动保留在工作区，不会自动写入项目目录。":"确认后开始执行。"):blockedConfirmReason}</small><div className="actions-group">{onAdjustViaChat&&<button type="button" className="button-secondary" onClick={onAdjustViaChat}>通过对话调整</button>}{onAbandonCard&&<button type="button" className="button-secondary" onClick={()=>void onAbandonCard()}>放弃此方案</button>}<button type="button" className="button-primary" disabled={!editable||busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime} onClick={()=>void run()}>{busy?"正在启动…":"确认并运行"}</button></div></div>}
  </section>;
 }

@@ -24,6 +24,17 @@ export function ExecutionProgressCard({
   meta?: string;
 }) {
   const progress = computeExecutionProgress(snapshot, plannedTotal, allVisits);
+  /** 顶部只补当前动作，不堆节点清单；详细轨迹仍由下方 Phase/Agent 行承载。 */
+  const terminal = ["completed", "cancelled", "interrupted"].includes(snapshot.status);
+  const current = terminal ? undefined
+    : progress.items.find((item) => ["running", "blocked", "paused", "pausing", "recovering"].includes(item.status))
+      ?? (snapshot.status === "running" ? progress.items.find((item) => item.status === "queued") : undefined);
+  const currentLabel = !current ? null
+    : snapshot.status === "paused" || snapshot.status === "pausing" ? "已暂停"
+    : snapshot.status === "recovering" ? "正在恢复"
+    : current.status === "blocked" ? "等待你的回答"
+    : current.status === "queued" ? "准备启动"
+    : "正在执行";
   return (
     <section className="wf-progress-card" aria-label="执行进度">
       <header>
@@ -40,6 +51,11 @@ export function ExecutionProgressCard({
           <small>分母为已创建节点；计划总数未提供</small>
         )}
       </header>
+      {current && (
+        <p className="wf-progress-current" role="status">
+          {currentLabel}：{current.label}
+        </p>
+      )}
     </section>
   );
 }

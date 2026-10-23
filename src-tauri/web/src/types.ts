@@ -151,7 +151,16 @@ export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; ca
 /** 耐久对话条目；实时展示与重开回放同源。 */
 export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
 /** ACP 主控会话广告的斜杠命令/技能；只来自运行时事件，不进入 Journal。 */
-export type HarnessAvailableCommand = { name: string; description: string; inputHint: string | null };
+export type HarnessAvailableCommand = {
+  name: string;
+  description: string;
+  inputHint: string | null;
+  /**
+   * UI 合并托管技能时使用的分组提示；ACP 原始命令不带该字段。
+   * 只影响斜线菜单分组，不改变 Engine 或 CLI 语义。
+   */
+  groupHint?: "skills";
+};
 /** Engine 事件帧中的会话事件（耐久派生子集）。 */
 export type HarnessStreamEvent = (
   | { /** 最终标题耐久后重读快照。 */ type:"title_changed" }
@@ -283,6 +292,73 @@ export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
 export type CliRuntime = { runtimeId: string; cli: RuntimeCli; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: RuntimeAdapterId; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
 export type CliRuntimeListResponse = { selectedByCli: Partial<Record<RuntimeCli, string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
+
+/** 可作为技能导入来源的本机 CLI 技能目录种类。 */
+export type SkillSourceCli = "codex" | "claude" | "dsh" | "kimi" | "agents";
+
+/** 一个可导入的本机 CLI 技能来源；exists=false 表示目录不存在，不是错误。 */
+export type SkillImportSource = {
+  /** 来源 CLI 种类；agents 表示共享的 ~/.agents/skills。 */
+  cli: SkillSourceCli;
+  /** 面向用户的来源名称。 */
+  label: string;
+  /** 技能根目录绝对路径。 */
+  root: string;
+  /** 扫描时该目录是否存在。 */
+  exists: boolean;
+};
+
+/** 从 CLI 目录发现的一个候选 skill。 */
+export type DiscoveredSkill = {
+  /** skill 名称。 */
+  name: string;
+  /** frontmatter description；非法候选为空字符串。 */
+  description: string;
+  /** 来源 CLI 种类。 */
+  sourceCli: SkillSourceCli;
+  /** 来源展示名称。 */
+  sourceLabel: string;
+  /** skill 目录绝对路径，用于导入时定位。 */
+  path: string;
+  /** SKILL.md 摘要；非法候选为 null。 */
+  skillMdSha256: string | null;
+  /** 与托管库的同名关系。 */
+  installed: "none" | "same" | "different";
+  /** 是否通过静态校验。 */
+  valid: boolean;
+  /** 校验失败原因；valid=true 时为 null。 */
+  issue: string | null;
+};
+
+/** 技能导入发现结果。 */
+export type SkillDiscoverResult = {
+  /** 扫描过的全部来源，含缺失来源。 */
+  sources: SkillImportSource[];
+  /** 有效或可解释的候选 skill。 */
+  skills: DiscoveredSkill[];
+};
+
+/** 设置页技能库状态；由 Engine 只读扫描产生，不含技能正文或凭据。 */
+export type SkillLibraryStatus = {
+  /** 技能库根目录绝对路径。 */
+  root: string;
+  /** 扫描时目录是否存在。 */
+  exists: boolean;
+  /** 库摘要；空库为 null。 */
+  digest: string | null;
+  /** 合法 skill 数量。 */
+  count: number;
+  /** 合法 skill、声明依赖与只读缺失诊断。 */
+  skills: Array<{ name: string; description: string; bytes: number; requiredBins: string[]; missingBins: string[] }>;
+  /** 所有 skill 声明中缺失的依赖并集；仅提示，不阻止注入。 */
+  missingDependencies: string[];
+  /** 被跳过、不参与注入的非法 skill；不影响其他合法项。 */
+  invalid: Array<{ name: string; issue: string }>;
+  /** 每个可选 CLI 的注入能力。 */
+  capabilities: Array<{ cli: RuntimeCli; displayName: string; injection: "verified" | "unsupported" }>;
+  /** 暂时下线的 CLI 与原因。 */
+  unavailable: Array<{ cli: RuntimeCli; reason: string }>;
+};
 /** 启动自动扫描的无敏感信息摘要；成功项已保存但尚未被设为默认。 */
 export type ScanCliRuntimesResponse = { discovered: number; verified: number; failures: Partial<Record<RuntimeCli, "absent" | "timeout" | "exec_failed" | "limit_reached">>; runtimes: CliRuntimeListResponse };
 export type DiscoveredCliCandidate = { cli: RuntimeCli; executablePath: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir"; discoveredShell: string | null; aliases: string[] };
@@ -293,18 +369,18 @@ export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   workspaceDiagnostic?:string;
-  /** 最终封存与自动应用证据；只读投影，不代表已提交或 push。 */
+  /** 最终封存证据；只读投影，不代表已提交或 push。 */
   sourceEvidence?: {
     /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
     /** 共享worktree分支及UUID。 */ branch:string; workspaceId:string;
     /** 最终封存commit与基准。 */ commit:string; baseCommit:string;
     /** 冻结授权身份。 */ authorizationId:string;
-    /** 实际变化文件、自动应用状态与耐久时间。 */ paths:string[]; savedAt:string;
-    /** 已自动写入主工作区，或记录未应用原因。 */ applied:{at:string;paths:string[]}|{skippedAt:string;reason:string};
+    /** 实际变化文件与耐久时间。 */ paths:string[]; savedAt:string;
+    /** 结果保留状态；当前为未写入主工作区的 worktree 原因。 */ applied:{at:string;paths:string[]}|{skippedAt:string;reason:string};
   };
   /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
   /** 共享worktree与租约投影；closedWriters 为恢复前终止或确认退出的旧writer数。 */
-  workspaceEvidence?:{workspaceId:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;closedWriters:number;cleaned:boolean};
+  workspaceEvidence?:{workspaceId:string;cwd:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;closedWriters:number;cleaned:boolean};
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };

@@ -596,9 +596,9 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .composer-guidance small { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .agent-workbench .composer-guidance .recover-quiet { padding:0; border:0; background:none; box-shadow:none; color:var(--wf-accent); font-size:inherit; cursor:pointer; }
 .agent-workbench .composer-guidance .recover-quiet:hover { text-decoration:underline; }
-.agent-workbench .send-message, .agent-workbench .stop-turn { display:grid; place-items:center; width:32px; height:32px; flex:0 0 auto; padding:0; border:0; border-radius:10px; background:var(--wf-accent-strong); box-shadow:none; color:#fff; font-size:18px; line-height:1; }
+.agent-workbench .send-message, .agent-workbench .stop-turn { display:grid; place-items:center; width:44px; height:44px; flex:0 0 auto; padding:0; border:0; border-radius:12px; background:var(--wf-accent-strong); box-shadow:none; color:#fff; font-size:18px; line-height:1; }
 .agent-workbench .send-message:hover:not(:disabled) { filter:brightness(1.08); }.agent-workbench .send-message:disabled { background:var(--wf-line); box-shadow:none; color:var(--wf-faint); opacity:1; }
-.agent-workbench .stop-turn { width:auto; padding:0 13px; border-radius:11px; background:var(--wf-panel-raised); box-shadow:none; color:var(--wf-ink); font-size:11px; }
+.agent-workbench .stop-turn { width:auto; min-width:44px; padding:0 13px; border-radius:12px; background:var(--wf-panel-raised); box-shadow:none; color:var(--wf-ink); font-size:12px; }
 .agent-workbench .composer-actions { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
 .agent-workbench .send-immediate { padding:0 12px; height:32px; border:1px solid color-mix(in srgb, var(--wf-accent) 55%, var(--wf-line)); border-radius:11px; background:transparent; box-shadow:none; color:var(--wf-accent-strong); font-size:11px; }
 .agent-workbench .send-immediate:hover:not(:disabled) { background:var(--wf-accent-wash); }
@@ -845,9 +845,9 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-image-placeholder { display:inline-block; padding:2px 8px; border:1px dashed var(--wf-border); border-radius:6px; color:var(--wf-text-dim); font-size:12px; }
 
 /* 思考/工具折叠行：无边框透明行，整行降为灰色（正文保持亮色形成层级）；展开区用左侧发丝线引导。 */
-.agent-workbench .wf-entry { max-width:760px; border-radius:8px; color:var(--wf-text-dim); }
+.agent-workbench .wf-entry { width:100%; max-width:760px; min-width:0; border-radius:8px; color:var(--wf-text-dim); }
 .agent-workbench .wf-entry:hover { background:color-mix(in srgb, var(--wf-raised) 55%, transparent); }
-.agent-workbench .wf-entry-row { display:flex; align-items:center; gap:8px; min-height:32px; padding:3px 8px; font-size:14px; color:var(--wf-text-dim); }
+.agent-workbench .wf-entry-row { display:flex; align-items:center; gap:8px; min-width:0; min-height:32px; padding:3px 8px; font-size:14px; color:var(--wf-text-dim); }
 .agent-workbench .wf-entry-glyph { width:15px; height:15px; flex:0 0 auto; fill:none; stroke:var(--wf-faint); stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
 .agent-workbench .wf-entry-name { display:flex; align-items:center; gap:6px; flex:0 0 auto; font-weight:500; }
 .agent-workbench .wf-entry-summary { min-width:0; flex:1 1 auto; overflow:hidden; color:var(--wf-faint); font:12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; text-overflow:ellipsis; white-space:nowrap; }
@@ -861,7 +861,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-entry-toggle { display:grid; place-items:center; width:24px; height:24px; flex:0 0 auto; padding:0; border:0; border-radius:6px; background:transparent; cursor:pointer; }
 .agent-workbench .wf-entry-toggle:hover { background:var(--wf-selected); }
 .agent-workbench .wf-entry-toggle svg { width:13px; height:13px; fill:none; stroke:var(--wf-faint); stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
-.agent-workbench .wf-entry-detail { margin-left:15px; padding:2px 10px 10px 18px; border-left:1px solid var(--wf-border); }
+.agent-workbench .wf-entry-detail { max-width:100%; overflow:hidden; margin-left:15px; padding:2px 10px 10px 18px; border-left:1px solid var(--wf-border); }
 .agent-workbench .wf-entry-group-items { display:grid; gap:1px; }
 .agent-workbench .wf-entry-group-items > * { min-width:0; }
 .agent-workbench .wf-entry { min-width:0; }
@@ -870,8 +870,8 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-thought-text { max-height:320px; margin:8px 0 2px; overflow:auto; color:var(--wf-text-dim); font:13px/1.7 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; }
 .agent-workbench .wf-tool-output { max-height:360px; margin:8px 0 2px; padding:10px 12px; overflow:auto; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); color:var(--wf-text); font:12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
 .agent-workbench .wf-tool-output.wf-terminal { background:var(--wf-terminal-bg); color:#e8e8ea; border-color:transparent; }
-.agent-workbench .wf-command-line { display:flex; align-items:center; gap:10px; margin-top:8px; }
-.agent-workbench .wf-command-line code { min-width:0; flex:1 1 auto; overflow-x:auto; padding:8px 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); color:var(--wf-text); font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
+.agent-workbench .wf-command-line { display:flex; align-items:center; gap:10px; min-width:0; max-width:100%; margin-top:8px; }
+.agent-workbench .wf-command-line code { min-width:0; max-width:100%; flex:1 1 auto; overflow-x:auto; padding:8px 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-raised); color:var(--wf-text); font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; }
 .agent-workbench .wf-copy-button { flex:0 0 auto; padding:5px 10px; border:1px solid var(--wf-border); border-radius:7px; background:var(--wf-surface); color:var(--wf-text-dim); font-size:12px; cursor:pointer; }
 .agent-workbench .wf-copy-button:hover { background:var(--wf-selected); color:var(--wf-text); }
 .agent-workbench .wf-entry-params { margin:8px 0 2px; color:var(--wf-text-dim); font:12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; overflow-wrap:anywhere; }
@@ -1429,9 +1429,6 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .agent-workbench .workflow-page-content .execution-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:14px 0 6px; }
 .agent-workbench .workflow-page-content .execution-actions:empty { display:none; }
 .agent-workbench .workflow-page-content .execution-actions button { margin:0; }
-/* “重新整理改动”的内联结果：成功与仍跳过都必须可见，不只依赖按钮状态。 */
-.agent-workbench .workflow-page-content .execution-apply-retry { margin:0 0 10px; padding:8px 12px; border:1px solid var(--wf-line); border-left:3px solid var(--wf-success); border-radius:8px; background:var(--wf-success-wash); color:var(--wf-text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
-.agent-workbench .workflow-page-content .execution-apply-retry.skipped { border-left-color:var(--wf-danger-line); background:var(--wf-danger-bg); color:var(--wf-danger-ink); }
 
 /* 执行轨迹与诊断附录沿用方案页的层级和留白。 */
 .agent-workbench .workflow-page-content > .wf-team-panel { margin-top:18px; }
@@ -1470,3 +1467,230 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .agent-workbench .composer-mention-suggestion code { flex:0 0 auto; color:var(--wf-accent); font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
 .agent-workbench .composer-mention-suggestion span { min-width:0; overflow:hidden; color:var(--wf-muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
 .agent-workbench .composer-mention-suggestion small { flex:0 0 auto; color:var(--wf-faint); font-size:10px; }
+
+/* 默认 CLI 门禁：居中模态 + 背景模糊，而不是铺满窗口的设置视图。 */
+.agent-workbench .settings-backdrop.connection-backdrop--gate {
+  padding: clamp(18px, 4vw, 40px);
+  place-items: center;
+  background: color-mix(in srgb, var(--wf-page) 52%, transparent);
+  backdrop-filter: blur(22px) saturate(1.25);
+  -webkit-backdrop-filter: blur(22px) saturate(1.25);
+  animation: wf-gate-backdrop-in .18s ease-out both;
+}
+.agent-workbench .runtime-settings--gate {
+  width: min(720px, 100%);
+  max-height: min(820px, calc(100dvh - 56px));
+  border: 1px solid color-mix(in srgb, var(--wf-line) 72%, transparent);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--wf-panel) 92%, transparent);
+  box-shadow: 0 32px 90px rgb(0 0 0 / 42%), 0 0 0 1px rgb(255 255 255 / 4%) inset;
+  animation: wf-gate-panel-in .24s cubic-bezier(.2, .8, .2, 1) both;
+}
+@keyframes wf-gate-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wf-gate-panel-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .agent-workbench .settings-backdrop.connection-backdrop--gate,
+  .agent-workbench .runtime-settings--gate { animation: none; }
+}
+@media (max-width: 640px) {
+  .agent-workbench .settings-backdrop.connection-backdrop--gate { padding: 14px; }
+  .agent-workbench .runtime-settings--gate { width: 100%; max-height: calc(100dvh - 28px); border-radius: 16px; }
+}
+
+/* 技能设置：库清单与导入弹窗。 */
+.agent-workbench .skills-head { align-items: flex-start; }
+.agent-workbench .skills-head-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.agent-workbench .skills-meta { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px 14px; margin: 18px 0 0; padding: 14px 16px; border: 1px solid var(--wf-line-soft); border-radius: 12px; background: var(--wf-panel-raised); }
+.agent-workbench .skills-meta dt { color: var(--wf-faint); font-size: 11px; }
+.agent-workbench .skills-meta dd { min-width: 0; margin: 0; color: var(--wf-ink); font-size: 12px; }
+.agent-workbench .skills-meta code { display: block; overflow-wrap: anywhere; color: var(--wf-muted); font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+.agent-workbench .skills-cli-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-workbench .skill-capability { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--wf-line-soft); border-radius: 999px; color: var(--wf-muted); font-size: 11px; }
+.agent-workbench .skill-capability em { color: var(--wf-faint); font-style: normal; font-size: 10px; }
+.agent-workbench .skill-capability.verified { border-color: color-mix(in srgb, var(--wf-success) 36%, var(--wf-line-soft)); }
+.agent-workbench .skill-capability.verified em { color: var(--wf-success); }
+.agent-workbench .skill-capability.unsupported, .agent-workbench .skill-capability.unavailable { color: var(--wf-faint); }
+.agent-workbench .skill-capability.unsupported em, .agent-workbench .skill-capability.unavailable em { color: var(--wf-wait); }
+.agent-workbench .skill-notice { margin: 16px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--wf-success) 36%, var(--wf-line)); border-radius: 10px; background: var(--wf-success-wash); color: var(--wf-success); font-size: 12px; line-height: 1.5; }
+.agent-workbench .skills-loading { margin: 20px 0; color: var(--wf-muted); font-size: 12px; }
+.agent-workbench .skills-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+.agent-workbench .skill-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 15px 16px; border: 1px solid var(--wf-line-soft); border-radius: 12px; background: var(--wf-panel-raised); }
+.agent-workbench .skill-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.agent-workbench .skill-card-head strong { overflow: hidden; color: var(--wf-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-workbench .skill-card-head small { flex: 0 0 auto; color: var(--wf-faint); font: 10px ui-monospace, monospace; }
+.agent-workbench .skill-card p { display: -webkit-box; overflow: hidden; margin: 0; color: var(--wf-muted); font-size: 12px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.agent-workbench .skill-deps { color: var(--wf-faint); font-size: 10px; line-height: 1.45; }
+.agent-workbench .skill-deps.missing { color: var(--wf-danger-ink); }
+.agent-workbench .skills-empty { display: grid; justify-items: center; gap: 8px; margin-top: 18px; padding: 34px 24px; border: 1px dashed var(--wf-line-soft); border-radius: 14px; text-align: center; }
+.agent-workbench .skills-empty strong { color: var(--wf-ink); font-size: 14px; }
+.agent-workbench .skills-empty p { margin: 0; color: var(--wf-muted); font-size: 12px; line-height: 1.6; }
+.agent-workbench .skills-empty button { margin-top: 6px; }
+
+.agent-workbench .skill-import-backdrop { position: fixed; z-index: 210; inset: 0; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--wf-page) 42%, transparent); backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2); animation: wf-gate-backdrop-in .16s ease-out both; }
+.agent-workbench .skill-import-panel { display: flex; flex-direction: column; width: min(760px, 100%); max-height: calc(100dvh - 48px); overflow: hidden; border: 1px solid color-mix(in srgb, var(--wf-line) 76%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--wf-panel) 96%, transparent); box-shadow: 0 30px 80px rgb(0 0 0 / 40%); animation: wf-gate-panel-in .22s cubic-bezier(.2, .8, .2, 1) both; }
+.agent-workbench .skill-import-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px 18px; border-bottom: 1px solid var(--wf-line-soft); }
+.agent-workbench .skill-import-head strong { display: block; color: var(--wf-ink); font-size: 18px; letter-spacing: -.02em; }
+.agent-workbench .skill-import-head p { max-width: 540px; margin: 6px 0 0; color: var(--wf-muted); font-size: 12px; line-height: 1.55; }
+.agent-workbench .skill-import-close { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 auto; border: 1px solid var(--wf-line); border-radius: 8px; background: var(--wf-panel-raised); color: var(--wf-muted); font-size: 18px; }
+.agent-workbench .skill-import-close:hover:not(:disabled) { color: var(--wf-ink); border-color: var(--wf-accent); }
+.agent-workbench .skill-import-tabs { display: flex; gap: 4px; padding: 12px 24px 0; }
+.agent-workbench .skill-import-tabs button { padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--wf-muted); font-size: 12px; font-weight: 600; }
+.agent-workbench .skill-import-tabs button.active { border-bottom-color: var(--wf-accent); color: var(--wf-ink); }
+.agent-workbench .skill-import-tabs button:disabled { opacity: .5; }
+.agent-workbench .skill-import-body { display: flex; flex-direction: column; min-height: 0; flex: 1; gap: 12px; padding: 16px 24px 18px; }
+.agent-workbench .skill-source-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-workbench .skill-source-chips button { padding: 5px 9px; border: 1px solid var(--wf-line); border-radius: 999px; background: transparent; color: var(--wf-muted); font-size: 11px; }
+.agent-workbench .skill-source-chips button.active { border-color: color-mix(in srgb, var(--wf-accent) 55%, var(--wf-line)); background: var(--wf-accent-wash); color: var(--wf-accent); }
+.agent-workbench .skill-import-search { min-height: 38px; padding: 0 12px; border: 1px solid var(--wf-line); border-radius: 9px; outline: 0; background: var(--wf-input); color: var(--wf-ink); font-size: 12px; }
+.agent-workbench .skill-import-search:focus { border-color: var(--wf-accent); box-shadow: 0 0 0 3px var(--wf-accent-wash); }
+.agent-workbench .skill-import-list { display: grid; gap: 6px; min-height: 100px; margin: 0; padding: 0; overflow: auto; list-style: none; scrollbar-gutter: stable; }
+.agent-workbench .skill-import-list li { border: 1px solid var(--wf-line-soft); border-radius: 10px; background: var(--wf-panel-raised); }
+.agent-workbench .skill-import-list li.disabled { opacity: .62; }
+.agent-workbench .skill-import-list label { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; }
+.agent-workbench .skill-import-list li.disabled label { cursor: default; }
+.agent-workbench .skill-import-list input { width: 15px; height: 15px; accent-color: var(--wf-accent); }
+.agent-workbench .skill-import-list label > span { min-width: 0; }
+.agent-workbench .skill-import-list strong { display: block; overflow: hidden; color: var(--wf-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-workbench .skill-import-list small { display: block; overflow: hidden; margin-top: 2px; color: var(--wf-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-workbench .skill-import-list em { color: var(--wf-faint); font-size: 10px; font-style: normal; white-space: nowrap; }
+.agent-workbench .skill-import-list li > p { margin: 0 12px 10px 40px; color: var(--wf-danger-ink); font-size: 10px; line-height: 1.45; }
+.agent-workbench .skill-import-empty { display: grid; justify-items: center; gap: 6px; padding: 28px 16px; border: 1px dashed var(--wf-line-soft); border-radius: 12px; color: var(--wf-muted); font-size: 12px; text-align: center; }
+.agent-workbench .skill-import-empty strong { color: var(--wf-ink); font-size: 13px; }
+.agent-workbench .skill-import-empty p { margin: 0; line-height: 1.55; }
+.agent-workbench .skill-import-error { margin: 0; padding: 9px 10px; border: 1px solid var(--wf-danger-line); border-radius: 9px; background: var(--wf-danger-bg); color: var(--wf-danger-ink); font-size: 11px; line-height: 1.5; }
+.agent-workbench .skill-import-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--wf-line-soft); }
+.agent-workbench .skill-import-footer > span { color: var(--wf-faint); font-size: 11px; line-height: 1.5; }
+.agent-workbench .skill-import-footer > div { display: flex; flex: 0 0 auto; gap: 8px; }
+.agent-workbench .skill-zip { display: grid; gap: 10px; padding: 18px; border: 1px dashed var(--wf-line-soft); border-radius: 12px; background: var(--wf-panel-raised); }
+.agent-workbench .skill-zip strong { color: var(--wf-ink); font-size: 13px; }
+.agent-workbench .skill-zip p { margin: 0; color: var(--wf-muted); font-size: 12px; line-height: 1.55; }
+.agent-workbench .skill-zip button { justify-self: start; }
+.agent-workbench .skill-zip code { display: block; overflow-wrap: anywhere; color: var(--wf-muted); font: 11px/1.5 ui-monospace, monospace; }
+@media (max-width: 900px) { .agent-workbench .skills-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .agent-workbench .skill-import-backdrop { padding: 14px; }
+  .agent-workbench .skill-import-panel { max-height: calc(100dvh - 28px); border-radius: 15px; }
+  .agent-workbench .skill-import-head, .agent-workbench .skill-import-body { padding-left: 16px; padding-right: 16px; }
+  .agent-workbench .skill-import-tabs { padding-left: 16px; padding-right: 16px; }
+  .agent-workbench .skills-head { flex-direction: column; }
+  .agent-workbench .skills-head-actions { width: 100%; }
+  .agent-workbench .skills-head-actions button { flex: 1; }
+  .agent-workbench .skill-import-footer { align-items: stretch; flex-direction: column; }
+  .agent-workbench .skill-import-footer > div { justify-content: flex-end; }
+}
+
+/* 中断后的产品级恢复卡：只给一个重新尝试动作，技术细节默认折叠。 */
+.agent-workbench .execution-recovery-card {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--wf-danger-ink) 35%, var(--wf-line-soft));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--wf-danger-ink) 7%, var(--wf-surface));
+}
+.agent-workbench .execution-recovery-card > strong { color: var(--wf-danger-ink); font-size: 13px; }
+.agent-workbench .execution-recovery-card > p { margin: 0; color: var(--wf-muted); font-size: 12px; line-height: 1.6; }
+.agent-workbench .execution-recovery-actions { display:flex; align-items:center; gap:8px; }
+.agent-workbench .execution-recovery-card details { margin-top: 2px; }
+.agent-workbench .execution-recovery-card summary { color: var(--wf-faint); font-size: 11px; cursor: pointer; }
+.agent-workbench .execution-recovery-card details p { margin: 6px 0 0; overflow-wrap:anywhere; color: var(--wf-faint); font: 11px/1.55 ui-monospace, monospace; }
+
+/* 停止确认：内联在输入区，避免打断阅读，同时防止误触。 */
+.agent-workbench .stop-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--wf-danger-ink) 35%, var(--wf-line-soft));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--wf-danger-ink) 7%, var(--wf-panel));
+  color: var(--wf-muted);
+  font-size: 11px;
+}
+.agent-workbench .stop-confirm > span:first-child { flex: 1 1 170px; min-width: 120px; }
+.agent-workbench .stop-confirm button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--wf-panel-raised);
+  color: var(--wf-ink);
+  font-size: 11px;
+  cursor: pointer;
+}
+.agent-workbench .stop-confirm button.danger { background: var(--wf-danger-ink); color: #fff; }
+.agent-workbench .stop-confirm button:focus-visible { outline: 2px solid var(--wf-accent-strong); outline-offset: 1px; }
+
+/* 停止 Execution 的内联确认：破坏性动作必须二次确认，但保留当前页面上下文。 */
+.agent-workbench .execution-stop-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 340px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--wf-danger-ink) 35%, var(--wf-line-soft));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--wf-danger-ink) 7%, var(--wf-surface));
+  font-size: 11px;
+  color: var(--wf-muted);
+}
+.agent-workbench .execution-stop-confirm > span:first-child { flex: 1 1 220px; }
+.agent-workbench .execution-stop-confirm button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--wf-panel-raised);
+  color: var(--wf-ink);
+  font-size: 11px;
+  cursor: pointer;
+}
+.agent-workbench .execution-stop-confirm button.danger { background: var(--wf-danger-ink); color: #fff; }
+.agent-workbench .execution-stop-confirm button:focus-visible { outline: 2px solid var(--wf-accent-strong); outline-offset: 1px; }
+
+/* 首次配置引导：没有可用工具时给出安装/登录路径，而不是只报“探测超时”。 */
+.agent-workbench .runtime-setup-guide {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--wf-line-soft);
+  border-radius: 10px;
+  background: var(--wf-panel);
+}
+.agent-workbench .runtime-setup-guide summary { cursor: pointer; color: var(--wf-accent-strong); font-size: 12px; font-weight: 600; }
+.agent-workbench .runtime-setup-guide p { margin: 6px 0; color: var(--wf-muted); font-size: 11px; line-height: 1.6; }
+.agent-workbench .runtime-setup-guide ul { margin: 6px 0; padding-left: 18px; color: var(--wf-muted); font-size: 11px; line-height: 1.8; }
+.agent-workbench .runtime-setup-guide code { padding: 1px 4px; border-radius: 4px; background: var(--wf-panel-raised); color: var(--wf-ink); overflow-wrap: anywhere; }
+
+/* 执行进度只补一行当前动作，避免用户只看到冷冰冰的分母。 */
+.agent-workbench .wf-progress-card .wf-progress-current {
+  margin: 6px 0 0;
+  color: var(--wf-muted);
+  font-size: 11px;
+}
+
+/* 技能注入能力是“支持性”说明，不能被误读成已安装/已连接工具。 */
+.agent-workbench .skills-capability-note { margin: 6px 0 0; color: var(--wf-faint); font-size: 11px; line-height: 1.6; }
+
+/* 停止按钮与确认卡共享一个聚焦容器，取消确认后焦点能回到原按钮。 */
+.agent-workbench .execution-stop-control { display:inline-flex; align-items:center; min-width:0; }
+
+/* 成果只保留在受管 worktree：直接展示可复制路径，避免用户只会看到 diff。 */
+.agent-workbench .execution-workspace-location {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--wf-line-soft);
+  border-radius: 9px;
+  background: var(--wf-panel);
+  color: var(--wf-muted);
+  font-size: 11px;
+}
+.agent-workbench .execution-workspace-location code { min-width:0; overflow-wrap:anywhere; color: var(--wf-ink); font: 11px/1.5 ui-monospace, monospace; }
+
+.agent-workbench .changes-footer-note { margin: 0; padding: 9px 14px; border-top: 1px solid var(--wf-line-soft); color: var(--wf-faint); font-size: 11px; }
