@@ -690,3 +690,46 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 1_000): Pr
   const deadline = Date.now() + timeoutMs;
   while (!(await predicate())) { if (Date.now() >= deadline) throw new Error("Harness turn 未在时限内结束。 "); await Bun.sleep(2); }
 }
+
+test("空闲主控会话超过上限时关闭最久未用，下一次回合可从耐久历史重建", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-idle-session-cap-")); directories.push(cwd);
+  const root = harnessRunsRoot(cwd);
+  const sessions: CapFakePi[] = [];
+  const service = new HarnessService(root, async () => { const session = new CapFakePi(); sessions.push(session); return session; }, undefined, undefined, false, 1, 1, 0);
+  const ids: string[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const created = await service.create(cwd);
+    ids.push(created.harnessRunId);
+    await service.send(created.harnessRunId, `hello ${index}`);
+    for (let wait = 0; wait < 100 && (await service.snapshot(created.harnessRunId)).status === "running"; wait += 1) await Bun.sleep(2);
+  }
+  expect(sessions.filter(session => session.closed).length).toBeGreaterThanOrEqual(2);
+  const before = sessions.length;
+  await service.send(ids[0]!, "reopen");
+  expect(sessions.length).toBe(before + 1);
+});
+
+class CapFakePi implements HarnessSession {
+  #listeners = new Set<(event: HarnessStreamEvent) => void>();
+  isRunning = false;
+  closed = false;
+  subscribe(listener: (event: HarnessStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  async prompt(_text: string) { this.isRunning = true; for (const listener of this.#listeners) listener({ type: "assistant_delta", delta: "answer" }); this.isRunning = false; return "answer"; }
+  abort() { this.isRunning = false; }
+  close() { this.closed = true; }
+}
+
+test("Orca 式空闲窗口到期后关闭未达硬上限的主控会话", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-idle-session-window-")); directories.push(cwd);
+  const root = harnessRunsRoot(cwd);
+  const sessions: CapFakePi[] = [];
+  const service = new HarnessService(root, async () => { const session = new CapFakePi(); sessions.push(session); return session; }, undefined, undefined, false, 3, 20, 0);
+  for (let index = 0; index < 2; index += 1) {
+    const created = await service.create(cwd);
+    await service.send(created.harnessRunId, `hello ${index}`);
+    for (let wait = 0; wait < 100 && (await service.snapshot(created.harnessRunId)).status === "running"; wait += 1) await Bun.sleep(2);
+  }
+  await Bun.sleep(60);
+  expect(sessions.some(session => session.closed)).toBe(true);
+  service.close();
+});

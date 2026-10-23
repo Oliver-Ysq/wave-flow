@@ -7,12 +7,15 @@ import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor
 import type { AgentNodeSnapshot } from "../runtime/run-types";
 import type { CliRuntimeRegistry } from "../runtimes/registry";
 import { resolveWorkerLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
+import { adapterById } from "../runtimes/adapter-catalog";
+import { prepareSessionSkills } from "../skills/session";
 import { WorkflowContractError } from "../workflow/errors";
 import { validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "./execution-workspaces";
 import { ownedAcpTransport } from "./managed-acp-transport";
 import { WorkspaceManager } from "./workspace-manager";
 import { WorkspaceExecutor } from "./workspace-executor";
 import { WriterProcessGroups } from "./writer-process-group";
+import { logWorkerLifecycle } from "../runtime/worker-lifecycle-log";
 
 /** Engine受管Workspace路径；首次执行/恢复沿用冻结Git授权，不重新让主控生成配置。 */
 export class ProductionWorkspaceExecutor {
@@ -28,6 +31,8 @@ export class ProductionWorkspaceExecutor {
     /** 单节点私有Control MCP，由Engine注册；scratch仅给受管writer。 */
     private readonly controlMcp: (identity: { runId: string; nodeId: string; agentSessionId: string; capability: string }, scratch?: string) => acp.McpServer,
     private readonly fallbackRuntimeId: string | null,
+    /** 技能库根目录；缺省 `waveFlowHome()/skills`，测试与隔离运行可注入。 */
+    private readonly skillsRoot?: string,
   ) { this.config = validateExecutionWorkspaces(config); }
 
   /** wireControl阶段先创建/复核受管worktree，完成后才允许Run后台执行。 */
@@ -39,13 +44,22 @@ export class ProductionWorkspaceExecutor {
     // 无论首次还是续作都先冻结本Execution的原授权与交接HEAD；重复调用幂等。
     if (!this.config.continuation) await manager.create(this.config.workspaceId, this.config.authorization);
     await manager.prepareExecution(runtime.journal.manifest.runId, this.config);
-    const readOnly = new RuntimeAcpWorkerExecutor(this.runtimes, (identity, scratch) => this.controlMcp(identity, scratch), undefined, this.fallbackRuntimeId, `${this.stateRoot}/read-only-scratch`);
+    const readOnly = new RuntimeAcpWorkerExecutor(this.runtimes, (identity, scratch) => this.controlMcp(identity, scratch), undefined, this.fallbackRuntimeId, `${this.stateRoot}/read-only-scratch`, this.skillsRoot);
     const delegate = new WorkspaceExecutor(manager, runtime.journal.manifest.runId, this.config.workspaceId, readOnly, async (node, binding) => {
       const selected = node.request.assignedRuntimeId ? await this.runtimes.resolveWorkerById(node.request.assignedRuntimeId) : await this.runtimes.resolveWorker(node.cli);
-      const launcher = resolveWorkerLauncher(selected);
+      // 写 Worker 与只读 Worker 使用同一投影语义；投影只落在本节点 scratch。
+      const runId = this.#runtime?.journal.manifest.runId ?? "";
+      const startedAt = performance.now();
+      const stage = (name: string, diagnostic?: string): void => logWorkerLifecycle({ stage: name, runId, nodeId: node.id, agentSessionId: node.agentSessionId ?? "", cli: node.cli, elapsedMs: Math.round(performance.now() - startedAt), ...(diagnostic ? { diagnostic } : {}) });
+      stage("skills_start");
+      const capability = adapterById(selected.verifiedAdapter.adapterId)?.skills;
+      const prepared = capability === undefined && this.skillsRoot === undefined
+        ? { launcher: resolveWorkerLauncher(selected), session: undefined, evidence: null }
+        : await prepareSessionSkills({ scratch: binding.scratch, launcher: resolveWorkerLauncher(selected), capability, libraryRoot: this.skillsRoot });
+      stage("skills_ready");
       const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter });
       // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
-      const worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected), identity => this.controlMcp(identity, binding.scratch), undefined, true);
+      const worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected, prepared.evidence), identity => this.controlMcp(identity, binding.scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       return {
         bindWriter: binding.bindWriter,
         verifyExited: async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)),

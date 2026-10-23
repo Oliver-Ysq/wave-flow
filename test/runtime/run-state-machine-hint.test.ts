@@ -62,6 +62,12 @@ test("节点绑定 log.written 只更新 hint，不改变状态与诊断；后�
   expect(state.agent("node").hint).toBeNull();
 });
 
+test("旧版 agent.hint 仍可回放为节点提示", () => {
+  const { state, runId, at } = fixture();
+  state.apply({ type: "agent.hint", at: at(3), runId, nodeId: "node", agentSessionId: SESSION_ID, diagnostic: null, message: "旧版启动提示" });
+  expect(state.agent("node")).toMatchObject({ status: "running", hint: "旧版启动提示" });
+});
+
 test("agent.completed 清空 hint，但保留结果与完成诊断", () => {
   const { state, runId, at } = fixture();
   state.apply(nodeLog(runId, at(3), "执行器提示"));

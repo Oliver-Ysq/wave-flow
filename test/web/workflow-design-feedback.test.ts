@@ -13,8 +13,7 @@ test("结果页逐一显示原总结与现场补充，过时义务不暴露重�
  expect(source).toContain('if (obligation.supersededBy)');
  expect(source).toContain('此补充已被更新的检查结果替代');
  expect(source).toContain('(item) => !item.supersededBy && item.status !== "completed"');
- expect(source).toContain('重新整理改动（不会重新执行）');
- expect(source).toContain('重新检查并重试补充');
+ expect(source).toContain('重新检查现场');
  expect(source).toContain('api.checkExecutionScene');
 });
 test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",async()=>{
@@ -22,38 +21,34 @@ test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",as
  const panel=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
  expect(app).toContain('(harness.task?.workflowContract === "single-workflow-v1" &&');
  expect(app).toContain('harness.executions.at(-1)?.executionId !==');
- expect(app).toContain('const changesApplied =');
  expect(app).toContain('所选工作流记录暂时不可用');
  expect(app).not.toContain('所选工作流记录已失效');
  expect(app).toContain('(detail.workspaceEvidence?.leases.length ?? 0) > 0');
  expect(app).not.toContain('TEMP DEBUG');
- expect(app).toContain('const applySkipped =');
- expect(app).toContain('applySkipped) && (');
- expect(app).toContain('applied={changesApplied}');
  expect(app).toContain('{!readOnly && (');
  expect(app).toContain('<div className="execution-actions">');
  expect(app).toContain('<ChangesPanel');
  expect(app).not.toContain("executions.merge");
  expect(app).not.toContain("changesWritable");
- expect(panel).toContain("已自动应用到主工作区（未提交、未推送）");
- expect(panel).not.toContain("采用这些改动");
+ expect(panel).not.toContain("已自动应用到主工作区");
+ expect(panel).not.toContain("未自动应用");
 });
 
-test("整工作区授权并入确认运行，自动应用，内部检查点默认折叠",async()=>{
+test("整工作区授权并入确认运行，结果保留在 worktree，内部检查点默认折叠",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(design).toContain("完成后自动应用到主工作区");
- expect(design).toContain("所有写节点共享同一 worktree");
+ expect(design).toContain("完成后改动保留在工作区，不会自动写入项目目录");
+ expect(design).toContain("本次执行共用一个工作区");
  expect(design).not.toContain("工作区分组");
  expect(design).not.toContain("集成来源节点");
  expect(design).not.toContain("接续上次改动");
  expect(design).not.toContain("approveGit");
  expect(app).toContain("<ChangesPanel");
  const review=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
- expect(review).toContain("已自动应用到主工作区（未提交、未推送）");
- expect(review).toContain("未自动应用");
+ expect(review).not.toContain("已自动应用到主工作区");
+ expect(review).not.toContain("未自动应用");
  expect(review).toContain("generation.current === token");
- expect(app).toContain("改动还没有整理好");
+ expect(app).toContain("成果还没有保存完整");
  // 诊断与 Git 检查点合并为一个折叠入口，不再出现两个相邻的“高级 / 诊断”。
  expect(app).toContain("<summary>高级 / 诊断信息</summary>");
  expect(app).toContain("<ExecutionDiagnostics");
@@ -65,14 +60,14 @@ test("整工作区授权并入确认运行，自动应用，内部检查点默�
 /** 组件接线回归；只证明加载/重试/启动互斥代码存在，不代替真实 DOM 与像素验收。 */
 test("执行配置预检失败提供重检入口，检查期间与失败状态均禁止确认",async()=>{
  const source=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
- expect(source).toContain("重新检查执行配置");
- expect(source).toContain("参数与选择已保留，请重新检查后运行");
+ expect(source).toContain("重新检查执行环境");
+ expect(source).toContain("参数和工具选择已保留，请稍后重新检查");
  expect(source).toContain("setCheckAttempt(attempt=>attempt+1)");
  expect(source).toContain("identity,checkAttempt]");
  expect(source).toContain("busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime");
  expect(source).toContain("if(!editable||busy||checking||planError||!plan||!revision.localOrigin&&!plan.harnessRuntime)return");
  expect(source).toContain("setPlanError(local||result.harnessRuntime?null:");
- expect(source).toContain("尚未设置已验证的 Wave Flow CLI，请在执行环境设置中选择");
+ expect(source).toContain("还没有选择可用的本地执行工具");
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
  expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');

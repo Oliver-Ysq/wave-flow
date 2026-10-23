@@ -1,4 +1,4 @@
-import { AcpSessionClient, acpProgressIsMeaningful, type AcpLauncher, type AcpSessionBinding } from "../adapters/acp-session";
+import { AcpSessionClient, acpProgressIsMeaningful, type AcpLauncher, type AcpSessionBinding, type AcpSessionOptions } from "../adapters/acp-session";
 import type { ControlServer, WorkerTurnContext } from "../control/control-server";
 import { workerAdapterForCli } from "../runtimes/adapter-catalog";
 import type { JsonObject } from "../shared/json";
@@ -6,13 +6,14 @@ import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { RuntimeProvenance } from "../runtimes/types";
 import type * as acp from "@agentclientprotocol/sdk";
 import { WorkflowContractError } from "../workflow/errors";
+import { logWorkerLifecycle } from "./worker-lifecycle-log";
 
 /** ACP Worker 会话的最小使用面，便于在不依赖真实模型的情况下验证 Runtime/Control 边界。 */
 export interface AcpWorkerSession {
   /** 当前已验证的原生 ACP session binding；recover 不得切换到另一 session。 */
   readonly binding: AcpSessionBinding | null;
   initialize(signal: AbortSignal): Promise<unknown>;
-  createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number): Promise<AcpSessionBinding>;
+  createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number, options?: AcpSessionOptions): Promise<AcpSessionBinding>;
   prompt(text: string, signal: AbortSignal): Promise<{ readonly stopReason: string }>;
   cancel(signal: AbortSignal): Promise<void>;
   close(): void;
@@ -49,8 +50,18 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     private readonly requireWriterExit = false,
     /** Engine停滞提示窗口，默认五分钟；只由有意义ACP进展（正文/工具/计划）刷新，blocked/paused/控制等待合法豁免；超窗只耐久提示一次，不自动中断/重试，唯一出口是用户显式停止。 */
     private readonly stallWindowMs = 300_000,
+    /** 技能注入等宿主级 session/new 参数；缺失表示本次会话未注入。 */
+    private readonly sessionOptions?: AcpSessionOptions,
+    /**
+     * 会话广告核对：expected 为本会话投影的 skill 名；match 来自 Adapter 能力声明。
+     * 只产生诊断，不阻断已建立的会话，也不把“文件已投影”伪装成“模型已使用”。
+     */
+    private readonly skillVerification?: { readonly expected: readonly string[]; readonly match: (skillName: string, advertisedName: string) => boolean },
+    /** ACP 启动（initialize/session-new）超时；超时只中断节点，不无限挂起。 */
+    private readonly startupTimeoutMs = configuredWorkerStartupTimeoutMs(),
   ) {
     if (!Number.isSafeInteger(stallWindowMs) || stallWindowMs < 1) throw new Error("ACP停滞窗口必须为正整数毫秒。");
+    if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1) throw new Error("ACP启动超时必须为正整数毫秒。");
   }
 
   /** Runtime 创建当前 Run 的 Control 后调用；缺失时绝不启动真实 Agent。 */
@@ -86,17 +97,65 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     // 同步回放事件的实现不得在 TDZ 内触碰 active。
     const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
     active.onTurnStarted = () => { lastActivity = performance.now(); active.stallDiagnosed = false; };
+    let skillAdvertisementChecked = false;
     const unsubscribe = session.subscribe?.(event => {
       // 停滞提示只由有意义进展刷新；thought 空分片/心跳不得续命。进展恢复后允许再次提示。
       if (event.sessionId === session.binding?.sessionId && acpProgressIsMeaningful(event.update)) { lastActivity = performance.now(); active.stallDiagnosed = false; }
+      // 首次命令广告到达时核对托管 skill 是否可见；只落诊断，不改变节点状态。
+      if (!skillAdvertisementChecked && this.skillVerification && event.update.sessionUpdate === "available_commands_update") {
+        skillAdvertisementChecked = true;
+        const advertised = event.update.availableCommands.map(command => command.name);
+        const missing = this.skillVerification.expected.filter(skill => !advertised.some(name => this.skillVerification!.match(skill, name)));
+        if (missing.length > 0) void control.recordExecutorDiagnostic(`技能注入未在 CLI 广告中得到确认：${missing.slice(0, 10).join("、")}；本次只证明文件已投影，不能据此宣称模型可见。`, node.id, node.agentSessionId!).catch(() => { /* 证据写入失败不改节点状态。 */ });
+      }
     });
     this.#active.set(key, active);
+    const startedAt = performance.now();
+    const stage = (name: string, diagnostic?: string): void => logWorkerLifecycle({
+      stage: name,
+      runId: control.runId,
+      nodeId: node.id,
+      agentSessionId: node.agentSessionId!,
+      cli: node.cli,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      ...(diagnostic ? { diagnostic } : {}),
+    });
+    const hint = (message: string): Promise<void> => {
+      stage("hint", message);
+      return control.recordExecutorHint(message, node.id, node.agentSessionId!).catch(() => { /* 启动提示写入失败不阻断启动。 */ });
+    };
+    let startupTimeoutMessage: string | null = null;
     try {
       const signal = new AbortController();
-      await Promise.race([session.initialize(signal.signal), completion]);
+      stage("execute_start");
+      await hint("ACP Worker 启动中：正在初始化 CLI 适配器。");
+      await withStartupTimeout(
+        Promise.race([session.initialize(signal.signal), completion]),
+        this.startupTimeoutMs,
+        "initialize",
+        () => {
+          stage("initialize_timeout");
+          signal.abort();
+          startupTimeoutMessage = `ACP Worker 启动超时：initialize 超过 ${this.startupTimeoutMs}ms，正在关闭会话。`;
+          void hint("本地执行环境响应较慢，正在自动恢复…");
+        },
+      );
+      stage("initialize_end");
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝投递任务。");
       mcpServers = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability })] : [];
-      const binding = await Promise.race([session.createSession(node.cwd, signal.signal, mcpServers, 10_000), completion.then(() => { throw new Error("ACP Worker 启动已终止。"); })]);
+      void hint("ACP Worker 启动中：正在创建 session/new（含 MCP 与托管技能注入）。");
+      const binding = await withStartupTimeout(
+        Promise.race([session.createSession(node.cwd, signal.signal, mcpServers, 10_000, this.sessionOptions), completion.then(() => { throw new Error("ACP Worker 启动已终止。"); })]),
+        this.startupTimeoutMs,
+        "session/new",
+        () => {
+          stage("session_new_timeout");
+          signal.abort();
+          startupTimeoutMessage = `ACP Worker 启动超时：session/new 超过 ${this.startupTimeoutMs}ms，正在关闭会话。`;
+          void hint("本地执行环境响应较慢，正在自动恢复…");
+        },
+      );
+      stage("session_new_end");
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝记录或投递任务。");
       await control.recordSession({
         runId: control.runId,
@@ -105,6 +164,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         delivery: "acp",
         acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities, ...(this.runtime ? { runtime: this.runtime } : {}) },
       });
+      stage("session_ready");
+      void hint("ACP Worker 已建立会话，正在投递任务。");
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝投递任务。");
       active.readTurnContext=()=>control.workerTurnContext({runId:control.runId,nodeId:node.id,agentSessionId:node.agentSessionId!,capability});
       // 不重发业务任务：可信Worker可能已产生任意外部副作用，read-only标签也不构成安全证明。
@@ -136,9 +197,16 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       // race handler 消费，避免 complete 之后形成未处理 rejection。
       return await Promise.race([completion, turn.then(() => completion)]);
     } catch (error) {
+      stage("execute_error", error instanceof Error ? error.message : String(error));
+      if (startupTimeoutMessage) {
+        await control.recordExecutorDiagnostic(startupTimeoutMessage, node.id, node.agentSessionId!).catch(() => {});
+        // 诊断日志保留技术阶段；节点 UI 只留用户可理解的自动恢复提示。
+        await hint("本地执行环境响应较慢，正在自动恢复…");
+      }
       control.unregister(control.runId, node.id, node.agentSessionId);
       throw error;
     } finally {
+      stage("execute_closed");
       if (stallTimer) clearInterval(stallTimer);
       unsubscribe?.();
       active.rejectCancelAck?.(new Error("原Worker执行已收尾，暂停未取得cancelled确认。"));
@@ -308,6 +376,36 @@ type ActiveAcpWorker = {
   /** 当前原Control会话的只读事实读取；初始化后设置，不重建会话或操作节点。 */
   readTurnContext?:()=>Promise<WorkerTurnContext>;
 };
+
+
+/** 默认 Worker 启动超时；启动挂起必须收敛为节点中断，不能永久占用 running。 */
+const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 60_000;
+
+/** 读取 Worker 启动超时；测试/排障可通过环境变量缩短，非法值回退默认值。 */
+function configuredWorkerStartupTimeoutMs(): number {
+  const raw = process.env.WF_WORKER_STARTUP_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_WORKER_STARTUP_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : DEFAULT_WORKER_STARTUP_TIMEOUT_MS;
+}
+
+/**
+ * 给 ACP 启动阶段加有界超时。
+ *
+ * 超时只用于启动阶段：真正业务 turn 的静默仍由停滞提示处理，不能被这里误杀。
+ * 超时回调负责 abort 当前 ACP 请求；底层 promise 的迟到拒绝已被消费，不形成未处理异常。
+ */
+async function withStartupTimeout<T>(promise: Promise<T>, timeoutMs: number, stage: string, onTimeout: () => void): Promise<T> {
+  void promise.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout(); } finally { reject(new Error(`ACP Worker 启动超时：${stage} 超过 ${timeoutMs}ms 未返回。`)); }
+    }, timeoutMs);
+  });
+  try { return await Promise.race([promise, timeout]); }
+  finally { if (timer) clearTimeout(timer); }
+}
 
 function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.agentSessionId ?? ""}`; }
 

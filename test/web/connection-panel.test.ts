@@ -23,7 +23,6 @@ test("手动CLI验证绑定当前输入，修改后清旧错误，关闭不冒�
  const source=await Bun.file('src-tauri/web/src/App.tsx').text();
  expect(source).toContain('if (runtimeBusy || !manualPath.trim()) return');
  expect(source).toContain('setManualPath(value);\n                    setManualError(null);');
- expect(source).toContain('if (base.includes("kimi")) setManualCli("kimi");');
  expect(source).toContain('else if (base.includes("codex")) setManualCli("codex");');
  expect(source).toContain('关闭窗口不会取消验证');
  expect(source).toContain('{runtimeBusy ? "关闭窗口" : "取消"}');
@@ -80,8 +79,8 @@ test("CLI设置默认项只在顶部展示，其他项保留技术详情与二�
  expect(source).toContain('const preferredByCli = (() => {');
  expect(source).toContain('runtimeState.selectedByCli?.[runtime.cli]');
  expect(source).toContain('...otherRuntimes].map((runtime) => runtimeRow(runtime))');
- expect(source).toContain('当前默认 CLI');
- expect(source).toContain('["cli", "CLI 设置"]');
+ expect(source).toContain('当前默认工具');
+ expect(source).toContain('["cli", "执行工具"]');
  expect(source).toContain('<summary>技术信息</summary>');
  expect(source).toContain('confirmSwitchId !== runtime.runtimeId');
  expect(source).toContain('runtime.verifiedAdapter.harnessTools ? (');
@@ -94,8 +93,8 @@ test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(source).toContain('runtime-settings--gate');
   expect(source).toContain('api.scanCliRuntimes()');
-  expect(source).toContain('选择 Wave Flow CLI');
-  expect(source).toContain('手动添加 CLI');
+  expect(source).toContain('连接本地执行工具');
+  expect(source).toContain('手动添加执行工具');
   expect(source).toContain('connection-panel--nested');
   expect(source).toContain('manual-runtime-error');
   expect(source).toContain('setManualError(message)');
@@ -199,18 +198,22 @@ test("Workflow 草案是受对话列宽约束的内联行动点，不能挤占�
 test("Execution 详情读取失败时说明 Desktop Engine 重连，而不是误报 Workflow 失败", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain("function executionLoadMessage");
-  expect(source).toContain("Desktop Engine 连接已中断；正在重新连接");
-  expect(source).toContain("旧 Execution 会安全收敛为“已中断”");
+  expect(source).toContain("本地服务连接中断，正在重连");
+  expect(source).toContain("若执行被中断");
   // 触发条件必须挂在 invoke 的稳定错误文案上，而不是永不出现的 fetch 网络错误。
   expect(source).toContain("Desktop Engine (已退出|请求超时|管道错误|未运行)");
 });
 
-test("取消或中断的 Execution 都提供同一冻结 revision 的显式恢复入口", async () => {
+test("取消或中断的 Execution 都提供显式恢复入口，中断走产品级恢复卡", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
-  expect(source).toContain('detail.snapshot.status === "interrupted" ||');
-  expect(source).toContain('detail.snapshot.status === "cancelled"');
-  expect(source).toMatch(/detail\.snapshot\.status === "cancelled"\s*\?\s*"恢复已停止 Execution"\s*:\s*"恢复中断 Execution"/);
+  // 中断不再暴露技术性的“恢复中断 Execution”，而是唯一主按钮“重新尝试”。
+  expect(source).toContain("function ExecutionRecoveryCard");
+  expect(source).toContain('detail.snapshot.status === "interrupted" && (');
+  expect(source).toContain('label={busy ? "正在重新尝试…" : "重新尝试"}');
   expect(source).toContain('onClick={() => void onControl("resume")}');
+  // 用户主动停止仍保留明确的恢复按钮，不与异常恢复混淆。
+  expect(source).toContain('detail.snapshot.status === "cancelled"');
+  expect(source).toContain('"重新开始执行"');
 });
 
 test("Task 执行仅通过 Engine action 刷新，不回退独立 Run 详情或 SSE", async () => {
@@ -219,4 +222,30 @@ test("Task 执行仅通过 Engine action 刷新，不回退独立 Run 详情或 
   expect(source).toContain(".execution(harness.harnessRunId, selectedExecutionId)");
   expect(source).not.toContain("api.currentAttempt(");
   expect(source).not.toContain("EventSource(");
+});
+
+test("默认 CLI 门禁是居中模态并带背景模糊，而不是铺满窗口", async () => {
+  const css = await Bun.file("src-tauri/web/src/workbench.css").text();
+  expect(css).toContain(".settings-backdrop.connection-backdrop--gate");
+  expect(css).toContain("backdrop-filter: blur(22px) saturate(1.25)");
+  expect(css).toContain("place-items: center");
+  expect(css).toContain("@media (prefers-reduced-motion: reduce)");
+});
+
+test("停止操作必须先内联确认，首次配置提供安装引导", async () => {
+  const app = await Bun.file("src-tauri/web/src/App.tsx").text();
+  const conversation = await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
+  expect(conversation).toContain('role="alertdialog"');
+  expect(conversation).toContain('aria-label="确认停止当前回合"');
+  expect(conversation).toContain('setConfirmStop(true)');
+  expect(conversation).toContain("确认停止");
+  expect(app).toContain('className="execution-stop-confirm"');
+  expect(app).toContain('setConfirmStop(true)');
+  expect(app).toContain("确认停止");
+  expect(app).toContain("重试成果收尾");
+  expect(app).toContain("execution-workspace-location");
+  expect(app).toContain("runtime-setup-guide");
+  expect(app).toContain("如何安装并登录？");
+  expect(app).toContain("重新检查");
+  expect(app).not.toContain("未检测到本机 CLI。如果已安装仍未出现，可能是探测超时。");
 });

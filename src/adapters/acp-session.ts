@@ -1,4 +1,5 @@
 import * as acp from "@agentclientprotocol/sdk";
+import { logAcpLifecycle } from "./acp-lifecycle-log";
 
 /** ACP Agent 的受控启动配置；argv 只能由 Engine 的已验证配置提供。 */
 export type AcpLauncher = {
@@ -33,6 +34,17 @@ export type AcpTransport = {
   readonly writerProcess?: import("../workspace/writer-process-group").OwnedWriterProcess;
   /** 受管写transport提供的有界退出核验；close本身仍为非阻塞清理。 */
   verifyClosed?(): Promise<void>;
+};
+
+/**
+ * ACP session/new 的附加参数；只由已验证的宿主能力产生，不是 Workflow 作者输入。
+ * 未使用的能力必须保持省略，不能发送空数组/空对象改变既有协议行为。
+ */
+export type AcpSessionOptions = {
+  /** 扩展会话文件系统范围的绝对目录；Codex 用它追加 skill 额外根。 */
+  readonly additionalDirectories?: readonly string[];
+  /** ACP `_meta` 透传对象；必须由宿主构造，禁止透传模型或用户自由文本。 */
+  readonly meta?: Readonly<Record<string, unknown>>;
 };
 
 /** 允许替换 transport，确保协议测试不依赖真实模型或本地登录。 */
@@ -140,14 +152,18 @@ export class AcpSessionClient {
   }
 
   /** 创建新 ACP session；只有成功响应后才发布 binding。 */
-  async createSession(cwd: string, signal: AbortSignal, mcpServers: acp.McpServer[] = [], mcpStartupAwaitMs?: number): Promise<AcpSessionBinding> {
+  async createSession(cwd: string, signal: AbortSignal, mcpServers: acp.McpServer[] = [], mcpStartupAwaitMs?: number, options: AcpSessionOptions = {}): Promise<AcpSessionBinding> {
     const connection = this.requireConnection();
+    // 宿主能力（技能注入）与会话启动参数合并，不能互相覆盖对方的 _meta。
+    const meta: Record<string, unknown> = { ...(options.meta ?? {}) };
+    // Codex ACP 默认异步启动 stdio MCP。受管 Worker 的首轮 Prompt 不能在
+    // 私有完成工具尚未可调用时发出，否则模型会诚实地 end_turn 而无法上报。
+    if (mcpServers.length > 0 && mcpStartupAwaitMs !== undefined) meta.mcpStartupAwaitTimeoutMs = mcpStartupAwaitMs;
     const created = await connection.agent.request(acp.methods.agent.session.new, {
       cwd,
       mcpServers,
-      // Codex ACP 默认异步启动 stdio MCP。受管 Worker 的首轮 Prompt 不能在
-      // 私有完成工具尚未可调用时发出，否则模型会诚实地 end_turn 而无法上报。
-      ...(mcpServers.length > 0 && mcpStartupAwaitMs !== undefined ? { _meta: { mcpStartupAwaitTimeoutMs: mcpStartupAwaitMs } } : {}),
+      ...(options.additionalDirectories && options.additionalDirectories.length > 0 ? { additionalDirectories: [...options.additionalDirectories] } : {}),
+      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
     }, { cancellationSignal: signal });
     if (!created.sessionId.trim()) throw new Error("ACP session/new 返回空 sessionId。 ");
     const capabilities = await this.requireCapabilities(signal);
@@ -175,13 +191,17 @@ export class AcpSessionClient {
     const turn = new AbortController();
     this.#permissionTurn = turn;
     this.#permissionSignal = AbortSignal.any([signal, turn.signal, this.#permissionAbort.signal]);
+    logAcpLifecycle({ event: "prompt_start", launcher: this.launcher.id, sessionId: binding.sessionId });
     try {
       const prompt: acp.ContentBlock[] = [{ type: "text", text }, ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))];
-      return await this.requireConnection().agent.request(acp.methods.agent.session.prompt, {
+      const response = await this.requireConnection().agent.request(acp.methods.agent.session.prompt, {
         sessionId: binding.sessionId,
         prompt,
       }, { cancellationSignal: signal });
+      logAcpLifecycle({ event: "prompt_end", launcher: this.launcher.id, sessionId: binding.sessionId });
+      return response;
     } catch (error) {
+      logAcpLifecycle({ event: "prompt_end", launcher: this.launcher.id, sessionId: binding.sessionId, diagnostic: messageOf(error) });
       if (signal.aborted || this.#closed) throw new AcpAmbiguousPromptError(`ACP prompt 投递结果不确定：${messageOf(error)}`);
       throw error;
     } finally {
@@ -261,7 +281,13 @@ export class AcpSessionClient {
 
   private fail(error: Error): void {
     this.#permissionAbort.abort();
-    if (!this.#closed) this.#closed = error;
+    if (this.#closed) return;
+    this.#closed = error;
+    // ACP transport/子进程退出后必须主动关闭协议连接；只记录 #closed 不会拒绝
+    // 已经发出的 prompt 请求，会让 Harness 回合永久停在“等待新的输出”。
+    logAcpLifecycle({ event: "fail", launcher: this.launcher.id, diagnostic: error.message });
+    try { this.#connection?.close(error); } catch { /* 连接可能已关闭 */ }
+    try { this.#transport?.close(); } catch { /* 进程可能已退出 */ }
   }
 }
 
@@ -292,12 +318,33 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
     // 环境（例如 discovery shell、认证 token）透传给用户 CLI。
     env: launcher.env ?? {},
   });
-  const stderr = new Response(child.stderr).text().catch(() => "");
+  logAcpLifecycle({ event: "spawn", launcher: launcher.id, pid: child.pid });
+  // stderr 必须在后台增量读取，不能阻塞 transport.exited：adapter 的子进程可能继承
+  // stderr，进程退出后管道未必立即 EOF；等待它会把“退出检测”重新变成永久挂起。
+  const stderrReader = child.stderr.getReader();
+  const stderrDecoder = new TextDecoder();
+  let stderrTail = "";
+  const stderrDone = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await stderrReader.read();
+        if (done) break;
+        if (value) stderrTail = (stderrTail + stderrDecoder.decode(value, { stream: true })).slice(-8_000);
+      }
+      stderrTail = (stderrTail + stderrDecoder.decode()).slice(-8_000);
+    } catch { /* stderr 读取失败不能影响退出判定。 */ }
+  })();
   const exited = child.exited.then(async (code) => {
-    if (code !== 0) throw new Error(`ACP Agent stderr：${(await stderr).slice(0, 2_000)}`);
+    logAcpLifecycle({ event: "exit", launcher: launcher.id, pid: child.pid, code, signal: child.signalCode, stderr: stderrTail });
+    if (code !== 0) {
+      // 仅异常退出时给 stderr 一个很短的有界汇合窗口；正常退出立即 resolve。
+      await Promise.race([stderrDone, Bun.sleep(250)]);
+      throw new Error(`ACP Agent stderr：${stderrTail.slice(0, 2_000)}`);
+    }
     return code;
   });
   const terminateGroup = () => {
+    logAcpLifecycle({ event: "terminate", launcher: launcher.id, pid: child.pid });
     // POSIX 向负 PID 发信号即定向到该独立进程组。若平台或进程已经退出而拒绝，
     // 回退单进程 kill；两者都只是 best-effort，不影响 Journal 的 durable 终态。
     const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };

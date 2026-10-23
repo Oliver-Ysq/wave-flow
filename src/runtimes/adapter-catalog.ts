@@ -3,6 +3,8 @@ import { claudeAcpAdapterEntry } from "./claude-acp-entry";
 import { createClaudeWorkerEnvironment, createDshWorkerEnvironment, createKimiWorkerEnvironment, createWorkerEnvironment } from "./worker-environment";
 import type { RuntimeCli, VerifiedCliRuntime } from "./types";
 import { claudeSessionIsolation, codexSessionIsolation, dshSessionIsolation, kimiSessionIsolation, type SessionIsolationProfile } from "./session-isolation";
+import { claudeSkillInjection, codexSkillInjection, dshSkillInjection } from "../skills/injection";
+import type { SkillInjectionCapability } from "../skills/types";
 
 /** 当前锁定的 Codex ACP adapter 来源；用户 runtime 不得决定 adapter argv。 */
 export const CODEX_ACP_ADAPTER = { id: "codex-acp" as const, version: "2.2.2", protocolVersion: 1 };
@@ -51,6 +53,11 @@ export type AdapterCatalogEntry = {
   readonly environment: (runtime: VerifiedCliRuntime) => Readonly<Record<string, string>>;
   /** 私有状态与隔离启动配置；缺省不支持，宿主按角色能力拒绝，不以CLI名称分支。 */
   readonly sessionIsolation?: SessionIsolationProfile;
+  /**
+   * 执行期技能注入能力；缺省表示该 CLI 未验证，技能库非空时必须 fail closed。
+   * 只声明机制与应用函数，不在此处读取技能库或启动进程。
+   */
+  readonly skills?: SkillInjectionCapability;
 };
 
 const entries: readonly AdapterCatalogEntry[] = [
@@ -66,6 +73,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     launcher: () => codexAcpAdapterEntry(),
     environment: (runtime) => createWorkerEnvironment(runtime),
     sessionIsolation: codexSessionIsolation,
+    skills: codexSkillInjection,
   },
   {
     adapterId: "kimi-acp",
@@ -96,6 +104,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     launcher: () => claudeAcpAdapterEntry(),
     environment: (runtime) => createClaudeWorkerEnvironment(runtime),
     sessionIsolation: claudeSessionIsolation,
+    skills: claudeSkillInjection,
   },
   {
     adapterId: "dsh-acp",
@@ -114,6 +123,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     launcher: (runtime) => ({ command: runtime.executablePath, args: ["acp"] }),
     environment: (runtime) => createDshWorkerEnvironment(runtime),
     sessionIsolation: dshSessionIsolation,
+    skills: dshSkillInjection,
   },
 ];
 

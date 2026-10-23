@@ -40,6 +40,14 @@ describe("RunJournal", () => {
     expect(opened.events).toHaveLength(1);
   });
 
+  test("兼容读取旧版 agent.hint 事件", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await journal.append({ type: "agent.hint", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan/auth", agentSessionId: "session-1", diagnostic: null, message: "旧版启动提示" });
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events.some(event => event.type === "agent.hint" && event.message === "旧版启动提示")).toBe(true);
+  });
+
   test("不同 Agent attempt 的结果与校验记录不得互相覆盖", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));

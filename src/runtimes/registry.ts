@@ -6,6 +6,7 @@ import { verifyExecutable, verifyExecutableIdentity } from "./identity";
 import { validateCliRuntime } from "./cli-runtime-validator";
 import { resolveNodeRuntime, verifyNodeRuntime, assertNodeMinimumVersion } from "./node-runtime";
 import type { CliRuntimeRecord, CliRuntimeRegistryFile, CliRuntimeView, RuntimeCli, VerifiedCliRuntime } from "./types";
+import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
 
 /** 用户级 CLI Runtime Registry；只保存确认后的 CLI metadata，绝不保存 shell env 或凭据。 */
 export class CliRuntimeRegistry {
@@ -18,7 +19,11 @@ export class CliRuntimeRegistry {
 
   async list(): Promise<{ readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>; readonly harnessRuntimeId: string | null; readonly runtimes: readonly CliRuntimeView[] }> {
     const state = await this.read();
-    return { selectedByCli: { ...state.selectedByCli }, harnessRuntimeId: state.harnessRuntimeId ?? null, runtimes: state.runtimes.map(view) };
+    // 暂时下线的 CLI 保留磁盘记录但不出现在产品入口；历史 Journal 仍自带 provenance。
+    const visible = state.runtimes.filter(runtime => isCliSelectable(runtime.cli));
+    const selectedByCli = Object.fromEntries(Object.entries(state.selectedByCli).filter(([cli]) => isCliSelectable(cli as RuntimeCli))) as Partial<Record<RuntimeCli, string>>;
+    const harnessRuntimeId = state.harnessRuntimeId && visible.some(runtime => runtime.runtimeId === state.harnessRuntimeId) ? state.harnessRuntimeId : null;
+    return { selectedByCli, harnessRuntimeId, runtimes: visible.map(view) };
   }
 
   /** App启动后后台检查原主控；不创建任务、不投递业务Prompt，也不替换默认选择。失败留给用户动作显示。 */
@@ -57,6 +62,7 @@ export class CliRuntimeRegistry {
       const state = await this.read();
       const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
       if (!runtime) throw new Error("未知 CLI Runtime。 ");
+      if (!isCliSelectable(runtime.cli)) throw new Error(cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。");
       if (runtime.status !== "verified") throw new Error("该 CLI 需要重新验证后才能设为默认。 ");
       if (!runtime.verifiedAdapter.harnessTools) throw new Error("该 CLI Adapter 不支持 Wave Flow 主控窄工具，不能设为主控。 ");
       // 身份快速复核：安装在保存后被删除或替换时，不能先写成默认、再等到新建会话
@@ -91,6 +97,7 @@ export class CliRuntimeRegistry {
    * 设置页收敛或由 14.3 指派 UI 解决。
    */
   async resolveWorker(cli: RuntimeCli): Promise<VerifiedCliRuntime> {
+    if (!isCliSelectable(cli)) throw new Error(cliUnavailableReason(cli) ?? "该 CLI 已暂时下线。");
     const state = await this.read();
     const candidates = state.runtimes.filter(item => item.cli === cli && item.status !== "invalid");
     if (candidates.length === 0) throw new Error(`没有已验证的本机 ${cli} CLI 可作为 Worker。请在设置页扫描并验证一个 Worker 执行底座。 `);
@@ -118,6 +125,7 @@ export class CliRuntimeRegistry {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
     if (!runtime || runtime.status === "invalid") throw new Error("分配快照指定的本机 CLI Runtime 不存在或未验证。 ");
+    if (!isCliSelectable(runtime.cli)) throw new Error(cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。");
     try { return await this.verifyRuntimeDependencies(runtime); }
     catch (error) {
       await this.markRevalidationFailed(runtime,error);
@@ -127,11 +135,12 @@ export class CliRuntimeRegistry {
 
   /** Execution/Run 创建前的存在性预检；逐节点仍在调度时按 cli 复核并 fail closed。 */
   async hasWorkerCandidate(): Promise<boolean> {    const state = await this.read();
-    return state.runtimes.some(item => item.status === "verified");
+    return state.runtimes.some(item => item.status === "verified" && isCliSelectable(item.cli));
   }
 
   /** 按 cli 的用户偏好解析 runtime；启动前复核 identity，漂移时持久化 needs-revalidation 后 fail closed。 */
   async resolveSelected(cli: RuntimeCli): Promise<VerifiedCliRuntime> {
+    if (!isCliSelectable(cli)) throw new Error(cliUnavailableReason(cli) ?? "该 CLI 已暂时下线。");
     const state = await this.read();
     const runtimeId = state.selectedByCli[cli];
     if (!runtimeId) throw new Error(`未选择已验证的本机 ${cli} CLI。请在“执行底座”中扫描、验证并设定。 `);
@@ -156,6 +165,7 @@ export class CliRuntimeRegistry {
     if (!runtimeId) throw new Error("未选择已验证的主控 CLI。请在“执行底座”中扫描、验证并设为主控。 ");
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
     if (!runtime || runtime.status === "invalid") throw new Error("当前主控 CLI 不可用，请重新验证。 ");
+    if (!isCliSelectable(runtime.cli)) throw new Error(`${cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。"}请在“执行底座”改选其他 CLI 作为主控。`);
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(runtime); }
     catch (error) {
@@ -171,6 +181,7 @@ export class CliRuntimeRegistry {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
     if (!runtime || runtime.status === "invalid") throw new Error("该 Harness 创建时使用的本机 CLI 已不可用，请重新验证。 ");
+    if (!isCliSelectable(runtime.cli)) throw new Error(`${cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。"}该历史任务不能继续发送新回合，请新建使用其他 CLI 的任务。`);
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(runtime); }
     catch (error) {

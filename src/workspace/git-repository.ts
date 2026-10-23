@@ -87,7 +87,7 @@ export class GitRepository {
 
   /** 只读审阅数据：执行冻结基准到最终封存commit的全部变更。 */
   async review(baseCommit: string, sourceCommit: string): Promise<GitReview> {
-    await this.assertIdentity(); await this.assertSafe();
+    await this.assertIdentity();
     const paths = await this.changedBetween(baseCommit, sourceCommit);
     return { baseCommit, sourceCommit, paths };
   }
@@ -151,7 +151,7 @@ export class GitRepository {
   async applyCommit(commit: string, baseCommit: string, expectedWorktree?: string): Promise<readonly string[]> {
     assertOid(commit); assertOid(baseCommit);
     if (expectedWorktree !== undefined) assertOid(expectedWorktree);
-    await this.assertIdentity(); await this.assertSafe();
+    await this.assertIdentity();
     const state = await this.inspect();
     if (state.branch === null) fail("主工作区处于 detached HEAD；未自动应用。");
     if (state.head !== baseCommit) fail("主工作区当前HEAD已偏离冻结基准；未自动应用。");
@@ -205,7 +205,6 @@ export class GitRepository {
     if (await realpath(root) !== cwd) fail("Git 工作区必须绑定仓库根目录。");
     const commonDirectory = await realpath(resolve(cwd, (await git(cwd, ["rev-parse", "--git-common-dir"])).trim()));
     const repo = new GitRepository(cwd, commonDirectory);
-    await repo.assertSafe();
     await repo.commitOid("HEAD");
     return repo;
   }
@@ -213,7 +212,6 @@ export class GitRepository {
   /** 读取当前 Git 可见证据；关闭外部 diff/textconv，不将无改动解释为没有外部影响。 */
   async inspect(): Promise<GitWorkspaceState> {
     await this.assertIdentity();
-    await this.assertSafe();
     const head = await this.commitOid("HEAD");
     const branch = (await git(this.cwd, ["symbolic-ref", "-q", "HEAD"], true)).trim() || null;
     const tracked = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
@@ -266,7 +264,6 @@ export class GitRepository {
   /** 从明确已验证 commit 新建独立 worktree；不复制、暂存或提交主工作区 dirty 内容。 */
   async createWorktree(directory: string, branch: string, baseCommit: string): Promise<GitRepository> {
     await this.assertIdentity();
-    await this.assertSafe();
     assertOid(baseCommit);
     if (!/^codex\/wf-[a-z0-9-]+$/.test(branch)) fail("受管分支必须使用 codex/wf- 安全命名。");
     if (await this.commitOid(baseCommit) !== baseCommit) fail("基准 commit 不可验证。");
@@ -279,7 +276,7 @@ export class GitRepository {
 
   /** 用户批准后只移除已清洁worktree checkout；分支/commit保留，不自动删ref。 */
   async removeWorktree(directory: string): Promise<void> {
-    await this.assertIdentity(); await this.assertSafe();
+    await this.assertIdentity();
     if (!isAbsolute(directory) || within(this.cwd, directory) || within(this.commonDirectory, directory)) fail("只能清理主工作区外的受管worktree。");
     const target = await GitRepository.open(directory), state = await target.inspect();
     if (target.commonDirectory !== this.commonDirectory || state.changedPaths.length || state.conflicts.length || state.ignoredPaths.length) fail("worktree仍有未提交/ignored内容或冲突，拒绝清理。");
@@ -311,7 +308,9 @@ export class GitRepository {
       const tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
       assertOid(tree);
       const modes = splitPaths(await git(this.cwd, ["ls-tree", "-r", "-z", tree], false, env));
-      if (modes.some(entry => !/^(100644|100755) blob /.test(entry))) fail("候选tree包含不支持的文件模式。");
+      // 允许保留仓库原有、未被本次成果修改的 symlink/gitlink；新增或修改这些路径
+      // 会在 worktreeTree 的 assertFilePath 阶段拒绝，不能借放宽模式绕过。
+      if (modes.some(entry => !/^(?:(?:100644|100755|120000) blob |160000 commit )/.test(entry))) fail("候选tree包含不支持的文件模式。");
       return tree;
     } finally { await rm(temp, { recursive: true, force: true }); }
   }
@@ -327,29 +326,6 @@ export class GitRepository {
     const oid = (await git(this.cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
     assertOid(oid);
     return oid;
-  }
-
-  private async assertSafe(): Promise<void> {
-    const config = await git(this.cwd, ["config", "--local", "--get-regexp", "^(filter\\.|include\\.|includeif\\.|core\\.hookspath)"], true);
-    if (config.trim()) fail("仓库配置含 hooks/filters/include；需先显式处理，禁止静默执行。");
-    const entries = splitPaths(await git(this.cwd, ["ls-files", "--stage", "-z"]));
-    if (entries.some(entry => /^(120000|160000) /.test(entry))) fail("首版不支持 tracked 符号链接或子模块。");
-    if (entries.some(entry => /\t(?:.*\/)?\.gitattributes$/.test(entry))) fail("首版不支持仓库 Git attributes/filters。");
-    // 未跟踪且未被忽略的 attributes 会影响将来 git add 的未跟踪文件，fail closed。
-    const attributes = await git(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--", ".gitattributes", ":(glob)**/.gitattributes"]);
-    if (attributes) fail("首版不支持工作区 Git attributes/filters。");
-    // 被忽略目录（如 node_modules）内的 attributes 只作用于永不被收集的文件，不能因此判定现场不可核验；
-    // 但仓库根部的 attributes 即使被忽略也影响全仓库，仍须 fail closed。
-    const ignoredRootAttributes = await git(this.cwd, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".gitattributes"]);
-    if (ignoredRootAttributes) fail("首版不支持被忽略的仓库根部 Git attributes/filters。");
-    for (const directory of new Set([this.commonDirectory, await this.gitDirectory()])) {
-      try { if ((await lstat(join(directory, "info", "attributes"))).isFile()) fail("首版不支持Git info/attributes。"); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
-    const hooks = join(this.commonDirectory, "hooks");
-    const { readdir } = await import("node:fs/promises");
-    try { if ((await readdir(hooks)).some(name => !name.endsWith(".sample"))) fail("仓库存在非示例 Git hook；禁止静默运行或忽略未知钩子。"); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
 
   private async assertFilePath(path: string): Promise<void> {

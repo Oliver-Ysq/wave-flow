@@ -17,7 +17,7 @@ export type ManagedWriterExecutor = AgentNodeExecutor & {
 /**
  * Runtime与WorkspaceManager间成果交接层；业务状态仍由原Control/Journal管理。
  * 一次Execution只有一个共享worktree：并行写节点同时持有租约、直接写同一目录，
- * 节点结束只释放自己的租约；最终封存与自动应用由Execution收尾统一完成。
+ * 节点结束只释放自己的租约；最终封存由Execution收尾统一完成，结果保留在工作区。
  */
 export class WorkspaceExecutor implements AgentNodeExecutor {
   #active = new Map<string, { lease: WorkspaceLease; writer: ManagedWriterExecutor }>();
@@ -69,7 +69,32 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
       if (!current.writerIdentity) throw new WorkflowContractError("写执行器未耐久绑定真实writer身份，拒绝交接。");
       return result;
     } catch (error) {
-      if (!current.writerIdentity) { await this.manager.abandonUnstarted(current); this.#active.delete(node.id); }
+      const message = error instanceof Error ? error.message : String(error);
+      const startupFailure = message.includes("ACP Worker 启动超时")
+        && !(node.agentSessionId && this.#control?.hasRecordedNodeSession(node.id, node.agentSessionId));
+      if (startupFailure) {
+        // 启动超时发生在任务投递前，writer 进程尚未产生业务副作用；必须等待进程退出
+        // 核验后再释放租约，否则上层重试会取得第二条租约、造成两个 writer 共享目录。
+        let verified = false;
+        try {
+          if (writer.finalizePartial) await writer.finalizePartial(node);
+          else await writer.stop?.(node);
+          verified = true;
+        } catch { /* 退出核验失败时保留租约与现场。 */ }
+        if (verified) {
+          try {
+            await this.manager.release(current, writer.verifyExited);
+            this.#active.delete(node.id);
+          } catch { verified = false; }
+        }
+        if (!verified) {
+          // 不复用“启动超时”错误文本：RunRuntimeHost 只对可安全重试的启动失败自动重试，
+          // 未核验退出的 writer 不能自动开第二个进程。
+          throw new Error("启动失败后旧写入进程尚未确认退出，已保留现场；请稍后重试。");
+        }
+      } else if (!current.writerIdentity) {
+        await this.manager.abandonUnstarted(current); this.#active.delete(node.id);
+      }
       // 已启动writer失败保留现场/租约；停止不自动回滚共享worktree中其他节点的改动。
       throw error;
     }

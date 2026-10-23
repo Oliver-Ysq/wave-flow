@@ -9,9 +9,12 @@ import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { JsonObject } from "../shared/json";
 import type * as acp from "@agentclientprotocol/sdk";
 import { prepareSessionScratch } from "../workspace/session-scratch";
+import { prepareSessionSkills } from "../skills/session";
+import { adapterById } from "../runtimes/adapter-catalog";
 import { ownedAcpTransport } from "../workspace/managed-acp-transport";
 import { WriterProcessGroups } from "../workspace/writer-process-group";
 import { WorkflowContractError } from "../workflow/errors";
+import { logWorkerLifecycle } from "./worker-lifecycle-log";
 
 /**
  * 延迟解析用户 Runtime 的 ACP Executor。Run/Execution 可先建立 Journal 与 Control，
@@ -38,6 +41,8 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     private readonly fallbackRuntimeId: string | null = null,
     /** Engine指定的Worker私有Control状态根；省略仅供历史测试，生产必须提供。 */
     private readonly workerStateRoot?: string,
+    /** 技能库根目录；缺省 `waveFlowHome()/skills`，测试与隔离运行可注入。 */
+    private readonly skillsRoot?: string,
   ) {}
 
   bindControl(control: ControlServer): void {
@@ -49,9 +54,9 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     const control = this.#control;
     if (!control) throw new Error("Runtime ACP Worker 尚未绑定 ControlServer。 ");
     const assignedRuntimeId = node.request.assignedRuntimeId;
-    if (!assignedRuntimeId) return this.launch(node, await this.runtimes.resolveWorker(node.cli), control);
+    if (!assignedRuntimeId) return this.launchWithStartupRetry(node, await this.runtimes.resolveWorker(node.cli), control);
     try {
-      return await this.launch(node, await this.runtimes.resolveWorkerById(assignedRuntimeId), control);
+      return await this.launchWithStartupRetry(node, await this.runtimes.resolveWorkerById(assignedRuntimeId), control);
     } catch (error) {
       // 回退边界：agent.session 一旦耐久，说明 ACP session 已建立、任务可能已投递，
       // 此后任何失败都不允许换 CLI，避免同一任务在两个 Runtime 上重复副作用。
@@ -64,26 +69,67 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
     }
   }
 
+  /**
+   * 启动超时发生在 prompt 投递前，没有业务副作用；自动换新进程重试一次，
+   * 不让用户先看到技术错误再自己决定是否恢复。agent.session 已耐久后不重试。
+   */
+  private async launchWithStartupRetry(node: AgentNodeSnapshot, runtime: VerifiedCliRuntime, control: ControlServer): Promise<JsonObject | null> {
+    try {
+      return await this.launch(node, runtime, control);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("ACP Worker 启动超时")) throw error;
+      if (node.agentSessionId && control.hasRecordedNodeSession(node.id, node.agentSessionId)) throw error;
+      if (control.isNodeStopped?.(node.id)) throw error;
+      await control.recordExecutorDiagnostic(`节点 ${node.id} 的 Worker 启动未完成，正在自动重启一次；这是启动阶段重试，不会重发已投递任务。`, node.id, node.agentSessionId ?? "").catch(() => {});
+      await control.recordExecutorHint?.("本地执行环境正在自动恢复，请稍候…", node.id, node.agentSessionId ?? "").catch(() => {});
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (control.isNodeStopped?.(node.id)) throw error;
+      return this.launch(node, runtime, control);
+    }
+  }
+
   /** 用已复核的 Runtime 组装 launcher 并执行；createSession 抛错前都允许上层回退。 */
   private async launch(node: AgentNodeSnapshot, runtime: VerifiedCliRuntime, control: ControlServer): Promise<JsonObject | null> {
     let worker: AcpWorkerExecutor;
     let owned = false;
+    const startedAt = performance.now();
+    const stage = (name: string, diagnostic?: string): void => logWorkerLifecycle({
+      stage: name,
+      runId: control.runId,
+      nodeId: node.id,
+      agentSessionId: node.agentSessionId ?? "",
+      cli: node.cli,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      ...(diagnostic ? { diagnostic } : {}),
+    });
     if (this.workerStateRoot) {
       if (node.sandbox !== "read-only") throw new WorkflowContractError("业务写Worker必须通过已授权Workspace执行器，不能回退普通ACP启动。");
+      stage("scratch_start");
       const scratch = await prepareSessionScratch(this.workerStateRoot, node.cwd);
-      const launcher = resolveWorkerLauncher(runtime);
+      stage("scratch_ready");
+      const capability = adapterById(runtime.verifiedAdapter.adapterId)?.skills;
+      stage("skills_start");
+      const prepared = capability === undefined && this.skillsRoot === undefined
+        ? { launcher: resolveWorkerLauncher(runtime), session: undefined, evidence: null }
+        : await prepareSessionSkills({ scratch, launcher: resolveWorkerLauncher(runtime), capability, libraryRoot: this.skillsRoot });
+      stage("skills_ready");
       const transport = ownedAcpTransport({ groups: new WriterProcessGroups(), bindWriter: async () => {} });
-      worker = new AcpWorkerExecutor(launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(runtime), identity => this.createControlMcp(identity, scratch), undefined, true);
+      worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(runtime, prepared.evidence), identity => this.createControlMcp(identity, scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       owned = true;
     } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);
     const key = keyOf(node);
     this.#workers.set(key, worker);
+    stage("worker_bound");
     try {
+      stage("execute_start");
       const result = await worker.execute(node);
+      stage("execute_end");
       if (owned) { this.#closing.set(key, worker); await this.finalizeCompleted(node); }
       return result;
     } catch (error) {
+      stage("execute_error", error instanceof Error ? error.message : String(error));
       // 异常也尽力核验退出，但原错误仍是权威诊断；未知退出不认领或重派发。
       if (owned) {
         this.#closing.set(key, worker);

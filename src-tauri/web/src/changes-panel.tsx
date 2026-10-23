@@ -6,9 +6,6 @@ import type { GitFileDiff, GitReview } from "../../../src/workspace/git-reposito
 /** 应用明暗主题；与 App.tsx 的 ColorTheme 保持一致。 */
 type ColorTheme = "dark" | "light";
 
-/** 自动应用结果；由Execution证据提供，不在面板内触发Git写入。 */
-type AppliedState = { at: string; paths: string[] } | { skippedAt: string; reason: string };
-
 /** 从 unified patch 统计增删行数，忽略 ---/+++ 文件头。 */
 function patchStats(patch: string) {
   let additions = 0, deletions = 0;
@@ -27,34 +24,11 @@ export function diffStyleForWidth(width: number): "split" | "unified" {
   return width >= SPLIT_DIFF_MIN_WIDTH ? "split" : "unified";
 }
 
-/** 自动应用结果页脚；拆成纯组件便于静态渲染回归测试。 */
-export function ChangesFooter({ applied, hasPaths }: {
-  /** 主工作区自动应用结果；缺省表示证据尚未就位。 */ applied?: AppliedState;
-  /** 最终封存是否包含文件；为空时不显示收尾说明。 */ hasPaths: boolean;
-}) {
-  if (!applied && !hasPaths) return null;
-  return <footer>
-    {applied && "at" in applied && (
-      <p role="status">已自动应用到主工作区（未提交、未推送）</p>
-    )}
-    {applied && "skippedAt" in applied && (
-      <p role="alert">未自动应用：{applied.reason}</p>
-    )}
-    {!applied && hasPaths && (
-      <small>改动已封存在受管 worktree 中；自动应用结果由执行页展示。</small>
-    )}
-    {applied && "skippedAt" in applied && (
-      <small>处理主工作区后，可在执行页重新整理改动；不会重新执行 Workflow。</small>
-    )}
-  </footer>;
-}
-
-/** 冻结改动的右侧审阅面板：左列文件清单，右侧按可用宽度选择并排或单列 diff；自动应用结果只读展示。 */
-export function ChangesPanel({ taskId, executionId, sourceCommit, applied, theme, onClose }: {
+/** 冻结改动的右侧只读审阅面板：左列文件清单，右侧按可用宽度选择并排或单列 diff。 */
+export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose }: {
   /** 原Task身份，不从全局选择补取。 */ taskId: string;
   /** 原Execution身份。 */ executionId: string;
   /** 最终封存commit完整oid，变化后重置审阅。 */ sourceCommit: string;
-  /** 主工作区自动应用结果；缺省表示尚未收尾。 */ applied?: AppliedState;
   /** 当前应用主题，驱动 diff 高亮配色。 */ theme: ColorTheme;
   /** 关闭面板；不改变任何业务状态。 */ onClose: () => void;
 }) {
@@ -175,6 +149,6 @@ export function ChangesPanel({ taskId, executionId, sourceCommit, applied, theme
         />}
       </div>
     </div>}
-    {review && <ChangesFooter applied={applied} hasPaths={review.paths.length > 0} />}
+    {review && <p className="changes-footer-note">只读审阅；改动保留在受管工作区，不会自动写入项目目录。</p>}
   </aside>;
 }

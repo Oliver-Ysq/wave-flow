@@ -191,6 +191,10 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "log.written":
       if (typeof event.message !== "string" || (event.nodeId === null) !== (event.agentSessionId === null)) throw new Error("log.written payload 无效。");
       break;
+    case "agent.hint":
+      // 兼容修复前生成的 Run；新写入统一使用节点级 log.written。
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || typeof event.message !== "string" || !event.message.trim()) throw new Error("agent.hint payload 无效。");
+      break;
     case "agent.created":
       if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
       break;

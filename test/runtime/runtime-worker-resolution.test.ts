@@ -15,10 +15,10 @@ import { adapterById } from "../../src/runtimes/adapter-catalog";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
-async function kimiRecord(root: string): Promise<CliRuntimeRecord> {
-  const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
+async function claudeRecord(root: string): Promise<CliRuntimeRecord> {
+  const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli: "kimi", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.304", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 function node(cli: AgentCli): AgentNodeSnapshot {
@@ -26,31 +26,32 @@ function node(cli: AgentCli): AgentNodeSnapshot {
 }
 
 describe("RuntimeAcpWorkerExecutor 按节点 cli 解析 Worker", () => {
-  test("kimi 节点解析到已验证的 kimi runtime 并使用直连 launcher", async () => {
+  test("claude 节点解析到已验证的 claude runtime 并使用直连 launcher", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-resolve-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const saved = await registry.saveVerified(await kimiRecord(root));
-    let launcher: { id: string; command: string; args: readonly string[] } | null = null;
+    const saved = await registry.saveVerified(await claudeRecord(root));
+    let launcher: { id: string; command: string; args: readonly string[]; env?: Record<string, string> } | null = null;
     let provenance: unknown = null;
     const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, (value, runtime) => { launcher = value; provenance = runtime; return stub as unknown as AcpWorkerExecutor; });
     executor.bindControl({} as ControlServer);
-    await expect(executor.execute(node("kimi"))).resolves.toEqual({ ok: true });
-    expect(launcher).toMatchObject({ id: "kimi-acp", command: saved.executablePath, args: ["acp"] });
-    expect(provenance).toMatchObject({ cli: "kimi", adapterId: "kimi-acp", runtimeId: saved.runtimeId });
+    await expect(executor.execute(node("claude"))).resolves.toEqual({ ok: true });
+    expect(launcher).toMatchObject({ id: "claude-acp" });
+    expect((launcher as { env?: Record<string, string> } | null)?.env?.CLAUDE_CODE_EXECUTABLE).toBe(saved.executablePath);
+    expect(provenance).toMatchObject({ cli: "claude", adapterId: "claude-acp", runtimeId: saved.runtimeId });
   });
 
   test("无已验证候选时 fail closed，未验证 cli 拒绝", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-closed-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    await registry.saveVerified(await kimiRecord(root));
+    await registry.saveVerified(await claudeRecord(root));
     const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, () => stub as unknown as AcpWorkerExecutor);
     executor.bindControl({} as ControlServer);
     // 该 cli 下完全没有已验证候选：codex 节点 fail closed
     await expect(executor.execute(node("codex"))).rejects.toThrow("没有已验证");
-    // kimi 有恰好一个已验证候选：直接解析成功
-    await expect(executor.execute(node("kimi"))).resolves.toEqual({ ok: true });
+    // claude 有恰好一个已验证候选：直接解析成功
+    await expect(executor.execute(node("claude"))).resolves.toEqual({ ok: true });
   });
 });
 
@@ -63,20 +64,20 @@ describe("AcpWorkerExecutor cli 门禁", () => {
 });
 
 test("生产普通ACP路径拒绝业务写节点，不创建私有目录或调用CLI工厂",async()=>{
- const root=await mkdtemp(join(tmpdir(),"wave-flow-readonly-route-"));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await kimiRecord(root));let factories=0;
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-readonly-route-"));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await claudeRecord(root));let factories=0;
  const executor=new RuntimeAcpWorkerExecutor(registry,()=>({name:"private",command:"fake",args:[],env:[]}) as never,()=>{factories++;throw new Error("不能创建");},null,join(root,"scratch"));executor.bindControl({} as ControlServer);
- await expect(executor.execute(node("kimi"))).rejects.toThrow("Workspace执行器");expect(factories).toBe(0);expect(await Bun.file(join(root,"scratch")).exists()).toBe(false);
+ await expect(executor.execute(node("claude"))).rejects.toThrow("Workspace执行器");expect(factories).toBe(0);expect(await Bun.file(join(root,"scratch")).exists()).toBe(false);
 });
 
 test("只读Worker退出核验失败保留原句柄，重试只核验不重新启动",async()=>{
- const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-readonly-close-")));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await kimiRecord(root));const cwd=join(root,"project");await mkdir(cwd);
+ const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-readonly-close-")));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await claudeRecord(root));const cwd=join(root,"project");await mkdir(cwd);
  const executor=new RuntimeAcpWorkerExecutor(registry,()=>({name:"private",command:"fake",args:[],env:[]}) as never,undefined,null,join(root,"scratch"));executor.bindControl({} as ControlServer);
  let checks=0,starts=0;
- const profile=adapterById("kimi-acp")!.sessionIsolation!;
+ const profile=adapterById("claude-acp")!.sessionIsolation!;
  const prepare=spyOn(profile,"prepare").mockImplementation(async launcher=>launcher);
  const execute=spyOn(AcpWorkerExecutor.prototype,"execute").mockImplementation(async()=>{starts++;return{ok:true};});
  const finalize=spyOn(AcpWorkerExecutor.prototype,"finalizeCompleted").mockImplementation(async()=>{checks++;if(checks<=2)throw new Error("原进程仍存在");});
- const value={...node("kimi"),sandbox:"read-only" as const,cwd,request:{...node("kimi").request,sandbox:"read-only" as const,cwd}};
+ const value={...node("claude"),sandbox:"read-only" as const,cwd,request:{...node("claude").request,sandbox:"read-only" as const,cwd}};
  try{
   await expect(executor.execute(value)).rejects.toThrow("原进程仍存在");expect(starts).toBe(1);expect(checks).toBe(2);
   await executor.finalizeCompleted(value);expect(starts).toBe(1);expect(checks).toBe(3);
@@ -102,26 +103,26 @@ describe("RuntimeAcpWorkerExecutor 分配快照解析与启动前回退", () => 
   test("assignedRuntimeId 优先按分配快照解析，忽略节点字面量 cli", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-assigned-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const kimi = await registry.saveVerified(await kimiRecord(root));
+    const kimi = await registry.saveVerified(await claudeRecord(root));
     let provenance: { runtimeId?: string } | null = null;
     const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, (_launcher, runtime) => { provenance = runtime; return stub as unknown as AcpWorkerExecutor; });
     executor.bindControl(controlStub(false, []));
-    // 节点字面量 cli 是 codex，但分配快照指派了 kimi runtime。
+    // 节点字面量 cli 是 codex，但分配快照指派了 claude runtime。
     await expect(executor.execute(assignedNode("codex", kimi.runtimeId))).resolves.toEqual({ ok: true });
-    expect(provenance).toMatchObject({ runtimeId: kimi.runtimeId, cli: "kimi" });
+    expect(provenance).toMatchObject({ runtimeId: kimi.runtimeId, cli: "claude" });
   });
 
   test("指派目标不可解析且 session 未建立时回退到主控 Runtime，并耐久诊断", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-fallback-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const fallback = await registry.saveVerified(await kimiRecord(root));
+    const fallback = await registry.saveVerified(await claudeRecord(root));
     const diagnostics: string[] = [];
     const used: string[] = [];
     const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, (_launcher, runtime) => { used.push(runtime.runtimeId ?? ""); return stub as unknown as AcpWorkerExecutor; }, fallback.runtimeId);
     executor.bindControl(controlStub(false, diagnostics));
-    await expect(executor.execute(assignedNode("kimi", crypto.randomUUID()))).resolves.toEqual({ ok: true });
+    await expect(executor.execute(assignedNode("claude", crypto.randomUUID()))).resolves.toEqual({ ok: true });
     expect(used).toEqual([fallback.runtimeId]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("回退到主控 Runtime");
@@ -130,8 +131,8 @@ describe("RuntimeAcpWorkerExecutor 分配快照解析与启动前回退", () => 
   test("adapter 启动失败（worker.execute 抛错）在 session 建立前同样允许回退", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-launch-fallback-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const assigned = await registry.saveVerified(await kimiRecord(root));
-    const fallbackPath = join(root, "kimi-fallback"); await writeFile(fallbackPath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(fallbackPath, 0o700);
+    const assigned = await registry.saveVerified(await claudeRecord(root));
+    const fallbackPath = join(root, "claude-fallback"); await writeFile(fallbackPath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(fallbackPath, 0o700);
     const fallbackExecutable = await verifyExecutable(fallbackPath);
     const fallback = await registry.saveVerified({ ...assigned, runtimeId: crypto.randomUUID(), executablePath: fallbackExecutable.executablePath, executableIdentity: fallbackExecutable.identity });
     const diagnostics: string[] = [];
@@ -140,16 +141,31 @@ describe("RuntimeAcpWorkerExecutor 分配快照解析与启动前回退", () => 
     const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, (_launcher, runtime) => { used.push(runtime.runtimeId ?? ""); return (runtime.runtimeId === assigned.runtimeId ? failing : stub) as unknown as AcpWorkerExecutor; }, fallback.runtimeId);
     executor.bindControl(controlStub(false, diagnostics));
-    await expect(executor.execute(assignedNode("kimi", assigned.runtimeId))).resolves.toEqual({ ok: true });
+    await expect(executor.execute(assignedNode("claude", assigned.runtimeId))).resolves.toEqual({ ok: true });
     expect(used).toEqual([assigned.runtimeId, fallback.runtimeId]);
     expect(diagnostics[0]).toContain("ACP 握手失败");
+  });
+
+  test("启动超时在任务投递前自动重启一次，用户无需手动恢复", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-startup-retry-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root);
+    await registry.saveVerified(await claudeRecord(root));
+    let attempts = 0;
+    const diagnostics: string[] = [];
+    const failing = { bindControl() {}, execute: async (): Promise<never> => { throw new Error("ACP Worker 启动超时：initialize 超过 60000ms 未返回。"); }, pause: async () => {}, recover: async () => ({}), stop: async () => {} };
+    const stub = { bindControl() {}, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
+    const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, () => { attempts += 1; return (attempts === 1 ? failing : stub) as unknown as AcpWorkerExecutor; });
+    executor.bindControl(controlStub(false, diagnostics));
+    await expect(executor.execute(node("claude"))).resolves.toEqual({ ok: true });
+    expect(attempts).toBe(2);
+    expect(diagnostics.some(item => item.includes("自动重启一次"))).toBe(true);
   });
 
   test("agent.session 已耐久后失败绝不回退，错误原样上抛", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-no-fallback-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    const assigned = await registry.saveVerified(await kimiRecord(root));
-    const fallbackPath = join(root, "kimi-fallback"); await writeFile(fallbackPath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(fallbackPath, 0o700);
+    const assigned = await registry.saveVerified(await claudeRecord(root));
+    const fallbackPath = join(root, "claude-fallback"); await writeFile(fallbackPath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(fallbackPath, 0o700);
     const fallbackExecutable = await verifyExecutable(fallbackPath);
     const fallback = await registry.saveVerified({ ...assigned, runtimeId: crypto.randomUUID(), executablePath: fallbackExecutable.executablePath, executableIdentity: fallbackExecutable.identity });
     const diagnostics: string[] = [];
@@ -157,16 +173,16 @@ describe("RuntimeAcpWorkerExecutor 分配快照解析与启动前回退", () => 
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, () => failing as unknown as AcpWorkerExecutor, fallback.runtimeId);
     // session 已建立（agent.session 已耐久）：失败只能收敛为 interrupted，不能换 CLI。
     executor.bindControl(controlStub(true, diagnostics));
-    await expect(executor.execute(assignedNode("kimi", assigned.runtimeId))).rejects.toThrow("投递后 Worker 死亡");
+    await expect(executor.execute(assignedNode("claude", assigned.runtimeId))).rejects.toThrow("投递后 Worker 死亡");
     expect(diagnostics).toHaveLength(0);
   });
 
   test("主控回退目标自身不可用则 fail closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-fallback-closed-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    await registry.saveVerified(await kimiRecord(root));
+    await registry.saveVerified(await claudeRecord(root));
     const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, () => { throw new Error("不应创建 Worker"); }, crypto.randomUUID());
     executor.bindControl(controlStub(false, []));
-    await expect(executor.execute(assignedNode("kimi", crypto.randomUUID()))).rejects.toThrow("不存在或未验证");
+    await expect(executor.execute(assignedNode("claude", crypto.randomUUID()))).rejects.toThrow("不存在或未验证");
   });
 });

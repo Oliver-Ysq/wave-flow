@@ -10,7 +10,7 @@ test("每个 CLI 种类的显示名与图标字母来自查表，新增种类不
   expect(cliIcon("kimi")).toBe("K");
   expect(cliIcon("claude")).toBe("A");
   expect(cliIcon("dsh")).toBe("D");
-  expect(CLI_KINDS).toEqual(["codex", "kimi", "claude", "dsh"]);
+  expect(CLI_KINDS).toEqual(["codex", "claude", "dsh"]);
 });
 
 test("展示位一律查表，不再用 codex/kimi 三元决定显示名或图标", async () => {
@@ -28,10 +28,10 @@ test("展示位一律查表，不再用 codex/kimi 三元决定显示名或图�
   expect(app).toContain("cliIcon(runtime.cli)");
 });
 
-test("手动添加下拉覆盖全部种类，路径猜测识别 claude/dsh 关键字", async () => {
+test("手动添加下拉覆盖当前可选种类，路径猜测识别 claude/dsh 关键字", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain("CLI_KINDS.map((kind) => (");
-  expect(source).toContain('else if (base.includes("claude")) setManualCli("claude");');
+  expect(source).toContain('if (base.includes("claude")) setManualCli("claude");');
   expect(source).toContain('else if (base.includes("dsh")) setManualCli("dsh");');
   expect(source).toContain('manualCli === "claude"');
   expect(source).toContain('manualCli === "dsh"');

@@ -31,3 +31,10 @@ test("SKILL.md 指向双模板，避免资产沉淀后不可发现", async () =>
   expect(guide).toContain("assets/workflow.ts");
   expect(guide).toContain("assets/workflow.restricted.txt");
 });
+
+test("SKILL.md 声明点名技能默认由 Worker 执行且仅作任务提示", async () => {
+  const guide = await readFile(join(assets, "../SKILL.md"), "utf8");
+  expect(guide).toContain("默认理解为 Worker 节点的执行依赖");
+  expect(guide).toContain("仅作为任务提示");
+  expect(guide).toContain("主控仍可");
+});

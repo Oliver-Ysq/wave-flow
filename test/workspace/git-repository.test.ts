@@ -1,5 +1,5 @@
 import { afterEach, expect, test as bunTest } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { GitRepository, type GitSealRequest } from "../../src/workspace/git-repository";
@@ -129,6 +129,34 @@ test("禁止主工作区封存、越界worktree、符号链接与Git attributes"
   await expect(worker.seal({ ...request })).rejects.toThrow("attributes");
 });
 
+test("tracked .gitattributes 不再阻断仓库打开", async () => {
+  const { cwd } = await fixture();
+  await writeFile(join(cwd, ".gitattributes"), "*.txt text eol=lf\n");
+  await git(cwd, "add", "--", ".gitattributes");
+  await git(cwd, "commit", "-m", "tracked attributes");
+  await expect(GitRepository.open(cwd)).resolves.toBeDefined();
+});
+
+test("仓库已有但未改动的 tracked symlink 不阻断封存与应用，修改 symlink 仍拒绝", async () => {
+  const { root, cwd, repo, base, request } = await fixture();
+  await symlink("a.txt", join(cwd, "link"));
+  await git(cwd, "add", "--", "link");
+  await git(cwd, "commit", "-m", "tracked symlink");
+  const reopened = await GitRepository.open(cwd);
+  const trackedBase = (await reopened.inspect()).head;
+  const worker = await reopened.createWorktree(join(root, "worker-link"), "codex/wf-worker-link", trackedBase);
+  await writeFile(join(worker.cwd, "a.txt"), "result\n");
+  const sealed = await worker.seal({ requestId: crypto.randomUUID(), baseCommit: trackedBase, startCommit: trackedBase });
+  expect(sealed.paths).toEqual(["a.txt"]);
+  await reopened.applyCommit(sealed.commit, trackedBase);
+  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("result\n");
+  expect((await lstat(join(cwd, "link"))).isSymbolicLink()).toBe(true);
+
+  await rm(join(worker.cwd, "link"));
+  await symlink("b.txt", join(worker.cwd, "link"));
+  await expect(worker.seal({ requestId: crypto.randomUUID(), baseCommit: base, startCommit: sealed.commit })).rejects.toThrow("符号链接");
+});
+
 test("封存接受worktree内已有commit并包含其全部历史", async () => {
   const { root, repo, base, request } = await fixture();
   const worker = await repo.createWorktree(join(root, "worker"), "codex/wf-worker", base);
@@ -143,12 +171,15 @@ test("封存接受worktree内已有commit并包含其全部历史", async () => 
   expect(await Bun.file(join(repo.cwd, "b.txt")).text()).toBe("uncommitted\n");
 });
 
-test("hooks及本地filters拒绝打开且不执行外部程序", async () => {
+test("本地 hooks/filters/include 不再阻断打开，Wave Flow 不执行 hooks", async () => {
   const { cwd } = await fixture();
-  await writeFile(join(cwd, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n");
-  await expect(GitRepository.open(cwd)).rejects.toThrow("hook");
-  await rm(join(cwd, ".git", "hooks", "pre-commit")); await git(cwd, "config", "filter.evil.clean", "false");
-  await expect(GitRepository.open(cwd)).rejects.toThrow("filters");
+  const marker = join(cwd, "hook-ran");
+  await writeFile(join(cwd, ".git", "hooks", "pre-commit"), `#!/bin/sh\ntouch '${marker}'\n`);
+  await expect(GitRepository.open(cwd)).resolves.toBeDefined();
+  expect(await Bun.file(marker).exists()).toBe(false);
+  await rm(join(cwd, ".git", "hooks", "pre-commit"));
+  await git(cwd, "config", "filter.evil.clean", "false");
+  await expect(GitRepository.open(cwd)).resolves.toBeDefined();
 });
 
 test("续作自动应用能删除/回退上一Execution新增的文件，后续续作不被死锁", async () => {

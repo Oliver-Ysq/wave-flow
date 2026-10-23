@@ -33,7 +33,7 @@ export type WorkflowMeta = {
 export type AgentOptions = {
   /** Run 内唯一且稳定的节点身份；最长 120 字符，参与后续会话和 replay 绑定。 */
   readonly id: string;
-  /** 要启动的正常交互式 CLI Adapter；只允许已实现并可验证的 codex 或 kimi。 */
+  /** 要启动的正常交互式 CLI Adapter；当前可选 codex、claude、dsh，kimi 支持已暂时下线。 */
   readonly cli: AgentCli;
   /** 可选展示名称；省略时运行时使用 id，不影响节点稳定身份。 */
   readonly label?: string;

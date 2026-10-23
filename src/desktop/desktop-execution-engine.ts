@@ -1,5 +1,6 @@
-import { readdir, realpath } from "node:fs/promises";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
@@ -49,6 +50,10 @@ import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace
 import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
 import { WorkflowContractError } from "../workflow/errors";
 import { AppSettingsStore, type AppSettings } from "./app-settings";
+import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
+import { readSkillLibrary, skillLibraryRoot } from "../skills/library";
+import { missingRequiredBins, skillDependencyPath } from "../skills/dependencies";
+import { discoverSkills, importSkillFromDirectory, importSkillZip } from "../skills/import";
 
 /** 真实执行器必须在 Runtime 创建 Control 后显式绑定，避免无 capability 的受管 Agent。 */
 export type ControlBoundExecutor = AgentNodeExecutor & { bindControl(control: ControlServer): void };
@@ -90,6 +95,16 @@ export type DesktopExecutionEngineOptions = {
   readonly maxActiveRuns?: number;
   /** 全局同时启动的真实 ACP Worker 上限。 */
   readonly maxActiveAgents?: number;
+  /**
+   * 托管技能库根目录；省略时取设置根目录下的 `skills`（生产等于 ~/.wave-flow/skills）。
+   * 仅测试或受控嵌入环境注入；所有主控/Worker 会话与 Replay 判定共用同一个根。
+   */
+  readonly skillsRoot?: string;
+  /**
+   * 技能导入发现使用的主目录；省略为当前用户 home。仅测试或受控嵌入环境注入，
+   * 生产不得伪造，避免把其他用户的 CLI 技能目录当成来源。
+   */
+  readonly homeDir?: string;
   /** 自动测试注入；生产省略时使用 selected ACP CLI Harness。 */
   readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks, runtime?:import("../runtimes/types").RuntimeProvenance) => Promise<import("../harness/session").HarnessSession>;
   /** 测试注入独立命名器；生产省略使用所选主控ACP，无业务工具。 */
@@ -98,6 +113,42 @@ export type DesktopExecutionEngineOptions = {
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
   /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
   readonly validateCliRuntime?: (cli: RuntimeCli, input: { readonly executablePath: string; readonly discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; readonly discoveredShell: string | null }) => Promise<CliRuntimeRecord>;
+};
+
+/** 设置页展示的技能库状态；不包含技能正文或任何凭据。 */
+export type SkillLibraryStatus = {
+  /** 技能库根目录绝对路径。 */
+  readonly root: string;
+  /** 扫描时目录是否存在；缺失不是错误。 */
+  readonly exists: boolean;
+  /** 库摘要；空库为 null。 */
+  readonly digest: string | null;
+  /** 合法 skill 数量。 */
+  readonly count: number;
+  /**
+   * 合法 skill 与其依赖诊断；只读展示，不安装依赖、不修改 Worker PATH。
+   * `missingBins` 只表示当前 Engine 可见 PATH 中找不到，不覆盖各 CLI 自己的 node 目录。
+   */
+  readonly skills: readonly {
+    /** skill 名称。 */
+    readonly name: string;
+    /** frontmatter description。 */
+    readonly description: string;
+    /** SKILL.md 字节数。 */
+    readonly bytes: number;
+    /** frontmatter `metadata.requires.bins` 声明的可执行文件名。 */
+    readonly requiredBins: readonly string[];
+    /** 当前诊断 PATH 中找不到的可执行文件名；空数组表示未发现缺失。 */
+    readonly missingBins: readonly string[];
+  }[];
+  /** 所有 skill 声明中缺失的依赖并集；供设置页一次性提示。 */
+  readonly missingDependencies: readonly string[];
+  /** 被跳过、不参与注入的非法 skill；不影响其他合法项。 */
+  readonly invalid: readonly { readonly name: string; readonly issue: string }[];
+  /** 每个可选 CLI 的执行期注入能力；未声明注入时 unsupported。 */
+  readonly capabilities: readonly { readonly cli: RuntimeCli; readonly displayName: string; readonly injection: "verified" | "unsupported" }[];
+  /** 暂时下线的 CLI 与原因；仅用于设置页说明，不提供选择入口。 */
+  readonly unavailable: readonly { readonly cli: RuntimeCli; readonly reason: string }[];
 };
 
 /**
@@ -118,6 +169,10 @@ export class DesktopExecutionEngine {
   #cliRuntimes: CliRuntimeRegistry;
   /** 用户级设置存储；每次创建主控会话时按当前感知模式选择原生/私有 Home 与写边界。 */
   #settings: AppSettingsStore;
+  /** 托管技能库根；主控、Worker 与 Replay 判定共用，生产等于 ~/.wave-flow/skills。 */
+  private readonly skillsRoot: string;
+  /** 技能导入发现使用的主目录；生产为用户 home，测试可注入。 */
+  private readonly homeDirectory: string;
   /** 同一 Engine 内启动扫描单飞，避免并发页面加载重复握手和覆盖 Registry。 */
   #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
   /** 每条 Harness ACP session 的随机私有 MCP FIFO；只在 Engine 内存存活。 */
@@ -172,6 +227,8 @@ export class DesktopExecutionEngine {
     // 同一 root 也作为感知模式要保护的 Engine 状态目录，保证测试注入与生产语义一致。
     const stateRoot = normalized.settingsRoot ?? dirname(harnessRoot);
     this.#settings = new AppSettingsStore(stateRoot);
+    this.skillsRoot = normalized.skillsRoot ?? skillLibraryRoot(stateRoot);
+    this.homeDirectory = normalized.homeDir ?? homedir();
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
     this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((cli, input) => validateCliRuntime(cli, input));
     this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
@@ -194,7 +251,7 @@ export class DesktopExecutionEngine {
       ] } as any;
       assertAbsoluteMcpCommand(mcpServer);
       let session: AcpHarnessSession;
-      try { session = await createIsolatedHarness({ mode, engineHome: stateRoot, launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(mode), prior, mcp: mcpServer }); }
+      try { session = await createIsolatedHarness({ mode, engineHome: stateRoot, launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(mode), prior, mcp: mcpServer, skills: adapterById(runtime.verifiedAdapter.adapterId)?.skills ?? null, skillsRoot: this.skillsRoot }); }
       catch (error) { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); throw error; }
       const close = session.close.bind(session); session.close = () => { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); close(); };
       return session;
@@ -220,7 +277,7 @@ export class DesktopExecutionEngine {
         if (!original) return; // 新Engine不认领旧writer，后续现场/退出核验仍fail closed。
         for (const node of snapshot.phases.flatMap(phase => phase.agents)) if (node.status === "completed") await original.finalizeCompleted(node);
       },
-    }, harnessRoot, this.storeRoot,this.workspaceRoot);
+    }, harnessRoot, this.storeRoot,this.workspaceRoot, this.skillsRoot);
     this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
     this.#harness.setExecutionSceneReader((taskId, executionId) => this.#executions.sceneEvidence(taskId, executionId));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
@@ -367,10 +424,10 @@ export class DesktopExecutionEngine {
   private createExecutionExecutor(config: import("../harness/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
     if (config?.workspaces) {
-      const base = new ProductionWorkspaceExecutor(config.workspaces, this.workspaceRoot, this.instanceId, this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), config.fallbackRuntimeId);
+      const base = new ProductionWorkspaceExecutor(config.workspaces, this.workspaceRoot, this.instanceId, this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), config.fallbackRuntimeId, this.skillsRoot);
       return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
     }
-    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, config?.fallbackRuntimeId ?? null, join(dirname(this.storeRoot), "read-only-scratch"));
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, config?.fallbackRuntimeId ?? null, join(dirname(this.storeRoot), "read-only-scratch"), this.skillsRoot);
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -455,10 +512,72 @@ export class DesktopExecutionEngine {
   /** 返回设置页可展示的 Runtime；不暴露文件身份、PATH 或任何环境变量。 */
   private async listCliRuntimes(): Promise<CliRuntimeListResponse> { return this.#cliRuntimes.list(); }
 
+  /**
+   * 设置页技能库状态：只读扫描，不创建目录、不启动进程、不读取技能正文。
+   * 非法库在这里如实报错，由 UI 展示为可操作诊断，不静默当作空库。
+   */
+  private async skillStatus(): Promise<SkillLibraryStatus> {
+    let library: import("../skills/types").SkillLibrary;
+    try { library = await readSkillLibrary(this.skillsRoot); }
+    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+    const capabilities = catalogClis().filter(isCliSelectable).map((cli) => {
+      const entry = adapterForCli(cli);
+      return { cli, displayName: entry.displayName, injection: entry.skills?.verified ? "verified" as const : "unsupported" as const };
+    });
+    const unavailable = catalogClis().filter(cli => !isCliSelectable(cli)).map(cli => ({ cli, reason: cliUnavailableReason(cli) ?? "该 CLI 已暂时下线。" }));
+    const pathValue = skillDependencyPath();
+    const skills = await Promise.all(library.skills.map(async skill => ({
+      name: skill.name,
+      description: skill.description,
+      bytes: skill.bytes,
+      requiredBins: skill.requiredBins,
+      missingBins: await missingRequiredBins(skill.requiredBins, pathValue),
+    })));
+    const missingDependencies = [...new Set(skills.flatMap(skill => skill.missingBins))];
+    return { root: library.root, exists: library.exists, digest: library.digest, count: library.skills.length, skills, missingDependencies, invalid: library.invalid ?? [], capabilities, unavailable };
+  }
+
+  /** 扫描本机 CLI 技能目录，返回可导入候选；只读，不复制。 */
+  private async discoverSkills(): Promise<import("../skills/import").SkillDiscoverResult> {
+    try { return await discoverSkills(this.skillsRoot, this.homeDirectory); }
+    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /** 从已识别的 CLI 技能目录导入一个 skill；同名目标拒绝，不覆盖。 */
+  private async importSkill(value: unknown): Promise<{ readonly name: string }> {
+    const path = requiredString(value, "path");
+    try {
+      const imported = await importSkillFromDirectory(path, this.skillsRoot, this.homeDirectory);
+      // 让新建或空闲重开的主控会话按新库重新投影；活动会话不回改。
+      this.#harness.closeIdleSessions();
+      return { name: imported.name };
+    } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /** 从用户选择的 skill.zip 导入一个 skill；展开前做路径/大小/条目校验。 */
+  private async importSkillArchive(value: unknown): Promise<{ readonly name: string }> {
+    const path = requiredString(value, "path");
+    try {
+      const imported = await importSkillZip(path, this.skillsRoot);
+      this.#harness.closeIdleSessions();
+      return { name: imported.name };
+    } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
+  }
+
+  /** 用户显式点击后打开技能库目录；缺失时创建空目录，不写任何示例 skill。 */
+  private async openSkillLibrary(): Promise<{ readonly opened: true }> {
+    await mkdir(this.skillsRoot, { recursive: true, mode: 0o700 });
+    if (process.platform === "darwin") {
+      const child = Bun.spawn(["/usr/bin/open", this.skillsRoot], { stdio: ["ignore", "ignore", "ignore"] });
+      child.unref();
+    }
+    return { opened: true };
+  }
+
   /** 仅保留为诊断接口；启动扫描应使用 scan，由 Engine 负责验证和安全写入。 */
   private async discoverCliRuntimes(value: unknown): Promise<DiscoverCliRuntimesResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "扫描本机 CLI 不接受请求字段。 ");
-    try { return { candidates: await this.discoverCliRuntimeCandidates() }; }
+    try { return { candidates: (await this.discoverCliRuntimeCandidates()).filter(candidate => isCliSelectable(candidate.cli)) }; }
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
@@ -476,7 +595,7 @@ export class DesktopExecutionEngine {
       const candidates = await this.discoverCliRuntimeCandidates();
       let verified = 0;
       const failures: Partial<Record<RuntimeCli, CliProbeStatus>> = {};
-      for (const cli of catalogClis()) {
+      for (const cli of catalogClis().filter(isCliSelectable)) {
         const list = candidates.filter((candidate) => candidate.cli === cli);
         if (list.length === 0) { failures[cli] = "absent"; continue; }
         let offset = 0;
@@ -526,11 +645,12 @@ export class DesktopExecutionEngine {
   private async validateCliRuntime(value: unknown): Promise<SelectCliRuntimeResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as ValidateCliRuntimeRequest).executablePath !== "string" || !catalogClis().includes((value as ValidateCliRuntimeRequest).cli)) throw new EngineActionError(400, "CLI Runtime 验证请求无效。 ");
     const request = value as ValidateCliRuntimeRequest;
+    if (!isCliSelectable(request.cli)) throw new EngineActionError(400, cliUnavailableReason(request.cli) ?? "该 CLI 已暂时下线。");
     const discoveredFrom = request.discoveredFrom ?? "manual";
     if (!["shell-path", "gui-path", "install-dir", "manual"].includes(discoveredFrom) || (request.discoveredShell !== undefined && request.discoveredShell !== null && typeof request.discoveredShell !== "string")) throw new EngineActionError(400, "CLI Runtime 验证来源无效。 ");
     const detected = await this.detectCliKind(request.executablePath);
     // 已识别出真实种类时以它为准；识别不出但仍失败时再依次试其他种类，避免用户被种类选择卡死。
-    const kinds: RuntimeCli[] = detected === request.cli ? [request.cli] : detected ? [detected, request.cli] : [request.cli, ...catalogClis().filter(cli => cli !== request.cli)];
+    const kinds: RuntimeCli[] = (detected === request.cli ? [request.cli] : detected ? [detected, request.cli] : [request.cli, ...catalogClis().filter(cli => cli !== request.cli)]).filter(isCliSelectable);
     let failure: unknown;
     for (const cli of kinds) {
       try {
@@ -685,7 +805,7 @@ export class DesktopExecutionEngine {
         sourceDiagnostic=await manager.inspectSourceDiagnostic(executionId)??undefined;
         const value=await manager.inspect(execution.config.workspaces.workspaceId);
         const head=value.cleanedAt?null:(await (await GitRepository.open(value.cwd)).inspect()).head;
-        workspaceEvidence={workspaceId:value.workspaceId,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
+        workspaceEvidence={workspaceId:value.workspaceId,cwd:value.cwd,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
         } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
       }
       return { execution, workspaceEvidence, workspaceDiagnostic, sourceEvidence, sourceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
@@ -813,6 +933,11 @@ export class DesktopExecutionEngine {
       case "runtimes.validate": return this.validateCliRuntime(value);
       case "runtimes.select": return this.selectCliRuntime(requiredString(value, "runtimeId"), {});
       case "runtimes.delete": return this.deleteCliRuntime(requiredString(value, "runtimeId"));
+      case "skills.status": return this.skillStatus();
+      case "skills.discover": return this.discoverSkills();
+      case "skills.import": return this.importSkill(value);
+      case "skills.importZip": return this.importSkillArchive(value);
+      case "skills.open": return this.openSkillLibrary();
       case "projects.list": return this.listProjects();
       case "projects.context": return readProjectContext((await this.#projects.get(requiredString(value, "projectId"))).cwd);
       case "projects.create": return this.createProject(value);
@@ -1075,7 +1200,7 @@ export class DesktopExecutionEngine {
     if (!this.deterministicForTest) await this.requireWorkerCandidate();
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"));
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"), this.skillsRoot);
     const executor: AgentNodeExecutor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
     const runtime = await RunRuntime.create({ workflow, input: value.input, workflowSource: source, clientRequestId: value.clientRequestId, workflowProjectCwd: cwd, workflowPath: sourcePath, storeRoot: this.storeRoot, executor });
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
@@ -1175,9 +1300,11 @@ export class DesktopExecutionEngine {
     const workflow = await loadWorkflow(manifest.workflowPath, cwd);
     const baseExecutor: AgentNodeExecutor = this.deterministicForTest
       ? new DeterministicExecutor()
-      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"));
+      : new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, null, join(dirname(this.storeRoot), "read-only-scratch"), this.skillsRoot);
     const executor = new LimitedAgentExecutor(baseExecutor, this.agentStartLimiter);
-    const runtime = await RunRuntime.resume(runId, executor, this.storeRoot);
+    const runtime = await RunRuntime.resume(runId, executor, this.storeRoot, null, this.skillsRoot);
+    const blocked = runtime.snapshot().phases.flatMap(phase => phase.agents).find(node => !isCliSelectable(node.cli));
+    if (blocked) throw new EngineActionError(409, `无法恢复：节点 ${blocked.id} 使用 ${blocked.cli}，该 CLI 支持已暂时下线。请新建使用其他 CLI 的执行。 `);
     await this.reconcileResumeSessions(runtime);
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
       const control = runtime.createControlServer();

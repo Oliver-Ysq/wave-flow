@@ -2,6 +2,7 @@ import {
   Component,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -12,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
 import { TaskTitleEditor } from "./task-title-editor";
 import { ProjectCreateDialog } from "./project-create-dialog";
-import { useProjectExpanded } from "./project-navigation";
+import { projectExpanded, useProjectExpanded } from "./project-navigation";
 import { userFacingText } from "./user-facing-text";
 import {
   RAIL_WIDTH_DEFAULT,
@@ -82,7 +83,7 @@ function rememberCommands(commands: readonly HarnessAvailableCommand[]): void {
 const detailPositions = new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
-import { ExecutionDiagnostics } from "./execution/execution-diagnostics";
+import { CopyValue, ExecutionDiagnostics } from "./execution/execution-diagnostics";
 import { SchemaForm } from "./forms/schema-form";
 import { TemplatePicker } from "./template-picker";
 import { LocalWorkflowPreview } from "./local-workflow-preview";
@@ -104,8 +105,11 @@ import type {
   PhaseVisit,
   RunSnapshot,
   RuntimeCli,
+  SkillLibraryStatus,
 } from "./types";
 import { CLI_KINDS, cliDisplayName, cliIcon } from "./cli-meta";
+import { SkillsSettings } from "./skills-settings";
+import { mergeManagedSkillCommands } from "./conversation/composer-commands";
 
 const terminal = new Set(["completed", "cancelled", "interrupted"]);
 const localeTime = (value: string | null) =>
@@ -175,7 +179,7 @@ export function App() {
   /** 上一次看到的最新方案身份；用于识别“正在看旧版时新版本到达”。 */
   const latestPlanKeyRef = useRef<string | null>(null);
   /** 当前主控 ACP 会话广告的斜杠命令/技能；只来自事件，不进入快照。 */
-  const [availableCommands, setAvailableCommands] = useState<HarnessAvailableCommand[]>(readCachedCommands);
+  const [acpCommands, setAcpCommands] = useState<HarnessAvailableCommand[]>(readCachedCommands);
   const [archiveConfirmation, setArchiveConfirmation] = useState<{
     harnessRunId: string;
     count: number;
@@ -647,6 +651,39 @@ export function App() {
   const [runtimeState, setRuntimeState] =
     useState<CliRuntimeListResponse | null>(null);
   const harnessRuntimeId = runtimeState?.harnessRuntimeId ?? null;
+  /** 托管技能库中的 skill；用于把设置页导入的 skill 合并进斜线菜单。 */
+  const [managedSkills, setManagedSkills] = useState<SkillLibraryStatus["skills"]>([]);
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      void api.skillsStatus()
+        .then(status => { if (active) setManagedSkills(status.skills); })
+        .catch(() => { /* 瞬时失败保留上一次技能菜单，不把可用技能瞬间清空。 */ });
+    };
+    load();
+    const listener = () => load();
+    const onFocus = () => load();
+    const onVisibility = () => { if (document.visibilityState === "visible") load(); };
+    window.addEventListener("wave-flow:skills-changed", listener);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      active = false;
+      window.removeEventListener("wave-flow:skills-changed", listener);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+  const controllerCli: "codex" | "claude" | "dsh" | null = (() => {
+    const runtimeId = harness?.runtime?.runtimeId ?? harnessRuntimeId;
+    const cli = runtimeState?.runtimes.find(runtime => runtime.runtimeId === runtimeId)?.cli;
+    return cli === "codex" || cli === "claude" || cli === "dsh" ? cli : null;
+  })();
+  /** ACP 原始命令 + 托管技能；只用于展示，不写回命令缓存。CLI 未知时不猜 token 格式。 */
+  const availableCommands = useMemo(
+    () => controllerCli ? mergeManagedSkillCommands(acpCommands, managedSkills, controllerCli) : acpCommands,
+    [acpCommands, managedSkills, controllerCli],
+  );
   /** 命令目录与运行时绑定；切换主控 CLI 后必须丢弃旧缓存并重新发现。 */
   const catalogProbe = useRef<string | null>(null);
   const previousHarnessRuntimeId = useRef<string | null | undefined>(undefined);
@@ -654,14 +691,14 @@ export function App() {
     if (previousHarnessRuntimeId.current === undefined) {
       previousHarnessRuntimeId.current = harnessRuntimeId;
       // 启动时缓存没有 runtime 身份；清掉后按当前 runtime 重新发现，避免沿用旧 CLI 的技能。
-      setAvailableCommands([]);
+      setAcpCommands([]);
       catalogProbe.current = null;
       try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞启动。 */ }
       return;
     }
     if (previousHarnessRuntimeId.current === harnessRuntimeId) return;
     previousHarnessRuntimeId.current = harnessRuntimeId;
-    setAvailableCommands([]);
+    setAcpCommands([]);
     catalogProbe.current = null;
     try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞切换。 */ }
   }, [harnessRuntimeId]);
@@ -670,23 +707,23 @@ export function App() {
       .filter((item) => !harnessRuntimeId || item.runtime?.runtimeId === harnessRuntimeId)
       .flatMap((item) => item.availableCommands ?? []);
     if (known.length > 0) {
-      setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(known) ? current : known);
+      setAcpCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(known) ? current : known);
       if (hasSkillCommands(known)) rememberCommands(known);
     }
   }, [harnesses, harnessRuntimeId]);
   useEffect(() => {
     const projectId = draftProjectId ?? selectedProjectId;
     const probeKey = `${harnessRuntimeId ?? "none"}:${projectId ?? "none"}`;
-    if (!projectId || harness || availableCommands.length > 0 || catalogProbe.current === probeKey) return;
+    if (!projectId || harness || acpCommands.length > 0 || catalogProbe.current === probeKey) return;
     catalogProbe.current = probeKey;
     let cancelled = false;
     void api.harnessCommandCatalog(projectId).then((response) => {
       if (cancelled || response.commands.length === 0) return;
-      setAvailableCommands([...response.commands]);
+      setAcpCommands([...response.commands]);
       rememberCommands(response.commands);
     }).catch(() => { /* 目录发现失败时保留 /wave-flow；不阻塞任务创建。 */ });
     return () => { cancelled = true; };
-  }, [draftProjectId, selectedProjectId, harness, availableCommands.length, harnessRuntimeId]);
+  }, [draftProjectId, selectedProjectId, harness, acpCommands.length, harnessRuntimeId]);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
   const runtimeScanStarted = useRef(false);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(
@@ -694,24 +731,6 @@ export function App() {
   );
   const [executionDetail, setExecutionDetail] =
     useState<ExecutionResponse | null>(null);
-  /** 最新一次“重新整理改动”的内联结果；用于成功/仍跳过都给出即时反馈，不再静默无变化。 */
-  const [applyRetryResult, setApplyRetryResult] = useState<{
-    executionId: string;
-    outcome: "applied" | "skipped";
-    reason?: string;
-  } | null>(null);
-  /** 受管 worktree 清理确认；null 表示未打开确认弹窗。 */
-  const [cleanupConfirmation, setCleanupConfirmation] = useState<{
-    harnessRunId: string;
-    executionId: string;
-    branch: string;
-  } | null>(null);
-  useEffect(() => {
-    setApplyRetryResult(null);
-  }, [harness?.harnessRunId, selectedExecutionId]);
-  useEffect(() => {
-    setCleanupConfirmation(null);
-  }, [harness?.harnessRunId]);
   /** 当前详情 revision 的动态节点数；plan 不可用或为 0 时按 0 处理。 */
   const [executionDynamicCount, setExecutionDynamicCount] = useState(0);
   useEffect(() => {
@@ -792,7 +811,7 @@ export function App() {
     } catch (cause) {
       if (!valid()) return;
       setConnected(false);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError("本地服务连接中断，正在重连。若执行被中断，重连后需要回到执行页点击“重新尝试”。");
       // 首次快照失败也要放行窗口：错误页与重试入口必须可见，不能隐藏等待。
       announceFirstFrame();
     }
@@ -816,9 +835,7 @@ export function App() {
         setRuntimeState(result.runtimes);
         setError(null);
       })
-      .catch((cause) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
-      )
+      .catch(() => setError("暂时无法检查本地执行工具，请稍后重试。"))
       .finally(() => setRuntimeScanning(false));
   }, [runtimeState]);
   /** 每次摘要来自 Desktop Engine，Tauri 只转写菜单栏文本，绝不维护第二份状态。 */
@@ -899,7 +916,7 @@ export function App() {
           // 命令目录是瞬时字段，防倒退合并可能保留旧快照；从权威响应刷新并跨草稿缓存。
           if (response.harness.availableCommands?.length) {
             const nextCommands = response.harness.availableCommands;
-            setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(nextCommands) ? current : [...nextCommands]);
+            setAcpCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(nextCommands) ? current : [...nextCommands]);
             if (hasSkillCommands(nextCommands)) rememberCommands(nextCommands);
           }
           setLastEventAt(Date.now());
@@ -924,7 +941,7 @@ export function App() {
       if (event.type === "commands_changed") {
         // ACP 命令目录是会话内存态，不触发快照重读；只更新斜杠菜单数据源。
         if (event.commands.length > 0) {
-          setAvailableCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(event.commands) ? current : [...event.commands]);
+          setAcpCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(event.commands) ? current : [...event.commands]);
           if (hasSkillCommands(event.commands)) rememberCommands(event.commands);
         }
         setLastEventAt(Date.now());
@@ -1195,9 +1212,6 @@ export function App() {
     if (!harness || !executionDetail) return;
     const owner = harness.harnessRunId;
     const executionId = executionDetail.execution.executionId;
-    // 已完成 Execution 的 resume 就是“重新整理改动”：Engine 只补 Git 收尾，不重跑 Workflow。
-    const retryingApply =
-      action === "resume" && executionDetail.snapshot.status === "completed";
     const valid = requestFence.current.begin(
       `execution:${owner}:${executionId}`,
     );
@@ -1205,14 +1219,12 @@ export function App() {
       `execution:${executionId}`,
       `execution:${action}`,
     );
-    if (retryingApply) setApplyRetryResult(null);
     try {
       const response =
         action === "resume"
           ? await api.resumeExecution(owner, executionId)
           : await api.executionControl(owner, executionId, action);
-      // executions.resume 只返回运行快照，不携带 sourceEvidence/workspaceEvidence；必须回读完整详情，
-      // 否则重试成功后来源证据从页面消失，仍跳过时也无从展示原因。回读失败时保留旧证据，只更新运行快照。
+      // executions.resume 只返回运行快照；回读完整详情以保留来源与 worktree 证据。
       const detail =
         action === "resume"
           ? await api.execution(owner, executionId).catch(() => ({
@@ -1229,18 +1241,6 @@ export function App() {
         routeRef.current.executionId === detail.execution.executionId
       )
         setExecutionDetail(detail);
-      if (retryingApply && valid() && harnessRef.current?.harnessRunId === owner) {
-        const applied = detail.sourceEvidence?.applied;
-        setApplyRetryResult({
-          executionId: detail.execution.executionId,
-          outcome: applied && "at" in applied ? "applied" : "skipped",
-          reason:
-            applied && "skippedAt" in applied
-              ? applied.reason
-              : detail.sourceDiagnostic ??
-                "执行页仍未读到自动应用证据，请稍后刷新详情。",
-        });
-      }
       const next = (await api.harness(owner)).harness;
       if (harnessRef.current?.harnessRunId === owner)
         setHarness((current) =>
@@ -1253,46 +1253,6 @@ export function App() {
       finishBusy();
     }
   }
-
-  /** 清理受管 worktree；只删除临时 checkout，已封存成果与主工作区自动应用结果不受影响。 */
-  async function cleanupWorkspaces(target: {
-    harnessRunId: string;
-    executionId: string;
-  }) {
-    const valid = requestFence.current.begin(
-      `execution:${target.harnessRunId}:${target.executionId}`,
-    );
-    const finishBusy = beginBusy(
-      `execution:${target.executionId}`,
-      "cleanup-workspaces",
-    );
-    try {
-      const next = await api.cleanupWorkspaces(
-        target.harnessRunId,
-        target.executionId,
-      );
-      if (
-        valid() &&
-        harnessRef.current?.harnessRunId === target.harnessRunId &&
-        routeRef.current.kind === "workflow" &&
-        routeRef.current.executionId === target.executionId
-      )
-        setExecutionDetail(next);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      finishBusy();
-    }
-  }
-
-  /** 变更面板展示自动应用结果；只读历史不改写当前工作区。 */
-  const changesApplied =
-    changesView &&
-    executionDetail &&
-    changesView.executionId === executionDetail.execution.executionId
-      ? executionDetail.sourceEvidence?.applied
-      : undefined;
 
   const latestPlanRevision = harness?.workflowRevisions.at(-1) ?? null;
   const pendingPlanRevision =
@@ -1418,17 +1378,6 @@ export function App() {
           }}
         />
       )}
-      {cleanupConfirmation && (
-        <WorkspaceCleanupConfirmation
-          branch={cleanupConfirmation.branch}
-          onClose={() => setCleanupConfirmation(null)}
-          onConfirm={() => {
-            const target = cleanupConfirmation;
-            setCleanupConfirmation(null);
-            void cleanupWorkspaces(target);
-          }}
-        />
-      )}
       <aside id="task-navigation" ref={navigationPanel} className="task-rail">
         <header>
           <div className="brand">
@@ -1460,9 +1409,9 @@ export function App() {
             </button>
             <div
               className={`connection ${connected ? "online" : "offline"}`}
-              title={
-                connected ? "Desktop Engine 已连接" : "Desktop Engine 不可用"
-              }
+              role="status"
+              aria-label={connected ? "本地服务正常" : "本地服务连接中断"}
+              title={connected ? "本地服务正常" : "本地服务连接中断"}
             >
               <i />
             </div>
@@ -1581,7 +1530,7 @@ export function App() {
         <footer>
           <span></span>
           <small>
-            {connected ? "Desktop Engine 已连接" : "Desktop Engine 未连接"}
+            {connected ? "本地服务正常" : "本地服务连接中断"}
           </small>
         </footer>
         <div
@@ -1766,7 +1715,7 @@ export function App() {
                 ? `针对${adjustContext.abandoned ? "已放弃的" : ""}第 ${adjustContext.revision} 版方案`
                 : undefined
             }
-            availableCommands={availableCommands.length > 0 ? availableCommands : (harness.runtime?.runtimeId === harnessRuntimeId ? (harness.availableCommands ?? []) : [])}
+            availableCommands={acpCommands.length > 0 ? availableCommands : (harness.runtime?.runtimeId === harnessRuntimeId && controllerCli ? mergeManagedSkillCommands(harness.availableCommands ?? [], managedSkills, controllerCli) : (harness.availableCommands ?? []))}
             onAdjustRevision={(revision) =>
               prepareRevisionDraft(harness, revision, !!revision.abandonedAt)
             }
@@ -2331,22 +2280,6 @@ export function App() {
                     status: item.status,
                   }))}
                 onControl={controlExecution}
-                applyRetryResult={applyRetryResult}
-                canCleanupWorkspaces={
-                  harness.executions
-                    .filter(
-                      (item) => item.finishedAt !== null && item.config?.workspaces,
-                    )
-                    .at(-1)?.executionId ===
-                  executionDetail.execution.executionId
-                }
-                onRequestCleanupWorkspaces={() =>
-                  setCleanupConfirmation({
-                    harnessRunId: harness.harnessRunId,
-                    executionId: executionDetail.execution.executionId,
-                    branch: executionDetail.workspaceEvidence?.branch ?? "",
-                  })
-                }
                 onOpenChanges={() => {
                   const evidence = executionDetail.sourceEvidence;
                   if (!evidence) return;
@@ -2440,7 +2373,6 @@ export function App() {
               taskId={changesView.taskId}
               executionId={changesView.executionId}
               sourceCommit={changesView.sourceCommit}
-              applied={changesApplied}
               theme={theme}
               onClose={() => setChangesView(null)}
             />
@@ -2502,7 +2434,7 @@ function executionLoadMessage(cause: unknown): string {
       message,
     )
   ) {
-    return "Desktop Engine 连接已中断；正在重新连接。若刚重启 Wave Flow，旧 Execution 会安全收敛为“已中断”，请在详情中显式恢复。";
+    return "本地服务连接中断，正在重连。若执行被中断，重连后需要回到执行页点击“重新尝试”。";
   }
   return message;
 }
@@ -2646,7 +2578,7 @@ function DesktopExitModal({
 }
 
 /** 设置分区标识：通用 / CLI 设置 / 诊断。 */
-type SettingsSection = "general" | "cli" | "diagnostics";
+type SettingsSection = "general" | "cli" | "skills" | "diagnostics";
 
 /** 完整显示的长路径 + 点击复制（就地"已复制"反馈）。 */
 function CopyablePath({ path }: { path: string }) {
@@ -2674,10 +2606,10 @@ function CopyablePath({ path }: { path: string }) {
 
 /** 扫描探测结论的中文文案；与 Engine 的 describeProbeStatus 同义，Web 侧不 import 服务端模块。 */
 const probeFailureLabels: Record<"absent" | "timeout" | "exec_failed" | "limit_reached", string> = {
-  absent: "未找到可执行文件",
-  timeout: "探测超时，无法确认是否已安装",
-  exec_failed: "程序无法运行（--version 失败）",
-  limit_reached: "候选过多且前几个都不可用",
+  absent: "未找到",
+  timeout: "检查超时",
+  exec_failed: "无法启动",
+  limit_reached: "候选过多",
 };
 
 /** 发现来源的中文文案。 */
@@ -3016,8 +2948,8 @@ function RuntimeConnectionPanel({
       runtime.status === "verified"
         ? null
         : runtime.status === "needs-revalidation"
-          ? "需重新验证"
-          : "验证失败";
+          ? "需要重新连接"
+          : "暂时不可用";
     return (
       <article key={runtime.runtimeId} className={isDefault ? "selected" : ""}>
         <span className={`runtime-icon ${runtime.cli}`} aria-hidden="true">
@@ -3055,10 +2987,10 @@ function RuntimeConnectionPanel({
           ) : (
             <span className="runtime-passive">
               {runtime.status === "needs-revalidation"
-                ? "需重新验证"
+                ? "需要重新连接"
                 : runtime.status === "invalid"
-                  ? "验证失败"
-                  : "仅可用于执行"}
+                  ? "暂时不可用"
+                  : "仅用于执行"}
             </span>
           )}
           {removable && !isDefault && (
@@ -3081,11 +3013,11 @@ function RuntimeConnectionPanel({
       <section className="connection-form runtime-actions">
         <div className="section-row">
           <div>
-            <strong>CLI</strong>
+            <strong>本地执行工具</strong>
             <span>
               {selected
-                ? "切换只影响新会话；正在处理的会话会阻止切换。"
-                : "从 PATH 自动发现，或手动添加一个绝对路径。"}
+                ? "切换只影响新任务；正在处理的任务会保留原工具。"
+                : "Wave Flow 会自动查找本机已安装的工具，也可以手动添加路径。"}
             </span>
           </div>
           <div className="runtime-actions-group">
@@ -3129,27 +3061,40 @@ function RuntimeConnectionPanel({
       <section className="runtime-list">
         {scanFailure ? (
           <div className="runtime-scan-failure" role="alert">
-            <span>无法完成 CLI 检测：{scanFailure}</span>
+            <span>暂时无法检查本地执行工具。</span>
             <button className="button-secondary" disabled={runtimeBusy} onClick={() => void scan()}>
-              重试检测
+              重新检查
             </button>
           </div>
         ) : !(selected || otherRuntimes.length) ? (
           <div className="runtime-scan-empty">
-            <span>
-              {scanning || runtimeOperation === "scan"
-                ? "正在检测已安装的 CLI…"
-                : "未检测到本机 CLI。如果已安装仍未出现，可能是探测超时。"}
-            </span>
+            <div>
+              <strong>还没有可用的本地执行工具</strong>
+              <p>Wave Flow 需要本机已登录的 Codex、Claude Code 或 DeepSeek Harness 之一。任务和代码不会被上传。</p>
+              {scanning || runtimeOperation === "scan" ? (
+                <p role="status">正在查找本机工具…</p>
+              ) : (
+                <details className="runtime-setup-guide">
+                  <summary>如何安装并登录？</summary>
+                  <p>任选一个工具，在终端安装并完成登录，然后回到这里重新检查。</p>
+                  <ul>
+                    <li><strong>Codex CLI</strong>：<code>npm install -g @openai/codex</code>，再运行 <code>codex login</code></li>
+                    <li><strong>Claude Code</strong>：<code>npm install -g @anthropic-ai/claude-code</code>，再运行 <code>claude</code> 完成登录</li>
+                    <li><strong>DeepSeek Harness</strong>：按团队安装文档安装并配置 provider，再运行 <code>dsh</code></li>
+                  </ul>
+                  <p>安装后点“重新检查”，不需要手动填路径。</p>
+                </details>
+              )}
+            </div>
             {!scanning && runtimeOperation !== "scan" && (
               <button className="button-secondary" onClick={() => void scan()}>
-                重新检测
+                重新检查
               </button>
             )}
           </div>
         ) : (
           <span className="list-caption">
-            已检测到 {new Set(runtimeState.runtimes.filter((item) => item.status === "verified").map((item) => item.cli)).size} 个可用 CLI
+            已找到 {new Set(runtimeState.runtimes.filter((item) => item.status === "verified").map((item) => item.cli)).size} 个可用工具
           </span>
         )}
         {(selected || otherRuntimes.length) && Object.keys(scanFailures).length > 0 && (
@@ -3177,7 +3122,7 @@ function RuntimeConnectionPanel({
           <section
             ref={manualPanel}
             className="connection-panel connection-panel--nested"
-            aria-label="手动添加 CLI"
+            aria-label="手动添加执行工具"
             role="dialog"
             aria-modal="true"
             onMouseDown={(event) => event.stopPropagation()}
@@ -3185,10 +3130,9 @@ function RuntimeConnectionPanel({
             <header className="connection-panel-head">
               <div>
                 <span className="modal-kicker">手动添加</span>
-                <strong>验证本机 CLI</strong>
+                <strong>添加本地执行工具</strong>
                 <p>
-                  输入绝对路径。验证会完成 realpath、版本与 ACP
-                  握手；成功后只加入候选列表。
+                  输入安装路径。验证通过后只加入候选，不会自动切换默认工具。
                 </p>
               </div>
               <button
@@ -3202,7 +3146,7 @@ function RuntimeConnectionPanel({
             </header>
             <section className="connection-form">
               <label className="connection-field">
-                <span>CLI 种类</span>
+                <span>工具类型</span>
                 <select
                   disabled={runtimeBusy}
                   value={manualCli}
@@ -3219,7 +3163,7 @@ function RuntimeConnectionPanel({
                 </select>
               </label>
               <label className="connection-field">
-                <span>CLI 绝对路径</span>
+                <span>安装路径</span>
                 <input
                   autoFocus
                   disabled={runtimeBusy}
@@ -3231,19 +3175,16 @@ function RuntimeConnectionPanel({
                     // 路径是事实、种类是意图：常见安装名直接跟随路径，避免用户把
                     // Kimi 二进制留在“Codex CLI”选项上直到验证才失败。
                     const base = value.trim().split("/").pop()?.toLowerCase() ?? "";
-                    if (base.includes("kimi")) setManualCli("kimi");
-                    else if (base.includes("claude")) setManualCli("claude");
+                    if (base.includes("claude")) setManualCli("claude");
                     else if (base.includes("dsh")) setManualCli("dsh");
                     else if (base.includes("codex")) setManualCli("codex");
                   }}
                   placeholder={
-                    manualCli === "kimi"
-                      ? "/Users/you/.kimi-code/bin/kimi"
-                      : manualCli === "claude"
-                        ? "/Users/you/.npm-global/bin/claude"
-                        : manualCli === "dsh"
-                          ? "/Users/you/.npm-global/bin/dsh"
-                          : "/Users/you/.local/bin/codex"
+                    manualCli === "claude"
+                      ? "/Users/you/.npm-global/bin/claude"
+                      : manualCli === "dsh"
+                        ? "/Users/you/.npm-global/bin/dsh"
+                        : "/Users/you/.local/bin/codex"
                   }
                   spellCheck={false}
                 />
@@ -3293,18 +3234,17 @@ function RuntimeConnectionPanel({
         <section
           ref={settingsPanel}
           className="connection-panel runtime-settings runtime-settings--gate"
-          aria-label="选择 Wave Flow CLI"
+          aria-label="连接本地执行工具"
           aria-modal="true"
           role="dialog"
           onMouseDown={(event) => event.stopPropagation()}
         >
           <header className="connection-panel-head">
             <div>
-              <span className="modal-kicker">本机执行底座</span>
-              <strong>选择 Wave Flow CLI</strong>
+              <span className="modal-kicker">本地执行</span>
+              <strong>连接本地执行工具</strong>
               <p>
-                选择一个已验证的本机 CLI，让 Wave Flow
-                帮你处理任务。扫描不会自动修改默认项。
+                选择一个本机已安装并登录的工具，让 Wave Flow 帮你处理任务。代码不会上传。
               </p>
             </div>
           </header>
@@ -3344,7 +3284,8 @@ function RuntimeConnectionPanel({
             {(
               [
                 ["general", "通用"],
-                ["cli", "CLI 设置"],
+                ["cli", "执行工具"],
+                ["skills", "技能"],
                 ["diagnostics", "诊断"],
               ] as Array<[SettingsSection, string]>
             ).map(([key, label]) => (
@@ -3431,6 +3372,7 @@ function RuntimeConnectionPanel({
               </section>
             )}
             {section === "cli" && cliContent}
+            {section === "skills" && <SkillsSettings />}
             {section === "diagnostics" && (
               <section className="settings-section">
                 <div className="section-row">
@@ -3467,8 +3409,8 @@ function RuntimeConnectionPanel({
                 )}
                 <div className="section-row">
                   <div>
-                    <strong>当前默认 CLI 来源</strong>
-                    <span>用于审计本机执行底座的真实落点。</span>
+                    <strong>当前默认工具</strong>
+                    <span>记录实际使用的本地程序位置，供审计和排障。</span>
                   </div>
                 </div>
                 {selected ? (
@@ -3643,9 +3585,11 @@ function ProjectGroup({
   onNewSession: () => void;
   onSelectHarness: (harness: HarnessSnapshot) => void;
 }) {
-  const [expanded, setExpanded] = useProjectExpanded(
+  const [expandedPref, setExpanded] = useProjectExpanded(
     `project:${project.projectId}`,
   );
+  /** 空项目没有可展开的子项；展开只会留出一段空白，因此保持收起。 */
+  const expanded = projectExpanded(harnesses.length > 0, expandedPref);
   return (
     <section className="project-group">
       <header>
@@ -3653,7 +3597,9 @@ function ProjectGroup({
           title={project.title}
           aria-expanded={expanded}
           aria-controls={`project-tasks-${project.projectId}`}
-          onClick={() => setExpanded(!expanded)}
+          disabled={harnesses.length === 0}
+          aria-disabled={harnesses.length === 0}
+          onClick={() => { if (harnesses.length > 0) setExpanded(!expanded); }}
         >
           <span className="folder-glyph" aria-hidden="true">
             ⌑
@@ -3760,7 +3706,7 @@ function DraftConversation({
   /** 仅关闭原草稿错误提示。 */ onDismissAttachmentError?: () => void;
   /** 打开已有系统图片选择器。 */ onAddAttachments: () => void;
   /** 仅移除尚未发送的指定附件。 */ onRemoveAttachment: (id: string) => void;
-  /** 最近一次 ACP 会话广告的技能；草稿页也用它提前展示技能菜单。 */
+  /** ACP 原始命令与托管技能合并后的菜单；草稿页也用它提前展示技能。 */
   availableCommands?: readonly HarnessAvailableCommand[];
 }) {
   const ready = project !== null;
@@ -3779,7 +3725,7 @@ function DraftConversation({
             if (active && request === token)
               setBranch(
                 value.branch ??
-                  (value.status === "detached" ? "游离 HEAD" : null),
+                  (value.status === "detached" ? "当前不在分支上" : null),
               );
           })
           .catch(() => {
@@ -4058,7 +4004,7 @@ function HarnessConversation({
   /** 只准备原版本修改上下文并聚焦输入，不发送消息。 */
   onAdjustRevision: (revision: import("./types").WorkflowRevision) => void;
   /** 输入草稿关联版本，不覆盖用户内容。 */ draftContext?: string;
-  /** 当前 ACP 会话广告的斜杠命令/技能；缺省只显示 /wave-flow。 */
+  /** ACP 原始命令与托管技能合并后的斜杠菜单；缺省只显示 /wave-flow。 */
   availableCommands?: readonly HarnessAvailableCommand[];
   onAnswerDecision: (
     decisionId: string,
@@ -4251,7 +4197,7 @@ function HarnessConversation({
                 }
               }}
             >
-              {retrying ? "正在检查 CLI 并连接…" : "重试连接（不重复创建任务）"}
+              {retrying ? "正在检查执行工具…" : "重新连接（不会重复创建任务）"}
             </button>
             <button disabled={retrying} onClick={onRuntimeSettings}>
               执行环境设置
@@ -4393,7 +4339,7 @@ function ArchiveTaskConfirmation({
           <strong>{conversationTitle(task)}</strong>
           <p>
             仍有 {count}{" "}
-            份执行总结未完成。你可以返回处理，或明确放弃总结并归档。归档后可在“已完成”中查看历史，不能继续执行。
+            份总结还没生成。你可以返回生成，或放弃总结后归档。归档后可在“已完成”中查看历史，不能继续执行。
           </p>
         </div>
         <div className="modal-actions">
@@ -4467,7 +4413,7 @@ function ArchiveImpactConfirmation({
         <div className="connection-form">
           <p>
             仍有 {count}{" "}
-            份执行总结未完成。归档后任务只读，不能再启动或恢复执行；未完成影响会保留在历史中。
+            份总结还没生成。归档后任务只读，不能再启动或继续执行；未完成记录会保留在历史中。
           </p>
         </div>
         <div className="modal-actions">
@@ -4476,81 +4422,6 @@ function ArchiveImpactConfirmation({
           </button>
           <button className="button-danger" onClick={onConfirm}>
             明确放弃并归档
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-/** 受管 worktree 清理确认：只删除临时 checkout，不删除已封存成果或主工作区改动。 */
-function WorkspaceCleanupConfirmation({
-  branch,
-  onClose,
-  onConfirm,
-}: {
-  /** 待清理 worktree 分支名；仅用于让用户确认清理对象。 */ branch: string;
-  /** 取消清理；不产生 Engine 动作。 */ onClose: () => void;
-  /** 用户明确确认清理；由父层调用 Engine 并回读详情。 */ onConfirm: () => void;
-}) {
-  const dialog = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const prior = document.activeElement as HTMLElement | null;
-    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    return () => {
-      if (prior?.isConnected) prior.focus();
-    };
-  }, []);
-  return (
-    <div
-      className="connection-backdrop"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        ref={dialog}
-        className="connection-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workspace-cleanup-title"
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            onClose();
-          }
-          if (event.key === "Tab") {
-            const buttons =
-              dialog.current?.querySelectorAll<HTMLButtonElement>("button");
-            if (!buttons?.length) return;
-            const first = buttons[0]!,
-              last = buttons[buttons.length - 1]!;
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
-          }
-        }}
-      >
-        <div className="connection-panel-head">
-          <h2 id="workspace-cleanup-title">清理临时工作区？</h2>
-        </div>
-        <div className="connection-form">
-          <p>
-            将删除该 Execution 的受管 worktree{branch ? `（${branch}）` : ""}。
-            已封存的改动、变更审阅与主工作区自动应用结果都不受影响；此操作不会重新执行 Workflow，也不能撤销。
-          </p>
-        </div>
-        <div className="modal-actions">
-          <button className="button-secondary" onClick={onClose}>
-            取消
-          </button>
-          <button className="button-danger" onClick={onConfirm}>
-            清理临时工作区
           </button>
         </div>
       </section>
@@ -4711,7 +4582,7 @@ function ImpactSummaryPanel({
       <div className="summary-compact">
         <span>
           {summaryWorkLabel(harness, executionId)}
-          ：总结未完成，暂不能启动或恢复执行。
+          ：这次执行还缺少一份总结。生成后可以继续下一次执行。
         </span>
         <button
           disabled={
@@ -4734,7 +4605,7 @@ function ImpactSummaryPanel({
             }
           }}
         >
-          {busy ? "正在重试…" : "重试总结"}
+          {busy ? "正在生成…" : "生成总结"}
         </button>
         <small>不会重新执行工作流</small>
         <details>
@@ -4828,7 +4699,7 @@ function ImpactSummaryPanel({
             }
           }}
         >
-          重新检查并重试补充
+          重新检查现场
         </button>
       </section>
     );
@@ -4838,7 +4709,7 @@ function ImpactSummaryPanel({
   const gitLimitation = harness.executions.find(
     (item) => item.executionId === executionId,
   )?.config?.workspaces
-    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明已自动应用到主工作区或外部系统已回滚。"
+    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明结果已写入主工作区或外部系统已回滚。"
     : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
   if (obligation.status === "cancelled")
     return (
@@ -4857,7 +4728,7 @@ function ImpactSummaryPanel({
             {
               pending: "准备总结",
               running: "正在总结",
-              interrupted: "总结中断，须重试",
+              interrupted: "总结未完成",
               completed: "总结已保存",
             }[obligation.status]
           }
@@ -4865,7 +4736,7 @@ function ImpactSummaryPanel({
       </p>
       {obligation.status !== "completed" && (
         <p>
-          完整总结前不能启动或恢复执行；可继续查看结果与反馈。重试只生成总结，不会重新执行节点。
+          生成总结后才能开始下一次执行；不会重新运行已完成节点。
         </p>
       )}
       {obligation.diagnostic && (
@@ -4912,7 +4783,7 @@ function ImpactSummaryPanel({
             ? "正在处理…"
             : obligation.status === "running"
               ? "停止总结"
-              : "重试总结"}
+              : "生成总结"}
         </button>
       )}
     </article>
@@ -4929,9 +4800,6 @@ function ExecutionDetail({
   dynamicCount,
   harnessRunId,
   onControl,
-  applyRetryResult,
-  canCleanupWorkspaces = false,
-  onRequestCleanupWorkspaces,
   onOpenChanges,
   onAnswer,
   onAnswerBlock,
@@ -4948,17 +4816,7 @@ function ExecutionDetail({
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
-  /** 最新一次“重新整理改动”的即时结果；只展示给产生它的 Execution。 */
-  applyRetryResult?: {
-    executionId: string;
-    outcome: "applied" | "skipped";
-    reason?: string;
-  } | null;
-  /** 最新终态且已有封存成果时才允许显式清理受管 worktree。 */
-  canCleanupWorkspaces?: boolean;
-  /** 打开清理确认弹窗；实际 Engine 动作与详情回读由父层执行。 */
-  onRequestCleanupWorkspaces?: () => void;
-  /** 打开右侧变更审阅面板；只读展示最终封存与自动应用结果。 */
+  /** 打开右侧变更审阅面板；只读展示最终封存 diff。 */
   onOpenChanges: () => void;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
@@ -4977,6 +4835,11 @@ function ExecutionDetail({
   const [visitsLoading, setVisitsLoading] = useState(true);
   const [visitsError, setVisitsError] = useState<string | null>(null);
   const [partialError, setPartialError] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const stopControlRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!["running", "pausing", "recovering", "paused"].includes(detail.snapshot.status)) setConfirmStop(false);
+  }, [detail.snapshot.status]);
   /** 跨 attempt 读取全部耐久 Phase 访问；稳定引用避免随快照轮询重复拉取。 */
   const loadAllVisits = useCallback(async () => {
     const items: import("./types").PhaseVisit[] = [];
@@ -5050,8 +4913,6 @@ function ExecutionDetail({
       查看变更
     </button>
   ) : null;
-  /** 已封存但主工作区当时不满足条件时，仍需保留显式重试入口。 */
-  const applySkipped = Boolean(detail.sourceEvidence && "skippedAt" in detail.sourceEvidence.applied);
   return (
     <>
       <PreviousRecords
@@ -5066,7 +4927,7 @@ function ExecutionDetail({
       )}
       {detail.sourceDiagnostic && (
         <p role="alert">
-          改动还没有整理好：{userFacingText(detail.sourceDiagnostic)}
+          成果还没有保存完整：{userFacingText(detail.sourceDiagnostic)}
         </p>
       )}
       {historical ? (
@@ -5111,34 +4972,21 @@ function ExecutionDetail({
             allVisits={allVisits}
             meta={executionMeta}
           />
+          {detail.workspaceEvidence && !detail.workspaceEvidence.cleaned && (
+            <p className="execution-workspace-location">
+              改动保留在工作区：<code>{detail.workspaceEvidence.cwd}</code>
+              <CopyValue value={detail.workspaceEvidence.cwd} />
+            </p>
+          )}
+          {!readOnly && detail.snapshot.status === "interrupted" && (
+            <ExecutionRecoveryCard
+              diagnostic={detail.snapshot.diagnostic}
+              busy={busy === "execution:resume"}
+              onRetry={() => onControl("resume")}
+            />
+          )}
           <div className="execution-actions">
             {changesAction}
-            {!readOnly &&
-              detail.snapshot.status === "completed" &&
-              detail.execution.config?.workspaces &&
-              (!detail.sourceEvidence ||
-                detail.sourceDiagnostic ||
-                applySkipped) && (
-                <button
-                  disabled={!!busy}
-                  onClick={() => void onControl("resume")}
-                >
-                  重新整理改动（不会重新执行）
-                </button>
-              )}
-            {!readOnly &&
-              detail.snapshot.status === "completed" &&
-              canCleanupWorkspaces &&
-              detail.sourceEvidence &&
-              detail.workspaceEvidence &&
-              !detail.workspaceEvidence.cleaned && (
-                <button
-                  disabled={!!busy}
-                  onClick={() => onRequestCleanupWorkspaces?.()}
-                >
-                  清理临时工作区
-                </button>
-              )}
             {!readOnly &&
               (detail.workspaceEvidence?.leases.length ?? 0) > 0 &&
               ["cancelled", "interrupted"].includes(
@@ -5160,6 +5008,15 @@ function ExecutionDetail({
               )}
             {!readOnly && (
               <>
+                {detail.snapshot.status === "completed" && detail.sourceDiagnostic && (
+                  <Action
+                    label="重试成果收尾"
+                    icon="↻"
+                    tone="primary"
+                    loading={busy === "execution:resume"}
+                    onClick={() => void onControl("resume")}
+                  />
+                )}
                 {detail.controllable &&
                   detail.snapshot.status === "running" && (
                     <Action
@@ -5179,15 +5036,15 @@ function ExecutionDetail({
                     onClick={() => void onControl("recover")}
                   />
                 )}
-                {(detail.snapshot.status === "interrupted" ||
-                  detail.snapshot.status === "cancelled" ||
+                {(detail.snapshot.status === "cancelled" ||
                   (!detail.controllable &&
-                    detail.snapshot.status !== "completed")) && (
+                    detail.snapshot.status !== "completed" &&
+                    detail.snapshot.status !== "interrupted")) && (
                   <Action
                     label={
                       detail.snapshot.status === "cancelled"
-                        ? "恢复已停止 Execution"
-                        : "恢复中断 Execution"
+                        ? "重新开始执行"
+                        : "重新开始执行"
                     }
                     icon="↻"
                     tone="primary"
@@ -5199,27 +5056,49 @@ function ExecutionDetail({
                   ["running", "pausing", "recovering", "paused"].includes(
                     detail.snapshot.status,
                   ) && (
-                    <Action
-                      label="停止 Execution"
-                      icon="■"
-                      tone="danger"
-                      loading={busy === "execution:stop"}
-                      onClick={() => void onControl("stop")}
-                    />
+                    <span ref={stopControlRef} className="execution-stop-control">
+                      {confirmStop ? (
+                        <span
+                          className="execution-stop-confirm"
+                          role="alertdialog"
+                          aria-label="确认停止执行"
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.stopPropagation();
+                              setConfirmStop(false);
+                              requestAnimationFrame(() => stopControlRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+                            }
+                          }}
+                        >
+                          <span>停止后未完成节点会中断，已完成节点和现场改动保留。</span>
+                          <button type="button" autoFocus onClick={() => {
+                            setConfirmStop(false);
+                            requestAnimationFrame(() => stopControlRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+                          }}>
+                            继续执行
+                          </button>
+                          <button type="button" className="danger" disabled={busy === "execution:stop"} onClick={() => {
+                            setConfirmStop(false);
+                            void onControl("stop");
+                            requestAnimationFrame(() => document.querySelector<HTMLElement>(".workflow-page-heading strong")?.focus());
+                          }}>
+                            确认停止
+                          </button>
+                        </span>
+                      ) : (
+                        <Action
+                          label="停止执行"
+                          icon="■"
+                          tone="danger"
+                          loading={busy === "execution:stop"}
+                          onClick={() => setConfirmStop(true)}
+                        />
+                      )}
+                    </span>
                   )}
               </>
             )}
           </div>
-          {!historical && applyRetryResult?.executionId === executionId && (
-            <p
-              className={`execution-apply-retry ${applyRetryResult.outcome}`}
-              role={applyRetryResult.outcome === "applied" ? "status" : "alert"}
-            >
-              {applyRetryResult.outcome === "applied"
-                ? "已重新应用到主工作区（未提交、未推送）。"
-                : `仍未应用：${userFacingText(applyRetryResult.reason ?? "自动应用条件仍不满足")}。处理主工作区后可再次重新整理。`}
-            </p>
-          )}
           {partialError && <p role="alert">{partialError}</p>}
           {!readOnly &&
             !detail.controllable &&
@@ -5227,16 +5106,15 @@ function ExecutionDetail({
             detail.snapshot.status !== "interrupted" &&
             detail.snapshot.status !== "cancelled" && (
               <div className="diagnostic">
-                该 Execution 不在当前 Engine 的可控制生命周期内（Engine
-                已重启）；只能显式 resume 创建新 attempt，pause/stop
-                与决策门回答都会被拒绝。
+                这次执行由之前的本地服务启动，当前无法直接暂停或停止。可以重新开始执行；可验证的已完成前缀会复用，其后的节点会重新执行。
               </div>
             )}
-          {detail.snapshot.diagnostic && (
-            <div className="diagnostic">
-              {userFacingText(detail.snapshot.diagnostic)}
-            </div>
-          )}
+          {detail.snapshot.diagnostic &&
+            detail.snapshot.status !== "interrupted" && (
+              <div className="diagnostic">
+                {userFacingText(detail.snapshot.diagnostic)}
+              </div>
+            )}
           {detail.snapshot.gates
             .filter(
               (gate) =>
@@ -5343,6 +5221,52 @@ function ExecutionDetail({
   );
 }
 
+/** 中断后的唯一用户路径：重新尝试；技术诊断折叠，不要求用户理解启动细节。 */
+function ExecutionRecoveryCard({
+  diagnostic,
+  busy,
+  onRetry,
+}: {
+  diagnostic: string | null;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  const startupFailure =
+    diagnostic?.includes("本地执行环境") === true ||
+    diagnostic?.includes("启动超时") === true ||
+    diagnostic?.includes("Worker 启动") === true;
+  return (
+    <section
+      className="execution-recovery-card"
+      aria-labelledby="execution-recovery-title"
+    >
+      <strong id="execution-recovery-title" role="alert">
+        {startupFailure ? "本地执行环境暂时不可用" : "执行已中断"}
+      </strong>
+      <p>
+        {startupFailure
+          ? "已自动尝试恢复，但仍未成功。重新尝试会从最早未完成节点继续；可验证的已完成前缀会复用，其后的节点会重新执行。"
+          : "重新尝试会从最早未完成节点继续；可验证的已完成前缀会复用，其后的节点会重新执行。"}
+      </p>
+      <div className="execution-recovery-actions">
+        <Action
+          label={busy ? "正在重新尝试…" : "重新尝试"}
+          icon="↻"
+          tone="primary"
+          loading={busy}
+          onClick={onRetry}
+        />
+      </div>
+      {diagnostic && (
+        <details>
+          <summary>查看详情</summary>
+          <p>{diagnostic}</p>
+        </details>
+      )}
+    </section>
+  );
+}
+
 function GateCard({
   gate,
   busy,
@@ -5354,7 +5278,7 @@ function GateCard({
 }) {
   return (
     <article className="conversation-action execution-gate">
-      <span>Execution 决策门 · {gate.gateId}</span>
+      <span>需要你确认的步骤</span>
       <p>{gate.question}</p>
       {gate.answerSchema ? (
         <SchemaForm

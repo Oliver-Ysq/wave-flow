@@ -91,7 +91,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
  }finally{release();held.mockRestore();pipes.forEach(pipe=>pipe.close());executor.close();}
 },240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，Execution收尾封存并自动应用", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，Execution收尾只封存", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-workspace-")));
   const cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code) throw new Error(err); return out.trim(); };
@@ -139,9 +139,9 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     expect(executor.config.version).toBe(3);
     const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config, ["a", "b"]);
     expect(delivery.paths).toEqual(["a.txt", "b.txt"]);
-    expect(delivery.applied).toHaveProperty("at");
+    expect(delivery.applied).toHaveProperty("skippedAt");
     expect(await manager.finalizeSource(runtime.snapshot().id, executor.config)).toEqual(delivery);
-    expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("worker-a\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("worker-b\n");
+    expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n");
     expect(await git("rev-parse", "HEAD")).toBe(base);expect(await git("diff", "--cached", "--name-only")).toBe("");
     console.log(JSON.stringify({ deliveryBranch: delivery.branch, deliveryCommit: delivery.commit, paths: delivery.paths, applied: delivery.applied }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
@@ -176,8 +176,8 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   const second=await run(config,"repair",'先读取当前cwd a.txt，必须是done加换行；若不是请如实报告，不重建旧基准。把已有内容改为repaired加换行，再读取验证。不commit/push、联网或安装。结果{ok:true}。');
   const workspace=await manager.inspect(workspaceId),source=await manager.finalizeSource(second.snapshot().id,config,["repair"]);
   expect(workspace.authorization).toEqual(original);expect(workspace.executionAuthorizations).toHaveLength(2);expect(workspace.executionAuthorizations?.[1].authorization).toEqual(renewed);
-  expect(source.applied).toHaveProperty("at");expect(source.paths).toEqual(["a.txt"]);
-  expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("repaired\n");
+  expect(source.applied).toHaveProperty("skippedAt");expect(source.paths).toEqual(["a.txt"]);
+  expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
   const oldEvents=(await RunJournal.open(first.snapshot().id,join(root,"runs"))).events,newEvents=(await RunJournal.open(second.snapshot().id,join(root,"runs"))).events;
   expect(newEvents.filter(item=>item.type==="agent.session")).toHaveLength(1);expect(newEvents.filter(item=>item.type==="agent.restarted")).toHaveLength(0);expect(second.snapshot().currentExecutionAttemptId).toBe(1);
   expect(newEvents.find(item=>item.type==="agent.session")!.agentSessionId).not.toBe(oldEvents.find(item=>item.type==="agent.session")!.agentSessionId);
@@ -185,7 +185,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
  }finally{pipes.forEach(pipe=>pipe.close());executors.forEach(executor=>executor.close());}
 },240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff并自动应用到主工作区", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff，结果只保留在worktree", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-auto-delivery-"))), cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const p = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]); if (code) throw Error(err); return out.trim(); };
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "a.txt"); await git("commit", "-m", "acceptance base");
@@ -213,8 +213,8 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保�
     expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(base);
     expect(await git("rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
     expect(await git("show", `${delivery.commit}:a.txt`)).toBe("done");
-    expect(delivery.applied).toHaveProperty("at");
-    expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("done\n");
+    expect(delivery.applied).toHaveProperty("skippedAt");
+    expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
     expect(await git("diff", "--cached", "--name-only")).toBe("");
     const identity={harnessRunId:taskId,executionId:detail.execution.executionId};
     const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;

@@ -115,12 +115,19 @@ test("/wave-flow 在独立 token 时注入宿主提案说明，普通消息不�
   await session.prompt("/wave-flow 分析这个流程");
   expect(captured[0]).toContain("宿主命令 /wave-flow");
   expect(captured[0]).toContain("propose_workflow_revision");
+  // /wave-flow 后点名的技能默认交给 Worker，而不是要求主控立即调用。
+  expect(captured[0]).toContain("默认表示 Worker");
+  expect(captured[0]).toContain("除非用户明确要求主控执行");
+  expect(captured[0]).toContain("仅作为任务提示");
+  expect(captured[0]).toContain("主控仍可");
   await session.prompt("普通追问");
   expect(captured[1]).toBe("普通追问");
   // 只有 `/wave-flow` 独立 token 才算命令；前缀相似文本不能被误判。
   expect(applyWaveFlowCommandInstruction("/waveflow 不是命令")).toBe("/waveflow 不是命令");
   // 多命令共存时，/wave-flow 出现在中间也必须触发提案说明。
   expect(applyWaveFlowCommandInstruction("$brainstorming /wave-flow 分析")).toContain("propose_workflow_revision");
+  // 用户示例形态：/wave-flow 之后跟多个技能，默认归 Worker。
+  expect(applyWaveFlowCommandInstruction("/wave-flow 使用 $bytedcli $cyber-figma-understanding 生成figma理解文档")).toContain("默认表示 Worker");
 });
 
 test("ACP 命令目录归一化为 commands_changed，并缓存给后订阅者", async () => {

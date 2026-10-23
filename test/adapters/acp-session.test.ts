@@ -138,3 +138,28 @@ test("不声明反向文件与terminal能力，CLI不能通过宿主绕过OS工�
  const client=new AcpSessionClient({id:"future",command:"fake",args:[]},async()=>({stream:acp.ndJsonStream(clientToAgent.writable,agentToClient.readable),exited:new Promise<number>(()=>{}),close:()=>connection.close()}));
  try{await client.initialize(new AbortController().signal);expect(caps?.fs).toEqual({readTextFile:false,writeTextFile:false});expect(caps?.terminal).toBe(false);}finally{client.close();}
 });
+
+test("ACP transport 退出时拒绝挂起的 prompt，而不是永久等待", async () => {
+  let exitTransport!: (code: number) => void;
+  const factory: AcpTransportFactory = async () => {
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const app = acp.agent({ name: "exit-acp" })
+      .onRequest(acp.methods.agent.initialize, () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }))
+      .onRequest(acp.methods.agent.session.new, () => ({ sessionId: "acp-session" }))
+      .onRequest(acp.methods.agent.session.prompt, () => new Promise<never>(() => {}));
+    const connection = app.connect(acp.ndJsonStream(agentToClient.writable, clientToAgent.readable));
+    return {
+      stream: acp.ndJsonStream(clientToAgent.writable, agentToClient.readable),
+      exited: new Promise<number>((resolve) => { exitTransport = resolve; }),
+      close: () => connection.close(),
+    };
+  };
+  const client = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, factory);
+  await client.initialize(new AbortController().signal);
+  await client.createSession("/workspace", new AbortController().signal);
+  const pending = client.prompt("pending", new AbortController().signal);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  exitTransport(0);
+  await expect(pending).rejects.toBeInstanceOf(AcpAmbiguousPromptError);
+});

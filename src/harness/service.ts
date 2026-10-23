@@ -185,6 +185,11 @@ export class HarnessService {
   readonly lifecycle = new TaskLifecycle();
   private readonly creations = new Map<string, { hash: string; promise: Promise<HarnessSnapshot> }>();
   #sessions = new Map<string, HarnessEntry>();
+  /** 主控会话最近使用顺序；只用于限制空闲 ACP 进程，不改变任何业务状态。 */
+  #sessionLastUsed = new Map<string, number>();
+  /** 每个空闲主控会话的最近空闲起点；用于 Orca 式空闲窗口判断。 */
+  #sessionIdleSince = new Map<string, number>();
+  #idleEvictionTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * 会话模式代际：设置变更时递增。新建会话记录当时的代际；进行中的回合结束后，
    * 下一回合发现代际不一致会关闭旧会话并按新设置重建，避免忙碌时切换被永久忽略。
@@ -205,7 +210,16 @@ export class HarnessService {
     private readonly resolveSessionIdentity: () => Promise<{ readonly fingerprint: string; readonly runtime?: import("../runtimes/types").RuntimeProvenance }> = async () => ({ fingerprint: "injected-harness-session" }),
     /** 新建Task契约由Engine启用；独立服务测试缺省旧规则，存量manifest不迁移。 */
     private readonly singleWorkflowForAcceptance = false,
+    /** 空闲主控 ACP 会话硬上限；资源压力下最终保留的会话数。 */
+    private readonly maxIdleSessions = 3,
+    /** Orca 式空闲窗口：正常保留的主控会话超过该时长才休眠。 */
+    private readonly idleSessionHibernateAfterMs = 30 * 60_000,
+    /** 超出硬上限的会话额外宽限；避免快速切换 Task 时反复重建。 */
+    private readonly idleSessionOverflowGraceMs = 60_000,
   ) {
+    if (!Number.isSafeInteger(maxIdleSessions) || maxIdleSessions < 0) throw new Error("空闲主控会话上限必须为非负整数。");
+    if (!Number.isSafeInteger(idleSessionHibernateAfterMs) || idleSessionHibernateAfterMs < 1) throw new Error("主控会话空闲窗口必须为正整数毫秒。");
+    if (!Number.isSafeInteger(idleSessionOverflowGraceMs) || idleSessionOverflowGraceMs < 0) throw new Error("主控会话超限宽限必须为非负整数毫秒。");
     // 仅测试夹具仍可使用旧构造器形状；生产 Engine 只传 ACP factory，且仓库不再
     // 提供任何 Base URL/API key 配置读写实现。
     if (legacyCreate) {
@@ -488,6 +502,9 @@ export class HarnessService {
       entry.session?.close?.();
       entry.session = null;
     }
+    this.#sessionLastUsed.clear();
+    this.#sessionIdleSince.clear();
+    if (this.#idleEvictionTimer) { clearTimeout(this.#idleEvictionTimer); this.#idleEvictionTimer = null; }
   }
 
   /**
@@ -500,11 +517,72 @@ export class HarnessService {
    */
   closeIdleSessions(): void {
     this.#sessionEpoch += 1;
-    for (const entry of this.#sessions.values()) {
+    for (const [harnessRunId, entry] of this.#sessions) {
       if (entry.turn || entry.session?.isRunning) continue;
       entry.session?.close?.();
       entry.session = null;
+      entry.commandsSubscription?.();
+      entry.commandsSubscription = undefined;
+      entry.commandsSession = undefined;
+      this.#sessionLastUsed.delete(harnessRunId);
+      this.#sessionIdleSince.delete(harnessRunId);
     }
+    if (this.#idleEvictionTimer) { clearTimeout(this.#idleEvictionTimer); this.#idleEvictionTimer = null; }
+  }
+
+  /** 可安全休眠的会话集合；evict 与定时器必须共用同一谓词，避免 1ms 空转。 */
+  private idleSessionEntries(): Array<[string, HarnessEntry]> {
+    return [...this.#sessions.entries()].filter(([, entry]) => {
+      const snapshot = entry.projection.snapshot();
+      // 对齐 Orca 的安全休眠条件：只关闭已完成、无排队消息、无待办总结的空闲会话。
+      return Boolean(entry.session && !entry.turn && !entry.session.isRunning
+        && snapshot.status === "idle"
+        && snapshot.messageQueue.length === 0
+        && !snapshot.impactSummaries?.some(item => item.status === "pending"));
+    });
+  }
+
+  /**
+   * 参考 Orca 的 agent hibernation：空闲窗口内保留会话；窗口到期或超出硬上限的
+   * 宽限到期后才关闭最久未用会话。只释放原生会话与命令订阅；Journal、投影和历史
+   * 消息不变，下一回合 ensureSession 会用耐久 capsule 重建独立会话。
+   */
+  private evictIdleSessions(): void {
+    const now = Date.now();
+    const idle = this.idleSessionEntries()
+      .sort(([left], [right]) => (this.#sessionLastUsed.get(left) ?? 0) - (this.#sessionLastUsed.get(right) ?? 0));
+    for (const [index, [harnessRunId, entry]] of idle.entries()) {
+      const idleMs = now - (this.#sessionIdleSince.get(harnessRunId) ?? now);
+      const overHardLimit = index >= Math.max(0, this.maxIdleSessions);
+      if (idleMs < this.idleSessionHibernateAfterMs && !(overHardLimit && idleMs >= this.idleSessionOverflowGraceMs)) continue;
+      entry.session?.close?.();
+      entry.session = null;
+      entry.commandsSubscription?.();
+      entry.commandsSubscription = undefined;
+      entry.commandsSession = undefined;
+      this.#sessionLastUsed.delete(harnessRunId);
+      this.#sessionIdleSince.delete(harnessRunId);
+    }
+    this.scheduleIdleEviction();
+  }
+
+  /** 为仍在空闲窗口内的会话安排下一次检查；定时器不阻止 Engine 正常退出。 */
+  private scheduleIdleEviction(): void {
+    if (this.#idleEvictionTimer) { clearTimeout(this.#idleEvictionTimer); this.#idleEvictionTimer = null; }
+    const now = Date.now();
+    const idle = this.idleSessionEntries()
+      .sort(([left], [right]) => (this.#sessionLastUsed.get(left) ?? 0) - (this.#sessionLastUsed.get(right) ?? 0));
+    let delay = Number.POSITIVE_INFINITY;
+    for (const [index, [harnessRunId]] of idle.entries()) {
+      const idleMs = now - (this.#sessionIdleSince.get(harnessRunId) ?? now);
+      const due = index >= Math.max(0, this.maxIdleSessions)
+        ? Math.max(0, this.idleSessionOverflowGraceMs - idleMs)
+        : Math.max(0, this.idleSessionHibernateAfterMs - idleMs);
+      delay = Math.min(delay, due);
+    }
+    if (!Number.isFinite(delay)) return;
+    this.#idleEvictionTimer = setTimeout(() => { this.#idleEvictionTimer = null; this.evictIdleSessions(); }, Math.max(1, delay));
+    this.#idleEvictionTimer.unref?.();
   }
 
   /**
@@ -629,7 +707,7 @@ export class HarnessService {
         // 而不释放它，后续 Harness 会永久卡在一个已无人消费的 Promise 上。
         if(entry.turnToken===turnToken)this.rejectDecisionWaiters(harnessRunId, "Harness 主控回合已结束，无法再接收该决策答案。 ");
         unsubscribe();
-        if(entry.turnToken===turnToken){entry.recorder = null;entry.turn = null;}
+        if(entry.turnToken===turnToken){entry.recorder = null;entry.turn = null;this.#sessionIdleSince.set(harnessRunId, Date.now());this.evictIdleSessions();}
         this.scheduleImpactSummary(harnessRunId);
         // 回合正常结束（idle）后立即按耐久 FIFO 继续投递；用户停止/错误中断保持队列不自动派发。
         if (!this.exiting && entry.projection.snapshot().status === "idle" && entry.projection.snapshot().messageQueue.length > 0) void this.dispatchNext(harnessRunId).catch(() => {});
@@ -1170,6 +1248,8 @@ export class HarnessService {
     const session = entry.session ?? await this.createSession(harnessRunId, entry.projection.snapshot().cwd, prior, actions, entry.projection.snapshot().runtime??undefined);
     entry.session = session;
     entry.sessionEpoch = this.#sessionEpoch;
+    this.#sessionLastUsed.set(harnessRunId, Date.now());
+    this.#sessionIdleSince.delete(harnessRunId);
     // ACP 命令目录是会话态而非回合态：独立于 prompt 回合订阅，确保 UI 随时能拿到
     // available_commands_update；AcpHarnessSession 会把先于订阅到达的目录缓存重放。
     if (entry.commandsSession !== session) {

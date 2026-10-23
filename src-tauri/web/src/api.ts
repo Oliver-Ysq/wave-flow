@@ -86,7 +86,7 @@ export const api = {
       "projects.context",
       { projectId },
     ),
-  /** 读取执行前后完整diff；自动应用结果只读展示，不产生新的Git写入。 */
+  /** 读取执行前后完整diff；只读Git对象，不产生新的Git写入。 */
   reviewGit: (harnessRunId: string, executionId: string) =>
     action<import("../../../src/workspace/git-repository").GitReview>(
       "executions.review",
@@ -101,13 +101,6 @@ export const api = {
   /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
   savePartial: (harnessRunId: string, executionId: string) =>
     action<ExecutionResponse>("executions.savePartial", {
-      harnessRunId,
-      executionId,
-      authorized: true,
-    }),
-  /** 显式清理该 Execution 的受管 worktree；仅当前未归档任务且执行已终态时成功，已封存成果不受影响。 */
-  cleanupWorkspaces: (harnessRunId: string, executionId: string) =>
-    action<ExecutionResponse>("executions.cleanupWorkspaces", {
       harnessRunId,
       executionId,
       authorized: true,
@@ -282,6 +275,16 @@ export const api = {
     action<AppSettings>("settings.update", patch),
   listHarnesses: () => action<HarnessRunListResponse>("harnesses.list"),
   cliRuntimes: () => action<CliRuntimeListResponse>("runtimes.list"),
+  /** 技能库只读状态；缺失目录视为空库，非法 skill 返回可操作错误。 */
+  skillsStatus: () => action<import("./types").SkillLibraryStatus>("skills.status"),
+  /** 用户显式打开技能库目录；缺失时 Engine 创建空目录。 */
+  skillsOpen: () => action<{ opened: true }>("skills.open"),
+  /** 扫描本机 CLI 技能目录，返回可导入候选；只读。 */
+  skillsDiscover: () => action<import("./types").SkillDiscoverResult>("skills.discover"),
+  /** 从已识别的 CLI 技能目录导入一个 skill；同名目标拒绝。 */
+  skillsImport: (path: string) => action<{ name: string }>("skills.import", { path }),
+  /** 从用户选择的 skill.zip 导入一个 skill；Engine 负责路径/大小/内容校验。 */
+  skillsImportZip: (path: string) => action<{ name: string }>("skills.importZip", { path }),
   discoverCliRuntimes: () =>
     action<{ candidates: DiscoveredCliCandidate[] }>("runtimes.discover"),
   scanCliRuntimes: () => action<ScanCliRuntimesResponse>("runtimes.scan"),

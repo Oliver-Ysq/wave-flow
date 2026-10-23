@@ -23,6 +23,7 @@ export class ViewCache<T> {
   constructor(private readonly limit = 64) {if(!Number.isInteger(limit)||limit<1)throw new Error("视图缓存容量必须为正整数。");}
   get(key:string):T|undefined { const value=this.values.get(key);if(value!==undefined){this.values.delete(key);this.values.set(key,value);}return value; }
   set(key:string,value:T):void { this.values.delete(key);this.values.set(key,value);while(this.values.size>this.limit)this.values.delete(this.values.keys().next().value!); }
+  delete(key:string):void { this.values.delete(key); }
 }
 /** 按资源与 generation 防止旧响应覆盖；失效不取消后台业务操作。 */
 export class RequestFence {

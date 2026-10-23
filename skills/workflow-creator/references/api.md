@@ -4,9 +4,9 @@
 
 ## 宿主成果交接边界
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，再把该tree自动应用到主工作区：主工作区改动保持未提交、未暂存，不移动主分支、不push、不在主工作区自动commit。主工作区dirty、HEAD偏离冻结基准、存在未解决冲突或将被覆盖的ignored文件时跳过自动应用并记录原因；这不是业务失败，不回滚也不覆盖现场，用户处理工作区后在执行页重试“重新整理改动（不会重新执行）”，Worker不重跑。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，结果只保留在该worktree，不写入主工作区；主分支不移动、不push、不自动commit。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
-Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API。业务 complete 耐久后，写节点只释放自己的租约；`agent()` 返回原 JSON。运行期的 writer 退出核验或租约交接失败会抛 WorkflowContractError，`parallel()`/`pipeline()` 必须继续抛出（节点保持 completed，Execution 收敛为 interrupted）。Execution 结束后的封存与自动应用在宿主收尾阶段执行：失败不进入脚本，Engine 记录耐久 `source-error`，Execution 保持 completed，用户在执行页重试“重新整理改动（不会重新执行）”，不重跑 Worker。原版 resume 可只恢复宿主交接，业务 completed 不回退，不创建新 Worker 或假 executionAttempt。Codex/Kimi/DeepSeek Harness/Claude 的受管并行写已有真实证据，执行仍要求Engine冻结授权和已验证Adapter；不能使用未公开workspace作者字段。
+Wave Flow 新增宿主约束：Runtime 的 `finalizeCompleted` 不是作者 API。业务 complete 耐久后，写节点只释放自己的租约；`agent()` 返回原 JSON。运行期的 writer 退出核验或租约交接失败会抛 WorkflowContractError，`parallel()`/`pipeline()` 必须继续抛出（节点保持 completed，Execution 收敛为 interrupted）。Execution 结束后的封存在宿主收尾阶段执行：失败不进入脚本，Engine 记录耐久 `source-error`，Execution 保持 completed，不重跑 Worker；结果保留在受管 worktree。原版 resume 可只恢复宿主交接，业务 completed 不回退，不创建新 Worker 或假 executionAttempt。Codex/DeepSeek Harness/Claude 的受管并行写已有真实证据（Kimi 暂时下线），执行仍要求Engine冻结授权和已验证Adapter；不能使用未公开workspace作者字段。
 
 ## 两种模块形状
 
@@ -95,14 +95,14 @@ function agent<T extends JsonObject = JsonObject>(
 ): Promise<T | null>;
 ```
 
-执行一次完整的本机 CLI ACP Worker 会话（Codex、Kimi、Claude Code 或 DeepSeek Harness；
+执行一次完整的本机 CLI ACP Worker 会话（Codex、Claude Code 或 DeepSeek Harness；
 四者均已完成真实双角色验收，均可设为主控；Claude Code 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定）。直接 `await` 时失败会抛出并把节点标记为
 interrupted；在 `parallel()` / `pipeline()` 内失败时该任务结果为 `null`。
 
 ```ts
 type AgentOptions = {
   id: string;          // 必填；Run 内唯一稳定，1–120 位 [A-Za-z0-9._:/-]
-  cli: "codex" | "kimi" | "claude" | "dsh"; // 必填；选择执行该节点的本机 Agent CLI 种类，该 Runtime 必须在设置页验证通过；四种 CLI 均已完成真实双角色验收并可设为主控
+  cli: "codex" | "claude" | "dsh"; // 必填；选择执行该节点的本机 Agent CLI 种类，该 Runtime 必须在设置页验证通过；三种 CLI 均已完成真实双角色验收并可设为主控；"kimi" 支持已暂时下线
   label?: string;      // 可选展示名；缺省用 id
   cwd?: string;        // 可选；相对路径必须位于 Workflow 项目目录内
   model?: string;      // 可选；由 Adapter 决定是否支持
