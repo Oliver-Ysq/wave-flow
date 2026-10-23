@@ -2,7 +2,7 @@
 
 **让任务有章可循，让不同 Agent 发挥所长。**
 
-Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / Kimi / DeepSeek Harness / Claude Code Agent 分阶段执行，你可以随时查看进度、回答问题或停止任务。
+Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / DeepSeek Harness / Claude Code Agent 分阶段执行（Kimi CLI 支持已暂时下线，历史记录仍可查看），你可以随时查看进度、回答问题或停止任务。
 
 把任务交给可控的流程，把不同工作交给合适的 Agent。不必让一段越来越长的对话，承担从规划到交付的所有事情。
 
@@ -19,7 +19,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 3. **需要你时，再接手。** Agent 显式请求人工协助，你提交答案后，由原 Agent 确认继续；也可主动暂停或停止。
 4. **结束之后，有据可查。** 查看结构化交付与历史执行尝试；中断后显式恢复，不悄悄重跑。
 
-写入类 Workflow 使用一个受管 Git worktree：同一执行的所有写 Agent 共享同一目录，自动保存实际 tracked 改动与非 ignored untracked 文件（排除未跟踪 node_modules），无需提前填写成果文件路径。宿主不做冲突检测或合并，同一文件后写覆盖先写，因此任务应按模块/文件分区。执行完成后宿主把结果封存为一个受管 commit，并自动把改动写入主工作区（保持未提交、未暂存、不移动分支、不 push）；可随时查看执行前后完整 diff。
+写入类 Workflow 使用一个受管 Git worktree：同一执行的所有写 Agent 共享同一目录，自动保存实际 tracked 改动与非 ignored untracked 文件（排除未跟踪 node_modules），无需提前填写成果文件路径。宿主不做冲突检测或合并，同一文件后写覆盖先写，因此任务应按模块/文件分区。执行完成后宿主把结果封存为一个受管 commit，结果只保留在该受管 worktree，不写入主工作区；可查看执行前后完整 diff。
 
 ## 为什么是 Wave Flow？
 
@@ -31,9 +31,13 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ### 不押注一个 Agent，让不同 CLI 各展所长
 
-把 Codex、Kimi、DeepSeek Harness、Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。也可以结合各自模型、工具与 CLI 能力分配工作，让擅长分析的分析、擅长实现的实现。
+把 Codex、DeepSeek Harness、Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。也可以结合各自模型、工具与 CLI 能力分配工作，让擅长分析的分析、擅长实现的实现。
 
 每个 Worker 绑定独立真实 ACP 会话，使用你选择的本机 CLI 及其默认模型。多 CLI 协作利用不同模型与 Harness 的互补性，降低单一路径的盲区；当前由用户分配 CLI，不提供自动模型路由。
+
+### 一份技能库，执行时注入所有会话
+
+在 `~/.wave-flow/skills/<name>/SKILL.md` 维护自己的 skill，Wave Flow 会在每次主控与 Worker 会话启动时以软链投影注入，不写入、不覆盖原生 CLI 目录；单独使用 codex/claude/dsh 时完全不受影响。设置 → 技能 可以从本机各 CLI 的技能目录发现并导入，也可以上传单个 `skill.zip`；导入的 skill 会合并进主控斜线菜单（Codex 为 `$name`，Claude/DSH 为 `/name`），新建或空闲重开的主控会话即可使用；导入前会校验 SKILL.md、frontmatter、软链、同名冲突与 ZIP 路径/大小，导入是复制且不覆盖已有同名 skill。空库不改变任何行为；库非空但当前 CLI 没有已验证的注入能力时会直接拒绝启动，而不是静默忽略。
 
 ### 方案可以商量，执行权始终在你手里
 
@@ -63,13 +67,14 @@ Wave Flow 仍在早期开发，欢迎试用，也请留意：
 
 - 本地 Workflow 是用户明确选择的受信任扩展；不支持 URL 下载工作流、可视化流程编辑、远程控制或云同步。
 - 主控默认开启感知模式：使用用户原生 CLI 配置与工具（skill/MCP/CLI）读取信息，OS 只拒绝写入当前项目与 Engine 状态目录，因此项目文件不会被主控修改；修改项目仍必须提出 Workflow 并由用户确认。设置中可关闭感知模式，关闭后主控回到私有隔离 Home、全量写隔离与四个窄工具。项目保护只覆盖当前项目，不覆盖其他项目、其他 Git 仓库或用户 Home；网络与外部系统副作用不被文件策略证明，主控仍可读取凭据并调用已登录工具。感知模式禁止新建硬链接；启动前已存在的项目外硬链接别名不在路径沙箱可枚举范围内，需自行清理。Worker 使用可信原生 CLI 配置与权限，不额外施加 Wave Flow OS 文件隔离。worktree/cwd 只分离正常工作现场，不能阻止 Worker 修改其他目录、其他 worktree、共享 Git 或凭据；任务意图不是安全保证。一次执行只创建一个共享受管 worktree，所有写节点共用同一目录；宿主不做冲突检测或合并，同一文件后写覆盖先写，因此任务应按模块/文件分区。Git diff 不证明工作区外影响，也不替代敏感内容审阅。
-- 执行完成后宿主把共享 worktree 封存为一个受管 commit 并自动把改动写入主工作区（保持未提交、未暂存、不移动分支、不 push），可随时查看执行前后完整 diff。主工作区存在未提交改动、HEAD 漂移、未解决冲突或 ignored 覆盖风险时跳过应用并记录原因：处理这些现场后可在执行页重新整理；HEAD 已前进时不做破坏性 reset，只能审阅变更后自行处理。原生 CLI 仍使用 `~/.codex`、`~/.kimi-code`、`~/.dsh`、`~/.claude`；配置与凭据也可能被模型工具修改。
+- 执行完成后宿主把共享 worktree 封存为一个受管 commit，结果只保留在该受管 worktree，不写入主工作区；可随时查看执行前后完整 diff。原生 CLI 仍使用 `~/.codex`、`~/.dsh`、`~/.claude`；配置与凭据也可能被模型工具修改。
+- Kimi CLI 支持已暂时下线：设置页不提供检测、验证、默认主控或 Worker 分配入口，历史 Journal/Execution 记录仍只读可查；恢复需重新接回并验收，旧记录不会自动重写。托管技能库只负责把 skill 文件投影进会话，不供给 `metadata.requires.bins` 声明的二进制、登录态、网络或 MCP；设置页会对 `requires.bins` 做只读 PATH 诊断并提示缺失项，但不会自动安装依赖或修改 PATH；Codex 的额外根会同时扩展其 sandbox 写根，投影目录因此只放在 Wave Flow 会话 scratch 内。Worker 按可信原生 CLI 模型可以修改技能库，从而影响后续主控会话，这不是新增的 OS 隔离边界。库内容变化会使旧 completed 节点在 Replay 时不再复用。
 - DeepSeek Harness 与 Claude Code 均已完成主控与 Worker 双角色真实验收，可在设置页设为默认主控。默认感知模式直接使用用户原生配置（skill/MCP/CLI/登录态可用）；关闭感知模式时主控使用各自私有隔离 Home：Claude 只继承认证/模型 env（用户 hooks/permissions 不进入主控）；DeepSeek Harness 使用出厂 profile 骨架且清空用户 patch，凭据仅软链引用。DeepSeek Harness 需在 `$DSH_HOME` 配置 provider key，且其 CLI 要求 Node ≥ 24 运行时（Node ≤ 22 下会静默退出，无任何输出）。Claude Code 的验收验证的是 harness 兼容性（Claude Code 2.1.304 + claude-agent-acp 0.94.0），模型侧由用户 `~/.claude/settings.json` 的认证配置决定（验收使用 Anthropic 兼容端点，非 Anthropic 模型）。
 - 完整总结、当前现场补充及 writer 安全交接是修订启动的前置条件。新版所有实际节点重新工作，不跨 Execution 缓存旧完成结果。新 Task 使用单链契约，旧多卡记录不自动迁移。
 - 中断恢复只复用同一执行内严格匹配的已完成前缀；不会回滚文件或撤销外部副作用。
 - Worker 原生会话持续五分钟无实质进展（正文/工具/计划事件）时，执行器记录一条停滞诊断提示，不自动中断、不 cancel、不重发任务；等待人工答案、用户暂停与控制操作不计入窗口，唯一出口是用户显式停止。静默和 read-only 意图都不能证明没有副作用。
 - 原版恢复须先完成执行总结并核验现场；Git 现场变化会要求独立影响面补充和重新确认。未交接 writer、未保存改动或旧成果不一致会阻止恢复，不自动回滚。Git 指纹只覆盖可核验文件，不证明外部系统状态。
-- 业务已完成但最终 Git 封存或自动应用失败时，可显式重试收尾（不会重新执行 Workflow），不重跑业务 Worker；未知 writer 退出仍会阻止交接。
+- 业务已完成但最终 Git 封存失败时，可显式重试收尾（不会重新执行 Workflow），不重跑业务 Worker；未知 writer 退出仍会阻止交接。
 - 工作台与执行引擎运行在本机；模型请求仍由所选 CLI 发送给其服务商，不代表离线推理或数据不出本机。
 
 如果你有建议，或者希望参与项目维护，欢迎联系：<oliver.ysq@gmail.com>

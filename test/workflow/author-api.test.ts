@@ -58,16 +58,14 @@ describe("Workflow 作者 API", () => {
     }]);
   });
 
-  test("接受 cli: kimi/claude/dsh，拒绝未知 cli", async () => {
+  test("接受 cli: claude/dsh；暂时下线的 kimi 与未知 cli 拒绝", async () => {
     const host = new MemoryHost();
-    const result = await executeWorkflow(workflow(async () => agent("Review", { id: "kimi-node", cli: "kimi" })), undefined, host);
-    expect(result).toEqual({ id: "kimi-node" });
-    expect(host.agents).toEqual([expect.objectContaining({ id: "kimi-node", cli: "kimi" })]);
     for (const cli of ["claude", "dsh"] as const) {
       const extra = new MemoryHost();
       await executeWorkflow(workflow(async () => agent("Review", { id: `${cli}-node`, cli })), undefined, extra);
       expect(extra.agents).toEqual([expect.objectContaining({ id: `${cli}-node`, cli })]);
     }
+    await expect(executeWorkflow(workflow(async () => agent("Review", { id: "kimi-node", cli: "kimi" })), undefined, host)).rejects.toThrow("支持已暂时下线");
     await expect(executeWorkflow(workflow(async () => agent("unsupported", { id: "unknown-cli", cli: "traex" as never })), undefined, host)).rejects.toThrow("当前仅支持 codex、kimi、claude 或 dsh");
   });
 
