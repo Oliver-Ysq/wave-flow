@@ -101,8 +101,18 @@ export function MentionComposer({
   const resize = useCallback(() => {
     const input = inputRef.current;
     if (!input) return;
-    input.style.height = "0px";
-    input.style.height = `${Math.min(input.scrollHeight, 220)}px`;
+    // 先用 auto 量内容高度：不要归零，否则每次按键都会让浏览器先按 0 高度排版一次，
+    // 滚动位置会被拉回顶部。限高在外层 control 上，textarea 自身永远不滚动。
+    input.style.height = "auto";
+    const contentHeight = input.scrollHeight;
+    input.style.height = `${contentHeight}px`;
+    // 高亮层是覆盖层，必须和被覆盖的文本同宽同高；滚动由外层 control 承担，
+    // 两层一起位移，mention 才不会和正文错行（下拉回弹时也不会把下方文字漏出来）。
+    const highlighter = input.parentElement?.querySelector<HTMLElement>(".composer-mentions__highlighter") ?? null;
+    if (highlighter) {
+      highlighter.style.width = `${input.clientWidth}px`;
+      highlighter.style.height = `${contentHeight}px`;
+    }
     onLayout?.();
   }, [onLayout]);
 

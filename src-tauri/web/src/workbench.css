@@ -588,7 +588,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .plan-pending-bar > button:hover { filter:brightness(1.08); }
 .agent-workbench .plan-pending-bar > button:focus-visible { outline:2px solid var(--wf-accent); outline-offset:2px; }
 .agent-workbench .conversation-composer:focus-within { border-color:color-mix(in srgb, var(--wf-accent) 65%, var(--wf-line)); box-shadow:0 0 0 3px color-mix(in srgb, var(--wf-accent-wash) 65%, transparent); }
-.agent-workbench .conversation-composer textarea { display:block; box-sizing:border-box; min-height:72px; max-height:none; overflow-y:hidden; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif, system-ui; resize:none; }
+.agent-workbench .conversation-composer textarea { display:block; box-sizing:border-box; min-height:72px; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif, system-ui; resize:none; }
 .agent-workbench .conversation-composer textarea::placeholder { color:var(--wf-faint); }
 .agent-workbench .conversation-composer .composer-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px; margin:0; padding:0 10px 8px 14px; border-top:1px solid color-mix(in srgb, var(--wf-line-soft) 78%, transparent); }
 .agent-workbench .composer-guidance { display:flex; align-items:center; min-width:0; gap:10px; color:var(--wf-faint); }
@@ -1449,10 +1449,15 @@ details.execution-workspace-evidence>article{margin-top:10px}
 /* react-mentions textarea 叠层：mention 是整块高亮，Backspace 按库的 mention 边界整条删除。 */
 .agent-workbench .conversation-composer > .composer-mentions { display:block; width:100%; margin:0; }
 .agent-workbench .composer-mentions { position:relative; width:100%; text-align:left; }
-.agent-workbench .composer-mentions__control { position:relative; width:100%; }
-.agent-workbench .composer-mentions__highlighter { box-sizing:border-box; width:100%; min-height:72px; padding:14px 16px 7px; position:relative; z-index:2; color:transparent !important; -webkit-text-fill-color:currentColor; border:0 !important; font:14px/1.55 ui-sans-serif,system-ui; white-space:pre-wrap; overflow-wrap:anywhere; pointer-events:none; }
+/* 滚动发生在这一层，而不是 textarea：高亮层和文本同属一个滚动容器，橡皮筋回弹时一起位移，
+   mention 与正文不会错行、也不会把下一行文字漏到上方；这里也是唯一的限高位置。 */
+.agent-workbench .composer-mentions__control { position:relative; width:100%; max-height:clamp(160px,34vh,320px); overflow-y:auto; overflow-x:hidden; overscroll-behavior:none; scrollbar-width:thin; }
+/* react-mentions 会给高亮层写内联 position:relative，只能用 !important 覆盖成覆盖层。
+   高度由 JS 同步成 textarea 内容高度、宽度同步成可用宽度后，换行和 mention 才对得上。 */
+.agent-workbench .composer-mentions__highlighter { box-sizing:border-box; position:absolute !important; top:0 !important; left:0 !important; right:0 !important; bottom:auto !important; min-height:0; padding:14px 16px 7px; z-index:2; color:transparent !important; -webkit-text-fill-color:currentColor; border:0 !important; font:14px/1.55 ui-sans-serif,system-ui; white-space:pre-wrap; overflow-wrap:anywhere; overflow:hidden; pointer-events:none; }
 .agent-workbench .composer-mentions__highlighter span { visibility:visible !important; }
-.agent-workbench .composer-mentions__input { display:block; box-sizing:border-box; width:100%; min-height:72px; max-height:220px; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif,system-ui; resize:none; overflow-y:hidden; }
+/* textarea 只按内容长高、自身永不滚动（滚动交给上面的 control），输入区高度因此有界。 */
+.agent-workbench .composer-mentions__input { display:block; box-sizing:border-box; position:relative !important; width:100%; min-height:72px; max-height:none; padding:14px 16px 7px; border:0; border-radius:14px 14px 0 0; outline:0; z-index:1; background:transparent; color:var(--wf-ink); caret-color:var(--wf-ink); font:14px/1.55 ui-sans-serif,system-ui; resize:none; overflow-y:hidden !important; }
 .agent-workbench .composer-mentions__input::placeholder { color:var(--wf-faint); }
 .agent-workbench .composer-mentions__mention { position:relative; color:var(--wf-accent-strong); -webkit-text-stroke:0.45px var(--wf-accent-strong); }
 .agent-workbench .composer-mentions__mention::before { content:""; position:absolute; left:0; top:50%; width:12px; height:12px; transform:translateY(-50%); background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237d89f5' stroke-width='1.4'%3E%3Cpath d='M8 1.8 14 5v6L8 14.2 2 11V5z'/%3E%3Cpath d='M2 5l6 3.2L14 5M8 8.2V14'/%3E%3C/svg%3E") center/contain no-repeat; }
