@@ -47,6 +47,30 @@ Adjust proposals through conversation and retain each revision. Discarding a pro
 
 > Each new Task owns one evolving workflow chain. Revise source, input or CLI configuration after feedback, then explicitly confirm a new Execution on the shared worktree handed over from the latest write execution. Original-version recovery stays within the same Execution; arbitrary node rollback and cross-version automatic replay are not provided.
 
+### Explicit failure boundaries for execution and evidence
+
+Stopping or exiting revokes startup permission for queued and initializing nodes, so Workers do not start after the Run has stopped. A failed Journal append rejects subsequent writes and preserves the original error, while shutdown still makes a best effort to signal real Workers. Writer processes record a durable spawn intent before launch; if a crash leaves their state unverifiable, resume fails closed instead of risking duplicate writers.
+
+Large evidence path lists are collected as complete streams rather than truncated evidence, and the changes viewer supports pagination. Image attachments are limited to 10MB each and are checked for identity before reading and actual byte size afterward. Execution details poll with a single in-flight request, preventing large evidence responses from starving the page.
+
+## Download and installation
+
+Current version: `v0.2.2`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
+
+```sh
+curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
+```
+
+You can also download `Wave.Flow_0.2.2_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+
+```sh
+bun install
+bun run desktop:dev   # development mode
+bun run desktop:build # release package
+```
+
+Build output is under `src-tauri/target/release/bundle/`. Development machines without a certificate use ad-hoc signing. Distribution still requires a Developer ID plus validation of hardened runtime, Bun JIT entitlements and notarization. Intel builds need an additional target and separate validation.
+
 ## A strong fit for
 
 - **Broad, evidence-driven exploration: technical research and large-scale code review.** Let multiple CLIs explore different directions, then verify and compare findings to reduce omissions and bias from a single model or Harness.

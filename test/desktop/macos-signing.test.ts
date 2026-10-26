@@ -11,4 +11,10 @@ test("macOS 构建在交付前统一签名主程序与 Desktop Engine", async ()
   expect(script).toContain('"--verify", "--deep", "--strict"');
   expect(script).toContain("APPLE_SIGNING_IDENTITY");
   expect(script).toContain("Bundle ID 与签名身份不一致");
+  expect(script).toContain("Tauri 在本脚本之前已经生成 dmg");
+  expect(script).toContain('"-srcfolder", staging');
+  expect(script).toContain('"-s", "/Applications"');
+  expect(script).toContain('"-readonly", "-mountpoint", mountPoint, dmgPath');
+  expect(script).toContain("dmg 内 App 的签名身份不一致");
+  expect(script).toContain("dmg 缺少 Applications 安装入口");
 });

@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const APP_IDENTIFIER = "com.wave-flow.desktop";
@@ -30,6 +31,30 @@ if (!appIdentity.split("\n").includes(`Identifier=${APP_IDENTIFIER}`)) throw new
 if (!engineIdentity.split("\n").includes(`Identifier=${ENGINE_IDENTIFIER}`)) throw new Error("Desktop Engine 签名身份不一致。");
 const bundleIdentity = capture("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", resolve(appPath, "Contents/Info.plist")]).trim();
 if (bundleIdentity !== APP_IDENTIFIER) throw new Error("外层 App 的 Bundle ID 与签名身份不一致。");
+
+// Tauri 在本脚本之前已经生成 dmg：必须用签名后的 App 重打包，再挂载复核，避免交付旧签名。
+const version = capture("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", resolve(appPath, "Contents/Info.plist")]).trim();
+const dmgPath = resolve(`src-tauri/target/release/bundle/dmg/Wave Flow_${version}_aarch64.dmg`);
+const staging = mkdtempSync(resolve(tmpdir(), "wave-flow-release-staging-"));
+const mountPoint = mkdtempSync(resolve(tmpdir(), "wave-flow-release-check-"));
+let mounted = false;
+try {
+  run("ditto", [appPath, resolve(staging, "Wave Flow.app")]);
+  run("ln", ["-s", "/Applications", resolve(staging, "Applications")]);
+  run("hdiutil", ["create", "-quiet", "-fs", "HFS+", "-volname", "Wave Flow", "-srcfolder", staging, "-ov", "-format", "UDZO", dmgPath]);
+  run("hdiutil", ["verify", dmgPath]);
+  run("hdiutil", ["attach", "-quiet", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmgPath]);
+  mounted = true;
+  run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", resolve(mountPoint, "Wave Flow.app")]);
+  const mountedIdentity = capture("codesign", ["-dv", "--verbose=4", resolve(mountPoint, "Wave Flow.app")]);
+  if (!mountedIdentity.split("\n").includes(`Identifier=${APP_IDENTIFIER}`)) throw new Error("dmg 内 App 的签名身份不一致。");
+  if (capture("readlink", [resolve(mountPoint, "Applications")]).trim() !== "/Applications") throw new Error("dmg 缺少 Applications 安装入口。");
+} finally {
+  if (mounted) run("hdiutil", ["detach", "-quiet", mountPoint]);
+  rmSync(staging, { recursive: true, force: true });
+  rmSync(mountPoint, { recursive: true, force: true });
+}
+console.log(`已生成并挂载复核：${dmgPath}`);
 
 if (identity === "-") {
   console.warn("已使用 ad-hoc 身份签名，App/Engine 身份及严格校验通过；首次权限弹窗行为仍需干净安装验收，正式发布前须验证 Developer ID、hardened runtime/JIT entitlement 与公证。");

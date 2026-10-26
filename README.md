@@ -47,6 +47,30 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 > 一个新 Task 持有一条持续演进的工作流链。执行后可根据反馈修订源码、输入或 CLI 配置；确认新版后创建新的 Execution，在已安全交接的当前现场重新工作。原版本恢复仍属于同一 Execution，不提供任意节点回滚或跨版本自动重放。
 
+### 执行与证据也有明确的故障边界
+
+停止或退出会同时撤销排队与初始化中的启动许可，不会在新任务已停止后继续启动 Worker。Journal 写入失败会阻止后续追加，并保留首个错误；停止流程仍尽力通知真实 Worker。writer 在创建进程前先记录启动意图，崩溃后无法核验时拒绝直接恢复，避免重复写入。
+
+大批量成果路径采用流式收集，不截断为不完整证据；变更列表支持分页审阅。图片附件单张上限 10MB，并在读取前后复核文件身份与实际字节数。执行详情采用单请求轮询，避免较大证据响应造成页面持续加载。
+
+## 下载与安装
+
+当前版本：`v0.2.2`，支持 macOS 12+ / Apple Silicon。可在终端一键安装：
+
+```sh
+curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
+```
+
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.2.2_aarch64.dmg`，或从源码构建：
+
+```sh
+bun install
+bun run desktop:dev   # 开发模式
+bun run desktop:build # 生成 release 安装包
+```
+
+产物位于 `src-tauri/target/release/bundle/`。开发机没有证书时使用 ad-hoc 签名；正式分发仍需配置 Developer ID，并验证 hardened runtime、Bun JIT entitlement 与公证。Intel 构建需要另加目标并验证。
+
 ## 特别适合这些任务
 
 - **广覆盖、重证据的探索：技术调研与大范围 CR。** 多 CLI 独立探索不同方向，再集中复核与比较，减少单一模型或 Harness 的遗漏和偏差。
