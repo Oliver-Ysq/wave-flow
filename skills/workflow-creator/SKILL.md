@@ -54,7 +54,9 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 并发分支共享同一个 Workflow 执行上下文。
 
 并发与多 Agent 的设计细节（计划→扇出→汇总、逐 item 流水线、独立验证、代码改动任务的
-写冲突约束等）见 [references/patterns.md](references/patterns.md)。
+写冲突约束等）见 [references/patterns.md](references/patterns.md)。内置目录的 `deep-research`
+与 `deep-cr` 展示了长任务编排的完整骨架（计划确认、分维度并行、逐条独立核验、缺口补证、
+红队审查、覆盖披露）；起草同类 Workflow 时按同一骨架组织，不要退化成"并行几个节点再汇总"。
 
 ## 托管技能库
 

@@ -9,5 +9,6 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts", "src-tauri/web/**/*.ts", "src-tauri/web/**/*.tsx"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts", "src-tauri/web/**/*.ts", "src-tauri/web/**/*.tsx"],
+  "exclude": ["src/harness/templates"]
 }

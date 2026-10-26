@@ -1,11 +1,14 @@
 import {afterEach,expect,test} from "bun:test";
-import {mkdtemp,rm} from "node:fs/promises";
+import {mkdtemp,readdir,readFile,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {dirname,join} from "node:path";
+import {fileURLToPath} from "node:url";
 import {HarnessService} from "../../src/harness/service";
 import {defineTemplate,isTemplateOrigin,listWorkflowTemplates,validateTemplateInput,canonicalJson} from "../../src/harness/workflow-templates";
+import {compileRestrictedWorkflow} from "../../src/workflow/restricted/restricted-runtime";
 import {HarnessJournal} from "../../src/harness/journal";
 const roots:string[]=[];
+const templateDir=join(dirname(fileURLToPath(import.meta.url)),"../../src/harness/templates");
 test("已开始的迟到参数提案在用户中止后零落盘，随后可显式新回合整理",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wf-guidance-late-proposal-"));roots.push(root);
  const state=join(root,"state");let release!:()=>void,finished!:()=>void;
@@ -137,6 +140,47 @@ test("目录真实编译、快照隔离与输入校验不填默认、不抹空�
  expect(canonicalJson({a:1,b:2})).toBe(canonicalJson({b:2,a:1}));
  (template.inputSchema as Record<string,unknown>).type="string";
  expect(listWorkflowTemplates()[0]!.inputSchema.type).toBe("object");
+});
+test("内置预置以文件维护：内嵌源码与磁盘文件一致，且目录文件全部注册",async()=>{
+ const files=(await readdir(templateDir)).filter(name=>name.endsWith(".ts")&&!name.endsWith(".d.ts")).sort();
+ expect(files.length).toBe(listWorkflowTemplates().length);
+ for(const template of listWorkflowTemplates()){
+  const path=join(templateDir,`${template.id}.ts`);
+  expect(files).toContain(`${template.id}.ts`);
+  // 内嵌文本与磁盘文件必须逐字节一致，否则模板指纹与实际审阅到的脚本会分叉。
+  expect(await readFile(path,"utf8")).toBe(template.source);
+  // 文件本体必须独立通过受限编译门禁，不依赖目录注册时的副作用。
+  const module=compileRestrictedWorkflow(template.source);
+  expect(module.meta.name).toBe(template.meta.name);
+  expect(module.meta.phases.map(phase=>phase.title)).toEqual(template.meta.phases.map(phase=>phase.title));
+ }
+});
+test("深度调研模板：编译合法、Schema 边界与参数校验生效",()=>{
+ const templates=listWorkflowTemplates();
+ expect(templates.map(item=>item.id)).toEqual(["code-review","deep-research","deep-cr"]);
+ const research=templates.find(item=>item.id==="deep-research")!;
+ expect(research.version).toBe(1);expect(research.meta.name).toBe("deep-research");
+ expect(research.meta.phases.map(phase=>phase.title)).toEqual(["计划","调研","核验","补证","综评","批判","定稿"]);
+ expect(isTemplateOrigin((({source,...origin})=>origin)(research))).toBe(true);
+ validateTemplateInput(research.inputSchema,{topic:"端侧推理框架选型"});
+ validateTemplateInput(research.inputSchema,{topic:"t",questions:["a"],context:"",depth:"deep",language:"中文"});
+ validateTemplateInput(research.inputSchema,{topic:"t",depth:"standard"});
+ expect(()=>validateTemplateInput(research.inputSchema,{})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(research.inputSchema,{topic:"",depth:"deep"})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(research.inputSchema,{topic:"t",depth:"deeper"})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(research.inputSchema,{topic:"t",questions:[]})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(research.inputSchema,{topic:"t",extra:1})).toThrow("参数无效");
+});
+test("深度CR模板：编译合法、Schema 边界与参数校验生效",()=>{
+ const review=listWorkflowTemplates().find(item=>item.id==="deep-cr")!;
+ expect(review.meta.phases.map(phase=>phase.title)).toEqual(["摸底","分维审查","取证复核","交叉裁决","盲区扫描","定稿汇总"]);
+ expect(isTemplateOrigin((({source,...origin})=>origin)(review))).toBe(true);
+ validateTemplateInput(review.inputSchema,{target:"src/"});
+ validateTemplateInput(review.inputSchema,{target:"src/",base:"main",focus:["并发"],context:"",language:"中文"});
+ expect(()=>validateTemplateInput(review.inputSchema,{})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(review.inputSchema,{target:"",base:"main"})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(review.inputSchema,{target:"src/",focus:[]})).toThrow("参数无效");
+ expect(()=>validateTemplateInput(review.inputSchema,{target:"src/",depth:"deep"})).toThrow("参数无效");
 });
 test("已保存且目录不再提供的版本仍按冻结源码/Schema编辑，旧批准保持不变",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wf-template-upgrade-"));roots.push(root);

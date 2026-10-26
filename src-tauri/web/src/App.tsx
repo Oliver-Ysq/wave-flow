@@ -1810,7 +1810,7 @@ export function App() {
                 : undefined
             }
             onClose={() => setTemplatePicker(false)}
-            onSave={async (selection, requestId) => {
+            onSave={async (selection, requestId, description) => {
               const owner = harnessRef.current,
                 token = navigationToken.current;
               const response = owner
@@ -1819,7 +1819,7 @@ export function App() {
                   )
                 : await api.createTemplateTask(
                     draftProjectId ?? selectedProjectId!,
-                    "只读代码审查与独立复核",
+                    description,
                     requestId,
                     selection,
                   );
