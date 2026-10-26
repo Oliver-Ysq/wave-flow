@@ -60,6 +60,7 @@
         </div>
         <div class="docs-nav__group">
           <p>工作流</p>
+          <a href="#builtin">内置预置</a>
           <a href="#workflow">编写 Workflow</a>
           <a href="#author-api">作者 API</a>
           <a href="#parallel-write">并行与写入</a>
@@ -86,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.2.2</span>
+          <span>适用于 v0.2.3</span>
           <span>macOS 12+</span>
           <span>更新于 2026-10</span>
         </div>
@@ -108,7 +109,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.2.2 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.2.3 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -149,6 +150,19 @@ bun run desktop:dev</code></pre>
           </ol>
           <div class="callout">
             <p><strong>不要把“跑完”当成“验收”。</strong>Schema 校验通过只证明结果结构合法，不证明答案正确。写入类任务应在流程末尾安排可验证的检查或人工复核。</p>
+          </div>
+        </section>
+
+        <section id="builtin">
+          <h2>内置预置工作流</h2>
+          <p>除了用对话生成方案，你也可以直接选一个内置预置开始。它们是随应用分发的编排脚本，参数由你在保存前确认；三个预置全程只读，不修改任何文件，也不运行构建或测试。</p>
+          <ul>
+            <li><strong>代码审查。</strong>两个顺序只读 Worker：先审查指定范围，再由另一个 Worker 独立复核证据，剔除无依据的结论。</li>
+            <li><strong>深度调研。</strong>计划 Agent 先把主题拆成可并行核验的研究问题，并等你确认或调整方向；随后并行多源调研，每条结论必须带原文摘录与来源地址，并由独立核验员重新打开来源逐条复核；再交叉检查互相矛盾、单一来源承重等问题；<code>deep</code> 模式还会按证据缺口做第二轮定向补证；最后经红队反向审查与修订，产出带引用与置信度分级的报告。</li>
+            <li><strong>深度代码审查。</strong>先摸底变更面、模块结构与仓库内的审查规范，再由六个专项审查员（正确性、安全、并发与状态、错误处理与资源、接口与数据兼容、意图与测试）并行审查；每个发现都要带文件、行区间、触发场景与置信度，并由独立复核员重新打开源码逐条核实、剔除误报；之后跨维度去重排序、给出合并建议，并扫描出未被覆盖的高风险文件。</li>
+          </ul>
+          <div class="callout">
+            <p><strong>预置只保证流程，不保证结论。</strong>深度调研的证据强度取决于你所用 CLI 是否具备检索与浏览能力；深度代码审查不运行代码，也不验证你的构建能通过。报告给出的是带证据的判断，仍需要人决定是否采纳。</p>
           </div>
         </section>
 

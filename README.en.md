@@ -16,7 +16,7 @@ For example: “Review this project, have another agent independently verify the
 
 With Wave Flow, you can:
 
-1. **Review before you run.** Generate and refine workflows through conversation, or start with the built-in read-only code review preset.
+1. **Review before you run.** Generate and refine workflows through conversation, or start from a built-in preset: read-only code review, deep research, or deep code review.
 2. **Follow work by stage.** A phase → executor view shows the division of work, each agent's state, streamed text, and tool activity.
 3. **Step in when needed.** Agents explicitly request human assistance. Your answer supplies information; the original agent confirms continuation. You can also pause or stop execution.
 4. **Inspect what happened.** Browse structured deliverables and historical attempts. Recover interrupted work explicitly—never through a silent rerun.
@@ -55,13 +55,13 @@ Large evidence path lists are collected as complete streams rather than truncate
 
 ## Download and installation
 
-Current version: `v0.2.2`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
+Current version: `v0.2.3`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
 
 ```sh
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.2.2_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.2.3_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install
@@ -80,6 +80,12 @@ Build output is under `src-tauri/target/release/bundle/`. Development machines w
 ## Quick start
 
 Open the desktop app and choose a project, then describe the goal directly, or choose a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start.
+
+Built-in presets:
+
+- **Code review**: two sequential read-only workers—review first, then an independent worker re-checks the evidence and drops unsupported claims.
+- **Deep research**: a planning agent turns the topic into parallel research questions and waits for your confirmation; research then runs in parallel, and every claim must carry an excerpt plus source URL that an independent verifier re-opens and checks. Contradictions and single-source claims are cross-checked; `deep` mode runs a second targeted round for evidence gaps; a red-team pass and revision produce a report with citations and confidence levels. It needs a CLI whose workers can search and browse.
+- **Deep code review**: it first maps the change surface, module structure and repository review conventions, then six specialist reviewers (correctness, security, concurrency and state, error handling and resources, interface and data compatibility, intent and tests) review in parallel. Every finding needs file, line range, trigger and confidence, and an independent verifier re-opens the source to confirm it and drop false positives; findings are then deduplicated, ranked and cross-checked, and blind spots are reported. Read-only throughout: it never modifies files and never runs builds or tests.
 
 Type `/` in the composer to open the command menu: `/wave-flow` asks the controller to generate a Workflow proposal for the current goal; skills are advertised by the current controller CLI through ACP. A selected command becomes a bold accent-colored icon block without the leading slash or background; multiple commands can be inserted, and Backspace deletes a block as a whole. Selecting only fills the composer without sending. `/compact` is not provided.
 
