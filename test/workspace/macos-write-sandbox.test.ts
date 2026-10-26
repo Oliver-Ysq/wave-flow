@@ -198,3 +198,12 @@ test.skipIf(process.platform !== "darwin")("感知模式真实sandbox-exec：项
   expect(await Bun.file(join(root, "moved-project")).exists()).toBe(false);
   expect(await Bun.file(join(root, "moved-engine")).exists()).toBe(false);
 }, 20_000);
+
+test.skipIf(process.platform !== "darwin")("macOS系统/tmp别名在两种写边界中统一规范化", async () => {
+  const { main } = await fixture(), scratch = join("/tmp", `wave-flow-system-tmp-${crypto.randomUUID()}`);
+  await mkdir(scratch); directories.push(scratch);
+  for (const mode of ["isolated", "perception"] as const) {
+    const profile = await macosWriteProfile({ workspace: null, scratch, controlFiles: [], protectedDirectories: [main], mode });
+    expect(profile).toContain("/private/tmp/");
+  }
+});

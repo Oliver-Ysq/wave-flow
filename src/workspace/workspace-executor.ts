@@ -21,6 +21,12 @@ export type ManagedWriterExecutor = AgentNodeExecutor & {
  */
 export class WorkspaceExecutor implements AgentNodeExecutor {
   #active = new Map<string, { lease: WorkspaceLease; writer: ManagedWriterExecutor }>();
+  /**
+   * 已收到 stop 但尚未登记 active 的写节点：stop 不能误报“没有执行器”，
+   * 改为耐久停止意图；execute 在 acquire、createWriter、真实投递前的每个关口复核，
+   * 命中即停止初始化并清理刚创建的 writer，绝不 spawn 后投递业务。
+   */
+  #startupStops = new Set<string>();
   #control: ControlServer | null = null;
   constructor(
     private readonly manager: WorkspaceManager,
@@ -31,7 +37,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     /** 只读节点执行器；不使用写workspace租约。 */
     private readonly readOnly: AgentNodeExecutor,
     /** 已验证隔离启动器工厂，创建时尚不启动业务。 */
-    private readonly createWriter: (node: AgentNodeSnapshot, binding: { readonly cwd: string; readonly scratch: string; readonly commonDirectory: string; readonly gitDirectory: string; readonly lease: WorkspaceLease; readonly bindWriter: (identity: string, evidence: WriterBindingEvidence) => Promise<void> }) => Promise<ManagedWriterExecutor> | ManagedWriterExecutor,
+    private readonly createWriter: (node: AgentNodeSnapshot, binding: { readonly cwd: string; readonly scratch: string; readonly commonDirectory: string; readonly gitDirectory: string; readonly lease: WorkspaceLease; readonly bindWriter: (identity: string, evidence: WriterBindingEvidence) => Promise<void>; /** spawn writer 进程前必须先耐久记录启动意图（崩溃窗口 fail closed 依据）。 */ readonly beginSpawn: () => Promise<void>; /** 仅底层 spawn 失败（进程确定未创建）时撤回启动意图。 */ readonly cancelSpawn: () => Promise<void> }) => Promise<ManagedWriterExecutor> | ManagedWriterExecutor,
     /** 原Engine证明不可用时的显式核查；缺省一律拒绝，不自动认领旧PID。 */
     private readonly verifyRecoveredWriter: WriterVerifier = async () => false,
   ) {}
@@ -50,20 +56,41 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
       const workspace = await this.manager.inspect(this.workspaceId);
       return this.readOnly.execute({ ...node, cwd: workspace.cwd, request: { ...node.request, cwd: workspace.cwd } });
     }
+    this.#assertStartupNotStopped(node);
     const workspace = await this.manager.inspect(this.workspaceId);
     const lease = await this.manager.acquire(this.workspaceId, { runId: this.runId, nodeId: node.id, attempt: node.executionAttemptId });
     let current = lease;
+    // stop 在 acquire 期间到达：writer 尚未创建、无任何启动意图，撤回租约即可。
+    if (this.#startupStops.has(node.id)) {
+      await this.manager.abandonUnstarted(lease);
+      throw new WorkflowContractError("节点已停止，不再创建 writer 或投递业务。");
+    }
     const bindWriter = async (identity: string, evidence: WriterBindingEvidence) => { current = await this.manager.bindWriter(current, identity, evidence); };
+    // spawn 前耐久启动意图：崩溃窗口内 writerIdentity 仍为 null 也能 fail closed；进程确定未创建时才允许撤回。
+    const beginSpawn = async () => { current = await this.manager.beginWriterSpawn(current); };
+    const cancelSpawn = async () => { current = await this.manager.cancelWriterSpawn(current); };
     let writer: ManagedWriterExecutor;
     try {
       const scratch = await this.manager.createScratch(lease.leaseId);
-      writer = await this.createWriter(node, { cwd: workspace.cwd, scratch, commonDirectory: workspace.commonDirectory, gitDirectory: workspace.gitDirectory, lease, bindWriter });
+      writer = await this.createWriter(node, { cwd: workspace.cwd, scratch, commonDirectory: workspace.commonDirectory, gitDirectory: workspace.gitDirectory, lease, bindWriter, beginSpawn, cancelSpawn });
       if (!this.#control) throw new WorkflowContractError("WorkspaceExecutor尚未绑定ControlServer。");
       writer.bindControl(this.#control);
     }
-    catch (error) { await this.manager.abandonUnstarted(lease); throw error; }
+    catch (error) {
+      // 启动意图已耐久但身份未绑定时撤回会被拒绝（spawn 后崩溃窗口语义）：保留租约与现场，由显式 resume fail closed 核验。
+      try { await this.manager.abandonUnstarted(current); } catch { /* 保留租约与现场。 */ }
+      throw error;
+    }
     const active = { get lease() { return current; }, writer };
     this.#active.set(node.id, active);
+    // stop 在初始化最后窗口（createWriter 之后、真实 execute 之前）到达：writer 尚未投递业务。
+    // 未耐久启动意图时撤回租约并移除登记；意图已耐久（工厂内 spawn 的执行器）则保留租约与现场，
+    // 由显式 resume fail closed 核验——不猜测终止无法核验的进程，也不吞掉停止事实。
+    if (this.#startupStops.has(node.id)) {
+      try { await this.manager.abandonUnstarted(current); this.#active.delete(node.id); }
+      catch { /* 保留租约与现场。 */ }
+      throw new WorkflowContractError("节点已停止，不再投递业务。");
+    }
     try {
       const result = await writer.execute({ ...node, cwd: workspace.cwd, request: { ...node.request, cwd: workspace.cwd } });
       if (!current.writerIdentity) throw new WorkflowContractError("写执行器未耐久绑定真实writer身份，拒绝交接。");
@@ -93,7 +120,8 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
           throw new Error("启动失败后旧写入进程尚未确认退出，已保留现场；请稍后重试。");
         }
       } else if (!current.writerIdentity) {
-        await this.manager.abandonUnstarted(current); this.#active.delete(node.id);
+        // 未耐久绑定身份的失败：能撤回才释放租约；启动意图仍在时保留租约与现场，由恢复流程 fail closed。
+        try { await this.manager.abandonUnstarted(current); this.#active.delete(node.id); } catch { /* 保留租约与现场。 */ }
       }
       // 已启动writer失败保留现场/租约；停止不自动回滚共享worktree中其他节点的改动。
       throw error;
@@ -134,6 +162,19 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
 
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> { const delegate = this.delegate(node); if (!delegate.pause) throw new WorkflowContractError("执行器不支持pause。"); await delegate.pause(node, signal); }
   async recover(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<AgentRecovery> { const delegate = this.delegate(node); if (!delegate.recover) throw new WorkflowContractError("执行器不支持recover。"); return delegate.recover(node, signal); }
-  async stop(node: AgentNodeSnapshot): Promise<void> { const delegate = this.delegate(node); if (!delegate.stop) throw new WorkflowContractError("执行器不支持stop。"); await delegate.stop(node); }
+  async stop(node: AgentNodeSnapshot): Promise<void> {
+    if (node.sandbox !== "workspace-write") { if (!this.readOnly.stop) throw new WorkflowContractError("执行器不支持stop。"); await this.readOnly.stop(node); return; }
+    // 先登记停止意图：尚未 active 的写节点不误报“没有执行器”；execute 的各关口复核此意图。
+    this.#startupStops.add(node.id);
+    const active = this.#active.get(node.id);
+    if (!active) return;
+    if (!active.writer.stop) throw new WorkflowContractError("执行器不支持stop。");
+    await active.writer.stop(node);
+  }
+
+  /** execute 启动关口：命中停止意图即拒绝；仅用于尚未取得租约等无需清理的位置。 */
+  #assertStartupNotStopped(node: AgentNodeSnapshot): void {
+    if (this.#startupStops.has(node.id)) throw new WorkflowContractError("节点已停止，不再启动 writer 或投递业务。");
+  }
   private delegate(node: AgentNodeSnapshot): AgentNodeExecutor { if (node.sandbox !== "workspace-write") return this.readOnly; const active = this.#active.get(node.id); if (!active) throw new WorkflowContractError("写节点没有当前Engine可控制的执行器。"); return active.writer; }
 }

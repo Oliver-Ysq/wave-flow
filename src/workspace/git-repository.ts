@@ -14,7 +14,7 @@ export class GitEvidenceLimitError extends WorkflowContractError {}
 /** 用户审阅的执行前后diff，不代表未提交现场或外部副作用。 */
 export type GitReview = {
   /** 原冻结基准。 */ readonly baseCommit: string;
-  /** 本次Execution最终封存commit。 */ readonly sourceCommit: string;
+  /** 本次Execution最终证据tree；不创建commit。 */ readonly sourceTree: string;
   /** 实际相对基准变更文件。 */ readonly paths: readonly string[];
 };
 /** 单文件有界diff；不能将省略当作没有改动。 */
@@ -24,13 +24,13 @@ export type GitFileDiff = {
   /** 二进制或过大时为true。 */ readonly omitted: boolean;
   /** 无省略时null，其他允许值说明不能inline的原因。 */ readonly reason: "binary" | "too-large" | null;
 };
-/** 一次Execution的最终封存请求；只提交到受管分支，不移动主工作区。 */
-export type GitSealRequest = {
-  /** 原Execution UUID，写入 commit trailer 用于幂等核验。 */
+/** 一次Execution的最终证据请求；只写证据ref，不创建commit、不移动主工作区。 */
+export type GitEvidenceRequest = {
+  /** 原Execution UUID，写入证据ref名用于幂等核验。 */
   readonly requestId: string;
   /** 执行前冻结的基准完整 oid；最终diff以它为起点。 */
   readonly baseCommit: string;
-  /** 交接时的worktree HEAD；封存commit必须包含其全部历史。 */
+  /** 交接时的worktree HEAD；证据必须包含其全部历史。 */
   readonly startCommit: string;
 };
 
@@ -50,46 +50,36 @@ export type GitWorkspaceState = {
   readonly changedPaths: readonly string[];
   /** 尚未解决的冲突路径；非空时不能交付。 */
   readonly conflicts: readonly string[];
-  /** Git忽略的现场文件；不纳入commit，但阻止自动清理，避免删除未知依赖/凭据。 */
-  readonly ignoredPaths: readonly string[];
 };
 
-/** 保存的标准 Git 证据；无改动不创建空 commit。 */
-export type GitSavedResult = {
-  /** 封存请求身份，用于关联去重。 */
+/** 一次Execution的tree级Git证据；不创建commit，无改动时复用当前HEAD tree。 */
+export type GitEvidence = {
+  /** 证据请求身份，用于关联去重。 */
   readonly requestId: string;
-  /** 成果 commit；无改动时等于当前HEAD。 */
-  readonly commit: string;
+  /** 现场收集得到的tree完整oid。 */
+  readonly tree: string;
+  /** 指向该tree的证据ref全名（refs/wave-flow/evidence/<requestId>）。 */
+  readonly evidenceRef: string;
   /** 相对冻结基准的全部变更路径。 */
   readonly paths: readonly string[];
-  /** true 表示未新建 commit。 */
-  readonly unchanged: boolean;
-};
-
-/** 最终ready来源证据；不代表已合入目标分支。 */
-export type GitSourceResult = {
-  /** 原确认请求UUID。 */ readonly requestId: string;
-  /** 最终来源的受管分支短名。 */ readonly branch: string;
-  /** 最终来源commit完整oid；Execution最终封存的唯一成果commit。 */ readonly commit: string;
-  /** 相对冻结基准实际变化文件。 */ readonly paths: readonly string[];
 };
 
 /** 固定 Git argv、禁 hooks/外部 diff/filter 的受管 Git 底座；不负责 writer 生命周期。 */
 export class GitRepository {
   private constructor(readonly cwd: string, readonly commonDirectory: string) {}
 
-  /** 读取冻结commit之间的实际路径；不读取当前未保存现场。 */
+  /** 读取冻结commit之间的实际路径；不读取当前未保存现场。流式完整读取，无截断。 */
   async changedBetween(base: string, source: string): Promise<string[]> {
     assertOid(base); assertOid(source);
-    const paths = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, source, "--"])).sort();
+    const paths = (await gitPaths(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, source, "--"])).sort();
     paths.forEach(assertPath); return paths;
   }
 
-  /** 只读审阅数据：执行冻结基准到最终封存commit的全部变更。 */
-  async review(baseCommit: string, sourceCommit: string): Promise<GitReview> {
+  /** 只读审阅数据：执行冻结基准到最终证据tree的全部变更。 */
+  async review(baseCommit: string, sourceTree: string): Promise<GitReview> {
     await this.assertIdentity();
-    const paths = await this.changedBetween(baseCommit, sourceCommit);
-    return { baseCommit, sourceCommit, paths };
+    const paths = await this.changedBetween(baseCommit, sourceTree);
+    return { baseCommit, sourceTree, paths };
   }
 
   /** 按已保存的Git对象加载文件patch，不允许任意路径读取。 */
@@ -106,95 +96,36 @@ export class GitRepository {
     }
   }
 
-  /** 把共享worktree的当前文件封存为一个受管commit；不移动主工作区分支，不push。
-   * 同一Execution重试识别已封存HEAD并复用，不重复制造commit。
-   * 已知取舍：与旧逐节点save的“意图文件冻结候选tree”不同，崩溃后的重试会重新收集现场；
-   * 安全性由调用方保证（finalizeSource要求租约全空且全程持有排他锁），暴露面只剩外部进程
-   * 在两次重试之间改动受管worktree，故不再单独冻结候选。
+  /** 把共享worktree的当前文件收集为一个tree并写入证据ref；不创建commit、不移动HEAD/真实索引/主工作区。
+   * 同一Execution重试重写同一证据ref（tree一致则幂等）。
+   * 已知取舍：与逐节点save的“意图文件冻结候选tree”相同，崩溃后的重试会重新收集现场；
+   * 安全性由调用方保证（finalize要求租约全空且全程持有排他锁），暴露面只剩外部进程
+   * 在两次重试之间改动受管worktree。
    */
-  async seal(request: GitSealRequest): Promise<GitSavedResult> {
-    if (!/^[0-9a-f-]{36}$/.test(request.requestId)) fail("封存请求必须为UUID。");
+  async captureEvidence(request: GitEvidenceRequest): Promise<GitEvidence> {
+    if (!/^[0-9a-f-]{36}$/.test(request.requestId)) fail("证据请求必须为UUID。");
     assertOid(request.baseCommit); assertOid(request.startCommit);
     const state = await this.inspect();
-    if (await this.gitDirectory() === this.commonDirectory || !state.branch?.startsWith("refs/heads/codex/wf-")) fail("禁止封存主工作区或非受管分支。");
-    if (state.conflicts.length) fail("尚有未解决冲突，成果不可封存。");
-    await git(this.cwd, ["merge-base", "--is-ancestor", request.baseCommit, state.head]);
-    await git(this.cwd, ["merge-base", "--is-ancestor", request.startCommit, state.head]);
-    const headTree = (await git(this.cwd, ["rev-parse", "HEAD^{tree}"])).trim();
+    if (await this.gitDirectory() === this.commonDirectory || !state.branch?.startsWith("refs/heads/codex/wf-")) fail("禁止采集主工作区或非受管分支。");
+    if (state.conflicts.length) fail("尚有未解决冲突，成果不可采集。");
+    // merge-base --is-ancestor 的 exit 1 是确定性“非祖先”语义，不是 Git 故障：
+    // 必须不可重试拒绝，禁止宿主每次启动重复注定失败的 finalize；只有 >1/信号才是可重试故障。
+    await assertAncestor(this.cwd, request.baseCommit, state.head, "冻结基准");
+    await assertAncestor(this.cwd, request.startCommit, state.head, "交接基准");
     const tree = await this.worktreeTree(state.changedPaths);
-    const message = `Wave Flow managed seal\n\nWave-Flow-Seal: ${request.requestId}`;
-    const body = (await git(this.cwd, ["show", "-s", "--format=%B", state.head])).trimEnd();
-    const sealed = body === message;
-    if (sealed) {
-      if (tree !== headTree) fail("封存后现场已变化；请修订方案，不重复制造成果。");
-      // update-ref 成功后、read-tree 前中断时索引仍是旧tree；同一请求重试先修复索引，避免worktree永久显示为脏。
-      await this.resetIndexToHeadIfStaged();
-      return { requestId: request.requestId, commit: state.head, paths: await this.changedBetween(request.baseCommit, state.head), unchanged: true };
-    }
-    if (tree === headTree) {
-      const staged = splitPaths(await git(this.cwd, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD", "--"]));
-      if (staged.length) fail("暂存区与工作文件不一致但工作内容等于HEAD；请先处理现场，不清空暂存或制造空成果。");
-      // 无新内容时不制造空commit，但不能把其他Execution/其他补收尾的封存HEAD冒充本次来源。
-      const foreign = /\nWave-Flow-Seal: ([0-9a-f-]{36})\n?$/.exec(body)?.[1] ?? null;
-      if (foreign !== null && foreign !== request.requestId && state.head !== request.startCommit) fail("当前HEAD是其他封存来源；不能把本次执行结果指向它。");
-      return { requestId: request.requestId, commit: state.head, paths: await this.changedBetween(request.baseCommit, state.head), unchanged: true };
-    }
-    const commit = (await git(this.cwd, ["commit-tree", tree, "-p", state.head, "-m", `${message}\n`])).trim();
-    assertOid(commit);
-    // compare-and-swap 保证封存不能覆盖封存期间的外部提交。
-    await git(this.cwd, ["update-ref", state.branch, commit, state.head]);
-    await git(this.cwd, ["read-tree", commit]);
-    return { requestId: request.requestId, commit, paths: await this.changedBetween(request.baseCommit, commit), unchanged: false };
+    const evidenceRef = `refs/wave-flow/evidence/${request.requestId}`;
+    // compare-and-swap 语义不适用（treeref可重复写）；重试只重写本请求的ref。
+    await git(this.cwd, ["update-ref", evidenceRef, tree]);
+    return { requestId: request.requestId, tree, evidenceRef, paths: await this.changedBetween(request.baseCommit, tree) };
   }
 
-  /** 把封存tree精确写入主工作区，保持未提交；HEAD前进/冲突/其他未提交改动时拒绝覆盖。 */
-  async applyCommit(commit: string, baseCommit: string, expectedWorktree?: string): Promise<readonly string[]> {
-    assertOid(commit); assertOid(baseCommit);
-    if (expectedWorktree !== undefined) assertOid(expectedWorktree);
-    await this.assertIdentity();
-    const state = await this.inspect();
-    if (state.branch === null) fail("主工作区处于 detached HEAD；未自动应用。");
-    if (state.head !== baseCommit) fail("主工作区当前HEAD已偏离冻结基准；未自动应用。");
-    if (state.conflicts.length) fail("主工作区存在未解决冲突；未自动应用。");
-    const targetTree = (await git(this.cwd, ["rev-parse", `${commit}^{tree}`])).trim();
-    assertOid(targetTree);
-    const headTree = (await git(this.cwd, ["rev-parse", "HEAD^{tree}"])).trim();
-    // 以应用前现场为索引基线收集工作文件，才能把上一次应用落下的 ignored/tracked 文件也纳入核对。
-    const currentTree = await this.worktreeTree(state.changedPaths, expectedWorktree ?? "HEAD");
-    const indexTree = (await git(this.cwd, ["write-tree"])).trim();
-    assertOid(indexTree);
-    const paths = await this.changedBetween(baseCommit, commit);
-    // 首次应用且相对基准没有任何文件改动：主工作区无需写入，不能因用户dirty而误报“未自动应用”。
-    if (!expectedWorktree && targetTree === headTree) return paths;
-    // 工作文件已经等于目标tree：应用已完整生效或重复收尾；只修复索引，不重复写现场。
-    if (currentTree === targetTree) {
-      if (indexTree === targetTree) await git(this.cwd, ["reset", "--mixed", "HEAD"]);
-      else if (indexTree !== headTree) fail("主工作区暂存区存在本次执行之外的改动；未自动应用。");
-      return paths;
-    }
-    if (!expectedWorktree) {
-      if (state.changedPaths.length) fail("主工作区存在未提交改动；未自动覆盖。");
-    } else {
-      assertOid(expectedWorktree);
-      const expectedTree = (await git(this.cwd, ["rev-parse", `${expectedWorktree}^{tree}`])).trim();
-      if (currentTree !== expectedTree) fail("主工作区存在本次执行之外的未提交改动；未自动覆盖。");
-    }
-    if (indexTree !== headTree) fail("主工作区暂存区存在本次执行之外的改动；未自动覆盖。");
-    if (state.ignoredPaths.some(ignored => paths.some(file => file === ignored || file.startsWith(ignored + "/") || ignored.startsWith(file + "/")))) fail("主工作区存在会被覆盖的ignored文件；未自动应用。");
-    // inspect 到 read-tree 之间主工作区无法加锁：用户恰在此窗口commit时其工作文件会被
-    // 封存tree覆盖（HEAD不动，内容可从其commit恢复）。窗口极小，已接受。
-    // 接续执行先把索引设为上一次应用结果，read-tree -u 才能删除上一次应用新增、本次回退或删除的文件。
-    if (expectedWorktree) await git(this.cwd, ["read-tree", expectedWorktree]);
-    await git(this.cwd, ["read-tree", "-u", "--reset", commit]);
-    // 只更新工作文件与索引，不移动分支；重置索引让改动保持未暂存、未提交。
-    await git(this.cwd, ["reset", "--mixed", "HEAD"]);
-    return paths;
-  }
-
-  /** 索引与HEAD不同但工作文件等于HEAD时，把索引恢复为HEAD tree；用于封存中断后的幂等修复。 */
-  private async resetIndexToHeadIfStaged(): Promise<void> {
-    const staged = splitPaths(await git(this.cwd, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD", "--"]));
-    if (staged.length) await git(this.cwd, ["read-tree", "HEAD"]);
+  /** 只读核验证据ref存在且tree与expected一致（expected可为历史commit tree-ish）；一致返回canonical tree。 */
+  async verifyEvidenceExists(ref: string, expected: string): Promise<string> {
+    const actual = (await git(this.cwd, ["rev-parse", "--verify", `${ref}^{tree}`])).trim();
+    const wanted = (await git(this.cwd, ["rev-parse", "--verify", `${expected}^{tree}`])).trim();
+    assertOid(actual); assertOid(wanted);
+    if (actual !== wanted) fail("证据tree与期望不一致。");
+    return actual;
   }
 
   /** 只读打开仓库根目录，拒绝软链接入口、非根目录及不安全仓库特性。 */
@@ -209,24 +140,26 @@ export class GitRepository {
     return repo;
   }
 
-  /** 读取当前 Git 可见证据；关闭外部 diff/textconv，不将无改动解释为没有外部影响。 */
+  /** 读取当前 Git 可见证据；关闭外部 diff/textconv，不将无改动解释为没有外部影响。
+   * 路径列表流式完整读取：不受 2MiB 证据读取上限约束（大列表合法现场不再永久拒绝交付），
+   * 非法 UTF-8 文件名明确拒绝，禁止 U+FFFD 替代字符被当作真实路径。 */
   async inspect(): Promise<GitWorkspaceState> {
     await this.assertIdentity();
     const head = await this.commitOid("HEAD");
     const branch = (await git(this.cwd, ["symbolic-ref", "-q", "HEAD"], true)).trim() || null;
-    const tracked = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
-    const staged = splitPaths(await git(this.cwd, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]));
-    const untracked = splitPaths(await git(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z"]));
-    const conflicts = splitPaths(await git(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z", "--"]));
-    const ignoredPaths=[...splitPaths(await git(this.cwd,["ls-files","--others","--ignored","--exclude-standard","-z"])), ...untracked.filter(path => path.split("/").includes("node_modules"))];
-    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...staged, ...untracked.filter(path => !path.split("/").includes("node_modules"))])].sort(), conflicts,ignoredPaths };
+    const tracked = await gitPaths(this.cwd, ["diff", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]);
+    const staged = await gitPaths(this.cwd, ["diff", "--cached", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "HEAD", "--"]);
+    const untracked = await gitPaths(this.cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
+    const conflicts = await gitPaths(this.cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z", "--"]);
+    return { cwd: this.cwd, commonDirectory: this.commonDirectory, gitDirectory: await this.gitDirectory(), head, branch, changedPaths: [...new Set([...tracked, ...staged, ...untracked])].sort(), conflicts };
   }
 
   /** 当前Git可见现场指纹；包括改动正文/删除/模式，忽略内容和外部系统不覆盖，变动中拒绝。 */
   async sceneFingerprint(): Promise<{ readonly hash: string; readonly state: GitWorkspaceState }> {
     const state = await this.inspect();
-    const index = await git(this.cwd, ["ls-files", "--stage", "-z"]);
-    const hash = createHash("sha256").update(JSON.stringify([state,index]));
+    // 索引列表只参与指纹：流式摘要，避免大仓库（文件数多）仅因列表超过证据读取上限而失败。
+    const indexDigest = await gitDigest(this.cwd, ["ls-files", "--stage", "-z"]);
+    const hash = createHash("sha256").update(JSON.stringify([state,indexDigest]));
     let bytes = 0;
     for (const path of state.changedPaths) {
       const absolute = resolve(this.cwd, path);
@@ -257,7 +190,7 @@ export class GitRepository {
           || current.size !== after.size || current.mtimeMs !== after.mtimeMs || current.ctimeMs !== after.ctimeMs) fail("现场读取期间发生变化或文件替换，请重新检查。");
       } finally { await handle.close(); }
     }
-    if (JSON.stringify(await this.inspect()) !== JSON.stringify(state) || await git(this.cwd, ["ls-files", "--stage", "-z"]) !== index) fail("现场读取期间Git状态或暂存区变化，请重新检查。");
+    if (JSON.stringify(await this.inspect()) !== JSON.stringify(state) || await gitDigest(this.cwd, ["ls-files", "--stage", "-z"]) !== indexDigest) fail("现场读取期间Git状态或暂存区变化，请重新检查。");
     return { hash: hash.digest("hex"), state };
   }
 
@@ -270,23 +203,55 @@ export class GitRepository {
     if (!isAbsolute(directory) || within(this.cwd, directory) || within(this.commonDirectory, directory)) fail("受管 worktree 必须位于主工作区及 Git 元数据目录之外。");
     const parent = await realpath(resolve(directory, ".."));
     if (resolve(parent, relative(resolve(directory, ".."), directory)) !== directory) fail("worktree 父目录必须为 canonical 路径。");
-    await git(this.cwd, ["worktree", "add", "-b", branch, "--", directory, baseCommit]);
+    await git(this.cwd, ["worktree", "add", "--no-track", "-b", branch, "--", directory, baseCommit], false, {}, undefined, 180_000);
     return GitRepository.open(directory);
   }
 
-  /** 用户批准后只移除已清洁worktree checkout；分支/commit保留，不自动删ref。 */
-  async removeWorktree(directory: string): Promise<void> {
+  /** 用户批准后只移除身份、注册和tree均匹配的受管worktree；ignored可删除，锁、嵌套worktree与已初始化submodule不可绕过。 */
+  async removeWorktree(directory: string, expectedTree: string, expectedIdentity: Pick<GitWorkspaceState, "gitDirectory" | "branch">): Promise<void> {
     await this.assertIdentity();
     if (!isAbsolute(directory) || within(this.cwd, directory) || within(this.commonDirectory, directory)) fail("只能清理主工作区外的受管worktree。");
     const target = await GitRepository.open(directory), state = await target.inspect();
-    if (target.commonDirectory !== this.commonDirectory || state.changedPaths.length || state.conflicts.length || state.ignoredPaths.length) fail("worktree仍有未提交/ignored内容或冲突，拒绝清理。");
-    await git(this.cwd, ["worktree", "remove", "--", directory]);
+    if (target.commonDirectory !== this.commonDirectory || state.gitDirectory !== expectedIdentity.gitDirectory || state.branch !== expectedIdentity.branch) fail("worktree身份与冻结记录不一致，拒绝清理。");
+    if (state.conflicts.length) fail("worktree仍有未解决冲突，拒绝清理。");
+    await this.assertRemovalRegistration(target);
+    await this.assertNoPopulatedSubmodules(target);
+    const current = await target.worktreeTree(state.changedPaths);
+    const expected = (await git(this.cwd, ["rev-parse", "--verify", `${expectedTree}^{tree}`])).trim();
+    assertOid(expected);
+    if (current !== expected) fail("worktree现场已偏离已采集证据，拒绝清理。");
+    await git(this.cwd, ["worktree", "remove", "--force", "--", directory], false, {}, undefined, null);
   }
 
-  /** 仅核验commit对象存在且完整；用于checkout已清理后的清理重试，不要求当前HEAD。 */
-  async verifyCommitExists(commit: string): Promise<void> {
-    assertOid(commit);
-    if (await this.commitOid(commit) !== commit) fail("成果commit不可验证。");
+  /** Git注册是删除依据；locked与嵌套注册checkout均需人工处理，不能由父目录force删除吞掉。 */
+  private async assertRemovalRegistration(target: GitRepository): Promise<void> {
+    const entries: { path: string; locked: boolean }[] = [];
+    for (const entry of parseWorktreeList(await git(this.cwd, ["worktree", "list", "--porcelain", "-z"], false, {}, undefined, 15_000, true))) {
+      try { entries.push({ ...entry, path: await realpath(entry.path) }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    const registered = entries.find(entry => entry.path === target.cwd);
+    if (!registered) fail("worktree未在当前Git仓库注册，拒绝按受管目录清理。");
+    if (registered.locked) fail("worktree已被Git锁定，拒绝force清理；请人工核查锁原因。");
+    if (entries.some(entry => entry.path !== target.cwd && within(target.cwd, entry.path))) fail("worktree包含嵌套注册checkout，拒绝随父目录清理。");
+  }
+
+  /** 父tree不覆盖submodule内部未推送历史；.gitmodules与HEAD gitlink取并集，防止配置删除后漏检。 */
+  private async assertNoPopulatedSubmodules(target: GitRepository): Promise<void> {
+    const paths = new Set<string>(), configured = await git(target.cwd, ["config", "-z", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"], true, {}, undefined, 15_000, true);
+    for (const entry of splitPaths(configured)) {
+      const separator = entry.indexOf("\n");
+      if (separator < 0) fail("submodule配置无法核验，拒绝清理。");
+      paths.add(entry.slice(separator + 1));
+    }
+    for (const path of await gitTreeGitlinks(target.cwd, "HEAD")) paths.add(path);
+    for (const path of paths) {
+      assertPath(path);
+      let populated = false;
+      try { await lstat(join(target.cwd, ...path.split("/"), ".git")); populated = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (populated) fail("worktree包含已初始化submodule，父tree不能证明其内部提交已保存，拒绝清理。");
+    }
   }
 
   /** 核验最终来源的Git父链覆盖每份独立成果，不凭声明推断已集成。 */
@@ -295,22 +260,21 @@ export class GitRepository {
     return (await git(this.cwd, ["merge-base", ancestor, source])).trim() === ancestor;
   }
 
-  /** 用临时索引把当前共享worktree的文件收集为一个tree；不改变真实索引或HEAD。
-   * baseRef 缺省为HEAD；接续应用传入上一次应用结果，使只在主工作区表现为ignored的已应用文件仍进入核对。 */
-  private async worktreeTree(paths: readonly string[], baseRef: string = "HEAD"): Promise<string> {
+  /** 用临时索引把当前共享worktree的文件收集为一个tree；不改变真实索引或HEAD。 */
+  private async worktreeTree(paths: readonly string[]): Promise<string> {
     const temp = await mkdtemp(join(await this.gitDirectory(), "wf-index-"));
     try {
       const env = { GIT_INDEX_FILE: join(temp, "index") };
-      await git(this.cwd, ["read-tree", baseRef], false, env);
+      await git(this.cwd, ["read-tree", "HEAD"], false, env);
       for (const path of paths) await this.assertFilePath(path);
       // 路径已经由tracked diff + exclude-standard untracked核定，-f仅避免新ignore规则拒绝tracked文件。
       if (paths.length) await git(this.cwd, ["--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], false, env, paths.join("\0") + "\0");
       const tree = (await git(this.cwd, ["write-tree"], false, env)).trim();
       assertOid(tree);
-      const modes = splitPaths(await git(this.cwd, ["ls-tree", "-r", "-z", tree], false, env));
       // 允许保留仓库原有、未被本次成果修改的 symlink/gitlink；新增或修改这些路径
       // 会在 worktreeTree 的 assertFilePath 阶段拒绝，不能借放宽模式绕过。
-      if (modes.some(entry => !/^(?:(?:100644|100755|120000) blob |160000 commit )/.test(entry))) fail("候选tree包含不支持的文件模式。");
+      // 完整tree的条目数可能上百万，流式核验，不因输出超过读取上限而拒绝合法证据。
+      await assertTreeModes(this.cwd, tree, env);
       return tree;
     } finally { await rm(temp, { recursive: true, force: true }); }
   }
@@ -343,27 +307,166 @@ export class GitRepository {
   }
 }
 
-/** Git 命令仅用于该底座；固定配置禁外部程序、禁凭据提示，输出与执行时间均有界。 */
-async function git(cwd: string, args: readonly string[], allowMissing = false, extra: Record<string, string> = {}, input?: string): Promise<string> {
-  const child = Bun.spawn(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "core.quotePath=false", "-c", "commit.gpgSign=false", ...args], {
-    cwd, env: { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "Wave Flow", GIT_AUTHOR_EMAIL: "workspace@wave-flow.local", GIT_COMMITTER_NAME: "Wave Flow", GIT_COMMITTER_EMAIL: "workspace@wave-flow.local", ...extra }, stdin: input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe",
+/** 受管 Git 固定参数：禁 hooks、外部 diff/textconv 与签名，固定简洁输出。 */
+const GIT_FIXED_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "core.quotePath=false", "-c", "commit.gpgSign=false"] as const;
+/** 受管 Git 固定环境：无系统/全局配置、无凭据提示，固定作者身份。 */
+const GIT_FIXED_ENV = { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "Wave Flow", GIT_AUTHOR_EMAIL: "workspace@wave-flow.local", GIT_COMMITTER_NAME: "Wave Flow", GIT_COMMITTER_EMAIL: "workspace@wave-flow.local" } as const;
+
+/** Git输出始终有界；普通操作默认15秒，创建180秒，删除不中途kill大型checkout。strictUtf8仅用于路径类输出。 */
+async function git(cwd: string, args: readonly string[], allowMissing = false, extra: Record<string, string> = {}, input?: string, timeoutMs: number | null = 15_000, strictUtf8 = false): Promise<string> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], {
+    cwd, env: { ...GIT_FIXED_ENV, ...extra }, stdin: input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe",
   });
   if (input !== undefined) { child.stdin!.write(input); child.stdin!.end(); }
-  const timeout = setTimeout(() => child.kill(), 15_000);
   try {
-    const [out, err, code] = await Promise.all([readBounded(child.stdout), readBounded(child.stderr), child.exited]);
+    const [out, err, code] = await Promise.all([readBounded(child.stdout, strictUtf8), readBounded(child.stderr), boundedChildExit(child, timeoutMs)]);
     if (code !== 0 && !(allowMissing && code === 1)) throw new GitCommandError(`Git ${args[0]} 失败（${code}）：${err.slice(0, 1000)}`);
     return out;
-  } catch (error) { child.kill(); throw error; } finally { clearTimeout(timeout); }
+  } catch (error) { child.kill(); throw error; }
 }
 
-async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> {
-  const reader = stream.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
-    try { while (true) { const value = await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > 2_000_000) { await reader.cancel(); throw new GitEvidenceLimitError("Git 证据超过读取上限，拒绝截断后保存。"); } chunks.push(value.value); } }
-  finally { reader.releaseLock(); }
-  return Buffer.concat(chunks).toString("utf8");
+/** 需要退出码语义的 Git 调用（merge-base --is-ancestor 等）；其余约定与 git() 相同。 */
+async function gitExit(cwd: string, args: readonly string[], timeoutMs: number | null = 15_000): Promise<{ readonly code: number; readonly err: string }> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  try {
+    const [, err, code] = await Promise.all([readBounded(child.stdout), readBounded(child.stderr), boundedChildExit(child, timeoutMs)]);
+    return { code, err };
+  } catch (error) { child.kill(); throw error; }
 }
+
+/** 确定性祖先核验：exit 1 是明确“非祖先”结论，属不可重试契约拒绝（WorkflowContractError）；
+ * 只有 exit >1 或信号才是可重试的 GitCommandError。避免宿主每次启动重复注定失败的 finalize。 */
+async function assertAncestor(cwd: string, ancestor: string, descendant: string, label: string): Promise<void> {
+  const { code, err } = await gitExit(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+  if (code === 1) fail(`${label}已不是当前 HEAD 的祖先，成果来源链断裂；确定性拒绝交付，不可自动重试。`);
+  if (code !== 0) throw new GitCommandError(`Git merge-base 失败（${code}）：${err.slice(0, 1000)}`);
+}
+
+/** Git 子进程终止阶梯参数：超时先 SIGTERM，宽限内仍存活升级 SIGKILL，再限时等待退出确认。 */
+export const GIT_TERMINATE_GRACE_MS = 2_000;
+
+/** 有界终止阶梯（独立注入点）：timeoutMs 到点 SIGTERM；escalateMs 宽限后升级 SIGKILL；
+ * confirmMs 内 exited 仍不 settle 则有界 reject，保证不无限悬挂、不长期持 root 锁。
+ * SIGKILL 后正常退出的进程以真实退出码 resolve，由调用方按非零码报错。
+ * 自动测试用忽略 SIGTERM 的真实进程验证升级与有界性。 */
+export function boundedExit(exited: Promise<number>, kill: (signal: NodeJS.Signals) => void, timeoutMs: number, escalateMs = GIT_TERMINATE_GRACE_MS, confirmMs = GIT_TERMINATE_GRACE_MS): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const term = setTimeout(() => kill("SIGTERM"), timeoutMs);
+    const escalate = setTimeout(() => kill("SIGKILL"), timeoutMs + escalateMs);
+    const stuck = setTimeout(() => settle(() => reject(new GitCommandError("Git 子进程在 SIGKILL 后仍未确认退出；有界拒绝，避免悬挂持锁。"))), timeoutMs + escalateMs + confirmMs);
+    function settle(done: () => void): void { clearTimeout(term); clearTimeout(escalate); clearTimeout(stuck); done(); }
+    exited.then(code => settle(() => resolve(code)), error => settle(() => reject(error)));
+  });
+}
+
+/** 子进程退出等待带终止阶梯；timeoutMs 为 null 表示不中途 kill（如大型 checkout 删除）。 */
+function boundedChildExit(child: { readonly exited: Promise<number>; kill: (signal?: number | NodeJS.Signals) => void }, timeoutMs: number | null): Promise<number> {
+  if (timeoutMs === null) return child.exited;
+  return boundedExit(child.exited, signal => child.kill(signal), timeoutMs);
+}
+
+/** 路径类输出必须严格 UTF-8：非法字节序列（非法文件名）明确拒绝且不可重试，
+ * 禁止 U+FFFD 替代字符被当作真实路径参与指纹、暂存或删除核验。 */
+function decodeStrictUtf8(bytes: Uint8Array): string {
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new WorkflowContractError("Git 路径输出包含非法 UTF-8 字节序列（疑似非法文件名），拒绝按替代字符继续。"); }
+}
+
+async function readBounded(stream: ReadableStream<Uint8Array>, strictUtf8 = false): Promise<string> {
+  const reader = stream.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
+  try { while (true) { const value = await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > 2_000_000) { await reader.cancel(); throw new GitEvidenceLimitError("Git 证据超过读取上限，拒绝截断后保存。"); } chunks.push(value.value); } }
+  finally { reader.releaseLock(); }
+  const bytes_ = Buffer.concat(chunks);
+  return strictUtf8 ? decodeStrictUtf8(bytes_) : bytes_.toString("utf8");
+}
+
+/** 大列表只参与哈希时的流式读取：内存有界、不截断，哈希覆盖完整字节。 */
+async function readIntoDigest(stream: ReadableStream<Uint8Array>, hash: ReturnType<typeof createHash>): Promise<void> {
+  const reader = stream.getReader();
+  try { while (true) { const value = await reader.read(); if (value.done) break; hash.update(value.value); } }
+  finally { reader.releaseLock(); }
+}
+
+/** 对只用于指纹的 Git 输出做流式摘要；不把完整输出放进内存，因此大仓库索引不会触发证据上限。 */
+async function gitDigest(cwd: string, args: readonly string[]): Promise<string> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  try {
+    const hash = createHash("sha256");
+    const [, err, code] = await Promise.all([readIntoDigest(child.stdout, hash), readBounded(child.stderr), boundedChildExit(child, 15_000)]);
+    if (code !== 0) throw new GitCommandError(`Git ${args[0]} 失败（${code}）：${err.slice(0, 1000)}`);
+    return hash.digest("hex");
+  } catch (error) { child.kill(); throw error; }
+}
+
+/** 逐条读取 NUL 分隔记录；跨 chunk 不解码半截条目，条目按严格 UTF-8 解码（非法文件名明确拒绝），内存不随完整输出增长。 */
+async function readNulEntries(stream: ReadableStream<Uint8Array>, consume: (entry: string) => void): Promise<void> {
+  const reader = stream.getReader(); let pending = Buffer.alloc(0);
+  try {
+    while (true) {
+      const value = await reader.read();
+      if (value.done) break;
+      pending = Buffer.concat([pending, Buffer.from(value.value)]);
+      let index: number;
+      while ((index = pending.indexOf(0)) !== -1) {
+        const entry = decodeStrictUtf8(pending.subarray(0, index));
+        pending = pending.subarray(index + 1); consume(entry);
+      }
+    }
+  } finally { reader.releaseLock(); }
+  if (pending.length) throw new WorkflowContractError("Git NUL 分隔输出未完整读取。");
+}
+
+/** 执行 Git 并流式收集 NUL 分隔路径列表：完整无截断（不受 2MiB 证据读取上限约束），
+ * 内存只随真实路径列表增长；非法 UTF-8 立即拒绝。用于 inspect/changedBetween 等大列表。 */
+async function gitPaths(cwd: string, args: readonly string[], timeoutMs: number | null = 15_000): Promise<string[]> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const paths: string[] = [];
+  try {
+    const [, err, code] = await Promise.all([readNulEntries(child.stdout, entry => paths.push(entry)), readBounded(child.stderr), boundedChildExit(child, timeoutMs)]);
+    if (code !== 0) throw new GitCommandError(`Git ${args[0]} 失败（${code}）：${err.slice(0, 1000)}`);
+    return paths;
+  } catch (error) { child.kill(); throw error; }
+}
+
+/** 流式核验 tree 条目模式；完整 tree 可能超过内存上限，但不能因此拒绝合法证据。 */
+function readTreeModes(stream: ReadableStream<Uint8Array>): Promise<void> {
+  return readNulEntries(stream, entry => {
+    if (!/^(?:(?:100644|100755|120000) blob |160000 commit )/.test(entry)) throw new WorkflowContractError("候选tree包含不支持的文件模式。");
+  });
+}
+
+async function assertTreeModes(cwd: string, tree: string, extra: Record<string, string>): Promise<void> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, "ls-tree", "-r", "-z", tree], { cwd, env: { ...GIT_FIXED_ENV, ...extra }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  try {
+    const [, err, code] = await Promise.all([readTreeModes(child.stdout), readBounded(child.stderr), boundedChildExit(child, 15_000)]);
+    if (code !== 0) throw new GitCommandError(`Git ls-tree 失败（${code}）：${err.slice(0, 1000)}`);
+  } catch (error) { child.kill(); throw error; }
+}
+
+/** 流式提取HEAD中的gitlink路径；cleanup不把完整tree列表装入内存。 */
+async function gitTreeGitlinks(cwd: string, tree: string): Promise<Set<string>> {
+  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, "ls-tree", "-r", "-z", tree], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const paths = new Set<string>();
+  try {
+    const [, err, code] = await Promise.all([
+      readNulEntries(child.stdout, entry => { const match = /^160000 commit [a-f0-9]+\t/.exec(entry); if (match) paths.add(entry.slice(match[0].length)); }),
+      readBounded(child.stderr), boundedChildExit(child, 15_000),
+    ]);
+    if (code !== 0) throw new GitCommandError(`Git ls-tree 失败（${code}）：${err.slice(0, 1000)}`);
+    return paths;
+  } catch (error) { child.kill(); throw error; }
+}
+
 function splitPaths(text: string): string[] { return text.split("\0").filter(Boolean); }
+function parseWorktreeList(text: string): { path: string; locked: boolean }[] {
+  const entries: { path: string; locked: boolean }[] = [];
+  for (const block of text.split("\0\0")) {
+    const fields = block.split("\0").filter(Boolean), path = fields.find(field => field.startsWith("worktree "))?.slice(9);
+    if (!path) { if (fields.length) fail("Git worktree注册输出无法核验。"); continue; }
+    entries.push({ path, locked: fields.some(field => field === "locked" || field.startsWith("locked ")) });
+  }
+  return entries;
+}
 function assertOid(oid: string): void { if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) fail("必须使用已验证完整 commit oid。"); }
 function assertPath(path: string): void { if (!path || isAbsolute(path) || path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\x00-\x1f\x7f\\]/.test(path)) fail("成果路径必须为安全仓库相对文件路径。"); }
 function within(parent: string, child: string): boolean { const path = relative(parent, child); return path === "" || (path !== ".." && !path.startsWith("../") && !isAbsolute(path)); }

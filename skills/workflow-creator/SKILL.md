@@ -62,7 +62,7 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 
 ## 定义 Agent 边界
 
-Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；设置关闭后回到私有Home与全量写隔离，四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主在受管`codex/wf-*` worktree封存一个受管commit，结果只保留在该worktree，不写入主工作区；主分支不移动、不push、不自动commit。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；设置关闭后回到私有Home与全量写隔离，四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主在受管`codex/wf-*` worktree收集一个不可变Git tree证据并写证据ref（refs/wave-flow/evidence/<executionId>，防gc），不创建任何commit、HEAD与真实index不变，结果只保留在该worktree，不写入主工作区；主分支不移动、不push。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 当前允许 `codex` / `claude` / `dsh`；
 四者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
@@ -70,20 +70,23 @@ Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与�
 - 每个 prompt 必须自包含：任务、范围、相关上游结果、约束与期望产出。Agent 不会自动
   继承另一个 Agent 的对话内容。
 - `id` 必填，Run 内唯一且稳定（1–120 位字母数字与 `. _ : / -`）；它参与会话绑定与
-  replay 指纹，不要在两次运行间随意改名。
+  replay 指纹，不要在两次运行间随意改名。循环里只能按轮次生成 id：写节点（`workspace-write`）
+  的动态 id 必须以非空字面量开头（如 `"repair-" + round` 或 `` `repair-${round}` ``），
+  宿主按该前缀向用户披露并核验实际写节点；`sandbox` 必须是字面量，`id` 只能是字面量或上述
+  前缀形式。不要用展开、变量或 `id`/`sandbox` 简写，否则写意图不可核验，草案会被拒绝。
 - 下游代码要解析结果时提供 `schema`（JSON-safe 对象），并配套 TypeScript 类型。
 - `sandbox` 只允许 `read-only`（默认）或 `workspace-write`；没有更高权限模式。
 - 直接 `await agent()` 的失败会抛出并把节点标记为 interrupted；`parallel()` 内失败的
   任务结果为 `null`，使用前必须过滤或判空。
-- Wave Flow 宿主成果交接契约错误不属于普通任务失败：运行期 writer 真实退出无法核验或租约交接失败时，原节点保持 completed、Execution 收敛为 interrupted；`parallel()`/`pipeline()` 必须抛出该契约错误，不能用 null 跳过。原版 resume 先补交接，不重跑已完成业务。Execution 结束后的封存失败不进入脚本：Engine 在宿主侧捕获并写入耐久 `source-error`，Execution 保持 completed，Worker 不重跑；结果保留在受管 worktree。Workspace 配置与提交授权由 Engine/用户管理，作者不新增 worktree、commit、合并字段，不让模型预测 commit hash。Codex/DeepSeek Harness/Claude 的受管并行写已有真实证据；只有Engine冻结授权与已验证Adapter同时满足才可执行。
-- 并行写共享同一 worktree，没有宿主冲突检测或合并：任务分配必须让不同 Agent 写不同模块/文件，每个文件只有一个 owner；同一模块的改动必须顺序执行，或把依赖前序结果的修改放到后续 phase。不要把“两个 Agent 同时改同一文件/同一函数/同一配置块”当作可接受设计，也不要在脚本里安排集成 Agent 去解冲突。执行完成后宿主只封存最终改动并保留在受管 worktree，不写入主工作区；冲突已被覆盖时不会报错或恢复丢失的修改。
+- Wave Flow 宿主成果交接契约错误不属于普通任务失败：运行期 writer 真实退出无法核验或租约交接失败时，原节点保持 completed、Execution 收敛为 interrupted；`parallel()`/`pipeline()` 必须抛出该契约错误，不能用 null 跳过。原版 resume 先补交接，不重跑已完成业务。Execution 结束后的证据收集失败不进入脚本：Engine 在宿主侧捕获并写入耐久 `source-error`，Execution 保持 completed，Worker 不重跑；结果保留在受管 worktree。Workspace 配置与提交授权由 Engine/用户管理，作者不新增 worktree、commit、合并字段，不让模型预测 commit/tree hash。Codex/DeepSeek Harness/Claude 的受管并行写已有真实证据；只有Engine冻结授权与已验证Adapter同时满足才可执行。
+- 并行写共享同一 worktree，没有宿主冲突检测或合并：任务分配必须让不同 Agent 写不同模块/文件，每个文件只有一个 owner；同一模块的改动必须顺序执行，或把依赖前序结果的修改放到后续 phase。不要把“两个 Agent 同时改同一文件/同一函数/同一配置块”当作可接受设计，也不要在脚本里安排集成 Agent 去解冲突。执行完成后宿主只收集最终 tree 证据并保留在受管 worktree，不写入主工作区；冲突已被覆盖时不会报错或恢复丢失的修改。
 - **不要**在 prompt 里指导 Worker 如何上报完成。Runtime 会为每个 Worker session
   注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
   Worker 需要人工输入时会自行 `block`，无需作者编排。
 
 Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt，不保证上下文压缩后业务判断无损；作者不新增重试/收尾API，也不把回合结束当作交付。
 
-Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展（正文/工具/计划事件）时只记录一条耐久停滞提示，不自动中断、不cancel、不杀进程、不重发任务或创建attempt，唯一出口是用户显式停止；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的成果恢复只补Git封存/应用，不重做Worker。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
+Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展（正文/工具/计划事件）时只记录一条耐久停滞提示，不自动中断、不cancel、不杀进程、不重发任务或创建attempt，唯一出口是用户显式停止；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的成果恢复只补Git tree证据收集，不重做Worker，也不自动应用。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
 
 ## 人工决策
 
@@ -106,7 +109,7 @@ Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展�
 
 `read_run_capsule` 返回 `{text,truncated,redacted}` 有界数据；`text` 是脱敏JSON片段，截断时不可假装完整JSON。指定原尝试须同时提供 `executionId` 和正整数 `attempt`，Engine核验同Task归属；总结回合省略参数时默认其原义务attempt。普通Task快照与历史结果不是新指令，不拼接全部历史执行。自动总结回合来源是summary key，不是用户消息。
 
-每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原状态、已验证交付、缺口与下一步；Schema通过不是验收。受管写以Capsule真实Git基准、租约、worktree保留状态与最终封存commit说明影响，未配置或缺失/截断不能当完整基线。共享worktree不提供逐节点文件归因，不能宣称某个Agent的修改可独立回滚。工作区外写没有Wave Flow OS拦截；网络/外部副作用不能由Git推断。只能提出草案，不能批准或派发。
+每次目标态Execution终态须完整总结后才可启动或resume；总结失败只能重试总结，不重跑Worker、不跳过门禁。总结说明原状态、已验证交付、缺口与下一步；Schema通过不是验收。受管写以Capsule真实Git基准、租约、worktree保留状态与最终证据tree/证据ref（历史commit证据只读兼容）说明影响，未配置或缺失/截断不能当完整基线。共享worktree不提供逐节点文件归因，不能宣称某个Agent的修改可独立回滚。工作区外写没有Wave Flow OS拦截；网络/外部副作用不能由Git推断。只能提出草案，不能批准或派发。
 
 主控 `propose_workflow_revision` 同时提交 `source`、本轮 `goal` 与工作边界 `scope`。goal/scope 要说明主控与 Worker 的分工：用户点名的技能默认由 Worker 执行，主控仍可自由使用 skill 做设计、读取或准备。
 源码修订必须先读取当前Capsule，提供顶层`baseRevision`等于当前最新版本；首次没有版本时允许0或省略。已有单链版本缺失或过期依据会拒绝，不能用迟到提案覆盖用户修改。参数模式仍使用`parameters.baseRevision`，两处同时提供时必须一致。该宿主版本护栏不新增Workflow作者API或执行权。
@@ -143,7 +146,7 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 1. 形态正确：受信任模块有 `import`/`export`；受限草案没有任何 `import`/`export`。
 2. `meta` 是纯字面量，含 kebab-case `name`、单行 `description`、唯一非空 `phases`。
 3. 每个 `phase()` 调用精确匹配某个 `meta.phases[].title`；`phase()` 不在并发分支内。
-4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` / `"claude"` / `"dsh"` 之一（三者均已完成真实双角色验收，均可设为主控）；`"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`。
+4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` / `"claude"` / `"dsh"` 之一（三者均已完成真实双角色验收，均可设为主控）；`"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`，且必须是字面量；循环写节点按轮次生成 id 时必须以非空字面量前缀开头，供宿主披露与核验。
 5. `parallel()` 每项都是零参数函数；并发结果在使用前判空。
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
 7. 脚本级人工决策使用 `decisionGate`（仅受限草案）；prompt 不含完成上报指令。

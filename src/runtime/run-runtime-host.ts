@@ -23,6 +23,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #phaseVisitSequence = 0;
   #phaseOccurrences = new Map<string, number>();
   #replayAttemptStarted = false;
+  /** stop/退出已撤销全部排队启动许可；等待中的节点在名额复核处拒绝，不再 durable running。 */
+  #schedulingAborted = false;
   /** 并行replay分支共享同一次attempt初始化，避免重复落run/attempt/phase开始事实。 */
   #replayAttemptStarting: Promise<PhaseVisit> | null = null;
   #replayPhaseTitle: string | null = null;
@@ -110,6 +112,25 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   /** 是否已有节点确实因 Engine 全局资源名额等待。 */
   hasWaitingStart(): boolean { return this.executor.hasWaitingStart?.() === true; }
 
+  /**
+   * 名额到手不代表启动许可仍然有效：等待期间用户可能已 pause/stop。
+   * stop/退出（含 Run 已终态）直接归还名额并拒绝；pause 先归还名额、挂到调度闸门，
+   * recover 后重新排队——queued 节点不得占住名额，也不得绕过闸门 durable running。
+   */
+  private async acquireStartSlot(nodeId: string): Promise<void> {
+    for (;;) {
+      if (this.#schedulingAborted) throw new WorkflowContractError("Run 已停止，排队节点不再启动。");
+      await this.executor.waitForStart?.(this.state.agent(nodeId));
+      if (this.#schedulingAborted || isTerminalRunStatus(this.state.snapshot().status)) {
+        this.executor.cancelStart?.(this.state.agent(nodeId));
+        throw new WorkflowContractError("Run 已停止，排队节点不再启动。");
+      }
+      if (!this.#schedulingPaused) return;
+      this.executor.cancelStart?.(this.state.agent(nodeId));
+      await this.#schedulingGate;
+    }
+  }
+
   /** Run pause 后阻断尚未进入启动阶段的新节点；已启动节点由 Executor 单独停止。 */
   pauseScheduling(): void {
     if (this.#schedulingPaused) return;
@@ -126,9 +147,19 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     this.#schedulingGate = null;
   }
 
+  /**
+   * stop/退出撤销所有尚未 durable running 的启动许可：唤醒调度闸门与名额等待者，
+   * 让它们在复核处带着明确诊断失败并归还名额，而不是悬挂或启动真实 Worker。
+   */
+  abortQueuedStarts(): void {
+    this.#schedulingAborted = true;
+    this.resumeScheduling();
+  }
+
   /** 创建、启动并执行节点；只有结果与 Journal 均耐久后才返回对象。 */
   async agent(request: NormalizedAgentRequest, executionBatch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
     while (this.#schedulingPaused) await this.#schedulingGate;
+    if (this.#schedulingAborted) throw new WorkflowContractError("Run 已停止，不再调度新 Agent 节点。");
     // 分配快照改写必须先于指纹比较与 agent.created 落盘：Journal 记录的永远是生效请求
     // （分配的 cli、cli-default 语义下的 model 省略、assignedRuntimeId），而不是脚本字面量。
     const effectiveRequest = this.rewriteRequest(request);
@@ -171,7 +202,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     }
     // 全局 Engine 的名额必须在节点进入 running 前取得。这样超限节点可被权威
     // 快照如实显示为 queued，而不会先伪装成已启动的 ACP Worker。
-    await this.executor.waitForStart?.(this.state.agent(nodeId));
+    await this.acquireStartSlot(nodeId);
     const restartedSession = existing && this.replay ? this.state.agent(nodeId).agentSessionId : null;
     const started = this.event({ type: "agent.status", nodeId, status: "running", agentSessionId: restartedSession ?? crypto.randomUUID() });
     try {
@@ -184,6 +215,12 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     }
     const node = this.state.agent(nodeId);
     try {
+      // running 落盘与真实启动之间仍可能发生 stop；即使 stop 快照没看到这个节点，
+      // 撤销标记也会阻止它在终态 Run 中启动真实 Worker。
+      if (this.#schedulingAborted || isTerminalRunStatus(this.state.snapshot().status)) {
+        this.executor.cancelStart?.(node);
+        throw new WorkflowContractError("Run 已停止，启动许可已撤销。");
+      }
       const result = await this.executeWithStartupRecovery(nodeId, node);
       // 真实执行器的 complete 已由 ControlServer 按证据顺序写入 Journal；不能重复写入。
       const current = this.state.agent(nodeId);
@@ -206,14 +243,17 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       // 执行器失败意味着节点不可能再继续（包括 Worker 在 blocked 等待答案时死亡）；
       // 任意非终态节点都必须诚实收敛为 interrupted，不得留下终态 Run 与非终态节点并存的投影。
       // 与pause/recover失败收敛共享互斥区；锁外读取会在磁盘等待期间过期。
-      await this.mutationExclusive(async () => {
-        const status = this.state.agent(nodeId).status;
-        if (status === "completed" || status === "cancelled" || status === "interrupted" || this.#stopping.has(nodeId)) return;
-        const event = this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic });
-        this.state.assertApplicable(event);
-        await this.journal.append(event);
-        this.state.apply(event);
-      });
+      // Journal fail closed 时收敛写入必然失败；保留节点自身的首个错误向外抛出。
+      try {
+        await this.mutationExclusive(async () => {
+          const status = this.state.agent(nodeId).status;
+          if (status === "completed" || status === "cancelled" || status === "interrupted" || this.#stopping.has(nodeId)) return;
+          const event = this.event({ type: "agent.status", nodeId, status: "interrupted", diagnostic });
+          this.state.assertApplicable(event);
+          await this.journal.append(event);
+          this.state.apply(event);
+        });
+      } catch { /* Journal 已 fail closed；不吞掉下方的首个失败。 */ }
       throw error;
     }
   }
@@ -409,4 +449,9 @@ function fingerprint(value: unknown): string {
     return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${fingerprint(record[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+/** Run 是否已封存终态；终态后不得再接受任何业务启动事实。 */
+function isTerminalRunStatus(status: import("./run-types").RunStatus): boolean {
+  return status === "completed" || status === "cancelled" || status === "interrupted";
 }

@@ -479,6 +479,44 @@ test("两个CLI使用相同通用完成协议，第二次end_turn仍漏报只拒
  expect(guides[0]).toBe(guides[1]);
 });
 
+test("回合间隙 pause 本地挂起不中断，recover 后同一 session 只发检查现场回合", async () => {
+  const value = await fixture(); let capability = "";
+  const prompts: string[] = [];
+  let reading!: () => void, releaseRead!: () => void;
+  const entered = new Promise<void>((done) => { reading = done; });
+  const hold = new Promise<void>((done) => { releaseRead = done; });
+  const original = value.control.workerTurnContext.bind(value.control);
+  value.control.workerTurnContext = async (identity) => { reading(); await hold; return original(identity); };
+  let cancels = 0;
+  const session: AcpWorkerSession = {
+    get binding() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) return { stopReason: "end_turn" };
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() { cancels++; }, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, (identity) => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  const running = executor.execute(value.node);
+  // 第一个 turn 已 end_turn，runTurn 正在 await 收尾事实读取：这正是曾经的“间隙 pause 炸掉整 Run”窗口。
+  await entered;
+  await executor.pause(value.node);
+  expect(cancels).toBe(0);
+  releaseRead();
+  await Bun.sleep(10);
+  // 间隙暂停不得发起完成提醒回合，也不得中断 execute。
+  expect(prompts).toHaveLength(1);
+  await executor.recover(value.node);
+  await expect(running).resolves.toEqual({ ok: true });
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toContain("检查当前工作目录");
+  expect(prompts[1]).not.toContain("不要重做业务任务");
+});
+
 test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", async () => {
   const value = await fixture(); let capability = ""; const prompts: string[] = [];
   const session: AcpWorkerSession = {

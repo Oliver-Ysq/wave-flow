@@ -179,7 +179,7 @@ export type ExecutionPlanResponse = {
   /** 最新终态执行的现场证据hash；首次为null，确认须携带，变化拒绝旧确认；不是授权凭据。 */
   readonly sceneEvidenceHash?: string | null;
   /** 固定写节点与实时Git基准预检；无写节点为null，无法验证有diagnostic并禁止受管写。 */
-  readonly workspacePlan?: { readonly nodeIds: readonly string[]; readonly repository: string; readonly baseCommit: string | null; readonly dirtyPaths: readonly string[]; readonly diagnostic: string | null } | null;
+  readonly workspacePlan?: { readonly nodeIds: readonly string[]; /** 循环写节点的稳定字面量前缀；用户确认时逐前缀披露，实际节点在执行记录中核验。 */ readonly dynamicNodePrefixes?: readonly string[]; readonly repository: string; readonly baseCommit: string | null; readonly dirtyPaths: readonly string[]; readonly diagnostic: string | null } | null;
   /** 已校验 meta.phases 的声明顺序标题；只作预览词表，不表达执行顺序或依赖。 */
   readonly phaseTitles: readonly string[];
   /** 每个源码 agent() 调用一个展示示意（含动态 id）；不用于分配校验或运行节点定位。 */
@@ -226,7 +226,7 @@ export type ExecutionResponse = {
   };
   /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
   readonly workspaceDiagnostic?: string;
-  /** 最终封存证据；缺省表示尚未收尾。 */
+  /** 最终快照证据（不可变 tree + 证据 ref）；缺省表示尚未收尾，不表示宿主创建了 commit。 */
   readonly sourceEvidence?: import("../workspace/workspace-manager").WorkspaceSource;
   /** 最终收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
   readonly sourceDiagnostic?: string;

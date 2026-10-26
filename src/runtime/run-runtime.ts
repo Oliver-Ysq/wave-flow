@@ -128,7 +128,10 @@ export class RunRuntime {
       // 再写 interrupted），由 status === "running" 守卫天然跳过；一旦新 attempt 已
       // 开始（Run 已回 running），失败必须同样封存终态，否则残留"running Run +
       // interrupted 节点"的损坏投影，下一次 resume 与启动收敛都会被误导。
-      if (!this.#stopping && this.state.snapshot().status === "running") await this.transitionRun("interrupted", diagnostic);
+      // Journal fail closed 时封存写入必然失败；绝不因此吞掉上方的首个失败。
+      if (!this.#stopping && this.state.snapshot().status === "running") {
+        try { await this.transitionRun("interrupted", diagnostic); } catch { /* Journal 已 fail closed，保留原始错误。 */ }
+      }
       throw error;
     }
   }
@@ -232,6 +235,9 @@ export class RunRuntime {
     const status = this.state.snapshot().status;
     if (status !== "running" && status !== "pausing" && status !== "paused" && status !== "recovering") throw new Error("只有运行中或暂停控制中的 Run 可以 stop。 ");
     this.host.pauseScheduling();
+    // 撤销仍在等名额/调度闸门的 queued 节点的启动许可：它们必须在复核处失败并
+    // 归还名额，绝不能在 stop 释放名额后启动真实 Worker。
+    this.host.abortQueuedStarts();
     this.#stopping = true;
     // 等待用户答案的决策门不属于任何节点；stop 必须主动拒绝它们，Workflow 调用栈才能退出。
     this.host.rejectPendingGates("用户停止 Run，决策门不再等待答案。 ");
@@ -240,7 +246,7 @@ export class RunRuntime {
     // pause/recover 可能正写入 agent/run 状态；先等待它因 abort 完成 finally 清理，
     // 再执行 stop，避免两个控制操作并发写状态机。
     if (activeControl && this.#controlSettled) await this.#controlSettled;
-    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering");
+    const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "queued" || node.status === "running" || node.status === "blocked" || node.status === "pausing" || node.status === "paused" || node.status === "recovering");
     let stopError: Error | undefined;
     try {
       for (const node of targets) {
@@ -248,15 +254,25 @@ export class RunRuntime {
         // 已终态的节点保持其已完成证据，不再落 cancelled。
         if (!canTransition(this.state.agent(node.id).status, "cancelled")) continue;
         this.host.beginStop(node.id);
-        try { await this.host.stopNode(node); }
-        catch (error) {
+        try {
+          // queued 节点从未进入执行器，没有真实会话可停；直接耐久 cancelled。
+          if (this.state.agent(node.id).status === "queued") {
+            await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
+            continue;
+          }
+          try { await this.host.stopNode(node); }
+          catch (error) {
+            stopError ??= error instanceof Error ? error : new Error(String(error));
+            const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
+            await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, diagnostic);
+            continue;
+          }
+          await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
+        } catch (error) {
+          // Journal fail closed 时仍继续停止其余真实 Worker，不能用首个落盘失败换取进程泄漏。
           stopError ??= error instanceof Error ? error : new Error(String(error));
-          const diagnostic = `停止未确认：${error instanceof Error ? error.message : String(error)}`;
-          await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, diagnostic);
-          // 仍需尝试其他Worker，不能让首个取消失败留下整批活跃节点。
-          continue;
+          try { await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, `停止未确认：${error instanceof Error ? error.message : String(error)}`); } catch { /* 保留首个失败并继续。 */ }
         }
-        await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "用户停止 Run。 ");
       }
       if (stopError !== undefined) throw stopError;
       await this.transitionRunIfLive("cancelled", "用户停止 Run。 ");
@@ -280,8 +296,11 @@ export class RunRuntime {
   async cancelForDesktopExit(engineInstanceId: string): Promise<RunSnapshot> {
     const status = this.state.snapshot().status;
     if (status === "completed" || status === "cancelled" || status === "interrupted") return this.snapshot();
-    await this.host.commitEvent({ type: "desktop.exit_requested", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "用户退出 Wave Flow。 ", engineInstanceId });
+    let exitError: Error | undefined;
+    try { await this.host.commitEvent({ type: "desktop.exit_requested", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: "用户退出 Wave Flow。 ", engineInstanceId }); }
+    catch (error) { exitError = error instanceof Error ? error : new Error(String(error)); }
     this.host.pauseScheduling(); this.#stopping = true;
+    this.host.abortQueuedStarts();
     this.host.rejectPendingGates("退出 Wave Flow，决策门不再等待答案。 ");
     const activeControl = this.#controlAbort;
     activeControl?.abort();
@@ -294,12 +313,14 @@ export class RunRuntime {
     );
     for (const node of targets) {
       // 与并发 complete 交错时已终态节点保持原证据，只收敛仍存活的节点。
-      const cancelled = await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "退出 Wave Flow 时停止。 ");
-      if (cancelled && node.status !== "queued" && this.host.stopNode) {
+      // Journal 已 fail closed 时仍必须向所有已启动 Worker 发停止信号。
+      try { await this.applyAgentStatusIfLive(node.id, "cancelled", node.agentSessionId, "退出 Wave Flow 时停止。 "); } catch { /* 最终 transition 会携带首个失败；先继续停止真实进程。 */ }
+      if (node.status !== "queued" && this.state.agent(node.id).status !== "completed" && this.host.stopNode) {
         this.host.beginStop(node.id);
         void this.host.stopNode(node).catch(() => undefined).finally(() => this.host.endStop(node.id));
       }
     }
+    if (exitError) throw exitError;
     await this.transitionRunIfLive("cancelled", "退出 Wave Flow 时停止。 ");
     return this.snapshot();
   }

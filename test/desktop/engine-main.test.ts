@@ -52,21 +52,27 @@ test("Engine重启仅补completed来源证据，不写主工作区、不重跑�
   expect(await manager.inspectSource(execution.executionId)).toBeNull();
   expect(await manager.canRetrySource(execution.executionId)).toBe(true);
   expect(await manager.inspectSourceDiagnostic(execution.executionId)).toContain("fixture disk unavailable");
-  const savedRef=await git("rev-parse",`refs/heads/codex/wf-${workspaceId}`);
+  const branchRef=`refs/heads/codex/wf-${workspaceId}`;
   // 用户在同Engine内显式resume只补成果来源，不重跑Workflow/Worker。
   await engine.handleDesktopAction("executions.resume", {harnessRunId:task.harnessRunId,executionId:execution.executionId});
   const detail=await engine.handleDesktopAction("executions.get",{harnessRunId:task.harnessRunId,executionId:execution.executionId}) as import("../../src/desktop/types").ExecutionResponse;
-  expect(detail.sourceEvidence?.branch).toBe(`codex/wf-${workspaceId}`);
-  expect(detail.sourceEvidence?.commit).toBe(savedRef);
+  expect(detail.sourceEvidence?.executionId).toBe(execution.executionId);
   expect(detail.sourceDiagnostic).toBeUndefined();
-  expect(await git("show","-s","--format=%P",detail.sourceEvidence!.commit)).toBe(base);
+  // 零 commit：最终快照是不可变 tree + 证据 ref，worktree HEAD 与受管分支仍停在 base，宿主不新增 commit。
+  expect(detail.sourceEvidence?.evidenceRef).toBe(`refs/wave-flow/evidence/${execution.executionId}`);
+  // 快照 tree 覆盖 worktree 现场文件，不等于 HEAD tree；HEAD 本身不前进。
+  expect(await git("show",`${detail.sourceEvidence!.tree}:a.txt`)).toBe("final");
+  expect(detail.sourceEvidence!.tree).not.toBe(await git("-C",workspace.cwd,"rev-parse","HEAD^{tree}"));
+  expect(await git("rev-parse",`${detail.sourceEvidence!.evidenceRef}^{tree}`)).toBe(detail.sourceEvidence!.tree);
+  expect(await git("-C",workspace.cwd,"rev-parse","HEAD")).toBe(base);
+  expect(await git("rev-parse",branchRef)).toBe(base);
   // 结果只保留在受管 worktree；主工作区不动。
   expect(await git("rev-parse","HEAD")).toBe(base);expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
   expect(await git("diff","--cached","--name-only")).toBe("");expect(await git("status","--porcelain")).toBe("");
   await engine.convergeStaleAcpWorkers();expect(await manager.inspectSource(execution.executionId)).toEqual(detail.sourceEvidence!);expect(calls).toBe(1);
   const identity={harnessRunId:task.harnessRunId,executionId:execution.executionId};
   const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
-  expect(review.paths).toEqual(["a.txt"]);expect(review.sourceCommit).toBe(savedRef);
+  expect(review.paths).toEqual(["a.txt"]);expect(review.sourceTree).toBe(detail.sourceEvidence!.tree);
   await expect(engine.handleDesktopAction("executions.fileDiff",{...identity,path:".git/config"})).rejects.toThrow("不属于");
  }finally{engine.shutdown();}
 },30_000);
@@ -507,6 +513,15 @@ test("已取消的文件批准动作拒绝且不创建权限Store", async () => 
   await expect(engine.handleDesktopAction("executions.decideFilePermission",{approved:true})).rejects.toThrow();
   expect(await Bun.file(join(root,"file-permissions")).exists()).toBe(false);
  }finally{engine.shutdown();}
+});
+
+test("Desktop 退出逐 Run 隔离失败，不让单个 Journal 错误跳过其他收敛", async () => {
+  const source = await Bun.file("src/desktop/desktop-execution-engine.ts").text();
+  expect(source).toContain('for(const runtime of this.#runs.values()) {');
+  expect(source).toContain('catch (error) { failure ??= error; }');
+  expect(source).toContain('try { await this.#executions.cancelForDesktopExit(this.instanceId); }');
+  expect(source).toContain('try { await this.#harness.interruptForDesktopExit(); }');
+  expect(source).toContain('if (failure !== undefined) throw failure;');
 });
 
 /** 回归：串行派发曾让亚秒级的方案检查排在分钟级 CLI 扫描之后无限等待（队头阻塞）。

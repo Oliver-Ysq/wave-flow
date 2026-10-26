@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunJournal } from "../../src/journal/run-journal";
 import { runsRoot } from "../../src/journal/paths";
-import { RUNTIME_VERSION, type RunManifest } from "../../src/journal/types";
+import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -73,6 +73,39 @@ describe("RunJournal", () => {
     await Bun.$`mkdir -p ${wide}`;
     await chmod(wide, 0o755);
     await expect(RunJournal.create(manifest(cwd), wide)).rejects.toThrow("权限过宽");
+  });
+
+  test("append 失败后 fail closed：后续 append 与 flush 携带首个原始错误拒绝，不产生磁盘空洞", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const event = (message: string): JournalEvent => ({ type: "log.written", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message });
+    await journal.append(event("first"));
+    journal.failNextAppendForTest("磁盘写入失败（注入）");
+    // 失败本身按原样抛出，后续 append 与 flush 携带同一个首个错误拒绝。
+    await expect(journal.append(event("second"))).rejects.toThrow("磁盘写入失败（注入）");
+    await expect(journal.append(event("third"))).rejects.toThrow("磁盘写入失败（注入）");
+    await expect(journal.flush()).rejects.toThrow("磁盘写入失败（注入）");
+    // 磁盘上没有自愈续写造成的空洞：只有 run.created 与 first 两条耐久事实。
+    const text = await readFile(join(journal.directory, "journal.jsonl"), "utf8");
+    expect(text.trim().split("\n")).toHaveLength(2);
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events).toHaveLength(2);
+    // 重开得到的是全新 Journal 实例，不携带旧实例的 poison，可继续追加。
+    await opened.journal.append(event("after-reopen"));
+    const reopened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(reopened.events).toHaveLength(3);
+  });
+
+  test("真实写入失败（目录被移除）同样 poison 后续 append", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await rm(journal.directory, { recursive: true, force: true });
+    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message: "x" };
+    await expect(journal.append(event)).rejects.toThrow();
+    const first = await journal.append(event).catch((error: unknown) => error as Error);
+    expect(first).toBeInstanceOf(Error);
+    // 后续拒绝携带的是首个原始错误，而不是新的泛化诊断。
+    await expect(journal.append(event)).rejects.toThrow(first!.message);
   });
 
   test("重开 completed 节点时要求独立结果文件存在且与事件一致", async () => {

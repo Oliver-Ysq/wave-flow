@@ -57,7 +57,7 @@ export class ProductionWorkspaceExecutor {
         ? { launcher: resolveWorkerLauncher(selected), session: undefined, evidence: null }
         : await prepareSessionSkills({ scratch: binding.scratch, launcher: resolveWorkerLauncher(selected), capability, libraryRoot: this.skillsRoot });
       stage("skills_ready");
-      const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter });
+      const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter, beginWriterStart: binding.beginSpawn, cancelWriterStart: binding.cancelSpawn });
       // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
       const worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected, prepared.evidence), identity => this.controlMcp(identity, binding.scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       return {

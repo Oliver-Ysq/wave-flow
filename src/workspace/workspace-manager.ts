@@ -1,13 +1,13 @@
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { GitCommandError, GitEvidenceLimitError, GitRepository, type GitSavedResult, type GitSealRequest, type GitSourceResult } from "./git-repository";
+import { GitCommandError, GitRepository } from "./git-repository";
 import type { ExecutionWorkspaceConfig } from "./execution-workspaces";
-import { validateExecutionWorkspaces } from "./execution-workspaces";
+import { isWorkspaceWriterAuthorized, validateExecutionWorkspaces } from "./execution-workspaces";
 import { WorkflowContractError } from "../workflow/errors";
 import { nodeWriterProcessControl, type WriterProcessControl } from "./writer-process-control";
 
-/** Git已封存但证据未耐久；允许同请求重试关联，绝不重跑Worker。 */
+/** Git快照证据已创建但关联记录未耐久；允许同请求重试关联，绝不重跑Worker。 */
 export class SourcePersistenceError extends Error {}
 
 /** 只按宿主错误类型决定重试；契约拒绝不通过解析诊断文本猜测为临时失败。 */
@@ -29,6 +29,8 @@ export type WorkspaceAuthorization = {
   readonly excludeExistingDirty: boolean;
   /** 获准在同一受管worktree中工作的写节点；不要求预测最终文件。 */
   readonly nodes: readonly { /** 原Run内稳定节点身份。 */ readonly nodeId: string }[];
+  /** 循环/批量写节点的稳定字面量前缀；用户在确认时逐前缀披露，实际节点在快照证据中记录。 */
+  readonly dynamicNodes?: readonly { /** 实际节点 id 的字面量前缀，非空。 */ readonly nodeIdPrefix: string }[];
 };
 
 /** 节点成果原始身份；用于关联已有 Run/attempt，不是节点状态 Store。 */
@@ -57,6 +59,11 @@ export type WorkspaceLease = WorkspaceNodeIdentity & {
   readonly writerPgid?: number | null;
   /** 启动时读取的 leader 启动时间指纹；用于区分 PID 复用，未启动为 null。 */
   readonly writerStartedAt?: string | null;
+  /** spawn writer 进程前耐久记录的启动意图时间（ISO），bindWriter 成功后清回 null。
+   * 崩溃窗口保护：transport 已 spawn 但身份绑定未耐久时 writerIdentity 仍为 null，
+   * 恢复端无法核验是否有进程存活，必须 fail closed 拒绝恢复，
+   * 禁止按 not-started 误判放行造成双 writer，也不猜测杀死无法核验的旧 PID。 */
+  readonly writerSpawnIntentAt?: string | null;
 };
 
 /** 绑定 writer 时必须提供的真实进程证据；缺失即拒绝，不留下不可核验的租约。 */
@@ -108,16 +115,7 @@ export type ManagedWorkspace = {
   readonly leases: readonly WorkspaceLease[];
   /** 恢复前已终止并核验的旧 Engine 租约证据；每条都记录判定结果。 */
   readonly closedReleases?: readonly ClosedWorkspaceRelease[];
-  /** 最近一次成功写入主工作区的封存commit；用于允许接续执行在完全相同的未提交现场上更新。 */
-  readonly lastApplied?: { /** 写入的Execution UUID。 */ readonly executionId: string; /** 已写入的封存commit。 */ readonly commit: string; /** 写入时间。 */ readonly at: string };
-  /** 自动应用的耐久意图；崩溃或Git失败后用于识别宿主自己的部分改动，不误判为用户现场。 */
-  readonly applyIntent?: {
-    /** 正在应用的Execution UUID。 */ readonly executionId: string;
-    /** 目标封存commit。 */ readonly commit: string;
-    /** 应用前期望的主工作区现场（上一次应用结果）；首次应用省略。 */ readonly expectedWorktree?: string;
-    /** 意图耐久时间，ISO格式。 */ readonly at: string;
-  };
-  /** checkout已安全移除时间；分支/commit/证据仍保留。 */
+  /** checkout已安全移除时间；快照证据ref仍保留。 */
   readonly cleanedAt: string | null;
   /** 清理前耐久意图；checkout移除后关联失败时按原身份补写，不再删除未知目录。 */
   readonly cleanupRequestedAt: string | null;
@@ -126,20 +124,19 @@ export type ManagedWorkspace = {
 /** owned ACP执行器提供的退出证明；没有证明即不释放锁。 */
 export type WriterVerifier = (lease: WorkspaceLease) => Promise<boolean>;
 
-/** 最终封存结果的保留状态；当前只记录结果留在 worktree，不写主工作区。 */
-export type WorkspaceApplyState =
-  | { /** 已写入主工作区的时间。 */ readonly at: string; /** 实际写入路径；与封存diff一致。 */ readonly paths: readonly string[] }
-  | { /** 未能自动应用的时间。 */ readonly skippedAt: string; /** 用户可读原因；不代表业务失败。 */ readonly reason: string };
-
-/** 一次Execution的最终封存证据；不移动主分支引用、不写主工作区。 */
-export type WorkspaceSource = GitSourceResult & {
-  /** 已完成的Execution UUID，同时作为幂等请求身份。 */ readonly executionId: string;
+/**
+ * 一次Execution的最终快照证据；不创建commit、不移动任何分支引用、不写主工作区，
+ * 结果原样保留在受管worktree。零 commit 改造后不再含 commit/branch/applied 字段。
+ */
+export type WorkspaceSource = {
+  /** 快照请求身份，等于 executionId；同时作为幂等请求身份。 */ readonly requestId: string;
+  /** 最终现场快照的 canonical tree oid。 */ readonly tree: string;
+  /** 指向快照证据的 Git 引用；清理时凭它验证证据仍存在且 tree 一致。 */ readonly evidenceRef: string;
+  /** 相对冻结基准的全部变更路径，供变更面板展示。 */ readonly paths: readonly string[];
+  /** 已完成的Execution UUID。 */ readonly executionId: string;
   /** 唯一受管工作区UUID。 */ readonly workspaceId: string;
   /** 冻结授权身份；旧Execution不得使用新的授权补交付。 */ readonly authorizationId: string;
   /** 冻结基准完整oid。 */ readonly baseCommit: string;
-  /** 最终封存commit。 */ readonly commit: string;
-  /** 相对基准的全部变更路径，供变更面板展示。 */ readonly paths: readonly string[];
-  /** 结果保留状态；当前固定记录未写主工作区的原因。 */ readonly applied: WorkspaceApplyState;
   /** 证据耐久写入时间，ISO格式。 */ readonly savedAt: string;
 };
 
@@ -208,14 +205,41 @@ export class WorkspaceManager {
       if (record.executionAuthorizations?.length && record.executionAuthorizations.at(-1)!.executionId !== identity.runId) fail("工作区已交接较新Execution，旧执行不能重新取得writer。");
       if (record.cleanedAt) fail("受管worktree已清理；保留成果分支但不能启动新writer。");
       if (record.cleanupRequestedAt) fail("受管worktree已有耐久清理意图，禁止新writer；请先完成原清理核查。");
-      const authorization = this.authorizationFor(record, identity.runId).nodes.find(node => node.nodeId === identity.nodeId);
-      if (!authorization) fail("节点未获成果提交授权。");
+      if (!isWorkspaceWriterAuthorized(this.authorizationFor(record, identity.runId), identity.nodeId)) fail("节点未获成果提交授权。");
       const repo = await this.repository(record), state = await repo.inspect();
       if (state.conflicts.length) fail("工作区存在未解决冲突，禁止启动writer；请先处理现场。");
       const handover = record.executionAuthorizations?.find(item => item.executionId === identity.runId);
       if (handover && state.head !== handover.startCommit && !(await repo.containsCommit(state.head, handover.startCommit))) fail("已交接现场HEAD被外部修改，拒绝启动writer，不自动回滚。");
       const lease: WorkspaceLease = { ...identity, leaseId: crypto.randomUUID(), workspaceId, startCommit: state.head, engineInstanceId: this.engineInstanceId, writerIdentity: null };
       await this.write(workspaceId, { ...record, leases: [...record.leases, lease] }); return lease;
+    });
+  }
+
+  /**
+   * 在真正 spawn writer 进程前耐久记录启动意图（`writerSpawnIntentAt`）。
+   *
+   * 崩溃窗口：transport spawn 成功但 bindWriter 未耐久时 Engine 崩溃，租约里
+   * writerIdentity 仍为 null。没有这条意图，恢复端会把该租约误判为 not-started 直接
+   * 放行，造成同一 worktree 双 writer。意图已耐久但身份未绑定时，恢复必须 fail closed。
+   * 同一租约重复标记幂等（重试同一次启动不推进时间）。
+   */
+  beginWriterSpawn(lease: WorkspaceLease): Promise<WorkspaceLease> {
+    return this.exclusive(async () => {
+      const record = await this.requireLease(lease);
+      if (lease.engineInstanceId !== this.engineInstanceId || lease.writerIdentity !== null) fail("只能为本 Engine 未绑定 writer 的租约记录启动意图。");
+      if (lease.writerSpawnIntentAt) return lease;
+      const marked: WorkspaceLease = { ...lease, writerSpawnIntentAt: new Date().toISOString() };
+      await this.write(lease.workspaceId, { ...record, leases: record.leases.map(item => item.leaseId === lease.leaseId ? marked : item) }); return marked;
+    });
+  }
+
+  /** 仅在底层 spawn 失败（进程确定未创建）时撤回启动意图；身份绑定失败后进程可能存活，禁止撤回。 */
+  cancelWriterSpawn(lease: WorkspaceLease): Promise<WorkspaceLease> {
+    return this.exclusive(async () => {
+      const record = await this.requireLease(lease);
+      if (lease.engineInstanceId !== this.engineInstanceId || lease.writerIdentity !== null || !lease.writerSpawnIntentAt) fail("只能撤回本 Engine 未绑定 writer 的未决启动意图。");
+      const cleared: WorkspaceLease = { ...lease, writerSpawnIntentAt: null };
+      await this.write(lease.workspaceId, { ...record, leases: record.leases.map(item => item.leaseId === lease.leaseId ? cleared : item) }); return cleared;
     });
   }
 
@@ -230,7 +254,7 @@ export class WorkspaceManager {
       const record = await this.requireLease(lease);
       if (lease.engineInstanceId !== this.engineInstanceId || lease.writerIdentity !== null || !writerIdentity.trim()) fail("writer 绑定必须来自本 Engine 的新租约。");
       if (!Number.isSafeInteger(evidence.pgid) || evidence.pgid <= 1 || !evidence.startedAt.trim()) fail("writer 绑定缺少可核验的进程证据。");
-      const bound = { ...lease, writerIdentity, writerPgid: evidence.pgid, writerStartedAt: evidence.startedAt };
+      const bound = { ...lease, writerIdentity, writerPgid: evidence.pgid, writerStartedAt: evidence.startedAt, writerSpawnIntentAt: null };
       await this.write(lease.workspaceId, { ...record, leases: record.leases.map(item => item.leaseId === lease.leaseId ? bound : item) }); return bound;
     });
   }
@@ -246,9 +270,9 @@ export class WorkspaceManager {
     });
   }
 
-  /** 尚未启动进程的租约可安全撤回；有 writer 记录必须经过退出验证。 */
+  /** 尚未启动进程的租约可安全撤回；已耐久启动意图或有 writer 记录必须经退出/人工核验。 */
   abandonUnstarted(lease: WorkspaceLease): Promise<void> {
-    return this.exclusive(async () => { const record = await this.requireLease(lease); if (lease.writerIdentity || lease.engineInstanceId !== this.engineInstanceId) fail("不能撤回已启动或旧Engine租约。"); await this.write(lease.workspaceId, { ...record, leases: record.leases.filter(item => item.leaseId !== lease.leaseId) }); });
+    return this.exclusive(async () => { const record = await this.requireLease(lease); if (lease.writerIdentity || lease.writerSpawnIntentAt || lease.engineInstanceId !== this.engineInstanceId) fail("不能撤回已启动、已耐久启动意图或旧Engine租约。"); await this.write(lease.workspaceId, { ...record, leases: record.leases.filter(item => item.leaseId !== lease.leaseId) }); });
   }
 
   /** 读取 Git 成果与租约证据，调用者不能据此覆盖业务状态。 */
@@ -268,7 +292,7 @@ export class WorkspaceManager {
         if (record.leases.length || record.cleanedAt || record.cleanupRequestedAt) fail("原交接尚有writer或清理，不能派发新worker。");
         const repo = await this.repository(record), current = await repo.inspect();
         if (current.conflicts.length) fail("交接重试期间现场变化，拒绝派发。");
-        // 交接后writer可在受管worktree内提交（封存会包含这些历史），只拒绝回退或分叉的HEAD。
+        // 交接后writer可在受管worktree内提交（快照会包含这些历史），只拒绝回退或分叉的HEAD。
         if (current.head !== expectedStart && !(await repo.containsCommit(current.head, expectedStart))) fail("交接重试期间现场变化，拒绝派发。");
         return;
       }
@@ -325,13 +349,18 @@ export class WorkspaceManager {
   /**
    * 单条旧租约的终止与核验。
    *
-   * 判定顺序：无进程证据 → 拒绝；进程组不存在 → 已退出；启动指纹不同 → PID
-   * 复用、原 writer 已退出且不得误杀；指纹一致或 leader 已退出但组仍存在 →
+   * 判定顺序：无身份且无启动意图 → 从未启动；无身份但有耐久启动意图 → 崩溃窗口
+   * （spawn 后绑定前崩溃），无法核验是否有进程存活，fail closed 拒绝恢复，不猜测杀死
+   * 无法核验的旧 PID；有身份但缺进程证据 → 拒绝；进程组不存在 → 已退出；启动指纹不同
+   * → PID 复用、原 writer 已退出且不得误杀；指纹一致或 leader 已退出但组仍存在 →
    * SIGKILL 整组并轮询到消失。任何一步不可读都抛出，不当成已退出。
    */
   private async closeStaleWriter(lease: WorkspaceLease, at: string): Promise<ClosedWorkspaceRelease> {
     const base = { at, leaseId: lease.leaseId, nodeId: lease.nodeId, attempt: lease.attempt };
-    if (!lease.writerIdentity) return { ...base, outcome: "not-started", reason: "writer 从未启动，无需核验进程退出。" };
+    if (!lease.writerIdentity) {
+      if (lease.writerSpawnIntentAt) fail(`节点 ${lease.nodeId} 的旧 writer 已耐久启动意图但身份未绑定（spawn 后崩溃窗口）；无法核验是否有进程存活，拒绝恢复，不猜测终止未知进程。`);
+      return { ...base, outcome: "not-started", reason: "writer 从未启动，无需核验进程退出。" };
+    }
     const pgid = lease.writerPgid ?? null, startedAt = lease.writerStartedAt ?? null;
     if (pgid === null || startedAt === null) fail(`节点 ${lease.nodeId} 的旧 writer 缺少进程证据，无法核验退出；拒绝恢复。`);
     if (pgid === process.pid || pgid === process.ppid) fail("旧 writer 进程组与本 Engine 重叠；拒绝终止，避免误杀。");
@@ -363,17 +392,24 @@ export class WorkspaceManager {
     }
   }
 
-  /** 只读交付记录；不存在返回null，不在查询中执行Git写入。 */
+  /** 只读交付记录；不存在返回null，不在查询中执行Git写入。历史 commit-only 记录只读映射为新形态，不回写文件。 */
   async inspectSource(executionId: string): Promise<WorkspaceSource | null> {
     assertUuid(executionId);
     try {
       const path = join(this.root, "records", `${executionId}.source`), info = await lstat(path);
       if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077)) fail("交付记录不是私有常规文件。");
-      const result = JSON.parse(await readFile(path, "utf8")) as WorkspaceSource;
-      if (result.executionId !== executionId || result.requestId !== executionId || result.branch !== `codex/wf-${result.workspaceId}`) fail("交付记录身份损坏。");
-      assertUuid(result.workspaceId); assertUuid(result.authorizationId);
-      if (![result.commit, result.baseCommit].every(oid => typeof oid === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)) || !Array.isArray(result.paths) || result.paths.some(path => typeof path !== "string") || !Number.isFinite(Date.parse(result.savedAt)) || !appliedShape(result.applied)) fail("交付记录字段损坏。");
-      return result;
+      const raw = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      const oid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+      const pathsValid = Array.isArray(raw.paths) && raw.paths.every(path => typeof path === "string");
+      if (raw.executionId !== executionId || raw.requestId !== executionId || typeof raw.savedAt !== "string" || !Number.isFinite(Date.parse(raw.savedAt)) || !pathsValid || typeof raw.baseCommit !== "string" || !oid.test(raw.baseCommit)) fail("交付记录身份或字段损坏。");
+      assertUuid(raw.workspaceId as string); assertUuid(raw.authorizationId as string);
+      // 历史 commit-only 来源：只读映射为 tree=旧commit、evidenceRef=旧受管分支引用；忽略旧 applied 字段，绝不重写文件。
+      if (raw.tree === undefined) {
+        if (typeof raw.commit !== "string" || !oid.test(raw.commit) || raw.branch !== `codex/wf-${raw.workspaceId}`) fail("历史交付记录身份损坏。");
+        return { executionId, requestId: executionId, workspaceId: raw.workspaceId as string, authorizationId: raw.authorizationId as string, baseCommit: raw.baseCommit, tree: raw.commit, evidenceRef: `refs/heads/${raw.branch}`, paths: raw.paths as readonly string[], savedAt: raw.savedAt };
+      }
+      if (typeof raw.tree !== "string" || !oid.test(raw.tree) || raw.evidenceRef !== `refs/wave-flow/evidence/${executionId}`) fail("交付记录快照证据字段损坏。");
+      return raw as unknown as WorkspaceSource;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   }
 
@@ -383,7 +419,7 @@ export class WorkspaceManager {
     await this.write(executionId, { diagnostic, retryable }, "source-error");
   }
 
-  /** 是否允许重启补交付；已有成功交付且已应用时不再重做。 */
+  /** 是否允许重启补交付；已有成功快照证据时不再重做。 */
   async canRetrySource(executionId: string): Promise<boolean> {
     const source = await this.inspectSource(executionId);
     if (!source) {
@@ -417,41 +453,37 @@ export class WorkspaceManager {
   }
 
   /**
-   * 最终封存：把共享worktree封存为一个受管commit，结果留在受管worktree。
-   * 不自动写入主工作区；调用者必须先确认Execution已completed。
+   * 最终快照：把共享worktree当前现场采集为耐久Git证据，结果原样保留在受管worktree。
+   * 不创建commit、不改变HEAD或索引、不写主工作区；调用者必须先确认Execution已completed。
    */
   finalizeSource(executionId: string, rawConfig: ExecutionWorkspaceConfig, actualNodeIds?: readonly string[]): Promise<WorkspaceSource> {
     return this.exclusive(async () => {
       assertUuid(executionId); const config = validateExecutionWorkspaces(rawConfig);
-      if (actualNodeIds?.some(id => !config.authorization.nodes.some(node => node.nodeId === id))) fail("实际写节点未授权，不能最终交付。");
+      if (actualNodeIds?.some(id => !isWorkspaceWriterAuthorized(config.authorization, id))) fail("实际写节点未授权，不能最终交付。");
       const main = await GitRepository.open(config.authorization.repository);
       const workspace = await this.require(config.workspaceId);
       if (!isDeepStrictEqual(this.authorizationFor(workspace, executionId), config.authorization) || workspace.commonDirectory !== main.commonDirectory) fail("交付工作区授权/仓库身份漂移。");
       const previous = await this.inspectSource(executionId);
       if (previous) {
-        if (previous.workspaceId !== config.workspaceId || previous.authorizationId !== config.authorization.authorizationId || previous.baseCommit !== config.authorization.baseCommit || previous.branch !== workspace.branch) fail("耐久交付记录与Git证据冲突。");
+        if (previous.workspaceId !== config.workspaceId || previous.authorizationId !== config.authorization.authorizationId || previous.baseCommit !== config.authorization.baseCommit) fail("耐久交付记录与Git证据冲突。");
         return previous;
       }
-      if (workspace.leases.length) fail("writer锁仍在，不能最终封存。");
+      if (workspace.leases.length) fail("writer锁仍在，不能最终采集快照。");
       if (workspace.cleanedAt) fail("受管worktree已清理且没有该Execution的交付记录。");
       const handover = workspace.executionAuthorizations?.find(item => item.executionId === executionId);
-      const request: GitSealRequest = { requestId: executionId, baseCommit: config.authorization.baseCommit, startCommit: handover?.startCommit ?? config.authorization.baseCommit };
-      const sealed = await (await this.repository(workspace)).seal(request);
-      const paths = await main.changedBetween(config.authorization.baseCommit, sealed.commit);
+      const evidence = await (await this.repository(workspace)).captureEvidence({ requestId: executionId, baseCommit: config.authorization.baseCommit, startCommit: handover?.startCommit ?? config.authorization.baseCommit });
       const result: WorkspaceSource = {
-        executionId, requestId: executionId, workspaceId: workspace.workspaceId, authorizationId: config.authorization.authorizationId,
-        baseCommit: config.authorization.baseCommit, commit: sealed.commit, branch: workspace.branch,
-        paths,
-        applied: { skippedAt: new Date().toISOString(), reason: "改动已保留在受管 worktree，未应用到主工作区。" },
-        savedAt: new Date().toISOString(),
+        executionId, requestId: evidence.requestId, tree: evidence.tree, evidenceRef: evidence.evidenceRef, paths: evidence.paths,
+        workspaceId: workspace.workspaceId, authorizationId: config.authorization.authorizationId,
+        baseCommit: config.authorization.baseCommit, savedAt: new Date().toISOString(),
       };
       try { await this.write(executionId, result, "source"); await this.clearSourceDiagnostic(executionId); }
-      catch (error) { throw new SourcePersistenceError(`Git封存已创建，但证据关联未能耐久；可重试宿主收尾：${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+      catch (error) { throw new SourcePersistenceError(`Git快照证据已创建，但证据关联未能耐久；可重试宿主收尾：${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
       return result;
     });
   }
 
-  /** 显式安全清理checkout；不删除分支/commit，不清理未封存或未知现场。 */
+  /** 显式安全清理checkout；快照证据ref保留，不清理未采集证据或未知现场。 */
   cleanup(workspaceId: string, executionId: string, authorized: boolean): Promise<ManagedWorkspace> {
     return this.exclusive(async () => {
       if (!authorized) fail("清理worktree必须由用户明确授权。");
@@ -459,23 +491,28 @@ export class WorkspaceManager {
       const record = await this.require(workspaceId); if (record.cleanedAt) return record;
       if (record.leases.length) fail("writer/Git锁仍在，拒绝清理。");
       const source = await this.inspectSource(executionId);
-      if (!source || source.workspaceId !== workspaceId) fail("该Execution尚无最终封存记录，拒绝清理。");
+      if (!source || source.workspaceId !== workspaceId) fail("该Execution尚无最终快照证据，拒绝清理。");
       const main = await GitRepository.open(record.authorization.repository);
-      // 清理意图已耐久、checkout已移除但cleanedAt未落盘（崩溃恢复）：只补关联，不重复删除或猜现场。
+      const legacyCommit = source.evidenceRef === `refs/heads/${record.branch}`;
+      // 新证据核验独立ref；历史commit-only证据核验原commit对象，续作推进分支tip也不能使旧记录失效。
+      const verifySource = () => legacyCommit ? main.verifyEvidenceExists(source.tree, source.tree) : main.verifyEvidenceExists(source.evidenceRef, source.tree);
+      const canonical = await verifySource();
+      // 清理意图已耐久、checkout已移除但cleanedAt未落盘（崩溃恢复）：证据已核验，只补关联，不重复删除或猜现场。
       if (record.cleanupRequestedAt && !await pathExists(record.cwd)) {
-        await main.verifyCommitExists(source.commit);
         const cleaned = { ...record, cleanedAt: new Date().toISOString() };
         await this.write(workspaceId, cleaned); return cleaned;
       }
-      const repo = await this.repository(record), state = await repo.inspect();
-      if (state.head !== source.commit) fail("封存后worktree HEAD已变化，拒绝清理。");
-      if (state.changedPaths.length || state.conflicts.length) fail("worktree仍有未提交内容或冲突，拒绝清理。");
       const requested = record.cleanupRequestedAt ? record : { ...record, cleanupRequestedAt: new Date().toISOString() };
       if (!record.cleanupRequestedAt) { await this.write(workspaceId, requested); }
-      try { await lstat(record.cwd); await main.removeWorktree(record.cwd); }
+      // 现场tree与快照canonical tree一致即可清理（允许dirty但内容一致）；后续变化或冲突由Git底座拒绝，ignored内容允许随checkout删除。
+      let checkoutPresent = true;
+      try { await lstat(record.cwd); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        await main.verifyCommitExists(source.commit);      }
+        checkoutPresent = false; await verifySource();
+      }
+      // 仅初始lstat的ENOENT表示目录已不在；删除过程中的内部ENOENT必须抛出，不能误记cleanedAt。
+      if (checkoutPresent) await main.removeWorktree(record.cwd, canonical, { gitDirectory: record.gitDirectory, branch: `refs/heads/${record.branch}` });
       const cleaned = { ...requested, cleanedAt: new Date().toISOString() }; await this.write(workspaceId, cleaned); return cleaned;
     });
   }
@@ -513,6 +550,8 @@ export class WorkspaceManager {
         // writer 进程证据可缺省（旧记录/未启动），一旦存在必须是可核验形态；损坏即拒绝恢复。
         if (lease.writerPgid !== undefined && lease.writerPgid !== null && (!Number.isSafeInteger(lease.writerPgid) || lease.writerPgid <= 1)) fail("Workspace租约进程组记录损坏。");
         if (lease.writerStartedAt !== undefined && lease.writerStartedAt !== null && (typeof lease.writerStartedAt !== "string" || !lease.writerStartedAt.trim())) fail("Workspace租约启动时间记录损坏。");
+        // 启动意图可缺省（旧记录/从未尝试启动），一旦存在必须是 ISO 时间或 null；损坏即拒绝恢复。
+        if (lease.writerSpawnIntentAt !== undefined && lease.writerSpawnIntentAt !== null && (typeof lease.writerSpawnIntentAt !== "string" || !Number.isFinite(Date.parse(lease.writerSpawnIntentAt)))) fail("Workspace租约启动意图记录损坏。");
       }
       if (record.closedReleases !== undefined) {
         if (!Array.isArray(record.closedReleases)) fail("Workspace恢复终止记录损坏。");
@@ -521,18 +560,6 @@ export class WorkspaceManager {
         }
       }
       if (new Set(record.leases.map(lease => lease.leaseId)).size !== record.leases.length) fail("Workspace租约重复。");
-      if (record.lastApplied !== undefined) {
-        if (!record.lastApplied || typeof record.lastApplied !== "object") fail("Workspace应用记录损坏。");
-        assertUuid(record.lastApplied.executionId);
-        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.lastApplied.commit) || !Number.isFinite(Date.parse(record.lastApplied.at))) fail("Workspace应用记录损坏。");
-      }
-      if (record.applyIntent !== undefined) {
-        const intent = record.applyIntent;
-        if (!intent || typeof intent !== "object") fail("Workspace应用意图损坏。");
-        assertUuid(intent.executionId);
-        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(intent.commit) || !Number.isFinite(Date.parse(intent.at))
-          || (intent.expectedWorktree !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(intent.expectedWorktree))) fail("Workspace应用意图损坏。");
-      }
       if (record.executionAuthorizations !== undefined) {
         if (!Array.isArray(record.executionAuthorizations)) fail("Execution授权历史损坏。");
         const ids = new Set<string>();
@@ -560,17 +587,17 @@ async function pathExists(path: string): Promise<boolean> {
   try { await lstat(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
-function appliedShape(value: unknown): boolean {
-  if (value === null || typeof value !== "object") return false;
-  const applied = value as Record<string, unknown>;
-  if (typeof applied.at === "string" && Number.isFinite(Date.parse(applied.at)) && Array.isArray(applied.paths) && applied.paths.every(path => typeof path === "string")) return true;
-  return typeof applied.skippedAt === "string" && Number.isFinite(Date.parse(applied.skippedAt)) && typeof applied.reason === "string" && applied.reason.length > 0;
-}
 function assertUuid(id: string): void { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) fail("Workspace身份必须为UUID。"); }
 function validateIdentity(identity: WorkspaceNodeIdentity): void { assertUuid(identity.runId); if (!/^[A-Za-z0-9._:/-]{1,120}$/.test(identity.nodeId) || !Number.isSafeInteger(identity.attempt) || identity.attempt < 1) fail("成果节点身份无效。"); }
 function validateAuthorization(value: WorkspaceAuthorization): void {
   assertUuid(value.authorizationId);
-  if (!Number.isFinite(Date.parse(value.approvedAt)) || !value.repository.startsWith("/") || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.baseCommit) || typeof value.excludeExistingDirty !== "boolean" || !Array.isArray(value.nodes) || !value.nodes.length || new Set(value.nodes.map(node => node.nodeId)).size !== value.nodes.length) fail("Workspace授权字段无效。");
+  const dynamicNodes=value.dynamicNodes;
+  if (!Number.isFinite(Date.parse(value.approvedAt)) || !value.repository.startsWith("/") || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.baseCommit) || typeof value.excludeExistingDirty !== "boolean" || !Array.isArray(value.nodes) || (!value.nodes.length && !(Array.isArray(dynamicNodes) && dynamicNodes.length)) || new Set(value.nodes.map(node => node.nodeId)).size !== value.nodes.length) fail("Workspace授权字段无效。");
   for (const node of value.nodes) { if (!/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeId) || "paths" in node || "externalResources" in node) fail("Workspace节点授权无效。"); }
+  if (dynamicNodes !== undefined) {
+    if (!Array.isArray(dynamicNodes)) fail("Workspace动态写节点授权必须为数组。");
+    const prefixes = new Set<string>();
+    for (const node of dynamicNodes) { if (!node || typeof node.nodeIdPrefix !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeIdPrefix) || prefixes.has(node.nodeIdPrefix) || "paths" in node || "externalResources" in node) fail("Workspace动态写节点授权无效。"); prefixes.add(node.nodeIdPrefix); }
+  }
 }
 function fail(message: string): never { throw new WorkflowContractError(message); }

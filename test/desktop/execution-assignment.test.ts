@@ -254,3 +254,27 @@ async function run(args) {
 });
 
 test("已删除的规则解析入口拒绝，不启动主控回合",async()=>{const {engine,harnessRunId}=await fixture();try{await expect(engine.handleDesktopAction("executions.parseRule",{harnessRunId,revision:1,ruleText:"全部Codex"})).rejects.toThrow("未知 Desktop action");}finally{engine.shutdown();}});
+
+test("循环写节点在计划中披露字面前缀，不再被判为不可核验写意图", async () => {
+  const { engine, harnessRunId } = await fixture();
+  const source = `const meta = { name: "loop-write", description: "循环修复写", phases: [{ title: "修复" }] };
+async function run(args) {
+  phase("修复");
+  for (const round of [1, 2]) {
+    await agent("修复", { id: "repair-" + round, cli: "codex", sandbox: "workspace-write" });
+  }
+  await agent("固定写", { id: "writer", cli: "codex", sandbox: "workspace-write" });
+  return {};
+}`;
+  const author = fixtureServices.get(harnessRunId)!;
+  await author.proposeWorkflowRevision(harnessRunId, source);
+  engine.shutdown();
+  const reopened = new DesktopExecutionEngine(fixtureOptions.get(harnessRunId)!);
+  try {
+    await reopened.handleDesktopAction("harnesses.acceptRevision", { harnessRunId, revision: 2 });
+    const plan = await reopened.handleDesktopAction("executions.plan", { harnessRunId, revision: 2 }) as ExecutionPlanResponse;
+    expect(plan.workspacePlan?.nodeIds).toEqual(["writer"]);
+    expect(plan.workspacePlan?.dynamicNodePrefixes).toEqual(["repair-"]);
+    expect(plan.workspacePlan?.diagnostic ?? "").not.toContain("写意图");
+  } finally { reopened.shutdown(); }
+});

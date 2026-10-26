@@ -95,7 +95,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     const key = nodeKey(node);
     // active 必须先于 subscribe 声明：测试 fixture 的 binding 从构造起即非空，
     // 同步回放事件的实现不得在 TDZ 内触碰 active。
-    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
+    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, turnGap: false, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, completionReminderSent: false };
     active.onTurnStarted = () => { lastActivity = performance.now(); active.stallDiagnosed = false; };
     let skillAdvertisementChecked = false;
     const unsubscribe = session.subscribe?.(event => {
@@ -239,7 +239,16 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> {
     const active = this.requireActive(node);
     if (active.paused || active.pauseRequested) throw new Error("ACP Worker 已在暂停控制中。 ");
-    if (!active.turn) throw new Error("ACP Worker 尚未建立可取消的当前 turn，拒绝伪造暂停。 ");
+    if (!active.turn) {
+      // 回合间隙暂停：上一 turn 已 end_turn、收尾事实读取尚未完成，没有可取消的
+      // ACP 请求；本地挂起即可，recover 时由 runTurn 在同一 session 发起检查现场回合。
+      // 间隙之外的“尚未建立 turn”（启动阶段）仍拒绝伪造暂停。
+      if (!active.turnGap || active.isSettled() || active.stopped) throw new Error("ACP Worker 尚未建立可取消的当前 turn，拒绝伪造暂停。 ");
+      active.pauseRequested = true;
+      active.paused = true;
+      active.resume = new Promise<void>((resolve) => { active.releaseResume = resolve; });
+      return;
+    }
     active.pauseRequested = true;
     const timeout = AbortSignal.timeout(15_000);
     const pauseSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -304,12 +313,15 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     }
   }
 
-  private async runTurn(active: ActiveAcpWorker, prompt: string, signal: AbortSignal, onStarted?: () => void): Promise<void> {
+  private async runTurn(active: ActiveAcpWorker, prompt: string, signal: AbortSignal): Promise<void> {
+    active.turnGap = false;
     active.onTurnStarted?.();
     active.turn = active.session.prompt(prompt, signal);
     // `session.prompt()` 已向 ACP transport 建立该恢复请求；后续 promise 只会在 turn
-    // 结束时 resolve，不能拿结束事件当作“已开始”的唯一信号。
-    onStarted?.();
+    // 结束时 resolve，不能拿结束事件当作“已开始”的唯一信号。任何新回合的实际发起
+    // 都结算 recover 的投递等待，包括间隙暂停后收到的提醒/恢复回合。
+    active.resolveRecoveryStarted?.();
+    active.resolveRecoveryStarted = null;
     let turn: { readonly stopReason: string };
     try { turn = await active.turn; }
     catch (error) {
@@ -317,6 +329,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       throw error;
     }
     active.turn = null;
+    // 回合间隙：从此刻到下一回合实际发起之间，pause 走本地挂起而不是 cancel。
+    active.turnGap = true;
     if (active.isSettled()) return;
     if(active.stopped)return;
     if (active.pauseRequested && turn.stopReason === "cancelled") {
@@ -324,10 +338,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       active.resolveCancelAck = null;
       await active.resume;
       if (active.isSettled() || active.stopped) return;
-      return this.runTurn(active, recoveryPrompt(), signal, () => {
-        active.resolveRecoveryStarted?.();
-        active.resolveRecoveryStarted = null;
-      });
+      return this.runTurn(active, recoveryPrompt(), signal);
     }
     if (active.pauseRequested) {
       const error = new Error(`ACP cancel 未确认 cancelled，实际为 ${turn.stopReason}。`);
@@ -338,9 +349,29 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       // Agent 的 end_turn 不能推进状态；只在同一原生 session 内补发一次“仅上报”
       // 回合，绝不重发原业务任务或自行推断结果。若它仍不 complete，诚实 interrupted。
       active.completionReminderSent = true;
-      const context=await active.readTurnContext!();
-      if(active.isSettled()||active.stopped||active.pauseRequested)return;
-      return this.runTurn(active, completionReminderPrompt(context), signal);
+      // 间隙 pause 会先收口：提醒回合不应在用户暂停期间发起，恢复回合也不依赖
+      // 收尾快照，因此 pause 前的读取与暂停期间的读取失败都不升级为节点中断。
+      if (!active.pauseRequested && !active.paused) {
+        let context: WorkerTurnContext;
+        try { context = await active.readTurnContext!(); }
+        catch (error) {
+          // Runtime 级 pause 已把节点耐久为 pausing/paused，Control 会拒绝只读收尾；
+          // 恢复回合自带现场检查指令，等用户 recover 即可。
+          if (active.pauseRequested || active.paused) {
+            await active.resume;
+            if (active.isSettled() || active.stopped) return;
+            return this.runTurn(active, recoveryPrompt(), signal);
+          }
+          throw error;
+        }
+        if(active.isSettled()||active.stopped)return;
+        // 收尾事实读取期间收到的间隙 pause 在此收口：不发起提醒回合，
+        // 等用户 recover 授权后改发同一 session 的检查现场回合。
+        if (!active.pauseRequested) return this.runTurn(active, completionReminderPrompt(context), signal);
+      }
+      await active.resume;
+      if (active.isSettled() || active.stopped) return;
+      return this.runTurn(active, recoveryPrompt(), signal);
     }
     throw new Error(`ACP Worker turn 已结束（${turn.stopReason}），但未收到 wave-flow complete。`);
   }
@@ -357,6 +388,8 @@ type ActiveAcpWorker = {
   readonly reject: (error: Error) => void;
   readonly isSettled: () => boolean;
   turn: Promise<{ readonly stopReason: string }> | null;
+  /** 上一 turn 已结束、下一 turn 尚未发起的间隙窗口；此窗口内 pause 走本地挂起而非 cancel。 */
+  turnGap: boolean;
   pauseRequested: boolean;
   paused: boolean;
   stopped: boolean;

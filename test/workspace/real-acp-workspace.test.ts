@@ -139,11 +139,14 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     expect(executor.config.version).toBe(3);
     const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config, ["a", "b"]);
     expect(delivery.paths).toEqual(["a.txt", "b.txt"]);
-    expect(delivery.applied).toHaveProperty("skippedAt");
+    // 零 commit：快照是不可变 tree + 证据 ref；worktree HEAD 与受管分支不前进，宿主不新增 commit。
+    expect(await git("show", `${delivery.tree}:a.txt`)).toBe("worker-a"); expect(await git("show", `${delivery.tree}:b.txt`)).toBe("worker-b");
+    expect(await git("rev-parse", `${delivery.evidenceRef}^{tree}`)).toBe(delivery.tree);
+    expect(await git("-C", workspace.cwd, "rev-parse", "HEAD")).toBe(base); expect(await git("rev-parse", `refs/heads/codex/wf-${workspaceId}`)).toBe(base);
     expect(await manager.finalizeSource(runtime.snapshot().id, executor.config)).toEqual(delivery);
     expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n");
     expect(await git("rev-parse", "HEAD")).toBe(base);expect(await git("diff", "--cached", "--name-only")).toBe("");
-    console.log(JSON.stringify({ deliveryBranch: delivery.branch, deliveryCommit: delivery.commit, paths: delivery.paths, applied: delivery.applied }));
+    console.log(JSON.stringify({ deliveryTree: delivery.tree, evidenceRef: delivery.evidenceRef, paths: delivery.paths }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
 }, 240_000);
 
@@ -172,16 +175,19 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   const first=await run(firstConfig,"write",'仅把当前cwd a.txt改为done加换行并读取验证。不commit/push、联网或安装。结果{ok:true}。');
   const firstSource=await manager.finalizeSource(first.snapshot().id,firstConfig,["write"]);
   const renewed={...original,authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),nodes:[{nodeId:"repair"}]};
-  const config:ExecutionWorkspaceConfig={version:3,authorization:renewed,workspaceId,continuation:{executionId:first.snapshot().id,workspaceId,head:firstSource.commit}};
+  // continuation.head 必须是 worktree 当前 HEAD，不是旧快照 tree；零 commit 下 HEAD 仍为 base。
+  const firstHead=await git("-C",(await manager.inspect(workspaceId)).cwd,"rev-parse","HEAD");
+  const config:ExecutionWorkspaceConfig={version:3,authorization:renewed,workspaceId,continuation:{executionId:first.snapshot().id,workspaceId,head:firstHead}};
   const second=await run(config,"repair",'先读取当前cwd a.txt，必须是done加换行；若不是请如实报告，不重建旧基准。把已有内容改为repaired加换行，再读取验证。不commit/push、联网或安装。结果{ok:true}。');
   const workspace=await manager.inspect(workspaceId),source=await manager.finalizeSource(second.snapshot().id,config,["repair"]);
   expect(workspace.authorization).toEqual(original);expect(workspace.executionAuthorizations).toHaveLength(2);expect(workspace.executionAuthorizations?.[1].authorization).toEqual(renewed);
-  expect(source.applied).toHaveProperty("skippedAt");expect(source.paths).toEqual(["a.txt"]);
+  expect(source.paths).toEqual(["a.txt"]);expect(await git("show",`${source.tree}:a.txt`)).toBe("repaired");expect(await git("rev-parse",`${source.evidenceRef}^{tree}`)).toBe(source.tree);
+  expect(await git("-C",workspace.cwd,"rev-parse","HEAD")).toBe(base);expect(await git("rev-parse",`refs/heads/codex/wf-${workspaceId}`)).toBe(base);
   expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
   const oldEvents=(await RunJournal.open(first.snapshot().id,join(root,"runs"))).events,newEvents=(await RunJournal.open(second.snapshot().id,join(root,"runs"))).events;
   expect(newEvents.filter(item=>item.type==="agent.session")).toHaveLength(1);expect(newEvents.filter(item=>item.type==="agent.restarted")).toHaveLength(0);expect(second.snapshot().currentExecutionAttemptId).toBe(1);
   expect(newEvents.find(item=>item.type==="agent.session")!.agentSessionId).not.toBe(oldEvents.find(item=>item.type==="agent.session")!.agentSessionId);
-  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,firstCommit:firstSource.commit,secondCommit:source.commit,cli}));
+  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,firstTree:firstSource.tree,secondTree:source.tree,cli}));
  }finally{pipes.forEach(pipe=>pipe.close());executors.forEach(executor=>executor.close());}
 },240_000);
 
@@ -210,15 +216,15 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保�
     expect(detail.execution.status, detail.execution.diagnostic ?? "").toBe("completed");
     expect(detail.sourceDiagnostic).toBeUndefined(); expect(detail.sourceEvidence).toBeDefined();
     const delivery = detail.sourceEvidence!;
-    expect(await git("show", "-s", "--format=%P", delivery.commit)).toBe(base);
-    expect(await git("rev-list", "--count", `${base}..${delivery.commit}`)).toBe("1");
-    expect(await git("show", `${delivery.commit}:a.txt`)).toBe("done");
-    expect(delivery.applied).toHaveProperty("skippedAt");
+    // 零 commit：快照是不可变 tree + 证据 ref，内容可达但宿主不新增 commit，HEAD 不前进。
+    expect(await git("show", `${delivery.tree}:a.txt`)).toBe("done");
+    expect(await git("rev-parse", `${delivery.evidenceRef}^{tree}`)).toBe(delivery.tree);
+    expect(await git("rev-parse", `refs/heads/codex/wf-${workspaces.workspaceId}`)).toBe(base);
     expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
     expect(await git("diff", "--cached", "--name-only")).toBe("");
     const identity={harnessRunId:taskId,executionId:detail.execution.executionId};
     const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
-    expect(review.paths).toEqual(["a.txt"]); expect(review.sourceCommit).toBe(delivery.commit);
+    expect(review.paths).toEqual(["a.txt"]); expect(review.sourceTree).toBe(delivery.tree);
     console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, delivery }));
   } finally { engine.shutdown(); }
 }, 180_000);

@@ -16,9 +16,17 @@ export function ownedAcpTransport(options: {
   readonly transport?: AcpTransportFactory;
   /** 启动时间指纹读取；缺省读真实进程，自动测试注入固定值。 */
   readonly readWriterStartedAt?: (pid: number) => Promise<string>;
+  /** 真正 spawn 前耐久启动意图；崩溃后无法用空 writer 身份推断进程未启动。 */
+  readonly beginWriterStart?: () => Promise<void>;
+  /** 仅底层 spawn 确定失败、进程未创建时撤回启动意图。 */
+  readonly cancelWriterStart?: () => Promise<void>;
 }): AcpTransportFactory {
   return async (launcher, signal) => {
-    const transport = await (options.transport ?? bunAcpTransport)(launcher, signal);
+    await options.beginWriterStart?.();
+    const transport = await (async () => {
+      try { return await (options.transport ?? bunAcpTransport)(launcher, signal); }
+      catch (error) { await options.cancelWriterStart?.(); throw error; }
+    })();
     if (!transport.writerProcess) { transport.close(); throw new WorkflowContractError("ACP transport没有真实进程组，拒绝启动Worker。"); }
     const identity = options.groups.register(transport.writerProcess);
     const readStartedAt = options.readWriterStartedAt ?? captureWriterStartedAt;

@@ -32,8 +32,10 @@ export type MacosWriteBoundary = {
 /** 生成继承到全部后代的macOS Seatbelt写策略；不可验证环境拒绝而非扩大权限。 */
 export async function macosWriteProfile(boundary: MacosWriteBoundary): Promise<string> {
   if (process.platform !== "darwin") throw new WorkflowContractError("受管写隔离当前仅验证macOS，其他平台拒绝启动。");
-  if (boundary.mode === "perception") return perceptionWriteProfile(boundary);
-  if (boundary.mode !== undefined && boundary.mode !== "isolated") throw new WorkflowContractError("写边界模式无效，拒绝启动。");
+  const normalized = normalizeSystemTmp(boundary);
+  if (normalized.mode === "perception") return perceptionWriteProfile(normalized);
+  if (normalized.mode !== undefined && normalized.mode !== "isolated") throw new WorkflowContractError("写边界模式无效，拒绝启动。");
+  boundary = normalized;
   const nativeRoots = boundary.cliWritableRoots ?? [];
   const writable = [boundary.scratch, ...nativeRoots];
   for (const path of nativeRoots) {
@@ -141,6 +143,10 @@ async function canonical(path: string, directory: boolean): Promise<void> {
   if (!isAbsolute(path) || path === "/" || /[\x00-\x1f\x7f]/.test(path)) throw new WorkflowContractError("写边界路径无效。");
   const info = await lstat(path);
   if (info.isSymbolicLink() || await realpath(path) !== path || (directory && !info.isDirectory()) || (!directory && !info.isFIFO())) throw new WorkflowContractError("写边界必须使用canonical真实目录或私有FIFO。");
+}
+function normalizeSystemTmp(boundary: MacosWriteBoundary): MacosWriteBoundary {
+  const canonical = (path: string) => path.startsWith("/tmp/") ? `/private/tmp/${path.slice(5)}` : path;
+  return { ...boundary, scratch: canonical(boundary.scratch), controlFiles: boundary.controlFiles.map(canonical), cliWritableRoots: boundary.cliWritableRoots?.map(canonical), readOnlyPaths: boundary.readOnlyPaths?.map(canonical), protectedDirectories: boundary.protectedDirectories.map(canonical) };
 }
 function overlaps(a: string, b: string): boolean { return inside(a, b) || inside(b, a); }
 function inside(a: string, b: string): boolean { const path = relative(a, b); return path === "" || (path !== ".." && !path.startsWith("../") && !isAbsolute(path)); }

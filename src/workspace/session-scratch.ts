@@ -7,8 +7,10 @@ import { WorkflowContractError } from "../workflow/errors";
  */
 export async function prepareSessionScratch(stateRoot: string, cwd: string): Promise<string> {
   if (!isAbsolute(stateRoot) || normalize(stateRoot) !== stateRoot || stateRoot === "/") throw new WorkflowContractError("会话私有运行根路径无效。");
+  // macOS系统/tmp别名必须先规范化；其他父目录符号链接仍按下方校验拒绝。
+  const rootPath = process.platform === "darwin" && stateRoot.startsWith("/tmp/") ? `/private/tmp/${stateRoot.slice(5)}` : stateRoot;
   const project = await realpath(cwd);
-  let ancestor = stateRoot;
+  let ancestor = rootPath;
   while (true) {
     try {
       const resolved = await realpath(ancestor);
@@ -16,9 +18,9 @@ export async function prepareSessionScratch(stateRoot: string, cwd: string): Pro
       break;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; ancestor = dirname(ancestor); }
   }
-  if (stateRoot === project || stateRoot.startsWith(`${project}/`) || project.startsWith(`${stateRoot}/`)) throw new WorkflowContractError("会话私有运行根目录与项目重叠。");
-  await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-  const root = await realpath(stateRoot), info = await lstat(stateRoot);
-  if (info.isSymbolicLink() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid()) || root !== stateRoot) throw new WorkflowContractError("会话私有运行根目录不安全。");
+  if (rootPath === project || rootPath.startsWith(`${project}/`) || project.startsWith(`${rootPath}/`)) throw new WorkflowContractError("会话私有运行根目录与项目重叠。");
+  await mkdir(rootPath, { recursive: true, mode: 0o700 });
+  const root = await realpath(rootPath), info = await lstat(rootPath);
+  if (info.isSymbolicLink() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid()) || root !== rootPath) throw new WorkflowContractError("会话私有运行根目录不安全。");
   return realpath(await mkdtemp(join(root, "session-")));
 }

@@ -32,11 +32,21 @@ export function validateExecutionWorkspaces(value: unknown): ExecutionWorkspaceC
   if ("autoSquashDelivery" in authorization) fail("旧自动交付授权不支持；请重新确认整工作区授权。");
   uuid(value.workspaceId);
   uuid(authorization.authorizationId);
-  if (typeof authorization.approvedAt !== "string" || !Number.isFinite(Date.parse(authorization.approvedAt)) || typeof authorization.repository !== "string" || !authorization.repository.startsWith("/") || typeof authorization.baseCommit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(authorization.baseCommit) || typeof authorization.excludeExistingDirty !== "boolean" || !Array.isArray(authorization.nodes) || !authorization.nodes.length) fail("Git成果授权字段无效。");
+  const dynamicNodes = authorization.dynamicNodes;
+  if (typeof authorization.approvedAt !== "string" || !Number.isFinite(Date.parse(authorization.approvedAt)) || typeof authorization.repository !== "string" || !authorization.repository.startsWith("/") || typeof authorization.baseCommit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(authorization.baseCommit) || typeof authorization.excludeExistingDirty !== "boolean" || !Array.isArray(authorization.nodes) || (!authorization.nodes.length && !(Array.isArray(dynamicNodes) && dynamicNodes.length))) fail("Git成果授权字段无效。");
   const ids = new Set<string>();
   for (const node of authorization.nodes) {
     if (!plain(node) || typeof node.nodeId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeId) || ids.has(node.nodeId) || "paths" in node || "externalResources" in node) fail("Git成果节点授权无效。");
     ids.add(node.nodeId);
+  }
+  // 可选增补：循环/批量写节点的稳定字面量前缀。缺省表示只允许逐节点枚举的固定写节点，旧配置语义不变。
+  if (dynamicNodes !== undefined) {
+    if (!Array.isArray(dynamicNodes)) fail("Git成果动态写节点授权必须为数组。");
+    const prefixes = new Set<string>();
+    for (const node of dynamicNodes) {
+      if (!plain(node) || typeof node.nodeIdPrefix !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(node.nodeIdPrefix) || prefixes.has(node.nodeIdPrefix) || "paths" in node || "externalResources" in node) fail("Git成果动态写节点前缀无效。");
+      prefixes.add(node.nodeIdPrefix);
+    }
   }
   if (value.continuation !== undefined) {
     const prior = value.continuation;
@@ -46,6 +56,11 @@ export function validateExecutionWorkspaces(value: unknown): ExecutionWorkspaceC
     if (typeof prior.head !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(prior.head)) fail("续作HEAD无效。");
   }
   return structuredClone(value) as unknown as ExecutionWorkspaceConfig;
+}
+
+/** 实际写节点是否在冻结授权内：固定节点精确匹配，循环写节点按用户已披露的前缀匹配。 */
+export function isWorkspaceWriterAuthorized(authorization: WorkspaceAuthorization, nodeId: string): boolean {
+  return authorization.nodes.some(node => node.nodeId === nodeId) || (authorization.dynamicNodes ?? []).some(node => nodeId.startsWith(node.nodeIdPrefix));
 }
 function plain(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function uuid(value: unknown): void { if (typeof value !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[0-9a-f]{12}$/.test(value)) fail("Git成果身份必须为UUID。"); }

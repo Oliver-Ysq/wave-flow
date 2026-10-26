@@ -9,6 +9,8 @@ import { RunStateMachine } from "../runtime/run-state-machine";
 /** 同一 Run 的 append-only Journal 与结果文件存储；不解释节点状态机。 */
 export class RunJournal {
   #appendQueue: Promise<void> = Promise.resolve();
+  /** 首个 append 失败的原始错误；fail closed 后所有后续 append 与 flush 都携带它拒绝。 */
+  #appendFailure: Error | null = null;
 
   private constructor(readonly manifest: RunManifest, readonly directory: string) {}
 
@@ -77,17 +79,24 @@ export class RunJournal {
     return { journal: new RunJournal(manifest, directory), events };
   }
 
-  /** 串行追加一条完整 JSONL 事实；调用成功代表该事实已写入本机文件系统。 */
+  /**
+   * 串行追加一条完整 JSONL 事实；调用成功代表该事实已写入本机文件系统。
+   * 一旦任何追加失败，本 Journal fail closed：后续 append/flush 一律携带首个
+   * 原始错误拒绝，不再向磁盘写入——自愈续写会在 Journal 留下事实空洞，
+   * 重放时状态机无法解释缺口后的业务事实。
+   */
   async append(event: JournalEvent): Promise<void> {
     validateEvent(event, this.manifest.runId);
+    if (this.#appendFailure) throw this.#appendFailure;
     const operation = this.#appendQueue.then(() => appendFile(join(this.directory, "journal.jsonl"), `${JSON.stringify(event)}\n`, "utf8"));
-    this.#appendQueue = operation.catch(() => undefined);
+    this.#appendQueue = operation.catch((error: unknown) => { this.#appendFailure = error instanceof Error ? error : new Error(String(error)); });
     return operation;
   }
 
-  /** 等待所有已排队的追加操作完成。 */
+  /** 等待所有已排队的追加操作完成；已 fail closed 时抛出首个原始错误。 */
   async flush(): Promise<void> {
     await this.#appendQueue;
+    if (this.#appendFailure) throw this.#appendFailure;
   }
 
   /** 耐久写入一个节点完成结果；仅接受 JSON 对象。 */

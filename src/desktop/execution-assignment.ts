@@ -65,5 +65,7 @@ export function validateExecutionConfig(value: unknown, workers: readonly Extrac
     const assignment = assignments.find(item => item.agentId === node.nodeId) ?? defaultAssignment;
     if (!adapterById(assignment.adapterId)?.capabilities.workerControlMcp) throw new Error("所选Adapter尚未完成Worker私有完成协议验证；请重新选择CLI。");
   }
+  // 循环写节点运行时按默认分配落 CLI，没有逐节点 assignment 可核对；仍须确认默认 Adapter 具备完成协议。
+  if (workspaces?.authorization.dynamicNodes?.length && !adapterById(defaultAssignment.adapterId)?.capabilities.workerControlMcp) throw new Error("循环写节点的默认CLI尚未完成Worker私有完成协议验证；请重新选择CLI。");
   return { version: 1, createdAt: typeof config.createdAt === "string" ? config.createdAt : new Date().toISOString(), fallbackRuntimeId: config.fallbackRuntimeId, ruleText: (config.ruleText as string | null) ?? null, ruleDegraded: config.ruleDegraded, defaultAssignment, assignments, ...(workspaces ? { workspaces } : {}) };
 }

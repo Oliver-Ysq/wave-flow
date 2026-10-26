@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
+import type { ControlServer } from "../../src/control/control-server";
 import { RunRuntime } from "../../src/runtime/run-runtime";
 import { AcpWorkerExecutor, type AcpWorkerSession } from "../../src/runtime/acp-worker-executor";
 import type { AgentNodeExecutor } from "../../src/runtime/run-types";
@@ -197,6 +198,76 @@ describe("RunRuntime ACP-neutral core", () => {
     expect(reopened.events.slice(cancelled).some((event) => event.type === "agent.status" && event.status !== "cancelled")).toBe(false);
     expect([...reopened.events].reverse().find((event) => event.type === "run.status")).toMatchObject({ status: "cancelled" });
   });
+  test("回合间隙 pause/recover 不再把整 Run 收敛为 interrupted", async () => {
+    let capability = "";
+    let reading!: () => void, releaseRead!: () => void;
+    const entered = new Promise<void>((done) => { reading = done; });
+    const hold = new Promise<void>((done) => { releaseRead = done; });
+    const prompts: string[] = [];
+    let control!: ControlServer;
+    let runtime!: RunRuntime;
+    const session: AcpWorkerSession = {
+      get binding() { return { launcherId: "test-acp", sessionId: "native", capabilities: {} }; },
+      async initialize() {},
+      async createSession() { return { launcherId: "test-acp", sessionId: "native", capabilities: {} }; },
+      async prompt(text) {
+        prompts.push(text);
+        if (prompts.length === 1) return { stopReason: "end_turn" };
+        // recover 的投递确认先于节点回到 running；真实 Worker 不会在这一窗口内 complete。
+        const deadline = Date.now() + 5_000;
+        while (runtime.snapshot().phases[0].agents[0].status !== "running") {
+          if (Date.now() > deadline) throw new Error("恢复回合后节点未回到 running。 ");
+          await Bun.sleep(1);
+        }
+        const agentSessionId = runtime.snapshot().phases[0].agents[0].agentSessionId!;
+        await control.complete({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability, summary: "done", result: { ok: true } });
+        return { stopReason: "end_turn" };
+      },
+      async cancel() {}, close() {},
+    };
+    const executor = new AcpWorkerExecutor({ id: "test-acp", command: "fake", args: [] }, () => session, undefined, (identity) => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+    runtime = await create(executor);
+    control = runtime.createControlServer();
+    executor.bindControl(control);
+    const original = control.workerTurnContext.bind(control);
+    control.workerTurnContext = async (identity) => { reading(); await hold; return original(identity); };
+    const running = runtime.run(workflow);
+    // 第一个 turn 已 end_turn，runTurn 正卡在收尾事实读取：曾经的间隙 pause 窗口。
+    await entered;
+    const paused = await runtime.pause();
+    expect(paused).toMatchObject({ status: "paused", phases: [{ agents: [{ id: "worker", status: "paused" }] }] });
+    releaseRead();
+    await Bun.sleep(10);
+    // 间隙暂停不得发起完成提醒回合。
+    expect(prompts).toHaveLength(1);
+    const recovered = await runtime.recover();
+    expect(recovered.status).toBe("running");
+    await expect(running).resolves.toEqual({ ok: true });
+    expect(runtime.snapshot()).toMatchObject({ status: "completed", phases: [{ agents: [{ id: "worker", status: "completed", result: { ok: true } }] }] });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("检查当前工作目录");
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.recovered", nodeId: "worker" }));
+    expect(reopened.events.some((event) => event.type === "run.status" && event.status === "interrupted")).toBe(false);
+  });
+  test("Journal fail closed 时 run() 抛出首个写入失败，不用收敛次生错误掩盖", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const runtime = await create({ execute: async () => { entered(); await gate; return { ok: true }; } });
+    const running = runtime.run(workflow).then(() => null, (error: unknown) => error as Error);
+    await started;
+    // 节点已 durable running；让下一条 Journal 写入（agent.completed）失败。
+    runtime.journal.failNextAppendForTest("磁盘已满（注入）");
+    release();
+    const error = await running;
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toContain("磁盘已满（注入）");
+    // 档案不包含伪造的 completed/interrupted 后续事实，可正常重开。
+    const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
+    expect(reopened.events.some((event) => event.type === "agent.completed")).toBe(false);
+    expect(reopened.events.some((event) => event.type === "run.status" && event.status !== "running")).toBe(false);
+  });
   test("确定性结果只在节点完成后封存 Run", async () => {
     const runtime = await create({ execute: async () => ({ ok: true }) });
     await expect(runtime.run(workflow)).resolves.toEqual({ ok: true });
@@ -221,6 +292,20 @@ describe("RunRuntime ACP-neutral core", () => {
     expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.status", status: "cancelled", diagnostic: "退出 Wave Flow 时停止。 " }));
     expect(reopened.events).toContainEqual(expect.objectContaining({ type: "run.status", status: "cancelled", diagnostic: "退出 Wave Flow 时停止。 " }));
     started(); await running;
+  });
+  test("desktop.exit_requested 落盘失败仍停止真实 Worker 并返回首个错误", async () => {
+    let entered!: () => void, stopped = 0, rejectExecution!: (error: Error) => void;
+    const enteredExecution = new Promise<void>((resolve) => { entered = resolve; });
+    const runtime = await create({
+      execute: async () => { entered(); return new Promise<JsonObject>((_, reject) => { rejectExecution = reject; }); },
+      stop: async () => { stopped++; rejectExecution(new Error("已停止")); },
+    });
+    const running = runtime.run(workflow).catch(() => undefined);
+    await enteredExecution;
+    runtime.journal.failNextAppendForTest("磁盘已满（注入）");
+    await expect(runtime.cancelForDesktopExit("test-engine")).rejects.toThrow("磁盘已满（注入）");
+    expect(stopped).toBe(1);
+    await running;
   });
   test("desktop.exit_requested 先于所有 cancelled 事实耐久", async () => {
     let entered!: () => void;

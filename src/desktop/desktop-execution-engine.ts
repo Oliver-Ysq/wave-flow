@@ -44,7 +44,7 @@ import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-run
 import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
 import { validateExecutionConfig } from "./execution-assignment";
 import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-executor";
-import { readWorkspaceWriteIntent } from "../workspace/write-intent";
+import { hasWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace-manager";
 import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
@@ -333,14 +333,18 @@ export class DesktopExecutionEngine {
     if (this.#exitRequested) return;
     this.#exitRequested = true;
     this.#harness.beginExit();
-    for (const runtime of this.#runs.values()) await runtime.cancelForDesktopExit(this.instanceId);
-    await this.#executions.cancelForDesktopExit(this.instanceId);
-    await this.#harness.interruptForDesktopExit();
+    let failure: unknown;
+    for(const runtime of this.#runs.values()) {
+      try { await runtime.cancelForDesktopExit(this.instanceId); } catch (error) { failure ??= error; }
+    }
+    try { await this.#executions.cancelForDesktopExit(this.instanceId); } catch (error) { failure ??= error; }
+    try { await this.#harness.interruptForDesktopExit(); } catch (error) { failure ??= error; }
     this.#harness.close();
     for (const pipe of this.#harnessControlPipes.values()) pipe.close();
     this.#harnessControlPipes.clear();
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
+    if (failure !== undefined) throw failure;
   }
 
 
@@ -762,8 +766,8 @@ export class DesktopExecutionEngine {
       const harnessRuntimeId=snapshot.runtime?.runtimeId??list.harnessRuntimeId;
       const intent = readWorkspaceWriteIntent(revision.source);
       let workspacePlan: ExecutionPlanResponse["workspacePlan"] = null;
-      if (intent.nodeIds.length || intent.uncertain) {
-        workspacePlan = { nodeIds: intent.nodeIds, repository: snapshot.cwd, baseCommit: null, dirtyPaths: [], diagnostic: intent.uncertain ? "写意图包含动态或展开选项，需改为可核验固定节点。" : null };
+      if (hasWorkspaceWriteIntent(intent)) {
+        workspacePlan = { nodeIds: intent.nodeIds, ...(intent.dynamicNodePrefixes.length?{dynamicNodePrefixes:intent.dynamicNodePrefixes}:{}), repository: snapshot.cwd, baseCommit: null, dirtyPaths: [], diagnostic: intent.uncertain ? "写意图包含无法静态核验的选项或 id，需改为字面量 sandbox 与可披露前缀的 id。" : null };
         if (!intent.uncertain) try { const git = await (await GitRepository.open(snapshot.cwd)).inspect(); workspacePlan = { ...workspacePlan, baseCommit: git.head, dirtyPaths: git.changedPaths }; } catch (error) { workspacePlan = { ...workspacePlan, diagnostic: error instanceof Error ? error.message : String(error) }; }
       }
       const sceneEvidenceHash=snapshot.task?.workflowContract==="single-workflow-v1"?await this.#harness.currentImpactEvidence(harnessRunId):null;
@@ -992,10 +996,10 @@ export class DesktopExecutionEngine {
         const task = await this.#harness.snapshot(taskId), execution = task.executions.find(item => item.executionId === executionId);
         if (!execution?.config?.workspaces) throw new Error("执行不属于当前任务或没有Git成果配置。");
         const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId), evidence = await manager.inspectSource(executionId);
-        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无最终封存记录可审阅。");
+        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无最终快照记录可审阅。");
         const repo = await GitRepository.open(execution.config.workspaces.authorization.repository);
-        if (action === "executions.review") return repo.review(evidence.baseCommit, evidence.commit);
-        return repo.fileDiff(evidence.baseCommit, evidence.commit, requiredString(value, "path"));
+        if (action === "executions.review") return repo.review(evidence.baseCommit, evidence.tree);
+        return repo.fileDiff(evidence.baseCommit, evidence.tree, requiredString(value, "path"));
       }
       case "executions.savePartial": {
         if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
@@ -1009,7 +1013,7 @@ export class DesktopExecutionEngine {
         for(const node of detail.snapshot.phases.flatMap(phase=>phase.agents))if(node.status==="cancelled"||node.status==="interrupted")await executor.finalizePartial(node);
         return this.executionSnapshot(taskId,executionId);
       }
-      // 执行页“清理临时工作区”入口；只删除已封存、干净、无租约的受管checkout，分支与证据保留。
+      // 执行页“清理临时工作区”入口；只删除已采证、身份/tree一致、无租约且未命中删除防护的受管checkout，分支与证据保留。
       case "executions.cleanupWorkspaces": {
         if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
         const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId"),task=await this.#harness.snapshot(taskId);
@@ -1065,7 +1069,7 @@ export class DesktopExecutionEngine {
       if(!isJsonObject(input))throw new Error("工作流参数必须是JSON-safe对象。");
       const rawConfig=object(value).config;
       const localWrite=revision.localOrigin?readWorkspaceWriteIntent(revision.source):null;
-      if(revision.localOrigin ? (localWrite!.nodeIds.length||localWrite!.uncertain ? !isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces : rawConfig!==undefined) : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。" : "确认配置必须是 JSON-safe 对象。");
+      if(revision.localOrigin ? (hasWorkspaceWriteIntent(localWrite!) ? !isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces : rawConfig!==undefined) : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。" : "确认配置必须是 JSON-safe 对象。");
       const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null,...(confirmedScene?{sceneEvidenceHash:confirmedScene}:{})})).digest("hex");
       const receipt=snapshot.executionConfirmations?.find(item=>item.requestId===requestId);
       if(receipt&&(receipt.payloadHash!==payloadHash||receipt.revision!==number))throw new Error("相同确认请求不能更换版本、输入或配置。");

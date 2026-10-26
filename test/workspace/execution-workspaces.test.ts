@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertCurrentWorkspaceRecord, validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
+import { assertCurrentWorkspaceRecord, isWorkspaceWriterAuthorized, validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
 
 function config(): ExecutionWorkspaceConfig {
   return { version: 3, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: "/repo", baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] }, workspaceId: crypto.randomUUID() };
@@ -37,4 +37,25 @@ test("续作UUID、共享worktree身份与冻结HEAD严格核验", () => {
     { ...continuation, head: "bad" },
     { ...continuation, heads: [] },
   ]) expect(() => validateExecutionWorkspaces({ ...input, continuation: prior })).toThrow();
+});
+
+test("循环写节点以字面量前缀授权：可只含动态前缀，前缀唯一且受字符集约束", () => {
+  const input = config();
+  const dynamic = { ...input, authorization: { ...input.authorization, dynamicNodes: [{ nodeIdPrefix: "repair-" }, { nodeIdPrefix: "retry-" }] } };
+  expect(validateExecutionWorkspaces(dynamic).authorization.dynamicNodes).toEqual([{ nodeIdPrefix: "repair-" }, { nodeIdPrefix: "retry-" }]);
+  // 只有循环写节点的脚本允许 nodes 为空，但不能两者都空。
+  const onlyDynamic = { ...input, authorization: { ...input.authorization, nodes: [], dynamicNodes: [{ nodeIdPrefix: "repair-" }] } };
+  expect(validateExecutionWorkspaces(onlyDynamic).authorization.nodes).toEqual([]);
+  for (const bad of [[{ nodeIdPrefix: "" }], [{ nodeIdPrefix: "bad prefix" }], [{ nodeIdPrefix: "repair-" }, { nodeIdPrefix: "repair-" }], "repair-"])
+    expect(() => validateExecutionWorkspaces({ ...input, authorization: { ...input.authorization, dynamicNodes: bad } })).toThrow("动态写节点");
+});
+test("封存写者核验：固定节点精确匹配，循环节点按已披露前缀匹配", () => {
+  const authorization = { ...config().authorization, dynamicNodes: [{ nodeIdPrefix: "repair-" }] };
+  expect(isWorkspaceWriterAuthorized(authorization, "a")).toBe(true);
+  expect(isWorkspaceWriterAuthorized(authorization, "repair-1")).toBe(true);
+  expect(isWorkspaceWriterAuthorized(authorization, "repair-")).toBe(true);
+  expect(isWorkspaceWriterAuthorized(authorization, "repair-other")).toBe(true);
+  expect(isWorkspaceWriterAuthorized(authorization, "hidden-1")).toBe(false);
+  // 旧配置没有 dynamicNodes 时语义不变：动态 id 仍不被授权。
+  expect(isWorkspaceWriterAuthorized(config().authorization, "repair-1")).toBe(false);
 });

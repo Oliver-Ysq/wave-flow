@@ -328,6 +328,8 @@ export class RunStateMachine {
   }
 
   #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
+    // 终态 Run 不再接受业务会话事实：stop/退出封存后迟到的 session 投递不得复活节点。
+    if (isTerminalRun(this.#status)) throw new Error(`Run 已终态（${this.#status}），不再接受 agent.session 事实。`);
     if (!event.nodeId || !event.agentSessionId) throw new Error("agent.session 缺少节点或会话身份。");
     const agent = this.#agents.get(event.nodeId);
     if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("agent.session 必须属于当前 running 节点。");
@@ -348,6 +350,9 @@ export class RunStateMachine {
 
   #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null, agentSessionId: string | null = null): void {
     if (!nodeId) throw new Error("Agent 状态事件缺少 nodeId。");
+    // 终态 Run 不再接受业务 running/completed：queued 节点等名额期间用户 stop 后，
+    // 迟到的启动事实不得绕过 cancelled/interrupted/completed 封存；收敛类写入不受影响。
+    if ((status === "running" || status === "completed") && isTerminalRun(this.#status)) throw new Error(`Run 已终态（${this.#status}），不再接受节点 ${status} 事实。`);
     const agent = this.#agents.get(nodeId);
     if (!agent) throw new Error(`未知 Agent 节点：${nodeId}`);
     if (!canTransition(agent.status, status)) throw new Error(`非法 Agent 状态转移：${agent.status} → ${status}`);

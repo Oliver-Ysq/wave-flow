@@ -29,3 +29,19 @@ Upstream: https://github.com/stablyai/orca/tree/8802b55db7572a1944af5719073ebb95
 License: MIT, reproduced in orca-LICENSE.
 
 Modified by Wave Flow: adapted to a single Bun Engine process with ACP Worker groups; candidate list comes from the login-shell PATH scan; status vocabulary is surfaced to the desktop UI as five user-facing outcomes; no Electron, WSL, Windows or remote-runtime paths are adopted.
+
+# Orca worktree lifecycle
+
+Wave Flow adapts worktree creation/removal safety from stablyai/orca, commit 6a96733ba9b10008daa39778217a229eca50a121.
+
+Ported:
+- src/main/git/worktree-operation-options.ts and worktree-add.ts — 180-second creation budget and no-track branch creation.
+- src/main/git/worktree-removal.ts — no generic short timeout for large checkout deletion.
+- src/main/git/worktree-removal-preflight.ts — explicit submodule visibility and populated-submodule refusal.
+- src/main/worktree-removal-safety.ts and src/shared/worktree/removal.ts — registered/locked worktree and nested checkout refusal.
+
+Upstream: https://github.com/stablyai/orca/tree/6a96733ba9b10008daa39778217a229eca50a121
+
+License: MIT, reproduced in orca-LICENSE.
+
+Modified by Wave Flow: integrated with frozen workspace identity, multi-writer leases, durable cleanup intent and zero-commit tree evidence refs; ignored files are not enumerated and may be deleted with the checkout; branches and evidence refs are preserved. No branch cleanup queue, background removal table, hooks, sparse checkout, WSL, Windows or remote-runtime paths are adopted.

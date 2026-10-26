@@ -62,3 +62,33 @@ test.skipIf(process.platform !== "darwin")("无真实writer句柄或绑定落盘
   await expect(failing({ id: "test", command: "/bin/true", args: [] }, new AbortController().signal)).rejects.toThrow("绑定失败");
   expect(closed).toBe(2);
 });
+
+test("owned transport 在 spawn 前登记意图，spawn 失败才撤回，生产执行器完成接线", async () => {
+  const calls: string[] = [];
+  const groups = new WriterProcessGroups(() => false);
+  const stream = acp.ndJsonStream(new WritableStream<Uint8Array>(), new ReadableStream<Uint8Array>());
+  const factory = ownedAcpTransport({
+    groups,
+    bindWriter: async () => { calls.push("bind"); },
+    beginWriterStart: async () => { calls.push("begin"); },
+    cancelWriterStart: async () => { calls.push("cancel"); },
+    readWriterStartedAt: async () => "start",
+    transport: async () => { calls.push("spawn"); return { stream, exited: Promise.resolve(0), close() {}, writerProcess: { pid: 43210, exited: Promise.resolve(0), terminate() {} } }; },
+  });
+  await factory({ id: "test", command: "/bin/true", args: [] }, new AbortController().signal);
+  expect(calls).toEqual(["begin", "spawn", "bind"]);
+
+  const failing = ownedAcpTransport({
+    groups,
+    bindWriter: async () => {},
+    beginWriterStart: async () => { calls.push("begin-failure"); },
+    cancelWriterStart: async () => { calls.push("cancel-failure"); },
+    transport: async () => { throw new Error("spawn failed"); },
+  });
+  await expect(failing({ id: "test", command: "/bin/true", args: [] }, new AbortController().signal)).rejects.toThrow("spawn failed");
+  expect(calls.slice(-2)).toEqual(["begin-failure", "cancel-failure"]);
+
+  const production = await Bun.file("src/workspace/production-workspace-executor.ts").text();
+  expect(production).toContain("beginWriterStart: binding.beginSpawn");
+  expect(production).toContain("cancelWriterStart: binding.cancelSpawn");
+});

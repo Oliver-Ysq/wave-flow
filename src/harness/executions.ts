@@ -20,7 +20,7 @@ import { HarnessJournal } from "./journal";
 import { canonicalJson, validateTemplateInput } from "./workflow-templates";
 import {loadWorkflowSource} from "../workflow/load-workflow";
 import {preflightLocalWorkflow,validateLocalInput} from "../workflow/preflight-local";
-import { assertWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
+import { assertWorkspaceWriteIntent, hasWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { WorkspaceManager } from "../workspace/workspace-manager";
 import { GitRepository } from "../workspace/git-repository";
 import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
@@ -189,7 +189,7 @@ export class HarnessExecutionService {
     if (snapshot.executions.some((item) => item.finishedAt === null)) throw new Error("存在未结束的 WorkflowExecution；新 revision 必须等前一执行到达终态。 ");
     const priorWorkspace=[...snapshot.executions].reverse().find(item=>item.config?.workspaces);
     if(priorWorkspace)assertCurrentWorkspaceRecord(priorWorkspace.config!.workspaces);
-    if(snapshot.task?.workflowContract==="single-workflow-v1"&&priorWorkspace&&readWorkspaceWriteIntent(revision.source).nodeIds.length&&!config?.workspaces?.continuation)throw new Error("写修订必须明确接续原受管现场，不能从历史基准另起并丢弃旧成果。");
+    if(snapshot.task?.workflowContract==="single-workflow-v1"&&priorWorkspace&&hasWorkspaceWriteIntent(readWorkspaceWriteIntent(revision.source))&&!config?.workspaces?.continuation)throw new Error("写修订必须明确接续原受管现场，不能从历史基准另起并丢弃旧成果。");
     if(config?.workspaces?.continuation){
       const prior=priorWorkspace,continuation=config.workspaces.continuation;
       if(snapshot.task?.workflowContract!=="single-workflow-v1"||!prior||prior.finishedAt===null||prior.executionId!==continuation.executionId||!prior.config?.workspaces)throw new Error("续作只能引用同Task最近写Execution的受管现场；只读轮次不能清除成果。");
@@ -205,7 +205,7 @@ export class HarnessExecutionService {
     // 受限 Execution 的脚本字面量 cli/model 不直接生效；没有分配卡冻结的快照就没有
     // 任何诚实依据决定节点落到哪个 Runtime，必须在任何耐久事实之前拒绝。
     if (!revision.localOrigin && !config) throw new Error("创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
-    if (revision.localOrigin) { const intent=readWorkspaceWriteIntent(revision.source); if((intent.nodeIds.length||intent.uncertain)&&!config?.workspaces)throw new Error("本地 Workflow 的workspace-write必须携带用户Git成果授权。 "); if(!intent.nodeIds.length&&!intent.uncertain&&config)throw new Error("纯只读本地 Workflow 不接受执行配置。 "); }
+    if (revision.localOrigin) { const intent=readWorkspaceWriteIntent(revision.source); if((hasWorkspaceWriteIntent(intent))&&!config?.workspaces)throw new Error("本地 Workflow 的workspace-write必须携带用户Git成果授权。 "); if(!hasWorkspaceWriteIntent(intent)&&config)throw new Error("纯只读本地 Workflow 不接受执行配置。 "); }
     // 编译失败在任何耐久事实之前拒绝，不产生 Execution。
     if(revision.localOrigin){
       const checked=await preflightLocalWorkflow(revision.localOrigin.path,snapshot.cwd);

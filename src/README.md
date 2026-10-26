@@ -16,7 +16,7 @@ Runtime → RuntimeAcpWorkerExecutor → 本机 CLI ACP（经内置 Adapter Cata
 - `control/`：唯一的 `complete / block / continue` 状态入口与 capability 校验。
 - `journal/`：Run 耐久事件、重放与路径。
 - `harness/`：主控对话、Task 生命周期、Execution 冻结/恢复与私有 MCP 窄工具。
-- `workspace/`：Git worktree、writer 租约、成果封存与只读变更审阅。
+- `workspace/`：Git worktree、writer 租约、tree 证据收集与只读变更审阅。
 - `desktop/`：Desktop Engine（本次应用的唯一状态权威）与 Tauri 私有 action 派发。
 - `skills/`：托管技能库扫描/校验、会话私有软链投影、按 Adapter 能力的执行期注入与证据。
 - `shared/`：无业务副作用的类型、ID、哈希、路径、CLI 可用性开关与 JSON 工具。
