@@ -34,7 +34,7 @@ test("执行结束后只保留受管 worktree，不再提供自动应用、重�
   expect(app).not.toContain("api.cleanupWorkspaces");
   expect(api).not.toContain("executions.cleanupWorkspaces");
   expect(design).toContain("完成后改动保留在工作区，不会自动写入项目目录");
-  expect(design).toContain("本次执行共用一个工作区");
+  expect(design).not.toContain("本次执行共用一个工作区");
   expect(design).not.toContain("自动应用到主工作区");
 });
 

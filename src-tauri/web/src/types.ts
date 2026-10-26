@@ -224,7 +224,7 @@ export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-d
 /** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
 export type ExecutionWorkspaceConfig = {
  /** 明确接续同Task最近写Execution的共享worktree；缺省首次分配。 */ continuation?:{executionId:string;workspaceId:string;head:string};
- version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>}; workspaceId:string };
+ version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>;/** 循环写节点的稳定字面量前缀；用户确认时逐前缀披露，实际节点在执行记录中核验。 */dynamicNodes?:Array<{nodeIdPrefix:string}>}; workspaceId:string };
 export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
@@ -232,7 +232,8 @@ export type ExecutionPlanResponse = {
   continuationPlan?:{executionId:string;baseCommit:string;workspaceId:string;head:string}|null;
   /** 最新终态执行现场证据；首次null，确认绑定此版本，不构成授权。 */
   sceneEvidenceHash?:string|null;
-  workspacePlan?:{nodeIds:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
+  /** 受管写计划：固定写节点逐个枚举；循环写节点只给稳定字面量前缀，实际节点在执行记录中核验。 */
+  workspacePlan?:{nodeIds:string[];/** 循环写节点 id 的字面量前缀，随确认载荷冻结并展示。 */dynamicNodePrefixes?:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
   harnessRunId: string;
   revision: number;
   /** 已校验的阶段词表，按 meta 声明排序；不代表实际执行顺序。 */
@@ -369,14 +370,14 @@ export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   workspaceDiagnostic?:string;
-  /** 最终封存证据；只读投影，不代表已提交或 push。 */
+  /** 最终快照证据；只读投影，是不可变 tree + 证据 ref，不代表宿主创建了 commit 或 push。 */
   sourceEvidence?: {
     /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
-    /** 共享worktree分支及UUID。 */ branch:string; workspaceId:string;
-    /** 最终封存commit与基准。 */ commit:string; baseCommit:string;
+    /** 受管工作区 UUID。 */ workspaceId:string;
+    /** 最终快照的不可变 tree 完整 oid 与冻结基准；不表示 commit。 */ tree:string; baseCommit:string;
+    /** 指向该 tree 的证据 ref 全名；仅作只读证据，不移动任何分支。 */ evidenceRef:string;
     /** 冻结授权身份。 */ authorizationId:string;
     /** 实际变化文件与耐久时间。 */ paths:string[]; savedAt:string;
-    /** 结果保留状态；当前为未写入主工作区的 worktree 原因。 */ applied:{at:string;paths:string[]}|{skippedAt:string;reason:string};
   };
   /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
   /** 共享worktree与租约投影；closedWriters 为恢复前终止或确认退出的旧writer数。 */

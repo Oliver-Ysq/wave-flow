@@ -24,17 +24,38 @@ export function diffStyleForWidth(width: number): "split" | "unified" {
   return width >= SPLIT_DIFF_MIN_WIDTH ? "split" : "unified";
 }
 
+/** 文件清单每页条数；大 Execution 一次渲染全部条目不可用。 */
+export const CHANGES_PAGE_SIZE = 200;
+
+/** 总页数；空清单按一页计，避免显示“第 1 / 0 页”。 */
+export function changesPageCount(total: number): number {
+  return Math.max(1, Math.ceil(total / CHANGES_PAGE_SIZE));
+}
+
+/** 把页码收敛到合法范围；清单缩短后旧页码可能越界。 */
+export function clampChangesPage(total: number, page: number): number {
+  return Math.min(Math.max(0, page), changesPageCount(total) - 1);
+}
+
+/** 当前页的文件切片；页码越界时收敛到合法范围。 */
+export function changesPageSlice<T>(paths: readonly T[], page: number): readonly T[] {
+  const clamped = clampChangesPage(paths.length, page);
+  return paths.slice(clamped * CHANGES_PAGE_SIZE, clamped * CHANGES_PAGE_SIZE + CHANGES_PAGE_SIZE);
+}
+
 /** 冻结改动的右侧只读审阅面板：左列文件清单，右侧按可用宽度选择并排或单列 diff。 */
-export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose }: {
+export function ChangesPanel({ taskId, executionId, sourceTree, theme, onClose }: {
   /** 原Task身份，不从全局选择补取。 */ taskId: string;
   /** 原Execution身份。 */ executionId: string;
-  /** 最终封存commit完整oid，变化后重置审阅。 */ sourceCommit: string;
+  /** 最终快照 tree 完整oid，变化后重置审阅。 */ sourceTree: string;
   /** 当前应用主题，驱动 diff 高亮配色。 */ theme: ColorTheme;
   /** 关闭面板；不改变任何业务状态。 */ onClose: () => void;
 }) {
   const [review, setReview] = useState<GitReview | null>(null);
   const [diffs, setDiffs] = useState<Readonly<Record<string, GitFileDiff>>>({});
   const [selected, setSelected] = useState<string | null>(null);
+  /** 文件清单当前页（0 基）；选中文件独立于页码，翻页不丢合法选择。 */
+  const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
@@ -97,7 +118,7 @@ export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose
 
   useEffect(() => {
     const token = ++generation.current;
-    setReview(null); setDiffs({}); setSelected(null); setError(null); setBusy(true);
+    setReview(null); setDiffs({}); setSelected(null); setPage(0); setError(null); setBusy(true);
     void api.reviewGit(taskId, executionId).then(value => {
       if (generation.current !== token) return;
       setReview(value);
@@ -107,7 +128,7 @@ export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose
       .finally(() => { if (generation.current === token) setBusy(false); });
     return () => { generation.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, executionId, sourceCommit]);
+  }, [taskId, executionId, sourceTree]);
 
   /** 按文件懒加载 patch；导航后丢弃迟到响应，已加载的保留在本地缓存。 */
   async function load(path: string, knownReview?: GitReview) {
@@ -121,6 +142,9 @@ export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose
   }
 
   const currentDiff = selected ? diffs[selected] : undefined;
+  const pageCount = changesPageCount(review?.paths.length ?? 0);
+  const currentPage = review ? clampChangesPage(review.paths.length, page) : 0;
+  const pagePaths = review ? changesPageSlice(review.paths, currentPage) : [];
   return <aside ref={panel} className="changes-panel" aria-label="变更" aria-busy={busy}>
     <header>
       <strong>变更{review ? ` · ${review.paths.length.toLocaleString()} 个文件` : ""}</strong>
@@ -130,19 +154,24 @@ export function ChangesPanel({ taskId, executionId, sourceCommit, theme, onClose
     {!review && !error && <p role="status">正在读取改动…</p>}
     {review && <div className="changes-body">
       <div className="changes-files" role="listbox" aria-label="变更文件">
-        {review.paths.map(path => {
+        {pagePaths.map(path => {
           const loaded = diffs[path]; const stats = loaded && !loaded.omitted ? patchStats(loaded.patch) : null;
           return <button key={path} role="option" aria-selected={selected === path} className={selected === path ? "active" : ""} onClick={() => { setSelected(path); if (!diffs[path]) void load(path); }}>
             <span className="changes-file-path">{path}</span>
             {stats && <small>+{stats.additions} −{stats.deletions}</small>}
           </button>;
         })}
+        {pageCount > 1 && <div className="changes-pages">
+          <button type="button" aria-label="上一页" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>‹</button>
+          <span role="status">第 {currentPage + 1} / {pageCount} 页 · 共 {review.paths.length.toLocaleString()} 个文件</span>
+          <button type="button" aria-label="下一页" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)}>›</button>
+        </div>}
       </div>
       <div className="changes-diff" ref={setDiffHost}>
         {selected && !currentDiff && !error && <p role="status">正在读取 {selected}…</p>}
         {currentDiff?.omitted && <p role="status">{currentDiff.reason === "binary" ? "二进制文件，无法内联显示" : "diff 超过 2MB，请在本地 Git 工具审阅"}</p>}
         {currentDiff && !currentDiff.omitted && <PatchDiff
-          key={`${sourceCommit}:${selected}`}
+          key={`${sourceTree}:${selected}`}
           patch={currentDiff.patch}
           disableWorkerPool
           options={{ diffStyle, themeType: theme, overflow: diffStyle === "unified" ? "wrap" : "scroll" }}

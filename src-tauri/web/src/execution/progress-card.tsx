@@ -40,16 +40,10 @@ export function ExecutionProgressCard({
       <header>
         <strong>
           {dynamicCount > 0
-            ? `${progress.completed} 完成 · 动态节点数量待定`
+            ? `${progress.completed} 完成`
             : `${progress.completed}/${progress.total} 完成`}
         </strong>
         {meta && <small>{meta}</small>}
-        {dynamicCount > 0 && (
-          <small>静态节点共 {progress.total} 个；动态节点在执行时确定</small>
-        )}
-        {dynamicCount === 0 && !progress.totalFromPlan && (
-          <small>分母为已创建节点；计划总数未提供</small>
-        )}
       </header>
       {current && (
         <p className="wf-progress-current" role="status">

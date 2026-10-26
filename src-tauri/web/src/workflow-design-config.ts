@@ -24,7 +24,8 @@ export class WorkspaceConfirmationCache {
     const key=JSON.stringify({identity,plan,excludeDirty,continuation});const prior=this.requests.get(key);if(prior)return structuredClone(prior);
     // 一个Execution只有一个共享worktree；写修订自动接续原现场，不提供分组或集成来源。
     const workspaceId=continuation?.workspaceId??crypto.randomUUID();
-    const value:ExecutionWorkspaceConfig={version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:plan.repository,baseCommit:plan.baseCommit,excludeExistingDirty:excludeDirty,nodes:plan.nodeIds.map(nodeId=>({nodeId}))},workspaceId,...(continuation?{continuation:{executionId:continuation.executionId,workspaceId,head:continuation.head}}:{})};
+    const dynamicNodes=plan.dynamicNodePrefixes?.length?plan.dynamicNodePrefixes.map(nodeIdPrefix=>({nodeIdPrefix})):undefined;
+    const value:ExecutionWorkspaceConfig={version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:plan.repository,baseCommit:plan.baseCommit,excludeExistingDirty:excludeDirty,nodes:plan.nodeIds.map(nodeId=>({nodeId})),...(dynamicNodes?{dynamicNodes}:{})},workspaceId,...(continuation?{continuation:{executionId:continuation.executionId,workspaceId,head:continuation.head}}:{})};
     this.requests.set(key,value);return structuredClone(value);
   }
 }

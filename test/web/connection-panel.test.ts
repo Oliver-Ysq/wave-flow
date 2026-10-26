@@ -204,6 +204,15 @@ test("Execution 详情读取失败时说明 Desktop Engine 重连，而不是误
   expect(source).toContain("Desktop Engine (已退出|请求超时|管道错误|未运行)");
 });
 
+test("大证据响应超过轮询间隔时不发起并发重载，避免详情永久饥饿", async () => {
+  const source = await Bun.file("src-tauri/web/src/App.tsx").text();
+  expect(source).toContain("let requestPending = false");
+  expect(source).toContain("if (requestPending) return");
+  expect(source).toContain("requestPending = true");
+  expect(source).toContain(".finally(() => { requestPending = false; })");
+  expect(source).toContain("window.setInterval(reload, 1_000)");
+});
+
 test("取消或中断的 Execution 都提供显式恢复入口，中断走产品级恢复卡", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   // 中断不再暴露技术性的“恢复中断 Execution”，而是唯一主按钮“重新尝试”。

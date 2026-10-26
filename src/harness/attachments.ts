@@ -91,14 +91,33 @@ function assertImageBytes(extension: string, bytes: Buffer): string {
  * 把用户显式选择的单个文件复制进 Engine 私有暂存区并返回待发送描述。
  * 选择只读取该文件一次；不遍历目录、不授权其他文件、不自动发送。
  */
-export async function stageAttachment(root: string, rawPath: string): Promise<StagedAttachment> {
+export type StageAttachmentIo = {
+  /** 解析用户选择的文件路径；测试可注入确定性替身。 */
+  readonly realpath: typeof realpath;
+  /** 读取路径当前元数据，用于与已打开句柄核对身份。 */
+  readonly lstat: typeof lstat;
+  /** 以调用方给定 flags 打开文件并返回句柄。 */
+  readonly open: typeof open;
+};
+
+export async function stageAttachment(root: string, rawPath: string, io: StageAttachmentIo = { realpath, lstat, open }): Promise<StagedAttachment> {
   if (typeof rawPath !== "string" || !rawPath.startsWith("/")) throw new Error("附件路径无效。 ");
-  const path = await realpath(rawPath).catch(() => { throw new Error("附件文件不可读取。 "); });
-  const info = await lstat(path).catch(() => { throw new Error("附件文件不可读取。 "); });
-  if (!info.isFile()) throw new Error("附件必须是普通文件，不能是目录。 ");
-  if (info.size <= 0) throw new Error("附件是空文件，未接受。 ");
-  if (info.size > MAX_ATTACHMENT_BYTES) throw new Error(`附件超过 ${Math.floor(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB 上限，未接受。 `);
-  const bytes = await readFile(path);
+  const path = await io.realpath(rawPath).catch(() => { throw new Error("附件文件不可读取。 "); });
+  // lstat 与 readFile 之间存在 TOCTOU：路径可能在检查后被替换或文件被追加增长。
+  // 先以 O_NOFOLLOW 打开句柄，再用 lstat 与句柄 fstat 的 dev/ino 对照确认读到的是同一个文件；
+  // 打开之后的替换只会影响路径名，不影响已持有的句柄。
+  const handle = await io.open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => { throw new Error("附件文件不可读取。 "); });
+  let bytes: Buffer;
+  try {
+    const [pathInfo, handleInfo] = await Promise.all([io.lstat(path).catch(() => { throw new Error("附件文件不可读取。 "); }), handle.stat()]);
+    if (!handleInfo.isFile()) throw new Error("附件必须是普通文件，不能是目录。 ");
+    if (pathInfo.dev !== handleInfo.dev || pathInfo.ino !== handleInfo.ino) throw new Error("附件文件在读取期间被替换，未接受。 ");
+    if (handleInfo.size <= 0) throw new Error("附件是空文件，未接受。 ");
+    if (handleInfo.size > MAX_ATTACHMENT_BYTES) throw new Error(`附件超过 ${Math.floor(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB 上限，未接受。 `);
+    bytes = await handle.readFile();
+  } finally { await handle.close(); }
+  // 读取期间文件可能被追加；实际字节数必须再次强制上限，不能只信打开时的大小。
+  if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`附件超过 ${Math.floor(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB 上限，未接受。 `);
   const mimeType = assertImageBytes(extname(path).toLowerCase(), bytes);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const stagedId = crypto.randomUUID();

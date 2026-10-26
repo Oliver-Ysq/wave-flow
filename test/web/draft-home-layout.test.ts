@@ -21,7 +21,7 @@ test("预置与本地工作流复用居中弹窗，不回退主网格或伪切�
   expect(template).toContain('<WorkflowSourceDialog title="预置工作流"');
   expect(template).not.toContain("本地工作流请从新建任务页选择");
   expect(local).toContain('<WorkflowSourceDialog title="本地工作流"');
-  expect(local).toContain('setPath(event.target.value);setResult(null);setError(null);');
+  expect(local).toContain('onChange={event=>changePath(event.target.value)}');
   expect(local).toContain('找不到工作流文件，请检查路径，或重新选择文件。');
   expect(shell).toContain('className="connection-backdrop workflow-source-backdrop"');
   expect(shell).toContain('role="dialog" aria-modal="true"');

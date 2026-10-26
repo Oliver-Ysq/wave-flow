@@ -38,7 +38,9 @@ test("整工作区授权并入确认运行，结果保留在 worktree，内部�
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
  const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
  expect(design).toContain("完成后改动保留在工作区，不会自动写入项目目录");
- expect(design).toContain("本次执行共用一个工作区");
+ expect(design).not.toContain("本次执行共用一个工作区");
+ expect(design).not.toContain("基于版本");
+ expect(design).not.toContain("循环写节点按已披露前缀生成");
  expect(design).not.toContain("工作区分组");
  expect(design).not.toContain("集成来源节点");
  expect(design).not.toContain("接续上次改动");

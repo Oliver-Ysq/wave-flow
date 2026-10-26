@@ -503,7 +503,11 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .chat-message.wf-body-continuation { margin-top:10px; }
 .agent-workbench .chat-message.wf-body-continuation .chat-avatar { visibility:hidden; }
 .agent-workbench .chat-avatar { width:34px; height:34px; border-radius:11px; box-shadow:inset 0 1px rgb(255 255 255 / 14%); }
-.agent-workbench .chat-message > div:last-child { min-width:0; }
+/* 消息内容列必须自己处理“无空格长 token”：URL、no_proxy 列表、hash、环境变量赋值。
+   overflow-wrap:anywhere 参与 min-content 计算，气泡/正文会按可用宽度收窄并强制换行；
+   否则长 token 会越过气泡边界，被 .conversation-scroll 的 overflow-x:hidden 直接裁掉，
+   用户既看不全也滚不到。 */
+.agent-workbench .chat-message > div:last-child { min-width:0; overflow-wrap:anywhere; }
 .agent-workbench .chat-message p { max-width:760px; margin:6px 0 0; font-size:15px; line-height:1.76; letter-spacing:.002em; }
 .agent-workbench .chat-message.user { grid-template-columns:minmax(0, 1fr) 34px; }
 .agent-workbench .chat-message.user .chat-avatar { grid-column:2; }
@@ -1243,7 +1247,6 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .workflow-design-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--wf-line-soft); }
 .workflow-design-row select { max-width: 280px; color: var(--wf-ink); background: var(--wf-input); border: 1px solid var(--wf-line); border-radius: 6px; padding: 8px; }
 .workflow-design small { display: block; margin: 10px 0; color: var(--wf-muted); }
-.workflow-design .workflow-workspace-summary{margin:16px 0 0;padding-top:12px;border-top:1px solid var(--wf-line-soft);color:var(--wf-muted);font-size:12px;line-height:1.6}
 .execution-workspace-evidence{display:grid;gap:10px;margin:16px 0;padding:14px;border:1px solid var(--wf-line);border-radius:12px;background:var(--wf-panel-raised)}
 .execution-workspace-evidence code{overflow-wrap:anywhere;white-space:normal}
 .execution-workspace-evidence summary{cursor:pointer}
@@ -1264,6 +1267,11 @@ details.execution-workspace-evidence>article{margin-top:10px}
 .changes-panel .changes-files button:hover { background:var(--wf-panel-raised); }
 .changes-panel .changes-files button.active { background:var(--wf-accent-wash); }.changes-panel .changes-files .changes-file-path { font-size:12px; overflow-wrap:anywhere; }
 .changes-panel .changes-files small { color:var(--wf-muted); }
+/* 大清单分页：页导航固定在文件列底部，避免翻页控件随长列表滚走。 */
+.changes-panel .changes-pages { position:sticky; bottom:0; display:flex; align-items:center; justify-content:space-between; gap:8px; margin:6px -8px -10px; padding:8px 6px; border-top:1px solid var(--wf-line-soft); background:var(--wf-panel); color:var(--wf-muted); font-size:11px; }
+.changes-panel .changes-pages button { display:grid; place-items:center; width:26px; height:26px; flex:0 0 auto; padding:0; border:1px solid var(--wf-line); border-radius:7px; background:var(--wf-panel-raised); color:var(--wf-ink); font-size:14px; line-height:1; cursor:pointer; }
+.changes-panel .changes-pages button:disabled { opacity:.4; cursor:default; }
+.changes-panel .changes-pages span { min-width:0; text-align:center; }
 .changes-panel .changes-diff { flex:1; min-width:0; overflow:auto; padding:14px 20px; }
 .changes-panel .changes-diff>p[role="status"] { color:var(--wf-muted); }
 .changes-panel>footer { flex:0 0 auto; display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 20px; border-top:1px solid var(--wf-line-soft); }

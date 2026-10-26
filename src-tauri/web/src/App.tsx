@@ -517,7 +517,7 @@ export function App() {
   const [changesView, setChangesView] = useState<{
     taskId: string;
     executionId: string;
-    sourceCommit: string;
+    sourceTree: string;
   } | null>(null);
   /** 详情面包屑只标示当前页签，避免整句用户输入挤占头部。 */
   const sectionLabel =
@@ -1129,9 +1129,13 @@ export function App() {
     )
       return;
     let active = true;
+    let requestPending = false;
     setExecutionDetail(null);
     const owner = harness.harnessRunId;
     const reload = () => {
+      // 大证据响应可能超过轮询间隔；不得用新请求持续作废旧响应，否则页面永远饥饿。
+      if (requestPending) return;
+      requestPending = true;
       const token = ++detailToken.current;
       const valid = requestFence.current.begin(
         `execution:${owner}:${selectedExecutionId}`,
@@ -1149,7 +1153,8 @@ export function App() {
         })
         .catch((cause) => {
           if (active && valid()) setError(executionLoadMessage(cause));
-        });
+        })
+        .finally(() => { requestPending = false; });
     };
     reload();
     // 详情只经 Engine action 轮询；终态必须来自其 Journal/状态机投影，而非页面推断。
@@ -2286,7 +2291,7 @@ export function App() {
                   setChangesView({
                     taskId: harness.harnessRunId,
                     executionId: executionDetail.execution.executionId,
-                    sourceCommit: evidence.commit,
+                    sourceTree: evidence.tree,
                   });
                 }}
                 onSavePartial={async () => {
@@ -2369,10 +2374,10 @@ export function App() {
           </div>
           {workflowPanelOpen && changesView && (
             <ChangesPanel
-              key={`${changesView.taskId}:${changesView.executionId}:${changesView.sourceCommit}`}
+              key={`${changesView.taskId}:${changesView.executionId}:${changesView.sourceTree}`}
               taskId={changesView.taskId}
               executionId={changesView.executionId}
-              sourceCommit={changesView.sourceCommit}
+              sourceTree={changesView.sourceTree}
               theme={theme}
               onClose={() => setChangesView(null)}
             />
@@ -4816,7 +4821,7 @@ function ExecutionDetail({
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
-  /** 打开右侧变更审阅面板；只读展示最终封存 diff。 */
+  /** 打开右侧变更审阅面板；只读展示最终快照 diff。 */
   onOpenChanges: () => void;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
@@ -5199,8 +5204,8 @@ function ExecutionDetail({
                 )}
                 <small>
                   {detail.sourceEvidence
-                    ? `最终封存 ${detail.sourceEvidence.commit.slice(0, 12)} · ${detail.sourceEvidence.paths.length} 个文件`
-                    : "尚无最终封存"}
+                    ? `最终快照 ${detail.sourceEvidence.tree.slice(0, 12)} · ${detail.sourceEvidence.paths.length} 个文件`
+                    : "尚无最终快照"}
                 </small>
               </article>}
               <p>

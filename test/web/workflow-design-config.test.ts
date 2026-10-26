@@ -73,3 +73,15 @@ test("续作自动复用原共享worktree并冻结原HEAD，新基准不串用�
  expect(drifted.authorization.authorizationId).not.toBe(first.authorization.authorizationId);
  expect(drifted.workspaceId).toBe(workspaceId);
 });
+
+test("循环写节点前缀随确认载荷冻结并在重试中复用",()=>{
+ const cache=new WorkspaceConfirmationCache();
+ const loopPlan={nodeIds:["reviewer"],dynamicNodePrefixes:["repair-"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
+ const first=cache.get("task:loop",loopPlan,false);
+ expect(first.authorization.nodes).toEqual([{nodeId:"reviewer"}]);
+ expect(first.authorization.dynamicNodes).toEqual([{nodeIdPrefix:"repair-"}]);
+ expect(cache.get("task:loop",loopPlan,false)).toEqual(first);
+ // 固定节点脚本不产生动态字段，保持旧载荷形状。
+ const fixed={nodeIds:["reviewer"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
+ expect(cache.get("task:fixed",fixed,false).authorization).not.toHaveProperty("dynamicNodes");
+});

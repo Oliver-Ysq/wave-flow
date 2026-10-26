@@ -62,16 +62,8 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
    return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{cliDisplayName(runtime.cli)}</option>)}</select>;
  }
  function workspaceSummary(){
-   if(!plan?.workspacePlan)return null;
-   const continuation=plan.continuationPlan;
-   return <p className="workflow-workspace-summary">
-     {plan.workspacePlan.diagnostic
-       ? plan.workspacePlan.diagnostic
-       : continuation
-         ? `接续上次执行的工作区（版本 ${continuation.head.slice(0, 12)}）；本次执行共用一个工作区。`
-         : `基于版本 ${plan.workspacePlan.baseCommit?.slice(0, 12) ?? "不可用"}；本次执行共用一个工作区。`}
-      完成后改动保留在工作区，不会自动写入项目目录。
-   </p>;
+   const diagnostic=plan?.workspacePlan?.diagnostic;
+   return diagnostic ? <p role="alert">{diagnostic}</p> : null;
  }
  async function run(){
    if(!editable||busy||checking||planError||!plan||!revision.localOrigin&&!plan.harnessRuntime)return;

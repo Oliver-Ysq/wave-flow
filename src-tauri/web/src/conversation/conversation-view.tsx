@@ -28,12 +28,13 @@ import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
 import {TimelineRecords,type TimelineItem} from './plan-updates';
 import { MentionComposer } from "./mention-composer";
+import { AttachmentDataCache } from "./attachment-cache";
 
 /** 会话内有界阅读位置；不落盘正文或参数。 */
 const conversationPositions = new Map<string, { top: number; stuck: boolean }>();
 
-/** 已发送附件的 data URL 会话内缓存；附件耐久不可变，按消息身份缓存安全。 */
-const attachmentDataCache = new Map<string, string>();
+/** 已发送附件的 data URL 会话内缓存；按条目数与总字符数双有界，读取刷新 LRU。 */
+const attachmentDataCache = new AttachmentDataCache();
 
 /** 已发送消息中的图片附件：按需从 Engine 读取耐久字节渲染缩略图。 */
 function MessageAttachmentView({
@@ -54,7 +55,6 @@ function MessageAttachmentView({
     api.attachmentData(harnessRunId, messageId, attachment.id)
       .then((response) => {
         attachmentDataCache.set(key, response.dataUrl);
-        if (attachmentDataCache.size > 128) attachmentDataCache.delete(attachmentDataCache.keys().next().value!);
         if (active) setDataUrl(response.dataUrl);
       })
       .catch(() => { if (active) setFailed(true); });

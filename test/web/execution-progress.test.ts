@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { computeExecutionProgress } from "../../src-tauri/web/src/execution/execution-progress";
+import { ExecutionProgressCard } from "../../src-tauri/web/src/execution/progress-card";
 import type { AgentSnapshot, RunSnapshot } from "../../src-tauri/web/src/types";
 
 /** 构造最小 Agent 节点。 */
@@ -95,4 +98,25 @@ test("恢复进度包含历史已交付节点，不重复计算新 attempt 同 i
   expect(result.completed).toBe(2);
   expect(result.total).toBe(2);
   expect(result.items.map(item => item.id)).toEqual(["b", "a"]);
+});
+
+test("动态节点场景只展示完成数和必要方案信息，不暴露内部调度术语", () => {
+  const current = snapshot([
+    phase("执行", [{
+      mode: "parallel",
+      agents: Array.from({ length: 5 }, (_, index) => agent(String(index), "completed")),
+    }]),
+  ]);
+  const html = renderToStaticMarkup(createElement(ExecutionProgressCard, {
+    snapshot: current,
+    dynamicCount: 2,
+    plannedTotal: 5,
+    meta: "方案 v1（已锁定） · 3 名执行者",
+  }));
+  expect(html).toContain("5 完成");
+  expect(html).toContain("方案 v1（已锁定） · 3 名执行者");
+  expect(html).not.toContain("动态节点");
+  expect(html).not.toContain("静态节点");
+  expect(html).not.toContain("数量待定");
+  expect(html).not.toContain("分母");
 });
