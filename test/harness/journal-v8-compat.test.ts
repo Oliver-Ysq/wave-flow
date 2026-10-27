@@ -37,8 +37,12 @@ test("v8 Harness 档案兼容读取：空队列、可继续发送与排队派发
   expect(snapshot.messageQueue).toEqual([]);
 
   await service.submit(id, "继续第一条");
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const after = await service.snapshot(id);
+  // 派发是异步的：固定 sleep 在整仓并发跑测试时可能不足，改成有界轮询到答案落盘。
+  let after = await service.snapshot(id);
+  for (let attempt = 0; attempt < 200 && after.messages.length < 3; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    after = await service.snapshot(id);
+  }
   expect(after.status).toBe("idle");
   expect(after.messages.map((message) => message.text)).toEqual(["历史消息", "继续第一条", "durable answer"]);
   expect(pi.prompts).toEqual(["继续第一条"]);
