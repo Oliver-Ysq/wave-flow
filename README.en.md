@@ -55,13 +55,13 @@ Large evidence path lists are collected as complete streams rather than truncate
 
 ## Download and installation
 
-Current version: `v0.2.4`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
+Current version: `v0.2.5`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
 
 ```sh
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.2.4_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.2.5_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install
