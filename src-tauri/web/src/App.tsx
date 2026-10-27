@@ -713,6 +713,8 @@ export function App() {
     return () => { cancelled = true; };
   }, [draftProjectId, selectedProjectId, harness, acpCommands.length, harnessRuntimeId]);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
+  /** 首次发现是否已完成；未完成时不把"空列表"渲染成"没有可用工具"的错误态。 */
+  const [runtimeScanCompleted, setRuntimeScanCompleted] = useState(false);
   const runtimeScanStarted = useRef(false);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(
     null,
@@ -824,7 +826,10 @@ export function App() {
         setError(null);
       })
       .catch(() => setError("暂时无法检查本地执行工具，请稍后重试。"))
-      .finally(() => setRuntimeScanning(false));
+      .finally(() => {
+        setRuntimeScanning(false);
+        setRuntimeScanCompleted(true);
+      });
   }, [runtimeState]);
   /** 每次摘要来自 Desktop Engine，Tauri 只转写菜单栏文本，绝不维护第二份状态。 */
   useEffect(() => {
@@ -2373,6 +2378,7 @@ export function App() {
         <RuntimeConnectionPanel
           runtimeState={runtimeState}
           scanning={runtimeScanning}
+          scanCompleted={runtimeScanCompleted}
           onRuntimeState={setRuntimeState}
           onClose={() => setSettingsOpen(false)}
           onError={setError}
@@ -2385,6 +2391,7 @@ export function App() {
           gateMode
           runtimeState={runtimeState}
           scanning={runtimeScanning}
+          scanCompleted={runtimeScanCompleted}
           onRuntimeState={setRuntimeState}
           onError={setError}
         />
@@ -2601,6 +2608,7 @@ function RuntimeConnectionPanel({
   gateMode = false,
   runtimeState,
   scanning,
+  scanCompleted = true,
   onRuntimeState,
   onClose,
   onError,
@@ -2610,6 +2618,8 @@ function RuntimeConnectionPanel({
   gateMode?: boolean;
   runtimeState: CliRuntimeListResponse;
   scanning: boolean;
+  /** 首次发现是否已经结束；false 时只展示"正在检查"，不把空列表当成"没有可用工具"。 */
+  scanCompleted?: boolean;
   onRuntimeState: (value: CliRuntimeListResponse) => void;
   onClose?: () => void;
   onError: (value: string) => void;
@@ -3043,21 +3053,28 @@ function RuntimeConnectionPanel({
         ) : !(selected || otherRuntimes.length) ? (
           <div className="runtime-scan-empty">
             <div>
-              <strong>还没有可用的本地执行工具</strong>
-              <p>Wave Flow 需要本机已登录的 Codex、Claude Code 或 DeepSeek Harness 之一。任务和代码不会被上传。</p>
-              {scanning || runtimeOperation === "scan" ? (
-                <p role="status">正在查找本机工具…</p>
+              {!scanCompleted || scanning || runtimeOperation === "scan" ? (
+                <>
+                  <strong>正在检查本机执行工具</strong>
+                  <p role="status">
+                    首次启动会逐个验证已安装的 CLI，通常几秒到十几秒。
+                  </p>
+                </>
               ) : (
-                <details className="runtime-setup-guide">
-                  <summary>如何安装并登录？</summary>
-                  <p>任选一个工具，在终端安装并完成登录，然后回到这里重新检查。</p>
-                  <ul>
-                    <li><strong>Codex CLI</strong>：<code>npm install -g @openai/codex</code>，再运行 <code>codex login</code></li>
-                    <li><strong>Claude Code</strong>：<code>npm install -g @anthropic-ai/claude-code</code>，再运行 <code>claude</code> 完成登录</li>
-                    <li><strong>DeepSeek Harness</strong>：按团队安装文档安装并配置 provider，再运行 <code>dsh</code></li>
-                  </ul>
-                  <p>安装后点“重新检查”，不需要手动填路径。</p>
-                </details>
+                <>
+                  <strong>还没有可用的本地执行工具</strong>
+                  <p>Wave Flow 需要本机已登录的 Codex、Claude Code 或 DeepSeek Harness 之一。任务和代码不会被上传。</p>
+                  <details className="runtime-setup-guide">
+                    <summary>如何安装并登录？</summary>
+                    <p>任选一个工具，在终端安装并完成登录，然后回到这里重新检查。</p>
+                    <ul>
+                      <li><strong>Codex CLI</strong>：<code>npm install -g @openai/codex</code>，再运行 <code>codex login</code></li>
+                      <li><strong>Claude Code</strong>：<code>npm install -g @anthropic-ai/claude-code</code>，再运行 <code>claude</code> 完成登录</li>
+                      <li><strong>DeepSeek Harness</strong>：按团队安装文档安装并配置 provider，再运行 <code>dsh</code></li>
+                    </ul>
+                    <p>安装后点“重新检查”，不需要手动填路径。</p>
+                  </details>
+                </>
               )}
             </div>
             {!scanning && runtimeOperation !== "scan" && (
