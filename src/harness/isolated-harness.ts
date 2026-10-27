@@ -19,7 +19,7 @@ export async function createIsolatedHarness(options: {
   /** 经Registry复核的CLI launcher；不按CLI名称判断隔离能力。 */ readonly launcher: AcpLauncher;
   /** Adapter Catalog提供的私有状态准备能力；仅isolated模式使用，缺省拒绝而非普通启动回退。 */ readonly isolation?: SessionIsolationProfile;
   /** 已验证项目cwd；原生读取保持全局可读，不授权写入。 */ readonly cwd: string;
-  /** Engine预建且canonical的私有会话目录；FIFO须位于其内。 */ readonly scratch: string;
+  /** Engine预建且canonical的私有会话目录；控制端点须位于其内。 */ readonly scratch: string;
   /** 主控角色/作者说明，不作为安全边界。 */ readonly prompt: string;
   /** 原Journal有界上下文；不认领旧ACP session。 */ readonly prior: readonly HarnessMessage[];
   /** 仅四个Harness控制工具的私有MCP；端点必须由Engine创建。 */ readonly mcp: HarnessMcpServer;
@@ -57,7 +57,7 @@ export async function createIsolatedHarness(options: {
     // 感知模式保留用户已安装的 skill/MCP/CLI 与登录态：不复制私有 Home、不覆盖 CLI 配置目录。
     actual = launcher;
     // scratch 位于 Engine 状态目录内；profile 内部先 deny 受保护目录再 allow scratch，
-    // 因此 MCP FIFO 和本会话运行目录仍可写。
+    // 因此 MCP 控制 socket 和本会话运行目录仍可写。
     boundary = { workspace: null, mode, scratch, controlFiles: [], readOnlyPaths: [], cliWritableRoots: [], protectedDirectories: [await realpath(options.cwd), options.engineHome ?? waveFlowHome()] };
   } else throw new Error("未知主控会话模式，拒绝启动。");
   // 技能投影与注入必须在最终 launcher 确定后、建立 ACP 会话前完成；失败即拒绝启动。

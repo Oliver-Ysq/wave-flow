@@ -91,7 +91,7 @@ export class ControlServer {
     private readonly journal: RunJournal,
     private readonly state: RunStateMachine,
     /**
-     * 同一 Run 的耐久事实互斥区。Worker FIFO 上报与用户 IPC 控制（stop/退出）没有
+     * 同一 Run 的耐久事实互斥区。Worker 控制 socket 上报与用户 IPC 控制（stop/退出）没有
      * 共享调用栈：校验、结果/校验文件写入、Journal 追加与内存 apply 必须在同一
      * 临界区内完成，否则 cancelled 会插进 complete 的磁盘窗口，使档案永久不可重放。
      */

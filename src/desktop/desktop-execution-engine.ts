@@ -34,8 +34,8 @@ import { AcpHarnessSession } from "../harness/acp-harness";
 import { resolveHarnessLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { DeterministicHarnessSession } from "../harness/deterministic-session";
 import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
-import { WorkerControlPipe } from "../runtime/worker-control-pipe";
-import { HarnessControlPipe } from "../harness/harness-control-pipe";
+import { WorkerControlChannel } from "../runtime/worker-control-channel";
+import { HarnessControlChannel } from "../harness/harness-control-channel";
 import { createIsolatedHarness } from "../harness/isolated-harness";
 import { generateAcpTaskTitle } from "../harness/acp-task-naming";
 import { prepareSessionScratch } from "../workspace/session-scratch";
@@ -175,10 +175,10 @@ export class DesktopExecutionEngine {
   private readonly homeDirectory: string;
   /** 同一 Engine 内启动扫描单飞，避免并发页面加载重复握手和覆盖 Registry。 */
   #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
-  /** 每条 Harness ACP session 的随机私有 MCP FIFO；只在 Engine 内存存活。 */
-  #harnessControlPipes = new Map<string, HarnessControlPipe>();
-  /** 当前 Engine 内每个真实 Worker 的私有 Control FIFO；从不发布或持久化。 */
-  #workerControlPipes = new Map<string, WorkerControlPipe>();
+  /** 每条 Harness ACP session 的随机私有 MCP 控制 socket；只在 Engine 内存存活。 */
+  #harnessControlPipes = new Map<string, HarnessControlChannel>();
+  /** 当前 Engine 内每个真实 Worker 的私有 Control socket；从不发布或持久化。 */
+  #workerControlPipes = new Map<string, WorkerControlChannel>();
   /** 当前Engine的受管writer证明对象；终态后保留用于显式partial收尾，不跨进程认领。 */
   #workspaceExecutors = new Map<string, ProductionWorkspaceExecutor>();
   /** ACP 缺少跨 Engine identity；仅提供诚实 UI 提示，绝不伪造 session 认领。 */
@@ -243,11 +243,11 @@ export class DesktopExecutionEngine {
       const compiled = import.meta.dir.startsWith("/$bunfs/");
       const command = process.execPath;
       const scratch = await prepareSessionScratch(join(dirname(harnessRoot), "harness-scratch"), cwd);
-      const pipe = new HarnessControlPipe(request => this.#harness.mcpTools(harnessRunId, request), scratch);
+      const pipe = new HarnessControlChannel(request => this.#harness.mcpTools(harnessRunId, request), scratch);
       this.#harnessControlPipes.set(harnessRunId, pipe);
       const args = compiled ? ["__harness-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__harness-mcp"];
       const mcpServer = { name: "wave-flow-harness", command, args, env: [
-        { name: "WF_HARNESS_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_HARNESS_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
+        { name: "WF_HARNESS_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
       ] } as any;
       assertAbsoluteMcpCommand(mcpServer);
       let session: AcpHarnessSession;
@@ -437,7 +437,7 @@ export class DesktopExecutionEngine {
 
   /**
    * Execution 复用与 Run 完全相同的 Control 边界：ControlServer 以 Execution 的内嵌
-   * runId 注册，Worker 的 complete/block/continue 经本节点私有 FIFO MCP 到达 Control，
+   * runId 注册，Worker 的 complete/block/continue 经本节点私有控制 socket MCP 到达 Control，
    * 不知道自己在 Execution 中。
    */
   private async wireExecutionControl(runtime: RunRuntime, wiring: unknown): Promise<void | (() => void)> {
@@ -491,14 +491,13 @@ export class DesktopExecutionEngine {
     if (!control) throw new Error("Worker MCP 创建时找不到当前 Engine 的 ControlServer。 ");
     const key = `${identity.runId}\0${identity.nodeId}\0${identity.agentSessionId}`;
     if (this.#workerControlPipes.has(key)) throw new Error("当前 Worker 已有私有 Control 通道。 ");
-    const pipe = new WorkerControlPipe(control, identity, () => this.#workerControlPipes.delete(key), scratch);
+    const pipe = new WorkerControlChannel(control, identity, () => this.#workerControlPipes.delete(key), scratch);
     this.#workerControlPipes.set(key, pipe);
     const command = process.execPath;
     const compiled = import.meta.dir.startsWith("/$bunfs/");
     const args = compiled ? ["__worker-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-mcp"];
     const server = { name: "wave-flow-worker-control", command, args, env: [
-        { name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo },
-        { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo },
+        { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
       ] };
     assertAbsoluteMcpCommand(server);
     return {

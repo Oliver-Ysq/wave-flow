@@ -40,7 +40,7 @@ export function ownedAcpTransport(options: {
  * 返回的close不等待，Git交接单独await verifyClosed；失败保留宿主租约。
  */
 export function managedAcpTransport(options: {
-  /** Engine指定的受管cwd/scratch/FIFO边界，不由Workflow或模型提供。 */ readonly boundary: MacosWriteBoundary;
+  /** Engine指定的受管cwd/scratch/控制端点边界，不由Workflow或模型提供。 */ readonly boundary: MacosWriteBoundary;
   /** 本Engine进程组登记簿，不能读取旧PID认领会话。 */ readonly groups: WriterProcessGroups;
   /** 创建进程后先耐久绑定随机证明身份，失败立即关闭进程且禁止ACP业务投递。 */ readonly bindWriter: (identity: string) => Promise<void>;
   /** 自动测试替换底层stdio，不替换OS profile路径校验。 */ readonly transport?: AcpTransportFactory;

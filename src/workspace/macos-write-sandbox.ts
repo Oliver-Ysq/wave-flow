@@ -11,7 +11,7 @@ export type MacosWriteBoundary = {
   readonly scratch: string;
   /** Adapter声明的当前CLI原生可写目录；缺省空，禁止Home根/软链接/与业务及Engine目录重叠。 */
   readonly cliWritableRoots?: readonly string[];
-  /** 仅开放Engine已创建的session私有FIFO端点，不开放其父目录。 */
+  /** 仅开放Engine已创建的会话私有控制端点（Unix socket），不开放其父目录。 */
   readonly controlFiles: readonly string[];
   /** 位于可写目录内但必须保持只读的配置、认证引用或子树；deny优先于父级allow。 */
   readonly readOnlyPaths?: readonly string[];
@@ -20,11 +20,11 @@ export type MacosWriteBoundary = {
   /**
    * 写策略模式；缺省为 `"isolated"`，保持“拒绝全部写、白名单放行”的既有语义。
    *
-   * - `"isolated"`：主控私有 Home 会话，只允许 scratch、声明的高级可写根与私有 FIFO；
+   * - `"isolated"`：主控私有 Home 会话，只允许 scratch、声明的高级可写根与私有控制端点；
    *   仍执行重叠、软链接、硬链接、只读例外与 CLI 可写根校验。
    * - `"perception"`：改用用户原生 CLI 配置，默认允许写，只 deny 当前项目与 Engine
-   *   状态目录（`protectedDirectories`），并允许 `scratch` 覆盖这条 deny，使 MCP FIFO
-   *   与本会话运行目录仍可写。该模式不接受 CLI 可写根与只读例外；其他平台仍在入口拒绝。
+   *   状态目录（`protectedDirectories`），并允许 `scratch` 覆盖这条 deny，使 MCP 控制
+   *   socket 与本会话运行目录仍可写。该模式不接受 CLI 可写根与只读例外；其他平台仍在入口拒绝。
    */
   readonly mode?: "isolated" | "perception";
 };
@@ -96,7 +96,7 @@ export async function macosWriteProfile(boundary: MacosWriteBoundary): Promise<s
  *
  * 规则顺序即语义：Seatbelt 以最后匹配的规则为准，所以必须先 deny 受保护目录、再
  * allow 会话 scratch。scratch 位于 Engine 状态目录（waveFlowHome）内，这个顺序保证
- * MCP FIFO 与本会话运行目录仍可写。末尾再 deny 受保护目录自身的 unlink，阻止删除
+ * MCP 控制 socket 与本会话运行目录仍可写。末尾再 deny 受保护目录自身的 unlink，阻止删除
  * 或重命名项目根、状态根，即使其内部路径已被 subpath 拒绝。
  *
  * 该模式不接受 CLI 可写根与只读例外：默认写权限已经覆盖用户配置，额外的白名单或
@@ -142,7 +142,8 @@ async function rejectHardlinkedProtectedFiles(root: string, writable: readonly s
 async function canonical(path: string, directory: boolean): Promise<void> {
   if (!isAbsolute(path) || path === "/" || /[\x00-\x1f\x7f]/.test(path)) throw new WorkflowContractError("写边界路径无效。");
   const info = await lstat(path);
-  if (info.isSymbolicLink() || await realpath(path) !== path || (directory && !info.isDirectory()) || (!directory && !info.isFIFO())) throw new WorkflowContractError("写边界必须使用canonical真实目录或私有FIFO。");
+  // 私有控制端点是 Unix domain socket 文件；保留 FIFO 只为兼容旧边界声明。
+  if (info.isSymbolicLink() || await realpath(path) !== path || (directory && !info.isDirectory()) || (!directory && !info.isFIFO() && !info.isSocket())) throw new WorkflowContractError("写边界必须使用canonical真实目录或私有控制端点。");
 }
 function normalizeSystemTmp(boundary: MacosWriteBoundary): MacosWriteBoundary {
   const canonical = (path: string) => path.startsWith("/tmp/") ? `/private/tmp/${path.slice(5)}` : path;

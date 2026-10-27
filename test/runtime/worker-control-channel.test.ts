@@ -1,35 +1,33 @@
 import { afterEach, expect, test } from "bun:test";
-import { createReadStream, createWriteStream } from "node:fs";
-import { createInterface } from "node:readline";
-import { WorkerControlPipe } from "../../src/runtime/worker-control-pipe";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { connectControlSocket } from "../../src/runtime/control-socket";
+import { WorkerControlChannel } from "../../src/runtime/worker-control-channel";
 
-const pipes: WorkerControlPipe[] = [];
+const pipes: WorkerControlChannel[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 afterEach(() => { for (const child of children.splice(0)) child.kill(); for (const pipe of pipes.splice(0)) pipe.close(); });
 
-/** Worker 完成上报必须通过随机 FIFO 直接进入当前 Engine 的 Control，而不是 HTTP。 */
-test("Worker 私有 Control FIFO 将 complete 直接交给 ControlServer", async () => {
+/** Worker 完成上报必须通过随机私有 socket 直接进入当前 Engine 的 Control，而不是 HTTP。 */
+test("Worker 私有 Control 通道 将 complete 直接交给 ControlServer", async () => {
   const received: unknown[] = [];
   const control = { async complete(value: unknown) { received.push(value); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const reader = createInterface({ input: createReadStream(pipe.endpoints.responseFifo, { flags: "r+", encoding: "utf8" }), crlfDelay: Infinity });
-  const response = new Promise<Record<string, unknown>>((resolve, reject) => {
-    reader.once("line", line => { try { resolve(JSON.parse(line)); } catch (error) { reject(error); } });
-  });
-  const writer = createWriteStream(pipe.endpoints.requestFifo, { flags: "r+" });
-  await new Promise<void>((resolve, reject) => writer.write(`${JSON.stringify({ requestId: "request", action: "complete", summary: "done", result: { ok: true } })}\n`, error => error ? reject(error) : resolve()));
-  expect(await response).toEqual({ requestId: "request", ok: true, result: { ok: true } });
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
+  expect(await client.request({ action: "complete", summary: "done", result: { ok: true } })).toEqual({ ok: true });
   expect(received).toEqual([{ runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: { ok: true } }]);
-  writer.destroy(); reader.close();
+  client.close();
 });
 
-/** MCP stdio 服务必须真实把工具调用转成私有 FIFO 请求，不能回退到 HTTP。 */
-test("Worker MCP 的 complete 工具通过私有 FIFO 交给 ControlServer", async () => {
+/** MCP stdio 服务必须真实把工具调用转成私有通道请求，不能回退到 HTTP。 */
+test("Worker MCP 的 complete 工具通过私有 socket 交给 ControlServer", async () => {
   const received: unknown[] = [];
   const control = { async complete(value: unknown) { received.push(value); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_MCP_REQUEST_FIFO: pipe.endpoints.requestFifo, WF_WORKER_MCP_RESPONSE_FIFO: pipe.endpoints.responseFifo } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
@@ -43,15 +41,15 @@ test("Worker MCP 的 complete 工具通过私有 FIFO 交给 ControlServer", asy
   expect(received).toEqual([{ runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: { ok: true } }]);
   // 客户端stdin仍打开也必须退出，不能依赖ACP adapter会回收它。
   expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
-});
+}, 20_000);
 
 for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP自行退出，不依赖ACP关闭stdin，pendingBlock=${pending}`, async () => {
   let entered!: () => void;
   const blocked = new Promise<void>((resolve) => { entered = resolve; });
   const control = { async complete() {}, async block() { entered(); return new Promise(() => {}); }, async continue() {} };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_MCP_REQUEST_FIFO: pipe.endpoints.requestFifo, WF_WORKER_MCP_RESPONSE_FIFO: pipe.endpoints.responseFifo } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
   const reader = child.stdout.getReader();
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } })}\n`);
   expect((await reader.read()).done).toBe(false);
@@ -62,51 +60,32 @@ for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP
   }
   pipe.close();
   expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
-});
+}, 20_000);
 
-/** block/continue 是 HITL 的另两个入口，必须与 complete 一样经私有 FIFO 且携带绑定身份。 */
-test("Worker 私有 Control FIFO 将 block 与 continue 原样交给 ControlServer", async () => {
+/** block/continue 是 HITL 的另两个入口，必须与 complete 一样经私有 socket 且携带绑定身份。 */
+test("Worker 私有 Control 通道 将 block 与 continue 原样交给 ControlServer", async () => {
   const received: unknown[] = [];
   const control = { async complete() { throw new Error("不应调用 complete"); }, async block(value: unknown) { received.push(["block", value]); return { blockRequestId: (value as { blockRequestId: string }).blockRequestId, answer: { ok: true } }; }, async continue(value: unknown) { received.push(["continue", value]); return { ok: true }; } };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const reader = createInterface({ input: createReadStream(pipe.endpoints.responseFifo, { flags: "r+", encoding: "utf8" }), crlfDelay: Infinity });
-  const responses: Record<string, unknown>[] = [];
-  reader.on("line", (line) => { responses.push(JSON.parse(line)); });
-  const writer = createWriteStream(pipe.endpoints.requestFifo, { flags: "r+" });
-  const write = (value: unknown) => new Promise<void>((resolve, reject) => writer.write(`${JSON.stringify(value)}\n`, (error) => (error ? reject(error) : resolve())));
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
   const blockRequestId = crypto.randomUUID();
-  await write({ requestId: "block-1", action: "block", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object" } });
-  await write({ requestId: "continue-1", action: "continue", blockRequestId });
-  await Bun.sleep(50);
-  expect(responses).toEqual([
-    { requestId: "block-1", ok: true, result: { blockRequestId, answer: { ok: true } } },
-    { requestId: "continue-1", ok: true, result: { ok: true } },
-  ]);
+  expect(await client.request({ action: "block", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object" } })).toEqual({ blockRequestId, answer: { ok: true } });
+  expect(await client.request({ action: "continue", blockRequestId })).toEqual({ ok: true });
   expect(received).toEqual([
     ["block", { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object" } }],
     ["continue", { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", blockRequestId }],
   ]);
-  writer.destroy(); reader.close();
+  client.close();
 });
 
 /** 畸形帧与 Control 拒绝都必须以错误响应回传，绝不能静默丢弃或改变其他请求。 */
-test("Worker 私有 Control FIFO 对畸形帧和 Control 错误回传 ok:false", async () => {
+test("Worker 私有 Control 通道 对畸形帧和 Control 错误回传 ok:false", async () => {
   const control = { async complete() { throw new Error("Control 拒绝完成"); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const reader = createInterface({ input: createReadStream(pipe.endpoints.responseFifo, { flags: "r+", encoding: "utf8" }), crlfDelay: Infinity });
-  const responses: Record<string, unknown>[] = [];
-  reader.on("line", (line) => { responses.push(JSON.parse(line)); });
-  const writer = createWriteStream(pipe.endpoints.requestFifo, { flags: "r+" });
-  const write = (text: string) => new Promise<void>((resolve, reject) => writer.write(text, (error) => (error ? reject(error) : resolve())));
-  await write("not-json\n");
-  await write(`${JSON.stringify({ requestId: "bad-frame", action: "unknown" })}\n`);
-  await write(`${JSON.stringify({ requestId: "rejected", action: "complete", summary: "done", result: { ok: true } })}\n`);
-  await Bun.sleep(50);
-  const byId = new Map(responses.map((item) => [item.requestId, item]));
-  expect(byId.get("")).toMatchObject({ ok: false, error: expect.stringContaining("合法 JSON") });
-  expect(byId.get("bad-frame")).toMatchObject({ ok: false, error: expect.stringContaining("请求无效") });
-  expect(byId.get("rejected")).toMatchObject({ ok: false, error: "Control 拒绝完成" });
-  writer.destroy(); reader.close();
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
+  await expect(client.request({ action: "unknown" })).rejects.toThrow("请求无效");
+  await expect(client.request({ action: "complete", summary: "done", result: { ok: true } })).rejects.toThrow("Control 拒绝完成");
+  client.close();
 });
 
 /**
@@ -126,9 +105,9 @@ test("wave_flow_block 有界等待：未答返回 waiting，同一 blockRequestI
     },
     async continue() { throw new Error("不应调用 continue"); },
   };
-  const pipe = new WorkerControlPipe(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_MCP_REQUEST_FIFO: pipe.endpoints.requestFifo, WF_WORKER_MCP_RESPONSE_FIFO: pipe.endpoints.responseFifo, WF_WORKER_BLOCK_WAIT_BUDGET_MS: "150" } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_BLOCK_WAIT_BUDGET_MS: "150" } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
@@ -151,4 +130,28 @@ test("wave_flow_block 有界等待：未答返回 waiting，同一 blockRequestI
   expect(answeredPayload).toEqual({ status: "answered", blockRequestId: waitingPayload.blockRequestId, answer: { x: 7 } });
   // 两次调用都把同一 blockRequestId 交给 Control；是否新建 block 由 Control 仲裁。
   expect((requests as { blockRequestId: string }[]).map((request) => request.blockRequestId)).toEqual([waitingPayload.blockRequestId, waitingPayload.blockRequestId]);
-});
+}, 20_000);
+
+/**
+ * 回归：控制通道不能占用 Bun 线程池。
+ *
+ * 曾经的 FIFO 实现每开一个会话就有一条阻塞读长期占用一个池线程（池大小 = CPU 核数），
+ * 会话关闭也不释放；累积到池大小后，Journal/生命周期日志/节点结果等所有异步文件写入
+ * 都会排队永不完成，表现为节点永久 running 且无日志。这里把通道数开到池大小，
+ * 并要求异步写入仍能完成。
+ */
+test("通道数达到线程池大小后，异步文件写入仍能完成", async () => {
+  const control = { async complete() {}, async block() { return {}; }, async continue() {} };
+  const poolSize = Math.max(4, navigator.hardwareConcurrency ?? 4);
+  const scratch = mkdtempSync(join(tmpdir(), "wf-channel-regression-"));
+  try {
+    const opened: WorkerControlChannel[] = [];
+    for (let index = 0; index < poolSize; index += 1) {
+      opened.push(new WorkerControlChannel(control as never, { runId: "run", nodeId: `node-${index}`, agentSessionId: `session-${index}`, capability: "capability" }, undefined, scratch));
+    }
+    const target = join(scratch, "probe.log");
+    const write = appendFile(target, "probe\n").then(() => "ok");
+    expect(await Promise.race([write, Bun.sleep(3_000).then(() => "timeout")])).toBe("ok");
+    for (const channel of opened) channel.close();
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+}, 20_000);

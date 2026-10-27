@@ -8,7 +8,7 @@ import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { ProductionWorkspaceExecutor } from "../../src/workspace/production-workspace-executor";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager";
 import { RunRuntime } from "../../src/runtime/run-runtime";
-import { WorkerControlPipe } from "../../src/runtime/worker-control-pipe";
+import { WorkerControlChannel } from "../../src/runtime/worker-control-channel";
 import { GitRepository } from "../../src/workspace/git-repository";
 import { agent, parallel, phase } from "../../src/workflow/author-api";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
@@ -24,10 +24,10 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写Worker�
   await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
   const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID();
   const cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex",registry=new CliRuntimeRegistry();await registry.resolveWorker(cli);
-  let runtime!:RunRuntime;const pipes:WorkerControlPipe[]=[];
+  let runtime!:RunRuntime;const pipes:WorkerControlChannel[]=[];
   const executor=new ProductionWorkspaceExecutor({version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId},join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
-    const pipe=new WorkerControlPipe(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-    return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_MCP_REQUEST_FIFO",value:pipe.endpoints.requestFifo},{name:"WF_WORKER_MCP_RESPONSE_FIFO",value:pipe.endpoints.responseFifo}],close:()=>pipe.close()} as acp.McpServer;
+    const pipe=new WorkerControlChannel(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
+    return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
   },null);
   const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"result-recovery",description:"成果交接恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('只将当前cwd的a.txt改成done加换行；不要commit/push、联网或安装。最终结果{ok:true}。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
   await writeFile(join(root,"workflow.ts"),"result-recovery");
@@ -61,10 +61,10 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
  const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID(),registry=new CliRuntimeRegistry();
  const cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex";await registry.resolveWorker(cli);
  const config={version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId};
- const pipes:WorkerControlPipe[]=[];
+ const pipes:WorkerControlChannel[]=[];
  const makeExecutor=(getRuntime:()=>RunRuntime)=>new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
-   const pipe=new WorkerControlPipe(getRuntime().createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_MCP_REQUEST_FIFO",value:pipe.endpoints.requestFifo},{name:"WF_WORKER_MCP_RESPONSE_FIFO",value:pipe.endpoints.responseFifo}],close:()=>pipe.close()} as acp.McpServer;
+   const pipe=new WorkerControlChannel(getRuntime().createControlServer(),identity,undefined,scratch);pipes.push(pipe);
+   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
  },null);
  let runtime!:RunRuntime;const executor=makeExecutor(()=>runtime);
  const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"partial-resume",description:"停止现场恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('先检查当前cwd的a.txt；仅当内容不是partial加换行时将其改成partial加换行。保留已有partial，不重复写；验证内容后返回{ok:true}。不要commit/push、联网、安装或修改其他文件。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
@@ -91,7 +91,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
  }finally{release();held.mockRestore();pipes.forEach(pipe=>pipe.close());executor.close();}
 },240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，Execution收尾只封存", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，结果保留在worktree", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-workspace-")));
   const cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const child = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (code) throw new Error(err); return out.trim(); };
@@ -101,11 +101,11 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
   const registry = new CliRuntimeRegistry();
   const cli = process.env.WF_REAL_WORKSPACE_CLI === "kimi" ? "kimi" : "codex";
   await registry.resolveWorker(cli);
-  const pipes: WorkerControlPipe[] = [];
+  const pipes: WorkerControlChannel[] = [];
   let runtime!: RunRuntime;
   const executor = new ProductionWorkspaceExecutor({ version: 3, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] }, workspaceId }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
-    const pipe = new WorkerControlPipe(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
-    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo }], close: () => pipe.close() } as acp.McpServer;
+    const pipe = new WorkerControlChannel(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
+    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }], close: () => pipe.close() } as acp.McpServer;
   }, null);
   const schema = { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false };
   const workflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "workspace-acceptance", description: "真实双写验收", phases: [{ title: "write" }] }, default: async () => {
@@ -137,16 +137,11 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     expect(await Bun.file(join(workspace.cwd, "b.txt")).text()).toBe("worker-b\n");
     expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n"); expect(await git("rev-parse", "HEAD")).toBe(base);
     expect(executor.config.version).toBe(3);
-    const delivery = await manager.finalizeSource(runtime.snapshot().id, executor.config, ["a", "b"]);
-    expect(delivery.paths).toEqual(["a.txt", "b.txt"]);
-    // 零 commit：快照是不可变 tree + 证据 ref；worktree HEAD 与受管分支不前进，宿主不新增 commit。
-    expect(await git("show", `${delivery.tree}:a.txt`)).toBe("worker-a"); expect(await git("show", `${delivery.tree}:b.txt`)).toBe("worker-b");
-    expect(await git("rev-parse", `${delivery.evidenceRef}^{tree}`)).toBe(delivery.tree);
+    // 宿主不保存成果快照：worktree HEAD 与受管分支不前进，结果只以未提交文件保留。
     expect(await git("-C", workspace.cwd, "rev-parse", "HEAD")).toBe(base); expect(await git("rev-parse", `refs/heads/codex/wf-${workspaceId}`)).toBe(base);
-    expect(await manager.finalizeSource(runtime.snapshot().id, executor.config)).toEqual(delivery);
     expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n");
     expect(await git("rev-parse", "HEAD")).toBe(base);expect(await git("diff", "--cached", "--name-only")).toBe("");
-    console.log(JSON.stringify({ deliveryTree: delivery.tree, evidenceRef: delivery.evidenceRef, paths: delivery.paths }));
+    console.log(JSON.stringify({ workspace: workspace.cwd, paths: ["a.txt", "b.txt"] }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
 }, 240_000);
 
@@ -155,14 +150,14 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
  const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Acceptance","-c","user.email=acceptance@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
  await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
  const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID(),registry=new CliRuntimeRegistry(),cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex";
- await registry.resolveWorker(cli);const pipes:WorkerControlPipe[]=[],executors:ProductionWorkspaceExecutor[]=[];
+ await registry.resolveWorker(cli);const pipes:WorkerControlChannel[]=[],executors:ProductionWorkspaceExecutor[]=[];
  const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId),schema={type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false};
  const original={authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"write"}]};
  const run=async(config:ExecutionWorkspaceConfig,id:string,prompt:string)=>{
   let runtime!:RunRuntime;
   const executor=new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
-   const pipe=new WorkerControlPipe(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_MCP_REQUEST_FIFO",value:pipe.endpoints.requestFifo},{name:"WF_WORKER_MCP_RESPONSE_FIFO",value:pipe.endpoints.responseFifo}],close:()=>pipe.close()} as acp.McpServer;
+   const pipe=new WorkerControlChannel(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
+   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
   },null);executors.push(executor);
   const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"revision-check",description:"现场修订",phases:[{title:"write"}]},default:async()=>{phase("write");return agent(prompt,{id,cli,sandbox:"workspace-write",schema});}};
   const path=join(root,`${id}.ts`);await writeFile(path,id);
@@ -173,25 +168,23 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
  try{
   const firstConfig:ExecutionWorkspaceConfig={version:3,authorization:original,workspaceId};
   const first=await run(firstConfig,"write",'仅把当前cwd a.txt改为done加换行并读取验证。不commit/push、联网或安装。结果{ok:true}。');
-  const firstSource=await manager.finalizeSource(first.snapshot().id,firstConfig,["write"]);
   const renewed={...original,authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),nodes:[{nodeId:"repair"}]};
-  // continuation.head 必须是 worktree 当前 HEAD，不是旧快照 tree；零 commit 下 HEAD 仍为 base。
+  // continuation.head 取 worktree 当前 HEAD；宿主不在中间创建 commit。
   const firstHead=await git("-C",(await manager.inspect(workspaceId)).cwd,"rev-parse","HEAD");
   const config:ExecutionWorkspaceConfig={version:3,authorization:renewed,workspaceId,continuation:{executionId:first.snapshot().id,workspaceId,head:firstHead}};
   const second=await run(config,"repair",'先读取当前cwd a.txt，必须是done加换行；若不是请如实报告，不重建旧基准。把已有内容改为repaired加换行，再读取验证。不commit/push、联网或安装。结果{ok:true}。');
-  const workspace=await manager.inspect(workspaceId),source=await manager.finalizeSource(second.snapshot().id,config,["repair"]);
+  const workspace=await manager.inspect(workspaceId);
   expect(workspace.authorization).toEqual(original);expect(workspace.executionAuthorizations).toHaveLength(2);expect(workspace.executionAuthorizations?.[1].authorization).toEqual(renewed);
-  expect(source.paths).toEqual(["a.txt"]);expect(await git("show",`${source.tree}:a.txt`)).toBe("repaired");expect(await git("rev-parse",`${source.evidenceRef}^{tree}`)).toBe(source.tree);
   expect(await git("-C",workspace.cwd,"rev-parse","HEAD")).toBe(base);expect(await git("rev-parse",`refs/heads/codex/wf-${workspaceId}`)).toBe(base);
   expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("repaired\n");expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
   const oldEvents=(await RunJournal.open(first.snapshot().id,join(root,"runs"))).events,newEvents=(await RunJournal.open(second.snapshot().id,join(root,"runs"))).events;
   expect(newEvents.filter(item=>item.type==="agent.session")).toHaveLength(1);expect(newEvents.filter(item=>item.type==="agent.restarted")).toHaveLength(0);expect(second.snapshot().currentExecutionAttemptId).toBe(1);
   expect(newEvents.find(item=>item.type==="agent.session")!.agentSessionId).not.toBe(oldEvents.find(item=>item.type==="agent.session")!.agentSessionId);
-  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,firstTree:firstSource.tree,secondTree:source.tree,cli}));
+  console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,workspace:workspace.cwd,cli}));
  }finally{pipes.forEach(pipe=>pipe.close());executors.forEach(executor=>executor.close());}
 },240_000);
 
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保存来源、读取diff，结果只保留在worktree", async () => {
+test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完成后不保存快照，结果只保留在worktree", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-auto-delivery-"))), cwd = join(root, "repo"); await mkdir(cwd);
   const git = async (...args: string[]) => { const p = Bun.spawn(["/usr/bin/git", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]); if (code) throw Error(err); return out.trim(); };
   await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "a.txt"); await git("commit", "-m", "acceptance base");
@@ -214,17 +207,12 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine保�
     const deadline = Date.now() + 150_000;
     while (detail.execution.finishedAt === null && Date.now() < deadline) { await Bun.sleep(100); detail = await engine.handleDesktopAction("executions.get", { harnessRunId: taskId, executionId: created.execution.executionId }) as import("../../src/desktop/types").ExecutionResponse; }
     expect(detail.execution.status, detail.execution.diagnostic ?? "").toBe("completed");
-    expect(detail.sourceDiagnostic).toBeUndefined(); expect(detail.sourceEvidence).toBeDefined();
-    const delivery = detail.sourceEvidence!;
-    // 零 commit：快照是不可变 tree + 证据 ref，内容可达但宿主不新增 commit，HEAD 不前进。
-    expect(await git("show", `${delivery.tree}:a.txt`)).toBe("done");
-    expect(await git("rev-parse", `${delivery.evidenceRef}^{tree}`)).toBe(delivery.tree);
+    // 宿主不保存任何成果快照或证据 ref；结果只作为 worktree 未提交文件存在。
+    expect(await git("for-each-ref", "--format=%(refname)", "refs/wave-flow")).toBe("");
     expect(await git("rev-parse", `refs/heads/codex/wf-${workspaces.workspaceId}`)).toBe(base);
     expect(await git("rev-parse", "HEAD")).toBe(base); expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
     expect(await git("diff", "--cached", "--name-only")).toBe("");
-    const identity={harnessRunId:taskId,executionId:detail.execution.executionId};
-    const review=await engine.handleDesktopAction("executions.review",identity) as import("../../src/workspace/git-repository").GitReview;
-    expect(review.paths).toEqual(["a.txt"]); expect(review.sourceTree).toBe(delivery.tree);
-    console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, delivery }));
+    expect(await Bun.file(join(detail.workspaceEvidence!.cwd, "a.txt")).text()).toBe("done\n");
+    console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, workspace: detail.workspaceEvidence!.cwd }));
   } finally { engine.shutdown(); }
 }, 180_000);

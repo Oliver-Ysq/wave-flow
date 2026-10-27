@@ -29,7 +29,7 @@ type EngineResponse =
  * 逐行并发派发 Engine 请求：每行独立 dispatch，响应以 requestId 关联、完成即写回，
  * 不保证到达顺序。一个慢或挂死的 action（如冷启动时的 CLI 扫描）不得队头阻塞后续
  * 请求——方案页执行配置检查本身亚秒级，曾因排在串行扫描后无限转圈。
- * 与 Worker 控制 FIFO 同一先例：并发处理，避免首个未返回请求饿死后续请求。
+ * 与 Worker 控制通道同一先例：并发处理，避免首个未返回请求饿死后续请求。
  * engine.shutdown 排空全部在途请求后才返回，已接受请求的响应不被截断。
  */
 export async function serveEngineRequests(engine: DesktopExecutionEngine, lines: AsyncIterable<string>, write: (value: unknown) => void): Promise<void> {

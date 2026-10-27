@@ -539,7 +539,7 @@ test("真实 Worker session 仅注入节点私有的 Control MCP", async () => {
     { id: "codex-acp", command: "fake", args: [] },
     () => session,
     undefined,
-    identity => { capability = identity.capability; return { name: "wave-flow-worker-control", command: "/wave-flow-desktop-engine", args: ["__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: "/private/request" }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: "/private/response" }] }; },
+    identity => { capability = identity.capability; return { name: "wave-flow-worker-control", command: "/wave-flow-desktop-engine", args: ["__worker-mcp"], env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: "/private/control.sock" }] }; },
   );
   executor.bindControl(value.control);
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });

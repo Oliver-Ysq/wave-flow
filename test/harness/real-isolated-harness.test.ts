@@ -8,7 +8,7 @@ import { resolveHarnessLauncher } from "../../src/runtimes/worker-launcher-resol
 import { createIsolatedHarness } from "../../src/harness/isolated-harness";
 import { prepareSessionScratch } from "../../src/workspace/session-scratch";
 import { HarnessService } from "../../src/harness/service";
-import { HarnessControlPipe } from "../../src/harness/harness-control-pipe";
+import { HarnessControlChannel } from "../../src/harness/harness-control-channel";
 import { buildHarnessSystemPrompt } from "../../src/harness/harness-prompt";
 import { prepareIsolatedLauncher } from "../../src/runtimes/session-isolation";
 import { managedAcpTransport } from "../../src/workspace/managed-acp-transport";
@@ -32,10 +32,10 @@ test.skipIf(process.env.WF_REAL_HARNESS_MODEL_ACCEPTANCE!=="1")("真实隔离主
   const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-harness-model-"))),cwd=join(root,"project");await mkdir(cwd);
   const inside=join(cwd,"marker.txt"),outside=join(root,"outside.txt");await writeFile(inside,"INSIDE_FIXTURE_42\n");await writeFile(outside,"OUTSIDE_FIXTURE_73\n");
   const registry=new CliRuntimeRegistry(),cli=process.env.WF_REAL_HARNESS_CLI==="kimi"?"kimi":"codex",runtime=await registry.resolveWorker(cli),entry=adapterById(runtime.verifiedAdapter.adapterId)!;
-  const pipes:HarnessControlPipe[]=[];
+  const pipes:HarnessControlChannel[]=[];
   const service=new HarnessService(join(root,"harness-runs"),async(id,project,prior)=>{
-    const scratch=await prepareSessionScratch(join(root,"scratch"),project),pipe=new HarnessControlPipe(request=>service.mcpTools(id,request),scratch);pipes.push(pipe);
-    const mcp={name:"wave-flow-harness",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__harness-mcp"],env:[{name:"WF_HARNESS_MCP_REQUEST_FIFO",value:pipe.endpoints.requestFifo},{name:"WF_HARNESS_MCP_RESPONSE_FIFO",value:pipe.endpoints.responseFifo}]} as acp.McpServer;
+    const scratch=await prepareSessionScratch(join(root,"scratch"),project),pipe=new HarnessControlChannel(request=>service.mcpTools(id,request),scratch);pipes.push(pipe);
+    const mcp={name:"wave-flow-harness",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__harness-mcp"],env:[{ name: "WF_HARNESS_CONTROL_SOCKET", value: pipe.endpoints.socketPath }]} as acp.McpServer;
     const observe: import("../../src/adapters/acp-session").AcpTransportFactory | undefined = process.env.WF_REAL_HARNESS_TRACE === "1" ? async(launcher,signal)=>{
       const value=await bunAcpTransport(launcher,signal);
       const readable=value.stream.readable.pipeThrough(new TransformStream({transform(message,controller){

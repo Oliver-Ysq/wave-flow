@@ -1,40 +1,39 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createReadStream, createWriteStream } from "node:fs";
-import { createInterface } from "node:readline";
+import { connectControlSocket } from "../runtime/control-socket";
 
 /** 由 Engine 以每个 Harness session 私有 token 启动的 MCP sidecar。 */
 export async function runHarnessMcpServer(): Promise<void> {
-  const control = new HarnessControlPipeClient(required("WF_HARNESS_MCP_REQUEST_FIFO"), required("WF_HARNESS_MCP_RESPONSE_FIFO"));
+  const control = await connectControlSocket({ socketPath: required("WF_HARNESS_CONTROL_SOCKET"), idPrefix: "harness" });
   const server = new Server({ name: "wave-flow-harness", version: "1" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => await control.request("list", {}) as { tools: unknown[] });
+  let closing = false;
+  let inFlight = 0;
+  const close = async (): Promise<void> => {
+    if (closing) return;
+    closing = true;
+    control.close();
+    await server.close();
+    // Engine 关闭通道或 stdio 结束时自行退出，避免成为孤儿进程；先 flush 再退出。
+    process.stdout.write("", () => process.exit(0));
+  };
+  server.setRequestHandler(ListToolsRequestSchema, async () => await control.request({ operation: "list", value: {} }) as { tools: unknown[] });
   server.setRequestHandler(CallToolRequestSchema, async requestValue => {
-    const result = await control.request("call", { name: requestValue.params.name, arguments: requestValue.params.arguments ?? {} });
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    inFlight += 1;
+    try {
+      const result = await control.request({ operation: "call", value: { name: requestValue.params.name, arguments: requestValue.params.arguments ?? {} } });
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } finally { inFlight -= 1; }
   });
   await server.connect(new StdioServerTransport());
+  // 连接建立后再挂退出钩子：通道被 Engine 关闭或 stdio 结束时自行退出，
+  // socket 关闭事件可靠，不轮询端点文件。
+  // 在途 tools/call 必须先把"通道已关闭"的错误写回 stdio 再退出，否则调用方只能等到超时。
+  void control.closed.then(async () => {
+    for (let index = 0; index < 40 && inFlight > 0; index += 1) await Bun.sleep(50);
+    await close();
+  });
+  process.stdin.once("end", () => { void close(); });
 }
 
 function required(key: string): string { const value = process.env[key]?.trim(); if (!value) throw new Error(`Harness MCP 服务缺少 ${key}。`); return value; }
-
-/** Harness MCP 仅向 Engine 的随机 FIFO 请求已授权工具；没有 HTTP fallback。 */
-class HarnessControlPipeClient {
-  #next = 1;
-  #pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  #writer: ReturnType<typeof createWriteStream>;
-  constructor(requestFifo: string, responseFifo: string) {
-    this.#writer = createWriteStream(requestFifo, { flags: "r+" });
-    const reader = createInterface({ input: createReadStream(responseFifo, { flags: "r+", encoding: "utf8" }), crlfDelay: Infinity }); void this.read(reader);
-  }
-  async request(operation: "list" | "call", value: Record<string, unknown>): Promise<unknown> {
-    const requestId = `harness-${process.pid}-${this.#next++}`;
-    const response = new Promise<unknown>((resolve, reject) => this.#pending.set(requestId, { resolve, reject }));
-    await new Promise<void>((resolve, reject) => this.#writer.write(`${JSON.stringify({ requestId, operation, value })}\n`, error => error ? reject(error) : resolve()));
-    return response;
-  }
-  private async read(reader: ReturnType<typeof createInterface>): Promise<void> {
-    try { for await (const line of reader) { let value: unknown; try { value = JSON.parse(line); } catch { continue; } if (!value || typeof value !== "object" || Array.isArray(value)) continue; const response = value as { requestId?: unknown; ok?: unknown; result?: unknown; error?: unknown }; if (typeof response.requestId !== "string") continue; const pending = this.#pending.get(response.requestId); if (!pending) continue; this.#pending.delete(response.requestId); response.ok === true ? pending.resolve(response.result) : pending.reject(new Error(typeof response.error === "string" ? response.error : "Harness 私有控制请求失败。")); } }
-    finally { const error = new Error("Harness 私有控制通道已关闭。"); for (const pending of this.#pending.values()) pending.reject(error); this.#pending.clear(); }
-  }
-}

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { RuntimeAcpWorkerExecutor } from "../../src/runtime/runtime-acp-worker-executor";
-import { WorkerControlPipe } from "../../src/runtime/worker-control-pipe";
+import { WorkerControlChannel } from "../../src/runtime/worker-control-channel";
 import { RunRuntime } from "../../src/runtime/run-runtime";
 import { agent, phase } from "../../src/workflow/author-api";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
@@ -19,11 +19,11 @@ test.skipIf(process.env.WF_REAL_READ_ONLY_WORKER_ACCEPTANCE !== "1")("真实只�
   await writeFile(join(root, "workflow.ts"), "read-only-acceptance");
   const cli = process.env.WF_REAL_READ_ONLY_WORKER_CLI === "kimi" ? "kimi" : "codex";
   const registry = new CliRuntimeRegistry(); await registry.resolveWorker(cli);
-  const pipes: WorkerControlPipe[] = [];
+  const pipes: WorkerControlChannel[] = [];
   let runtime!: RunRuntime;
   const executor = new RuntimeAcpWorkerExecutor(registry, (identity, scratch) => {
-    const pipe = new WorkerControlPipe(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
-    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_MCP_REQUEST_FIFO", value: pipe.endpoints.requestFifo }, { name: "WF_WORKER_MCP_RESPONSE_FIFO", value: pipe.endpoints.responseFifo }], close: () => pipe.close() } as acp.McpServer;
+    const pipe = new WorkerControlChannel(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
+    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }], close: () => pipe.close() } as acp.McpServer;
   }, undefined, null, join(root, "scratch"));
   const workflow: WorkflowModule<JsonObject, unknown> = {
     meta: { name: "read-only-acceptance", description: "只读隔离验收", phases: [{ title: "read" }] },

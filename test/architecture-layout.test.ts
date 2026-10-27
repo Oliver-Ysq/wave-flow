@@ -104,12 +104,18 @@ describe("新架构目录与历史实现边界", () => {
     expect(workbench).not.toContain("/harness-runs/");
     const workerMcp = await Bun.file(join(projectRoot, "src", "runtime", "worker-mcp-server.ts")).text();
     expect(workerMcp).not.toContain("WF_WORKER_MCP_BASE_URL");
-    expect(workerMcp).toContain("WF_WORKER_MCP_REQUEST_FIFO");
-    const workerPipe = await Bun.file(join(projectRoot, "src", "runtime", "worker-control-pipe.ts")).text();
-    expect(workerPipe).toContain('"/usr/bin/mkfifo"');
+    expect(workerMcp).toContain("WF_WORKER_CONTROL_SOCKET");
+    // 控制通道必须是事件循环驱动的 Unix socket：FIFO 阻塞读会占线程池线程，
+    // 会话结束也不释放，累积后饿死 Journal/日志写入。
+    const controlSocket = await Bun.file(join(projectRoot, "src", "runtime", "control-socket.ts")).text();
+    expect(controlSocket).toContain("unix:");
+    expect(controlSocket).not.toContain("mkfifo");
+    const workerChannel = await Bun.file(join(projectRoot, "src", "runtime", "worker-control-channel.ts")).text();
+    expect(workerChannel).toContain("startControlSocket");
+    expect(workerChannel).not.toContain("mkfifo");
     const harnessMcp = await Bun.file(join(projectRoot, "src", "harness", "mcp-server.ts")).text();
     expect(harnessMcp).not.toContain("WF_HARNESS_MCP_BASE_URL");
-    expect(harnessMcp).toContain("WF_HARNESS_MCP_REQUEST_FIFO");
+    expect(harnessMcp).toContain("WF_HARNESS_CONTROL_SOCKET");
     const acpSession = await Bun.file(join(projectRoot, "src", "adapters", "acp-session.ts")).text();
     expect(acpSession).toContain("detached: true");
     expect(acpSession).toContain('signalGroup("SIGTERM")');

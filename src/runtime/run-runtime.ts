@@ -250,7 +250,7 @@ export class RunRuntime {
     let stopError: Error | undefined;
     try {
       for (const node of targets) {
-        // 节点可能在停止期间自行 complete（Worker FIFO 与 IPC 是两条通道）；
+        // 节点可能在停止期间自行 complete（Worker 控制 socket 与 IPC 是两条通道）；
         // 已终态的节点保持其已完成证据，不再落 cancelled。
         if (!canTransition(this.state.agent(node.id).status, "cancelled")) continue;
         this.host.beginStop(node.id);
