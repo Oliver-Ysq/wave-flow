@@ -1,32 +1,13 @@
 import { expect, test } from "bun:test";
-import { diffStyleForWidth } from "../../src-tauri/web/src/changes-panel";
 
-test("diff 分栏阈值落在面板可达宽度内：宽 diff 列并排、窄列单列", () => {
-  expect(diffStyleForWidth(300)).toBe("unified");
-  expect(diffStyleForWidth(539)).toBe("unified");
-  expect(diffStyleForWidth(540)).toBe("split");
-  // 变更面板最大 820px，扣除 220px 文件列与 40px 内边距后仍应达到并排阈值。
-  expect(diffStyleForWidth(820 - 220 - 40)).toBe("split");
-});
-
-test("变更面板在 review 渲染后测量 diff 宽度，并把 Tab 焦点留在面板内", async () => {
-  const panel = await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
-  expect(panel).toContain("const [diffHost, setDiffHost] = useState<HTMLDivElement | null>(null)");
-  expect(panel).toContain("ref={setDiffHost}");
-  expect(panel).toContain("new ResizeObserver(update)");
-  expect(panel).toContain("diffStyleForWidth(diffHost.clientWidth)");
-  expect(panel).toContain('event.key !== "Tab"');
-  expect(panel).toContain("document.addEventListener(\"keydown\", keydown, true)");
-});
-
-test("执行结束后只保留受管 worktree，不再提供自动应用、重试应用或清理入口", async () => {
+test("执行结束后只保留受管 worktree，不提供变更面板、自动应用或清理入口", async () => {
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
   const api = await Bun.file("src-tauri/web/src/api.ts").text();
-  const panel = await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
   const design = await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
-  expect(panel).not.toContain("ChangesFooter");
-  expect(panel).not.toContain("已自动应用到主工作区");
-  expect(panel).not.toContain("未自动应用");
+  expect(app).not.toContain("ChangesPanel");
+  expect(app).not.toContain("changes-panel");
+  expect(api).not.toContain("executions.review");
+  expect(api).not.toContain("executions.fileDiff");
   expect(app).not.toContain("applyRetryResult");
   expect(app).not.toContain("setApplyRetryResult");
   expect(app).not.toContain("重新整理改动");

@@ -17,7 +17,7 @@ export type AgentNodeExecutor = {
   hasWaitingStart?(): boolean;
   /** 执行一个已进入 running 的节点；对象表示完成，null 或抛错都表示无法验证完成的中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
-  /** 业务completed已耐久后等待宿主成果ready；普通只读执行器省略，失败必须抛契约错误且不回退业务终态。 */
+  /** 业务completed已耐久后的宿主交接（writer退出核验与租约释放）；普通只读执行器省略，失败必须抛契约错误且不回退业务终态。 */
   finalizeCompleted?(node: AgentNodeSnapshot): Promise<void>;
   /** 用户普通stop后的宿主partial收尾；业务cancelled先耐久，失败保留锁/现场且不能回退业务终态。Desktop退出不调用。 */
   finalizePartial?(node: AgentNodeSnapshot): Promise<void>;

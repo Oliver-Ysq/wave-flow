@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarnessExecutionService } from "../../src/harness/executions";
@@ -159,40 +159,20 @@ describe("HarnessExecutionService", () => {
       const reopened=await HarnessJournal.open(task.harnessRunId,root);expect(reopened.snapshot.executions).toHaveLength(2);expect(reopened.snapshot.executions[1].sceneEvidenceHash).toBe(hash!);
     }finally{harness.close();}
   });
-  test("原completed成果补收尾失败不重开Execution、不派发第二Worker，错误可诊断", async () => {
-    const {harness,harnessRunId,root}=await fixture();let calls=0,prepares=0;
-    const config={...testConfig(),workspaces:{version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:root,baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"w1"}]},workspaceId:crypto.randomUUID()}};
-    const service=new HarnessExecutionService(harness,()=>({executor:{execute:async()=>{calls++;return {ok:true};}}}),{prepareResume:async()=>{prepares++;throw Error("writer退出仍未知");}},root);
-    await harness.proposeWorkflowRevision(harnessRunId,SIMPLE_SOURCE.replace('cli: "codex"','cli: "codex", sandbox: "workspace-write"'));await harness.acceptWorkflowRevision(harnessRunId,1);
-    const {execution}=await service.createExecution(harnessRunId,1,{},config);
-    await waitFor(async()=>(await service.listExecutions(harnessRunId))[0].finishedAt!==null);
-    const prior=(await service.listExecutions(harnessRunId))[0];
-    await expect(service.resume(harnessRunId,execution.executionId)).rejects.toThrow("writer退出仍未知");
-    expect(calls).toBe(1);expect(prepares).toBe(1);expect((await service.listExecutions(harnessRunId))[0]).toEqual(prior);
-    expect((await service.snapshotExecution(harnessRunId,execution.executionId)).currentExecutionAttemptId).toBe(1);
-    await writeFile(join(root,harnessRunId,"executions",execution.executionId,"source.ts"),"changed source");
-    await expect(service.resume(harnessRunId,execution.executionId)).rejects.toThrow("冻结源码快照与登记 hash 不一致");
-    expect(prepares).toBe(1);expect(calls).toBe(1);
-  });
-  test("来源收尾在Worker收尾之后且终态发布之前运行，失败不丢失业务completed", async () => {
+  test("completed 的 resume 只读返回原终态，不补收尾、不派发第二Worker", async () => {
     const { harness, harnessRunId, root } = await fixture();
-    let finalized = false, called = 0;
+    let calls = 0;
     const config = { ...testConfig(), workspaces: { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: root, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "w1" }] }, workspaceId: crypto.randomUUID() } };
-    const executions = new HarnessExecutionService(harness, () => ({ executor: { execute: async () => ({ ok: true }), finalizeCompleted: async () => { finalized = true; } } }), {
-      finalizeSource: async (id, frozen) => {
-        expect(finalized).toBe(true); expect(frozen).toEqual(config); called++;
-        expect((await harness.snapshot(harnessRunId)).executions.find(item => item.executionId === id)?.finishedAt).toBeNull();
-        throw new Error("模拟交付证据磁盘失败");
-      },
-    }, root);
+    const executions = new HarnessExecutionService(harness, () => ({ executor: { execute: async () => { calls += 1; return { ok: true }; } } }), {}, root);
     try {
       const source = SIMPLE_SOURCE.replace('cli: "codex"', 'cli: "codex", sandbox: "workspace-write"');
       await harness.proposeWorkflowRevision(harnessRunId, source); await harness.acceptWorkflowRevision(harnessRunId, 1);
       const { execution } = await executions.createExecution(harnessRunId, 1, {}, config);
       await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
-      const record = (await executions.listExecutions(harnessRunId))[0];
-      expect(record.status).toBe("completed"); expect(record.diagnostic).toContain("模拟交付证据磁盘失败"); expect(called).toBe(1);
-      expect((await executions.snapshotExecution(harnessRunId, execution.executionId)).status).toBe("completed");
+      const snapshot = await executions.resume(harnessRunId, execution.executionId);
+      expect(snapshot.status).toBe("completed");
+      expect(snapshot.currentExecutionAttemptId).toBe(1);
+      expect(calls).toBe(1);
     } finally { harness.close(); }
   });
   test("控制初始化失败保留原Execution并收敛interrupted，不创建Worker",async()=>{

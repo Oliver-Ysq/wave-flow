@@ -20,7 +20,8 @@ test("用户手工源码提案弹窗移除，方案只在中央详情展示", as
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).not.toContain("function WorkflowDraftModal(");
   expect(source).not.toContain("api.proposeWorkflowRevision");
-  expect(source).toContain('central-workflow${changesView ? " changes-open" : ""}');
+  expect(source).toContain('className="central-workflow"');
+  expect(source).not.toContain("changes-open");
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(css).toMatch(/\.connection-backdrop\s*\{[^}]*position:fixed;[^}]*inset:0;/);
 });

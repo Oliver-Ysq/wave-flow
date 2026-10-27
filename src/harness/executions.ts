@@ -37,8 +37,6 @@ export type HarnessExecutionExecutor = {
 export type HarnessExecutionHooks = {
   /** 用户显式resume前仅补原completed节点成果；缺省无动作，禁止execute或释放未知writer租约。 */
   readonly prepareResume?: (executionId: string, snapshot: RunSnapshot) => Promise<void>;
-  /** Run已completed、所有节点收尾后调用；只处理最终Git来源证据，不改业务状态、不派发Worker。缺省无动作。 */
-  readonly finalizeSource?: (executionId: string, config: ExecutionConfigSnapshot, snapshot: RunSnapshot) => Promise<void>;
   /**
    * 节点启动前绑定本实例的 ControlServer；缺省不接线。可返回同步释放器，捕获
    * 本次具体资源身份，在耐久终态后退役时调用一次；不得按 executionId 清理新实例。
@@ -109,7 +107,7 @@ export class HarnessExecutionService {
       try{
         const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
         const workspace=await manager.inspect(execution.config.workspaces.workspaceId);
-        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,source:await manager.inspectSource(executionId),sourceDiagnostic:await manager.inspectSourceDiagnostic(executionId),workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,leases:workspace.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedReleases:workspace.closedReleases??[],cleanedAt:workspace.cleanedAt},limitation:"共享worktree的Git证据只覆盖受管文件与所执行验证；不提供逐节点归因，也不证明外部系统已回滚或无副作用"};
+        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,leases:workspace.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedReleases:workspace.closedReleases??[],cleanedAt:workspace.cleanedAt},limitation:"宿主不保存成果快照；结果只保留在受管worktree，当前内容可能已被用户或后续执行修改，不证明外部副作用"};
       }catch(error){workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,status:"受管Git证据不可读取",diagnostic:error instanceof Error?error.message:String(error),limitation:"缺失不代表没有改动"};}
     }
     return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence,nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,hint:node.hint??null,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
@@ -143,10 +141,8 @@ export class HarnessExecutionService {
     const workspace = await manager.inspect(execution.config.workspaces.workspaceId);
     return {
       project: await (await GitRepository.open(task.cwd)).sceneFingerprint(),
-      source: await manager.inspectSource(executionId),
-      sourceDiagnostic: await manager.inspectSourceDiagnostic(executionId),
       workspace: { workspaceId: workspace.workspaceId, leases: workspace.leases, closedReleases: workspace.closedReleases ?? [], cleanedAt: workspace.cleanedAt, scene: workspace.cleanedAt ? null : await (await GitRepository.open(workspace.cwd)).sceneFingerprint() },
-      limitation: "Git可见文件证据，不锁定外部系统或无限制外部修改",
+      limitation: "当前Git可见文件现场；宿主不保存历史成果快照，不锁定外部系统或无限制外部修改",
     };
   }
 
@@ -502,17 +498,9 @@ export class HarnessExecutionService {
       if (snapshot.task) await this.harness.ensureCurrentImpact(harnessRunId, executionId);
     }
     if (record.status === "completed") {
-      if (!record.config?.workspaces || !this.hooks.finalizeSource) throw new Error("业务已完成，无可恢复的Git成果收尾；不重跑业务。");
-      const runtime = opened;
-      if (runtime.snapshot().status !== "completed") throw new Error("业务终态与原Run证据不一致，拒绝成果恢复。");
-      // 只补最终来源关联，不重开Execution、不调用Workflow或构造Worker执行器。
-      // 旧Engine无法核验的writer租约必须先显式释放；否则封存会一直被锁挡住。
-      const manager = await WorkspaceManager.open(this.workspaceRoot, crypto.randomUUID());
-      await manager.prepareResume(record.config.workspaces, executionId);
-      await this.hooks.finalizeSource(executionId, record.config, runtime.snapshot());
-      if (!await manager.inspectSource(executionId) || await manager.inspectSourceDiagnostic(executionId)) throw new Error("Git成果仍未完整保存；请处理原诊断后重试成果收尾，不重跑业务。");
-      if (snapshot.task) await this.harness.ensureCurrentImpact(harnessRunId, executionId);
-      return runtime.snapshot();
+      // 宿主不再保存成果快照：已完成的 Execution 没有可补的收尾动作，resume 只读返回原终态。
+      if (opened.snapshot().status !== "completed") throw new Error("业务终态与原Run证据不一致，拒绝恢复。");
+      return opened.snapshot();
     }
     const module = record.kind==="local-run"?await loadWorkflowSource(source,revision.localOrigin?.path):compileRestrictedWorkflow(source);
     // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
@@ -633,16 +621,9 @@ export class HarnessExecutionService {
         // interrupted 优先采用本次 run() 的真实 rejection；snapshot.diagnostic 可能是
         // 旧 attempt 遗留的终态诊断（例如 resume 重放在首个节点前被拒，快照从未更新）。
         // cancelled 的诊断以快照为准（"用户停止"/"退出 Wave Flow" 语义由控制路径耐久）。
-        let diagnostic = terminal === "completed" ? null
+        const diagnostic = terminal === "completed" ? null
           : terminal === "interrupted" && runtimeError ? runtimeError.message
           : snapshot.diagnostic;
-        if (terminal === "completed" && this.#instances.get(executionId) === instance) {
-          const execution = (await this.harness.snapshot(harnessRunId)).executions.find(item => item.executionId === executionId);
-          if (execution?.config?.workspaces) {
-            try { await this.hooks.finalizeSource?.(executionId, execution.config, snapshot); }
-            catch (error) { diagnostic = `Git最终交付诊断未能保存：${error instanceof Error ? error.message : String(error)}；业务已完成，不自动重跑。`; }
-          }
-        }
         // 终态发布与 resume 共用 Harness 事务锁：身份校验和 append 之间不能换代。
         await this.withLifecycleLock(harnessRunId, async () => {
           if (this.#instances.get(executionId) !== instance) return;

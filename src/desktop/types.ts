@@ -224,12 +224,8 @@ export type ExecutionResponse = {
     /** 该worktree累计被显式恢复终止或确认退出的旧writer数（含其他接续Execution）。 */ readonly closedWriters:number;
     /** worktree是否已安全清理。 */ readonly cleaned:boolean;
   };
-  /** Git证据读取失败不影响原Run状态读取；错误不代表无改动。 */
+  /** 工作区现场读取失败不影响原Run状态读取；错误不代表目录不存在或没有改动。 */
   readonly workspaceDiagnostic?: string;
-  /** 最终快照证据（不可变 tree + 证据 ref）；缺省表示尚未收尾，不表示宿主创建了 commit。 */
-  readonly sourceEvidence?: import("../workspace/workspace-manager").WorkspaceSource;
-  /** 最终收尾失败原因，与Run业务状态分开展示；缺省无已登记失败。 */
-  readonly sourceDiagnostic?: string;
 };
 
 /** 单个执行尝试的只读结果证据；缺失结果不从其他 attempt 补造。 */

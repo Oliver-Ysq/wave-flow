@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitRepository } from "../../src/workspace/git-repository";
-import { SourcePersistenceError, isRetryableSourceError, WorkspaceManager, type WorkspaceAuthorization } from "../../src/workspace/workspace-manager";
+import { WorkspaceManager, type WorkspaceAuthorization } from "../../src/workspace/workspace-manager";
 import { captureWriterStartedAt, nodeWriterProcessControl, type WriterProcessControl } from "../../src/workspace/writer-process-control";
 import { WorkflowContractError } from "../../src/workflow/errors";
 import { WorkspaceExecutor } from "../../src/workspace/workspace-executor";
@@ -33,17 +33,6 @@ function node(id: string, attempt = 1, sandbox: "workspace-write" | "read-only" 
   return { id, phase: "run", executionAttemptId: attempt, phaseVisitId: 1, sequence: 1, executionBatch: { sequence: 1, mode: "serial" }, cli: "codex", sandbox, cwd: "/tmp/project", label: id, status: "running", result: null, diagnostic: null, createdAt: new Date().toISOString(), startedAt: null, endedAt: null, agentSessionId: crypto.randomUUID(), block: null, request: { id, cli: "codex", sandbox, cwd: "/tmp/project", phase: "run", prompt: "work" } };
 }
 
-test("交付重试按错误类型分类，安全契约拒绝不误当临时失败", async () => {
-  expect(isRetryableSourceError(new SourcePersistenceError("fixture"))).toBe(true);
-  expect(isRetryableSourceError(new Error("disk"))).toBe(true);
-  expect(isRetryableSourceError(new WorkflowContractError("未授权/锁"))).toBe(false);
-  const { manager, runId } = await fixture();
-  await manager.recordSourceDiagnostic(runId, "contract refused");
-  expect(await manager.canRetrySource(runId)).toBe(false);
-  await manager.recordSourceDiagnostic(runId, "disk", true);
-  expect(await manager.canRetrySource(runId)).toBe(true);
-});
-
 test("同一共享worktree可并行持有多个writer租约，释放需独立退出证明", async () => {
   const { manager, workspaceId, authorization, runId } = await fixture();
   await manager.create(workspaceId, authorization);
@@ -55,13 +44,12 @@ test("同一共享worktree可并行持有多个writer租约，释放需独立退
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(2);
   await manager.release(first, async () => true);
   expect((await manager.inspect(workspaceId)).leases.map(lease => lease.nodeId)).toEqual(["b"]);
-  await expect(manager.finalizeSource(runId, config(workspaceId, authorization))).rejects.toThrow("锁");
   await manager.release(second, async () => true);
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(0);
   await expect(manager.abandonUnstarted(second)).rejects.toThrow("租约");
 });
 
-test("循环写节点按披露前缀取得租约并收尾，未披露前缀拒绝", async () => {
+test("循环写节点按披露前缀取得租约，未披露前缀拒绝，结果保留在worktree", async () => {
   const { manager, workspaceId, authorization, runId } = await fixture();
   const dynamicAuthorization = { ...authorization, nodes: [], dynamicNodes: [{ nodeIdPrefix: "repair-" }] };
   const workspace = await manager.create(workspaceId, dynamicAuthorization);
@@ -69,46 +57,24 @@ test("循环写节点按披露前缀取得租约并收尾，未披露前缀拒�
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "repair-1", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "repaired\n");
   await manager.release(lease, async () => true);
-  const source = await manager.finalizeSource(runId, config(workspaceId, dynamicAuthorization), ["repair-1"]);
-  expect(source.paths).toEqual(["a.txt"]);
+  expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("repaired\n");
 });
 
-test("Execution收尾只采集快照证据，主工作区与worktree HEAD/索引保持不变", async () => {
+test("写节点结果只保留在受管worktree，宿主不产生快照，主工作区不变", async () => {
   const { manager, workspaceId, authorization, runId, cwd, git } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
-  await writeFile(join((await manager.inspect(workspaceId)).cwd, "a.txt"), "result\n");
+  await writeFile(join(workspace.cwd, "a.txt"), "result\n");
   await manager.release(lease, async () => true);
-  const source = await manager.finalizeSource(runId, config(workspaceId, authorization), ["a", "b"]);
-  expect(source.requestId).toBe(runId);
-  expect(source.tree).toMatch(/^[a-f0-9]{40}$/);
-  expect(source.evidenceRef).toMatch(/^refs\//);
-  expect(source.paths).toEqual(["a.txt"]);
+  expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("result\n");
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
   expect(await git("rev-parse", "HEAD")).toBe(authorization.baseCommit);
   expect(await git("diff", "--cached", "--name-only")).toBe("");
-  // 快照不创建commit：受管worktree的HEAD与索引保持原样，改动仍以dirty形式保留。
   const worktreeState = await (await GitRepository.open(workspace.cwd)).inspect();
   expect(worktreeState.head).toBe(authorization.baseCommit);
   expect(worktreeState.changedPaths).toEqual(["a.txt"]);
-  expect(await manager.finalizeSource(runId, config(workspaceId, authorization))).toEqual(source);
-});
-
-test("主工作区dirty不影响worktree快照；结果仍只保留在worktree", async () => {
-  const { manager, workspaceId, authorization, runId, cwd } = await fixture();
-  await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
-  await writeFile(join((await manager.inspect(workspaceId)).cwd, "a.txt"), "result\n");
-  await manager.release(lease, async () => true);
-  await writeFile(join(cwd, "user.txt"), "keep");
-  const source = await manager.finalizeSource(runId, config(workspaceId, authorization));
-  expect(source.tree).toMatch(/^[a-f0-9]{40}$/);
-  expect(source.evidenceRef).toMatch(/^refs\//);
-  expect(await manager.canRetrySource(runId)).toBe(false);
-  await rm(join(cwd, "user.txt"));
-  const retried = await manager.finalizeSource(runId, config(workspaceId, authorization));
-  expect(retried).toEqual(source);
-  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
+  // 宿主不记录任何成果对象或证据引用。
+  expect(await git("for-each-ref", "--format=%(refname)", "refs/wave-flow")).toBe("");
 });
 
 test("续作复用同一worktree，续作head来自worktree当前inspect，主工作区始终保持未修改", async () => {
@@ -118,10 +84,9 @@ test("续作复用同一worktree，续作head来自worktree当前inspect，主�
   const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "one\n");
   await manager.release(first, async () => true);
-  await manager.finalizeSource(runId, config(workspaceId, authorization));
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
 
-  // 零commit改造后没有封存commit；续作head取受管worktree当前真实HEAD。
+  // 宿主不创建封存commit；续作head取受管worktree当前真实HEAD。
   const head = (await (await GitRepository.open(workspace.cwd)).inspect()).head;
   const nextRun = crypto.randomUUID(), renewed = { ...authorization, authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), nodes: [{ nodeId: "repair" }] };
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head });
@@ -130,9 +95,8 @@ test("续作复用同一worktree，续作head来自worktree当前inspect，主�
   const second = await manager.bindWriter(await manager.acquire(workspaceId, { runId: nextRun, nodeId: "repair", attempt: 1 }), "second", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "b.txt"), "two\n");
   await manager.release(second, async () => true);
-  const source = await manager.finalizeSource(nextRun, nextConfig, ["repair"]);
-  expect(source.tree).toMatch(/^[a-f0-9]{40}$/);
-  expect(source.paths).toEqual(["a.txt", "b.txt"]);
+  expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("one\n");
+  expect(await Bun.file(join(workspace.cwd, "b.txt")).text()).toBe("two\n");
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
   expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n");
   expect((await (await GitRepository.open(cwd)).inspect()).changedPaths).toEqual([]);
@@ -311,8 +275,7 @@ test("WorkspaceExecutor共享cwd、逐节点只释放租约；Execution收尾只
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(0);
   await expect((await GitRepository.open(workspace.cwd)).inspect()).resolves.toMatchObject({ head: authorization.baseCommit });
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
-  await manager.finalizeSource(runId, config(workspaceId, authorization), ["a"]);
-  expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
+  expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("managed\n");
 
   const reopened = new WorkspaceExecutor(await WorkspaceManager.open(join(tmpdir(), crypto.randomUUID()), crypto.randomUUID()), runId, workspaceId, { execute: async () => null }, () => { throw new Error("不应重新创建writer"); });
   reopened.bindControl({} as never);
@@ -333,24 +296,17 @@ test("写Execution的只读节点也在共享worktree中读取，不读主项目
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(0);
 });
 
-test("清理要求快照证据且现场tree一致；锁、未快照、后续变化与冲突拒绝，ignored允许删除", async () => {
+test("清理需显式授权；锁与冲突拒绝，dirty与ignored内容随checkout删除", async () => {
   const { manager, workspaceId, authorization, runId, cwd } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
-  await expect(manager.cleanup(workspaceId, runId, false)).rejects.toThrow("明确授权");
-  await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("尚无最终快照");
+  await expect(manager.cleanup(workspaceId, false)).rejects.toThrow("明确授权");
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
-  await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("锁");
+  await expect(manager.cleanup(workspaceId, true)).rejects.toThrow("锁");
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
   await manager.release(lease, async () => true);
-  const source = await manager.finalizeSource(runId, config(workspaceId, authorization));
-  // 快照后的后续变化拒绝清理：现场tree已偏离快照canonical tree。
-  await writeFile(join(workspace.cwd, "a.txt"), "later\n");
-  await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow();
-  await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
-  // ignored内容不参与tree核验，按Orca模式允许随checkout删除。
+  // 未提交内容与ignored文件都随checkout删除；宿主不做成果保全。
   await writeFile(join(cwd, ".git", "info", "exclude"), "local.cache\n");
-  await writeFile(join(workspace.cwd, "local.cache"), "unknown-content");
-  // 未解决冲突拒绝清理；解除索引冲突后现场仍与快照一致。
+  await writeFile(join(workspace.cwd, "local.cache"), "ignored content");
   const wgit = async (input: string | undefined, ...args: string[]) => {
     const child = Bun.spawn(["/usr/bin/git", ...args], { cwd: workspace.cwd, stdin: input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe" });
     if (input !== undefined) { child.stdin!.write(input); child.stdin!.end(); }
@@ -360,36 +316,32 @@ test("清理要求快照证据且现场tree一致；锁、未快照、后续变�
   const blobA = await wgit("conflict-a\n", "hash-object", "-w", "--stdin");
   const blobB = await wgit("conflict-b\n", "hash-object", "-w", "--stdin");
   await wgit(`100644 ${blobA} 1\ta.txt\n100644 ${blobB} 2\ta.txt\n`, "update-index", "--index-info");
-  await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow();
+  await expect(manager.cleanup(workspaceId, true)).rejects.toThrow("冲突");
   await wgit(undefined, "read-tree", "HEAD");
-  // dirty 但内容与快照tree一致：允许清理。
-  const cleaned = await manager.cleanup(workspaceId, runId, true);
+  const cleaned = await manager.cleanup(workspaceId, true);
   expect(cleaned.cleanedAt).not.toBeNull();
   expect(await Bun.file(workspace.cwd).exists()).toBe(false);
-  expect(await manager.inspectSource(runId)).toEqual(source);
 });
 
 test("cleanup拒绝同仓库branch被替换的checkout，保留现场", async () => {
-  const { manager, workspaceId, authorization, runId, git } = await fixture();
+  const { manager, workspaceId, authorization, git } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
-  await manager.finalizeSource(runId, config(workspaceId, authorization));
   await git("-C", workspace.cwd, "switch", "-c", "codex/wf-other");
-  await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("身份");
+  await expect(manager.cleanup(workspaceId, true)).rejects.toThrow("身份");
   expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("ready\n");
   expect((await manager.inspect(workspaceId)).cleanedAt).toBeNull();
 });
 
 test("cleanup内部ENOENT不得误记已清理，目录与重试资格保留", async () => {
-  const { manager, workspaceId, authorization, runId } = await fixture();
+  const { manager, workspaceId, authorization } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
-  await manager.finalizeSource(runId, config(workspaceId, authorization));
   const removal = spyOn(GitRepository.prototype, "removeWorktree").mockRejectedValueOnce(Object.assign(new Error("internal ENOENT"), { code: "ENOENT" }));
-  try { await expect(manager.cleanup(workspaceId, runId, true)).rejects.toThrow("internal ENOENT"); } finally { removal.mockRestore(); }
+  try { await expect(manager.cleanup(workspaceId, true)).rejects.toThrow("internal ENOENT"); } finally { removal.mockRestore(); }
   expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("ready\n");
   expect((await manager.inspect(workspaceId)).cleanedAt).toBeNull();
-  await manager.cleanup(workspaceId, runId, true);
+  await manager.cleanup(workspaceId, true);
   expect(await Bun.file(workspace.cwd).exists()).toBe(false);
 });
 
@@ -404,36 +356,20 @@ test("首次dirty基线拒绝；显式排除后创建且同身份重试不重复
   await expect(manager.create(workspaceId, { ...approved, authorizationId: crypto.randomUUID() })).rejects.toThrow("冲突");
 });
 
-test("快照证据已创建但关联失败时保留Git证据，重试只补关联", async () => {
-  const { manager, workspaceId, authorization, runId } = await fixture();
-  const workspace = await manager.create(workspaceId, authorization);
-  const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
-  await writeFile(join(workspace.cwd, "a.txt"), "saved\n");
-  await manager.release(lease, async () => true);
-  const write = spyOn(manager as unknown as { write: (...args: unknown[]) => Promise<void> }, "write").mockRejectedValueOnce(new Error("association failed"));
-  try { await expect(manager.finalizeSource(runId, config(workspaceId, authorization))).rejects.toThrow("association failed"); } finally { write.mockRestore(); }
-  expect(await manager.inspectSource(runId)).toBeNull();
-  const result = await manager.finalizeSource(runId, config(workspaceId, authorization));
-  expect(await manager.inspectSource(runId)).toEqual(result);
-  expect(await Bun.file(join(authorization.repository, "a.txt")).text()).toBe("base\n");
-});
-
 test("清理意图已耐久但checkout先被移除时，重试只补关联不重复删除", async () => {
   const { root, manager, workspaceId, authorization, runId, cwd } = await fixture();
   const workspace = await manager.create(workspaceId, authorization);
   const lease = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "group", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "ready\n");
   await manager.release(lease, async () => true);
-  await manager.finalizeSource(runId, config(workspaceId, authorization));
   // 模拟清理崩溃：意图已耐久、checkout已移除、cleanedAt 未落盘。
   const recordPath = join(root, "state", "records", `${workspaceId}.json`);
   const record = JSON.parse(await Bun.file(recordPath).text());
   record.cleanupRequestedAt = new Date().toISOString(); record.cleanedAt = null;
   await writeFile(recordPath, JSON.stringify(record));
   await rm(workspace.cwd, { recursive: true, force: true });
-  const cleaned = await manager.cleanup(workspaceId, runId, true);
+  const cleaned = await manager.cleanup(workspaceId, true);
   expect(cleaned.cleanedAt).not.toBeNull();
-  expect(await manager.inspectSource(runId)).not.toBeNull();
   expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n");
 });
 
@@ -458,8 +394,6 @@ test("续作resume先释放旧租约再补交接，顺序颠倒会拒绝派发",
   const first = await manager.bindWriter(await manager.acquire(workspaceId, { runId, nodeId: "a", attempt: 1 }), "first", { pgid: 54321, startedAt: "test-fingerprint" });
   await writeFile(join(workspace.cwd, "a.txt"), "one\n");
   await manager.release(first, async () => true);
-  const prior = await manager.finalizeSource(runId, config(workspaceId, authorization));
-  expect(prior.tree).toMatch(/^[a-f0-9]{40}$/);
   const nextRun = crypto.randomUUID(), renewed = { ...authorization, authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), nodes: [{ nodeId: "repair" }] };
   const nextConfig = config(workspaceId, renewed, { executionId: runId, workspaceId, head: (await (await GitRepository.open(workspace.cwd)).inspect()).head });
   await manager.prepareExecution(nextRun, nextConfig);
@@ -536,56 +470,6 @@ test("写Worker启动超时先核验退出并释放租约，自动重试不会�
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(1);
   await executor.finalizeCompleted({ ...nodeSnapshot, status: "completed", result: { ok: true } });
   expect((await manager.inspect(workspaceId)).leases).toEqual([]);
-});
-
-test("历史 commit-only 交付记录只读映射为新形态，忽略旧applied且不回写文件", async () => {
-  const { root, manager, workspaceId, authorization, runId } = await fixture();
-  const workspace = await manager.create(workspaceId, authorization);
-  const savedAt = new Date().toISOString();
-  const legacy = {
-    executionId: runId, requestId: runId, workspaceId, authorizationId: authorization.authorizationId,
-    baseCommit: authorization.baseCommit, commit: authorization.baseCommit, branch: workspace.branch,
-    paths: ["a.txt"], applied: { skippedAt: savedAt, reason: "legacy" }, savedAt,
-  };
-  const path = join(root, "state", "records", `${runId}.source`);
-  await writeFile(path, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
-  const before = await Bun.file(path).text();
-  const source = await manager.inspectSource(runId);
-  expect(source).toEqual({
-    executionId: runId, requestId: runId, workspaceId, authorizationId: authorization.authorizationId,
-    baseCommit: authorization.baseCommit, tree: authorization.baseCommit,
-    evidenceRef: `refs/heads/${workspace.branch}`, paths: ["a.txt"], savedAt,
-  });
-  // 只读映射：文件内容原样保留，不做迁移重写。
-  expect(await Bun.file(path).text()).toBe(before);
-  // 损坏的历史身份（分支不属于该工作区）仍拒绝读取。
-  const damaged = { ...legacy, branch: "codex/wf-not-this-workspace" };
-  await writeFile(path, `${JSON.stringify(damaged)}\n`);
-  await expect(manager.inspectSource(runId)).rejects.toThrow("损坏");
-});
-
-test("新格式交付记录的证据ref必须绑定本Execution", async () => {
-  const { root, manager, workspaceId, authorization, runId } = await fixture();
-  const source = { executionId: runId, requestId: runId, workspaceId, authorizationId: authorization.authorizationId, baseCommit: authorization.baseCommit, tree: authorization.baseCommit, evidenceRef: "refs/heads/master", paths: [], savedAt: new Date().toISOString() };
-  await writeFile(join(root, "state", "records", `${runId}.source`), `${JSON.stringify(source)}\n`, { mode: 0o600 });
-  await expect(manager.inspectSource(runId)).rejects.toThrow("损坏");
-});
-
-test("历史commit-only续作推进分支后，checkout已删仍按原commit补清理", async () => {
-  const { root, manager, workspaceId, authorization, runId, git } = await fixture();
-  const workspace = await manager.create(workspaceId, authorization);
-  await writeFile(join(workspace.cwd, "a.txt"), "old\n"); await git("-C", workspace.cwd, "add", "a.txt"); await git("-C", workspace.cwd, "commit", "-m", "old evidence");
-  const oldCommit = await git("-C", workspace.cwd, "rev-parse", "HEAD"), savedAt = new Date().toISOString();
-  const legacy = { executionId: runId, requestId: runId, workspaceId, authorizationId: authorization.authorizationId, baseCommit: authorization.baseCommit, commit: oldCommit, branch: workspace.branch, paths: ["a.txt"], applied: { skippedAt: savedAt, reason: "legacy" }, savedAt };
-  await writeFile(join(root, "state", "records", `${runId}.source`), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
-  const recordPath = join(root, "state", "records", `${workspaceId}.json`), record = JSON.parse(await Bun.file(recordPath).text());
-  await writeFile(recordPath, `${JSON.stringify({ ...record, cleanupRequestedAt: savedAt })}\n`, { mode: 0o600 });
-  await writeFile(join(workspace.cwd, "a.txt"), "new\n"); await git("-C", workspace.cwd, "commit", "-am", "later continuation");
-  expect(await git("-C", workspace.cwd, "rev-parse", "HEAD")).not.toBe(oldCommit);
-  await git("worktree", "remove", "--force", workspace.cwd);
-  const cleaned = await manager.cleanup(workspaceId, runId, true);
-  expect(cleaned.cleanedAt).not.toBeNull();
-  expect((await manager.inspectSource(runId))?.tree).toBe(oldCommit);
 });
 
 test("spawn 成功但 bindWriter 前崩溃：未决启动意图 fail closed，拒绝恢复与撤回，不杀未知 PID", async () => {

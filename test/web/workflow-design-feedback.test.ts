@@ -16,9 +16,8 @@ test("结果页逐一显示原总结与现场补充，过时义务不暴露重�
  expect(source).toContain('重新检查现场');
  expect(source).toContain('api.checkExecutionScene');
 });
-test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",async()=>{
+test("归档与旧Execution隐藏成果恢复合入清理，不保留变更面板",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
- const panel=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
  expect(app).toContain('(harness.task?.workflowContract === "single-workflow-v1" &&');
  expect(app).toContain('harness.executions.at(-1)?.executionId !==');
  expect(app).toContain('所选工作流记录暂时不可用');
@@ -27,11 +26,10 @@ test("归档与旧Execution隐藏成果恢复合入清理，保留diff阅读",as
  expect(app).not.toContain('TEMP DEBUG');
  expect(app).toContain('{!readOnly && (');
  expect(app).toContain('<div className="execution-actions">');
- expect(app).toContain('<ChangesPanel');
+ expect(app).not.toContain('<ChangesPanel');
+ expect(app).not.toContain('changes-panel');
  expect(app).not.toContain("executions.merge");
  expect(app).not.toContain("changesWritable");
- expect(panel).not.toContain("已自动应用到主工作区");
- expect(panel).not.toContain("未自动应用");
 });
 
 test("整工作区授权并入确认运行，结果保留在 worktree，内部检查点默认折叠",async()=>{
@@ -45,12 +43,8 @@ test("整工作区授权并入确认运行，结果保留在 worktree，内部�
  expect(design).not.toContain("集成来源节点");
  expect(design).not.toContain("接续上次改动");
  expect(design).not.toContain("approveGit");
- expect(app).toContain("<ChangesPanel");
- const review=await Bun.file("src-tauri/web/src/changes-panel.tsx").text();
- expect(review).not.toContain("已自动应用到主工作区");
- expect(review).not.toContain("未自动应用");
- expect(review).toContain("generation.current === token");
- expect(app).toContain("成果还没有保存完整");
+ expect(app).not.toContain("<ChangesPanel");
+ expect(app).not.toContain("成果还没有保存完整");
  // 诊断与 Git 检查点合并为一个折叠入口，不再出现两个相邻的“高级 / 诊断”。
  expect(app).toContain("<summary>高级 / 诊断信息</summary>");
  expect(app).toContain("<ExecutionDiagnostics");

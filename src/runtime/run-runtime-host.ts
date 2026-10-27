@@ -64,7 +64,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   controlContext(): { readonly journal: RunJournal; readonly state: RunStateMachine; readonly exclusive: <T>(operation: () => Promise<T>) => Promise<T> } { return { journal: this.journal, state: this.state, exclusive: (operation) => this.mutationExclusive(operation) }; }
 
   /**
-   * 同一 Run 的耐久事实互斥区。Worker 上报（FIFO 通道）与用户控制（IPC 通道）没有
+   * 同一 Run 的耐久事实互斥区。Worker 上报（私有控制 socket）与用户控制（IPC 通道）没有
    * 共享调用栈：complete/block 的磁盘写入窗口内可能插入 stop/exit 的 cancelled，
    * 若校验与 append 分离，非法事件会先落盘再在 apply 时爆炸，使档案永久不可重放。
    * 互斥区内必须先 assertApplicable 核验、再 append、再 apply。
@@ -174,7 +174,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       // （含启动前回退）与当前分配快照不一致时，旧结果不可复用，从该节点开始新 attempt。
       const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
       if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) {
-        // 业务JSON可复用不代表Git成果可交接。宿主先恢复原成果保存/关联，不能重跑业务。
+        // 业务JSON可复用不代表可以跳过退出核验与租约释放。宿主先补交接，不能重跑业务。
         await this.executor.finalizeCompleted?.(existing);
         if (this.executor.finalizeCompleted && this.resumeInterrupted) {
           // 纯Git收尾恢复没有新Worker，不伪造executionAttempt；仅在收尾核验成功后恢复Run调度。

@@ -71,7 +71,7 @@ export class LimitedAgentExecutor implements AgentNodeExecutor {
     this.#releases.delete(key);
   }
 
-  /** 已完成业务的Git成果收尾也必须透传；不申请新Worker名额，不触发重复执行。 */
+  /** 已完成节点的退出核验与租约释放也必须透传；不申请新Worker名额，不触发重复执行。 */
   async finalizeCompleted(node: AgentNodeSnapshot): Promise<void> { await this.delegate.finalizeCompleted?.(node); }
   async finalizePartial(node: AgentNodeSnapshot): Promise<void> { await this.delegate.finalizePartial?.(node); }
 

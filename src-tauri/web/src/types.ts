@@ -369,17 +369,7 @@ export type HarnessProjectResponse = { project: HarnessProject };
 export type HarnessProjectListResponse = { projects: HarnessProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
-  workspaceDiagnostic?:string;
-  /** 最终快照证据；只读投影，是不可变 tree + 证据 ref，不代表宿主创建了 commit 或 push。 */
-  sourceEvidence?: {
-    /** 原Execution及幂等请求身份。 */ executionId:string; requestId:string;
-    /** 受管工作区 UUID。 */ workspaceId:string;
-    /** 最终快照的不可变 tree 完整 oid 与冻结基准；不表示 commit。 */ tree:string; baseCommit:string;
-    /** 指向该 tree 的证据 ref 全名；仅作只读证据，不移动任何分支。 */ evidenceRef:string;
-    /** 冻结授权身份。 */ authorizationId:string;
-    /** 实际变化文件与耐久时间。 */ paths:string[]; savedAt:string;
-  };
-  /** 收尾失败原因，不代表业务节点未complete。 */ sourceDiagnostic?:string;
+  /** 工作区现场读取失败；不代表目录不存在或没有改动。 */ workspaceDiagnostic?:string;
   /** 共享worktree与租约投影；closedWriters 为恢复前终止或确认退出的旧writer数。 */
   workspaceEvidence?:{workspaceId:string;cwd:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;closedWriters:number;cleaned:boolean};
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */

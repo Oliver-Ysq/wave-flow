@@ -46,9 +46,8 @@ import { validateExecutionConfig } from "./execution-assignment";
 import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-executor";
 import { hasWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { GitRepository } from "../workspace/git-repository";
-import { WorkspaceManager, isRetryableSourceError } from "../workspace/workspace-manager";
+import { WorkspaceManager } from "../workspace/workspace-manager";
 import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
-import { WorkflowContractError } from "../workflow/errors";
 import { AppSettingsStore, type AppSettings } from "./app-settings";
 import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
 import { readSkillLibrary, skillLibraryRoot } from "../skills/library";
@@ -271,7 +270,6 @@ export class DesktopExecutionEngine {
     this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
     this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
-      finalizeSource: (executionId, config, snapshot) => this.finalizeSource(executionId, config, snapshot),
       prepareResume: async (executionId, snapshot) => {
         const original = this.#workspaceExecutors.get(executionId);
         if (!original) return; // 新Engine不认领旧writer，后续现场/退出核验仍fail closed。
@@ -283,24 +281,6 @@ export class DesktopExecutionEngine {
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
-  }
-
-  /** 启动授权内的自动Git收尾；失败独立耐久展示，不覆写原Run completed或重跑Worker。 */
-  private async finalizeSource(executionId: string, config: import("../harness/types").ExecutionConfigSnapshot, snapshot: import("../runtime/run-types").RunSnapshot): Promise<void> {
-    if (!config.workspaces) return;
-    const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
-    for (let attempt = 1; attempt <= 3; attempt++) try {
-      const writers = snapshot.phases.flatMap(phase => phase.agents).filter(node => node.sandbox === "workspace-write");
-      if (snapshot.status !== "completed" || writers.some(node => node.status !== "completed")) throw new WorkflowContractError("实际写节点尚未全部completed，不能最终交付。");
-      await manager.finalizeSource(executionId, config.workspaces, writers.map(node => node.id));
-      return;
-    }
-    catch (error) {
-      const retryable = isRetryableSourceError(error);
-      if (retryable && attempt < 3) continue;
-      await manager.recordSourceDiagnostic(executionId, error instanceof Error ? error.message : String(error), retryable);
-      return;
-    }
   }
 
   /** 释放当前 Desktop Execution Engine 的内存会话；不会删除 Journal 或本地结果文件。 */
@@ -400,14 +380,6 @@ export class DesktopExecutionEngine {
     for (const harnessRunId of harnessIds) {
       try {
         await this.#executions.convergeStaleExecutions(harnessRunId);
-        const task = await this.#harness.snapshot(harnessRunId);
-        for (const execution of task.executions) if (execution.status === "completed" && execution.config?.workspaces) {
-          const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId);
-          // 缺失交付或可重试关联失败只补宿主收尾；确定性契约拒绝不循环，成功记录无旧错误时跳过。
-          const delivered = await manager.inspectSource(execution.executionId);
-          const diagnostic = await manager.inspectSourceDiagnostic(execution.executionId);
-          if ((!delivered || diagnostic) && await manager.canRetrySource(execution.executionId)) await this.finalizeSource(execution.executionId, execution.config, await this.#executions.snapshotExecution(harnessRunId, execution.executionId));
-        }
       }
       catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
     }
@@ -799,19 +771,15 @@ export class DesktopExecutionEngine {
       const revision=task.workflowRevisions.find(item=>item.revision===execution.revision);
       let workspaceEvidence:ExecutionResponse["workspaceEvidence"];
       let workspaceDiagnostic:string|undefined;
-      let sourceEvidence:ExecutionResponse["sourceEvidence"];
-      let sourceDiagnostic:string|undefined;
       if(execution.config?.workspaces){
         try {
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
-        sourceEvidence=await manager.inspectSource(executionId)??undefined;
-        sourceDiagnostic=await manager.inspectSourceDiagnostic(executionId)??undefined;
         const value=await manager.inspect(execution.config.workspaces.workspaceId);
         const head=value.cleanedAt?null:(await (await GitRepository.open(value.cwd)).inspect()).head;
         workspaceEvidence={workspaceId:value.workspaceId,cwd:value.cwd,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
-        } catch(error) { workspaceDiagnostic=`Git成果证据不可读取：${error instanceof Error?error.message:String(error)}；不代表无改动。`; }
+        } catch(error) { workspaceDiagnostic=`受管工作区现场不可读取：${error instanceof Error?error.message:String(error)}；不代表目录不存在或没有改动。`; }
       }
-      return { execution, workspaceEvidence, workspaceDiagnostic, sourceEvidence, sourceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+      return { execution, workspaceEvidence, workspaceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -989,17 +957,6 @@ export class DesktopExecutionEngine {
       case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
       case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
       case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
-      case "executions.review":
-      case "executions.fileDiff": {
-        const taskId = requiredString(value, "harnessRunId"), executionId = requiredString(value, "executionId");
-        const task = await this.#harness.snapshot(taskId), execution = task.executions.find(item => item.executionId === executionId);
-        if (!execution?.config?.workspaces) throw new Error("执行不属于当前任务或没有Git成果配置。");
-        const manager = await WorkspaceManager.open(this.workspaceRoot, this.instanceId), evidence = await manager.inspectSource(executionId);
-        if (execution.status !== "completed" || !evidence) throw new Error("执行尚无最终快照记录可审阅。");
-        const repo = await GitRepository.open(execution.config.workspaces.authorization.repository);
-        if (action === "executions.review") return repo.review(evidence.baseCommit, evidence.tree);
-        return repo.fileDiff(evidence.baseCommit, evidence.tree, requiredString(value, "path"));
-      }
       case "executions.savePartial": {
         if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
         const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId");
@@ -1012,7 +969,8 @@ export class DesktopExecutionEngine {
         for(const node of detail.snapshot.phases.flatMap(phase=>phase.agents))if(node.status==="cancelled"||node.status==="interrupted")await executor.finalizePartial(node);
         return this.executionSnapshot(taskId,executionId);
       }
-      // 执行页“清理临时工作区”入口；只删除已采证、身份/tree一致、无租约且未命中删除防护的受管checkout，分支与证据保留。
+      // 受管checkout清理动作：用户明确授权后删除身份一致、无租约且未命中删除防护的受管checkout。
+      // 宿主不保存成果快照，未提交内容随目录删除，由用户负责。当前没有 Web 入口，只能由 Engine 动作显式触发。
       case "executions.cleanupWorkspaces": {
         if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
         const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId"),task=await this.#harness.snapshot(taskId);
@@ -1021,7 +979,7 @@ export class DesktopExecutionEngine {
         if(execution.finishedAt===null)throw new Error("执行尚未终态，禁止清理。");
         assertCurrentWorkspaceRecord(execution.config.workspaces);
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
-        await manager.cleanup(execution.config.workspaces.workspaceId,executionId,true);
+        await manager.cleanup(execution.config.workspaces.workspaceId,true);
         return this.executionSnapshot(taskId,executionId);
       }
       case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));

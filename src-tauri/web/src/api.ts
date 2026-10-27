@@ -86,18 +86,6 @@ export const api = {
       "projects.context",
       { projectId },
     ),
-  /** 读取执行前后完整diff；只读Git对象，不产生新的Git写入。 */
-  reviewGit: (harnessRunId: string, executionId: string) =>
-    action<import("../../../src/workspace/git-repository").GitReview>(
-      "executions.review",
-      { harnessRunId, executionId },
-    ),
-  /** 仅读取已属于该成果diff的指定文件patch。 */
-  fileDiff: (harnessRunId: string, executionId: string, path: string) =>
-    action<import("../../../src/workspace/git-repository").GitFileDiff>(
-      "executions.fileDiff",
-      { harnessRunId, executionId, path },
-    ),
   /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
   savePartial: (harnessRunId: string, executionId: string) =>
     action<ExecutionResponse>("executions.savePartial", {

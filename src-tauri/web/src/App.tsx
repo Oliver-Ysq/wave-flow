@@ -513,12 +513,6 @@ export function App() {
       setWorkflowPanelOpen(false);
     }
   }, [harness, route, workflowPanelOpen]);
-  /** 变更审阅属于整个详情弹窗，不随正文滚动；页签或执行身份变化即关闭。 */
-  const [changesView, setChangesView] = useState<{
-    taskId: string;
-    executionId: string;
-    sourceTree: string;
-  } | null>(null);
   /** 详情面包屑只标示当前页签，避免整句用户输入挤占头部。 */
   const sectionLabel =
     route.kind === "workflow"
@@ -560,23 +554,17 @@ export function App() {
       )
         return;
       event.preventDefault();
-      if (changesView) {
-        setChangesView(null);
-        return;
-      }
       setRoute({ kind: "conversation" });
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [workflowPanelOpen, changesView]);
+  }, [workflowPanelOpen]);
   const centralScroll = useRef<HTMLDivElement | null>(null);
   const pageKey =
     route.kind === "workflow"
       ? `${route.taskId}:${route.cardId}:${route.revision}:${route.section}:${route.executionId ?? ""}:${route.attempt ?? "current"}`
       : "conversation";
   useEffect(() => {
-    // 切页或换执行时收起变更面板，避免把上一个执行来源的 diff 留在新页面上。
-    setChangesView(null);
     const el = centralScroll.current;
     if (!el || route.kind !== "workflow") return;
     el.scrollTop = detailPositions.get(pageKey) ?? 0;
@@ -1900,7 +1888,7 @@ export function App() {
         }}
       >
       <aside
-        className={`central-workflow${changesView ? " changes-open" : ""}`}
+        className="central-workflow"
         role="dialog"
         aria-modal="true"
         aria-label="工作流详情"
@@ -2285,15 +2273,6 @@ export function App() {
                     status: item.status,
                   }))}
                 onControl={controlExecution}
-                onOpenChanges={() => {
-                  const evidence = executionDetail.sourceEvidence;
-                  if (!evidence) return;
-                  setChangesView({
-                    taskId: harness.harnessRunId,
-                    executionId: executionDetail.execution.executionId,
-                    sourceTree: evidence.tree,
-                  });
-                }}
                 onSavePartial={async () => {
                   const owner = harness.harnessRunId,
                     id = executionDetail.execution.executionId;
@@ -2372,16 +2351,6 @@ export function App() {
           ) : null}
           </div>
           </div>
-          {workflowPanelOpen && changesView && (
-            <ChangesPanel
-              key={`${changesView.taskId}:${changesView.executionId}:${changesView.sourceTree}`}
-              taskId={changesView.taskId}
-              executionId={changesView.executionId}
-              sourceTree={changesView.sourceTree}
-              theme={theme}
-              onClose={() => setChangesView(null)}
-            />
-          )}
         </WorkflowPanelErrorBoundary>
       </aside>
       </div>
@@ -4805,7 +4774,6 @@ function ExecutionDetail({
   dynamicCount,
   harnessRunId,
   onControl,
-  onOpenChanges,
   onAnswer,
   onAnswerBlock,
   onSavePartial,
@@ -4821,8 +4789,6 @@ function ExecutionDetail({
   /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   harnessRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
-  /** 打开右侧变更审阅面板；只读展示最终快照 diff。 */
-  onOpenChanges: () => void;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
     blockId: string,
@@ -4913,11 +4879,6 @@ function ExecutionDetail({
   ]
     .filter(Boolean)
     .join(" · ");
-  const changesAction = detail.sourceEvidence ? (
-    <button disabled={!!busy} onClick={() => onOpenChanges()}>
-      查看变更
-    </button>
-  ) : null;
   return (
     <>
       <PreviousRecords
@@ -4930,14 +4891,8 @@ function ExecutionDetail({
       {detail.workspaceDiagnostic && (
         <p role="alert">{userFacingText(detail.workspaceDiagnostic)}</p>
       )}
-      {detail.sourceDiagnostic && (
-        <p role="alert">
-          成果还没有保存完整：{userFacingText(detail.sourceDiagnostic)}
-        </p>
-      )}
       {historical ? (
         <>
-          <div className="execution-actions">{changesAction}</div>
           <p>历史过程，只读；此页面不会恢复执行。</p>
           {visitsLoading ? (
             <p role="status">正在读取历史过程…</p>
@@ -4991,7 +4946,6 @@ function ExecutionDetail({
             />
           )}
           <div className="execution-actions">
-            {changesAction}
             {!readOnly &&
               (detail.workspaceEvidence?.leases.length ?? 0) > 0 &&
               ["cancelled", "interrupted"].includes(
@@ -5013,15 +4967,6 @@ function ExecutionDetail({
               )}
             {!readOnly && (
               <>
-                {detail.snapshot.status === "completed" && detail.sourceDiagnostic && (
-                  <Action
-                    label="重试成果收尾"
-                    icon="↻"
-                    tone="primary"
-                    loading={busy === "execution:resume"}
-                    onClick={() => void onControl("resume")}
-                  />
-                )}
                 {detail.controllable &&
                   detail.snapshot.status === "running" && (
                     <Action
@@ -5202,14 +5147,9 @@ function ExecutionDetail({
                     {detail.workspaceEvidence.closedWriters} 个旧 attempt 的 writer 已在恢复前完成核验（终止 / 已退出 / 从未启动）；该受管 worktree 累计，含其他接续 Execution；现场改动保留
                   </small>
                 )}
-                <small>
-                  {detail.sourceEvidence
-                    ? `最终快照 ${detail.sourceEvidence.tree.slice(0, 12)} · ${detail.sourceEvidence.paths.length} 个文件`
-                    : "尚无最终快照"}
-                </small>
               </article>}
               <p>
-                所有写节点共享同一 worktree；Git 证据覆盖受管文件与已执行验证，不提供逐节点文件归因，也不证明外部系统已回滚。
+                所有写节点共享同一 worktree；宿主不保存成果快照，目录当前内容就是唯一结果，可能已被用户或后续执行修改。
               </p>
             </details>
           )}
@@ -5391,4 +5331,3 @@ function Action({
     </button>
   );
 }
-import { ChangesPanel } from "./changes-panel";

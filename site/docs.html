@@ -241,7 +241,7 @@ bun run desktop:dev</code></pre>
         <section id="parallel-write">
           <h2>并行与写入</h2>
           <p>并行写共享同一工作现场，宿主不做冲突检测或自动合并。任务分配必须按模块或文件分区：同一文件、同一函数或同一配置块只能有一个 writer；依赖前序结果的写入放到后续 phase。</p>
-          <p>写入类 Workflow 使用受管 Git worktree，执行不会自动 commit、合并或 push。完成后宿主收集不可变 Git tree 证据并写入 <code>refs/wave-flow/evidence/&lt;executionId&gt;</code>，不创建 commit，HEAD 与真实索引不变；成果只保留在受管 worktree，不写入主工作区，可查看完整 diff。</p>
+          <p>写入类 Workflow 使用受管 Git worktree，执行不会自动 commit、合并或 push。完成后宿主不保存任何成果快照、不写证据 ref、不创建 commit，HEAD 与真实索引不变；结果就是该 worktree 当前的未提交文件，不写入主工作区，查看、修改、提交或清理由你自行决定。</p>
           <div class="callout">
             <p><strong>worktree 不是安全边界。</strong>它只分离正常工作现场，不能阻止 Worker 修改其他目录、其他 worktree、共享 Git 或凭据。Git diff 也不证明工作区外没有副作用。</p>
           </div>
@@ -259,7 +259,7 @@ bun run desktop:dev</code></pre>
           <p>关闭窗口不会停止 Engine 或 Agent。Engine 重启后不会跨进程认领 ACP 会话：旧的 active 节点一律收敛为 <code>interrupted</code>，只有你在执行页显式恢复才会创建新 attempt。</p>
           <p>恢复只复用同一 Execution 内严格匹配的已完成前缀。匹配项包括 Workflow hash、cwd、Runtime 版本、id、调用顺序、CLI、输入、sandbox、model 与 Schema 指纹；第一个重启节点之后的下游节点不会复用旧结果。</p>
           <p>Journal 是执行证据，不是虚拟机快照：恢复不会回滚文件，也不会撤销外部副作用。Worker 原生会话持续五分钟无实质进展（正文/工具/计划事件）时，执行器只记录一条停滞诊断提示，不自动中断、不重发任务，唯一出口是你显式停止。</p>
-          <p>停止与退出会撤销排队及初始化中的启动许可；Journal 写入失败会 fail closed，停止流程仍尽力通知真实 Worker。writer 在 spawn 前记录启动意图，崩溃后无法核验时拒绝直接恢复，避免双写。大批量路径采用流式收集，变更列表分页展示；执行详情只在上一请求结束后继续轮询，避免大证据响应使页面持续加载。</p>
+          <p>停止与退出会撤销排队及初始化中的启动许可；Journal 写入失败会 fail closed，停止流程仍尽力通知真实 Worker。writer 在 spawn 前记录启动意图，崩溃后无法核验时拒绝直接恢复，避免双写。大批量路径采用流式收集并分页读取；执行详情只在上一请求结束后继续轮询，避免大响应使页面持续加载。</p>
         </section>
 
         <section id="cli">

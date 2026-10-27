@@ -128,12 +128,12 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     }
   }
 
-  /** 节点completed后释放自己的租约；成果由Execution收尾统一封存，不产生逐节点commit。 */
+  /** 节点completed后释放自己的租约；执行收尾只做退出核验与租约释放，不产生逐节点commit，也不收集成果快照。 */
   async finalizeCompleted(node: AgentNodeSnapshot): Promise<void> {
     if (node.sandbox !== "workspace-write") { await this.readOnly.finalizeCompleted?.(node); return; }
     const active = this.#active.get(node.id), lease = active?.lease;
     if (!lease || lease.runId !== this.runId || lease.nodeId !== node.id || lease.attempt !== node.executionAttemptId) {
-      // Replay不重新执行writer：共享worktree没有逐节点成果可核验，交由Execution收尾。
+      // Replay不重新执行writer：共享worktree没有逐节点成果可核验，也没有需要补的成果快照。
       // 不匹配时不得删除表中entry：它可能属于同节点的新attempt，误删会丢失活跃writer的控制句柄。
       return;
     }

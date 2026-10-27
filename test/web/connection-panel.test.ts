@@ -165,7 +165,9 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(css).toContain("white-space:pre-wrap");
   expect(css).toContain(".workflow-render-error");
   expect(css).toContain("grid-template-columns: var(--wf-rail-width, 260px) minmax(0, 1fr)");
-  expect(source).toContain('central-workflow${changesView ? " changes-open" : ""}');
+  expect(source).toContain('className="central-workflow"');
+  expect(source).not.toContain("changes-open");
+  expect(source).not.toContain("changes-panel");
   expect(source).not.toContain('className="workflow-peek"');
 });
 
@@ -251,7 +253,7 @@ test("停止操作必须先内联确认，首次配置提供安装引导", async
   expect(app).toContain('className="execution-stop-confirm"');
   expect(app).toContain('setConfirmStop(true)');
   expect(app).toContain("确认停止");
-  expect(app).toContain("重试成果收尾");
+  expect(app).not.toContain("重试成果收尾");
   expect(app).toContain("execution-workspace-location");
   expect(app).toContain("runtime-setup-guide");
   expect(app).toContain("如何安装并登录？");

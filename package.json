@@ -33,7 +33,6 @@
     "@agentclientprotocol/codex-acp": "2.2.2",
     "@agentclientprotocol/sdk": "1.8.0",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "@pierre/diffs": "^1.5.2",
     "@tauri-apps/api": "^2.12.3",
     "@tauri-apps/plugin-dialog": "^2.8.3",
     "ajv": "^8.17.1",

@@ -83,7 +83,7 @@ const confirmed = unique.filter((_, index) => verdicts[index] !== null);
 
 ## 代码改动任务
 
-Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主在受管`codex/wf-*` worktree收集一个不可变Git tree证据并写证据ref（refs/wave-flow/evidence/<executionId>，防gc），不创建任何commit、HEAD与真实index不变，结果只保留在该worktree，不写入主工作区；主分支不移动、不push。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控保留OS写隔离、原生读取与四窄MCP；Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；没有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写覆盖先写；因此必须按模块/文件分区，同一文件或逻辑区域顺序执行。执行完成后宿主不保存任何成果快照、不创建commit、HEAD与真实index不变；结果只保留在该worktree的当前未提交文件里，不写入主工作区；主分支不移动、不push。用户自行查看、修改、提交或清理，清理会删除未提交内容。作者不新增worktree/commit/merge接口，不让Worker自行提交。cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 给改动类 Agent 明确的项目 `cwd`、`workspace-write` 权限、验收标准和它应运行的检查。
 Wave Flow 的作者 API 不声明 worktree 或 commit。Desktop 会对固定 `workspace-write` 节点
@@ -112,7 +112,7 @@ return agent(`复审刚才的实现，修复已验证的问题并再次运行检
 写任务按模块/文件分区，每个文件只有一个 owner；新增与修改同一模块的 Agent 必须顺序执行。
 共享 worktree 不检测、不合并冲突，后写覆盖先写且不会报错或恢复丢失的修改。不要安排
 “集成 Agent”去解冲突，也不得预测 commit/tree hash 或执行 push；宿主在
-Execution 收尾时只收集 tree 证据并保留在受管 worktree，不写入主工作区，作者不提供该接口。
+Execution 完成后宿主不保存快照，结果只保留在受管 worktree 的当前未提交文件里，不写入主工作区；作者不提供该接口。
 
 ## 脚本级人工决策（仅受限草案）
 
