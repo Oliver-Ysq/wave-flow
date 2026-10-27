@@ -159,8 +159,8 @@ test("深度调研模板：编译合法、Schema 边界与参数校验生效",()
  const templates=listWorkflowTemplates();
  expect(templates.map(item=>item.id)).toEqual(["code-review","deep-research","deep-cr"]);
  const research=templates.find(item=>item.id==="deep-research")!;
- expect(research.version).toBe(1);expect(research.meta.name).toBe("deep-research");
- expect(research.meta.phases.map(phase=>phase.title)).toEqual(["计划","调研","核验","补证","综评","批判","定稿"]);
+ expect(research.version).toBe(2);expect(research.meta.name).toBe("deep-research");
+ expect(research.meta.phases.map(phase=>phase.title)).toEqual(["计划","调研","核验","交叉检查与补证","综评","批判","定稿"]);
  expect(isTemplateOrigin((({source,...origin})=>origin)(research))).toBe(true);
  validateTemplateInput(research.inputSchema,{topic:"端侧推理框架选型"});
  validateTemplateInput(research.inputSchema,{topic:"t",questions:["a"],context:"",depth:"deep",language:"中文"});

@@ -24,9 +24,22 @@ async function run(args: Args) {
   const mapped = await agent(mapPrompt, { id: "scope-mapper", cli: "codex", label: "审查摸底", schema: mapSchema });
   if (!mapped) throw new Error("审查摸底未能交付。");
   const map = mapped as MapResult;
-  if (map.reviewSurface.length === 0) throw new Error("摸底没有发现可审查的文件。");
-  log("摸底完成：变更面 " + map.changeSurface.length + " 个文件，深入审查面 " + map.reviewSurface.length + " 个文件。");
-  const surfaceText = map.reviewSurface.map((item) => item.path + "(" + item.reason + ")").join("；");
+  // 摸底按全仓变更面列举，可能包含 target 之外的文件；审查规则要求不得越界读取，
+  // 所以先按范围求交，避免"清单里有、规则说不许读"的自相矛盾。
+  const normalizePath = (value: string): string => value.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+  const targetRoot = normalizePath(target);
+  const inTarget = (path: string): boolean => {
+    const value = normalizePath(path);
+    if (targetRoot === "" || targetRoot === ".") return true;
+    return value === targetRoot || value.startsWith(targetRoot + "/");
+  };
+  const reviewSurface = map.reviewSurface.filter((item) => inTarget(item.path));
+  const changeSurface = map.changeSurface.filter((path) => inTarget(path));
+  const droppedSurface = map.reviewSurface.length - reviewSurface.length;
+  if (droppedSurface > 0) log("摸底返回的 " + droppedSurface + " 个文件不在审查范围 " + target + " 内，已剔除。");
+  if (reviewSurface.length === 0) throw new Error("摸底没有发现审查范围 " + target + " 内可审查的文件。");
+  log("摸底完成：变更面 " + changeSurface.length + " 个文件，深入审查面 " + reviewSurface.length + " 个文件。");
+  const surfaceText = reviewSurface.map((item) => item.path + "(" + item.reason + ")").join("；");
   const focusText = focus.length > 0 ? "用户特别关注的类别：" + JSON.stringify(focus) + "。" : "";
   const findingItem = { type: "object", properties: { title: { type: "string" }, severity: { type: "string", enum: ["critical", "high", "medium", "low"] }, confidence: { type: "string", enum: ["high", "medium", "low"] }, file: { type: "string" }, lines: { type: "string" }, evidence: { type: "string" }, trigger: { type: "string" }, impact: { type: "string" }, suggestion: { type: "string" } }, required: ["title", "severity", "confidence", "file", "lines", "evidence", "trigger", "impact", "suggestion"], additionalProperties: false };
   const reviewSchema = { type: "object", properties: { findings: { type: "array", maxItems: 8, items: findingItem }, coverage: { type: "array", maxItems: 30, items: { type: "string" } } }, required: ["findings", "coverage"], additionalProperties: false };
@@ -42,7 +55,7 @@ async function run(args: Args) {
   // 也必须报告，否则"既有历史问题不报"会被模型理解成"什么都不要报"。
   const scoped = base !== "";
   const scopeRule = scoped ? "本次提供了基线 " + base + "，只审该基线以来的改动：先看改动内容，再看必要的上下文，既有历史问题一律不报。" : "没有提供基线，按给定审查面做全量审查：审查面内所有有源码证据的问题都必须报告，包括早于最近提交的历史遗留问题；无法判断是否与最近提交相关时在 impact 中写 unknown。";
-  const sharedRules = "通用规则：0) 所有文件路径一律相对项目根目录书写，审查范围是 " + target + "，不得读取该范围以外的文件；1) 只报有源码证据、能给出具体触发场景的问题，说不出触发场景的不报，不确定的不报，风格与 linter 能抓的问题不报；2) 每条发现必须给出 file(相对路径)、lines(行区间如 120-135)、evidence(相关代码摘录)、trigger(具体触发场景)、impact(后果)、suggestion(可执行修复建议)；3) 低置信度但高影响的发现可以报，必须在 impact 中显式注明不确定性；4) 只审查给定清单内的文件，不得越界；5) 报告中已确认的问题在 coverage 列出你实际审查过的文件。审查范围口径：" + scopeRule + "变更面文件：" + JSON.stringify(map.changeSurface) + "。审查员推断的变更意图：" + map.intentSummary + "。用户给出的变更意图：" + (context.trim() === "" ? "（用户未提供）" : context) + "。审查规范要点：" + JSON.stringify(map.standards) + "。" + focusText;
+  const sharedRules = "通用规则：0) 所有文件路径一律相对项目根目录书写，审查范围是 " + target + "，不得读取该范围以外的文件；1) 只报有源码证据、能给出具体触发场景的问题，说不出触发场景的不报，不确定的不报，风格与 linter 能抓的问题不报；2) 每条发现必须给出 file(相对路径)、lines(行区间如 120-135)、evidence(相关代码摘录)、trigger(具体触发场景)、impact(后果)、suggestion(可执行修复建议)；3) 低置信度但高影响的发现可以报，必须在 impact 中显式注明不确定性；4) 只审查给定清单内的文件，不得越界；5) 报告中已确认的问题在 coverage 列出你实际审查过的文件。审查范围口径：" + scopeRule + "变更面文件（已按审查范围过滤）：" + JSON.stringify(changeSurface) + "。审查员推断的变更意图：" + map.intentSummary + "。用户给出的变更意图：" + (context.trim() === "" ? "（用户未提供）" : context) + "。审查规范要点：" + JSON.stringify(map.standards) + "。" + focusText;
   phase("分维审查");
   log("六个专项审查员并行审查不同维度：" + dimensions.map((dim) => dim.name).join("、"));
   const reviews = await parallel(dimensions.map((dim, index) => () => (async () => {
@@ -103,14 +116,14 @@ async function run(args: Args) {
   const judged = await agent("你是裁决人，对所有已确认的发现做跨维度整理。输入发现(JSON，带维度来源)：" + JSON.stringify(confirmedWithDim) + "；变更意图：" + map.intentSummary + "。要求：1) 去重合并：同一 file 相邻行区间被多个维度命中的问题只保留一条并注明涉及维度；2) 按 severity(critical>high>medium>low)再按 confidence 排序；3) 没有确认发现时 mergeRecommendation 给 no_concerns，有 critical 或 high 给 changes_required，其余给 needs_review；4) summary 给 2 到 4 句整体判断。最终以 JSON 返回 findings、mergeRecommendation、summary。", { id: "judge", cli: "codex", label: "交叉裁决", schema: judgeSchema });
   phase("盲区扫描");
   const blindSchema = { type: "object", properties: { blindSpots: { type: "array", maxItems: 8, items: { type: "object", properties: { path: { type: "string" }, reason: { type: "string" }, suggestedCheck: { type: "string" } }, required: ["path", "reason", "suggestedCheck"], additionalProperties: false } }, statement: { type: "string" } }, required: ["blindSpots", "statement"], additionalProperties: false };
-  const blind = await agent("你是盲区扫描员。审查面与高风险区域(JSON)：" + JSON.stringify({ reviewSurface: map.reviewSurface, riskAreas: map.riskAreas }) + "；已确认发现覆盖的文件(JSON)：" + JSON.stringify(confirmed.map((finding) => finding.file)) + "。找出审查面与高风险区域中没有被任何已确认发现覆盖、又值得人工再看的文件或区域，给 reason 与 suggestedCheck；确实没有就明确说没有。最终以 JSON 返回 blindSpots、statement。", { id: "blind-spot", cli: "codex", label: "盲区扫描", schema: blindSchema });
+  const blind = await agent("你是盲区扫描员。审查面与高风险区域(JSON)：" + JSON.stringify({ reviewSurface: reviewSurface, riskAreas: map.riskAreas }) + "；已确认发现覆盖的文件(JSON)：" + JSON.stringify(confirmed.map((finding) => finding.file)) + "。找出审查面与高风险区域中没有被任何已确认发现覆盖、又值得人工再看的文件或区域，给 reason 与 suggestedCheck；确实没有就明确说没有。最终以 JSON 返回 blindSpots、statement。", { id: "blind-spot", cli: "codex", label: "盲区扫描", schema: blindSchema });
   phase("定稿汇总");
   const finalSchema = { type: "object", properties: { report: { type: "string" }, stats: { type: "object", properties: { confirmed: { type: "integer" }, rejected: { type: "integer" }, dimensions: { type: "integer" } }, required: ["confirmed", "rejected", "dimensions"], additionalProperties: false } }, required: ["report", "stats"], additionalProperties: false };
   // 裁决节点失败时的回退必须沿用同一严重度规则，否则"没有 critical 就 needs_review"会漏掉高危结论。
   const fallbackRecommendation = confirmed.some((finding) => finding.severity === "critical" || finding.severity === "high") ? "changes_required" : confirmed.length > 0 ? "needs_review" : "no_concerns";
   const judgeValue = judged === null ? { findings: confirmed, mergeRecommendation: fallbackRecommendation, summary: "裁决节点未交付，按复核结果直接汇总。" } : judged;
   const blindValue = blind === null ? { blindSpots: [], statement: "盲区扫描未交付。" } : blind;
-  const final = await agent("你是报告撰写人。基于以下输入撰写一份 " + language + " 深度代码审查报告(markdown)。结构：1) 变更走查(意图与机制)；2) 分级发现列表，每条格式为 [severity][confidence] file:lines title，正文含 evidence、trigger、impact、suggestion；3) 合并建议(no_concerns/needs_review/changes_required)与理由；4) 覆盖与局限：实际审查过的文件、盲区扫描建议人工复核项、failedVerifications 大于 0 时说明有多少维度未完成复核、本次审查的方法限制(只读、未运行代码)；5) 审查统计。要求：只使用已确认的发现，禁止新增；多个位置同类问题只写一次并指出其余位置；若没有任何确认发现，必须写明是未发现问题的审查，不得暗示已覆盖全部范围。输入：意图(JSON)" + JSON.stringify(map.intentSummary) + "；裁决结果(JSON)" + JSON.stringify(judgeValue) + "；盲区(JSON)" + JSON.stringify(blindValue) + "；测试情况(JSON)" + JSON.stringify(map.testNotes) + "；复核统计：确认 " + confirmed.length + " 条，剔除 " + rejectedCount + " 条，未完成复核 " + verificationFailures + " 个维度。最终以 JSON 返回 report、stats。", { id: "report-writer", cli: "codex", label: "撰写报告", schema: finalSchema });
+  const final = await agent("你是报告撰写人。基于以下输入撰写一份 " + language + " 深度代码审查报告(markdown)。结构：1) 变更走查(意图与机制)；2) 分级发现列表，每条格式为 [severity][confidence] file:lines title，正文含 evidence、trigger、impact、suggestion；3) 合并建议(no_concerns/needs_review/changes_required)与理由；4) 覆盖与局限：实际审查过的文件、盲区扫描建议人工复核项、failedVerifications 大于 0 时说明有多少维度未完成复核、本次审查的方法限制(只读、未运行代码)；5) 审查统计。要求：只使用已确认的发现，禁止新增；多个位置同类问题只写一次并指出其余位置；若没有任何确认发现，必须写明是未发现问题的审查，不得暗示已覆盖全部范围。输入：意图(JSON)" + JSON.stringify(map.intentSummary) + "；裁决结果(JSON)" + JSON.stringify(judgeValue) + "；盲区(JSON)" + JSON.stringify(blindValue) + "；测试情况(JSON)" + JSON.stringify(map.testNotes) + "；复核统计：确认 " + confirmed.length + " 条，剔除 " + rejectedCount + " 条，未完成复核 " + verificationFailures + " 个维度；完成审查的维度总数：" + batches.length + "。stats.dimensions 必须填写这个「完成审查的维度总数」，不得填成未完成复核的维度数。最终以 JSON 返回 report、stats。", { id: "report-writer", cli: "codex", label: "撰写报告", schema: finalSchema });
   if (!final) throw new Error("审查报告未能交付。");
   const recommendation = (judgeValue as { mergeRecommendation?: string }).mergeRecommendation ? (judgeValue as { mergeRecommendation: string }).mergeRecommendation : fallbackRecommendation;
   log("审查完成：确认 " + confirmed.length + " 条发现，合并建议 " + recommendation + "。");

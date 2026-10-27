@@ -1,7 +1,7 @@
 const meta = {
   name: "deep-research",
   description: "多源深度调研、逐条核验并批判修订",
-  phases: [{ title: "计划" }, { title: "调研" }, { title: "核验" }, { title: "补证" }, { title: "综评" }, { title: "批判" }, { title: "定稿" }],
+  phases: [{ title: "计划" }, { title: "调研" }, { title: "核验" }, { title: "交叉检查与补证" }, { title: "综评" }, { title: "批判" }, { title: "定稿" }],
   exampleArgs: { topic: "端侧大模型推理框架的现状与选型", depth: "deep" }
 };
 type Args = { topic: string; questions?: string[]; context?: string; depth?: string; language?: string };
@@ -54,12 +54,18 @@ async function run(args: Args) {
   log("第一轮：并行调研 " + plan.questions.length + " 个研究问题。");
   const round1 = await parallel(plan.questions.map((question, index) => runResearch(question, 1, index)));
   const pairs: { title: string; batch: ResearchBatch }[] = [];
+  /** 调研直接失败、因此完全没有对应结论的问题；必须显式写进报告的未解决问题。 */
+  const unresearched: string[] = [];
+  /** 结论撞上核验节点失败、未能进入报告的问题；同样要显式列出。 */
+  const unverified: string[] = [];
   let round1Succeeded = 0;
   plan.questions.forEach((question, index) => {
     const batch = round1[index];
     if (batch !== null) {
       pairs.push({ title: question.title, batch: batch });
       round1Succeeded = round1Succeeded + 1;
+    } else {
+      unresearched.push(question.title);
     }
   });
   if (pairs.length === 0) throw new Error("第一轮调研没有任何可用结果。");
@@ -86,6 +92,7 @@ async function run(args: Args) {
   verified1.forEach((verdict, index) => {
     if (verdict === null) {
       verificationFailures = verificationFailures + 1;
+      unverified.push(pairs[index]!.title);
       return;
     }
     confirmed.push({ title: pairs[index]!.title, findings: verdict.verified });
@@ -94,18 +101,18 @@ async function run(args: Args) {
   if (confirmed.length === 0) throw new Error("没有任何结论通过核验。");
   if (verificationFailures > 0) log("注意：" + verificationFailures + " 个批次的核验节点未交付，其结论未计入本报告。");
   const crossSchema = { type: "object", properties: { claims: { type: "array", maxItems: 12, items: { type: "object", properties: { claim: { type: "string" }, confidence: { type: "string", enum: ["high", "medium", "low"] }, sourceFamilyCount: { type: "integer" }, contradictions: { type: "array", maxItems: 3, items: { type: "string" } } }, required: ["claim", "confidence", "sourceFamilyCount", "contradictions"], additionalProperties: false } }, gaps: { type: "array", maxItems: 3, items: { type: "string" } }, summary: { type: "string" } }, required: ["claims", "gaps", "summary"], additionalProperties: false };
-  phase("补证");
+  phase("交叉检查与补证");
   log("交叉检查已核验结论：矛盾检测、证据家族去重与缺口清单。");
   const cross = await agent("你是交叉检查员。基于以下已通过核验的结论(按研究问题分组)与已知争议点，做三件事：1) 矛盾检测：找出互相冲突的结论，在 contradictions 中说明冲突点；2) 证据家族去重：同一原始研究或同一通稿的多个转载算一个证据家族，给每条结论标 sourceFamilyCount；3) 缺口分析：哪些研究问题没有被回答、哪些承重结论只有单一证据家族，写入 gaps(最多 3 条，每条是一个可执行的定向补证问题；没有就空数组)。confidence 按证据强度重新校准。已核验结论(JSON)：" + JSON.stringify(confirmed) + "；已知争议点(JSON)：" + JSON.stringify(plan.controversies) + "。最终以 JSON 返回 claims、gaps、summary。", { id: "cross-check", cli: "codex", label: "交叉检查", schema: crossSchema });
   const round2Pairs: { title: string; batch: ResearchBatch }[] = [];
   let round2QuestionCount = 0;
   let round2Succeeded = 0;
   let crossGaps: string[] = [];
+  // 缺口清单与深度无关：standard 模式不补证，但缺口仍要交给报告列入未解决问题。
+  if (cross !== null) crossGaps = (cross as { gaps?: string[] }).gaps ? (cross as { gaps: string[] }).gaps : [];
   if (deep && cross !== null) {
-    const gaps = (cross as { gaps?: string[] }).gaps ? (cross as { gaps: string[] }).gaps : [];
-    crossGaps = gaps;
-    if (gaps.length > 0) {
-      const picked = gaps.slice(0, 2).map((gap, index) => ({ title: "补证 " + (index + 1) + "：" + gap, keyPoints: [gap], searchHints: [gap] }));
+    if (crossGaps.length > 0) {
+      const picked = crossGaps.slice(0, 2).map((gap, index) => ({ title: "补证 " + (index + 1) + "：" + gap, keyPoints: [gap], searchHints: [gap] }));
       round2QuestionCount = picked.length;
       log("第二轮：针对 " + picked.length + " 个证据缺口做定向补证。");
       const round2 = await parallel(picked.map((question, index) => runResearch(question, 2, index)));
@@ -114,12 +121,15 @@ async function run(args: Args) {
         if (batch !== null) {
           round2Pairs.push({ title: question.title, batch: batch });
           round2Succeeded = round2Succeeded + 1;
+        } else {
+          unresearched.push(question.title);
         }
       });
       const verified2 = await parallel(round2Pairs.map((pair, index) => runVerify(pair, 2, index)));
       verified2.forEach((verdict, index) => {
         if (verdict === null) {
           verificationFailures = verificationFailures + 1;
+          unverified.push(round2Pairs[index]!.title);
           return;
         }
         confirmed.push({ title: round2Pairs[index]!.title, findings: verdict.verified });
@@ -129,7 +139,7 @@ async function run(args: Args) {
       log("交叉检查没有发现需要补证的缺口，跳过第二轮。");
     }
   } else if (!deep) {
-    log("standard 深度模式：跳过第二轮补证。");
+    log("standard 深度模式：跳过第二轮补证，交叉检查的缺口直接列入未解决问题。");
   } else {
     log("交叉检查节点未交付，跳过第二轮补证；本报告的覆盖范围因此更窄。");
   }
@@ -137,13 +147,13 @@ async function run(args: Args) {
   log("进入综评：共 " + totalFindings + " 条已核验结论，" + rejectedCount + " 条被剔除。");
   phase("综评");
   const synthSchema = { type: "object", properties: { report: { type: "string" }, citations: { type: "array", maxItems: 20, items: { type: "object", properties: { id: { type: "string" }, title: { type: "string" }, url: { type: "string" } }, required: ["id", "title", "url"], additionalProperties: false } }, keyTakeaways: { type: "array", maxItems: 5, items: { type: "string" } } }, required: ["report", "citations", "keyTakeaways"], additionalProperties: false };
-  const synthInput = { brief: plan.brief, controversies: plan.controversies, confirmed: confirmed, crossClaims: cross === null ? [] : (cross as { claims?: unknown }).claims, unresolvedGaps: crossGaps, failedVerifications: verificationFailures };
-  const draft = await agent("你是报告撰写人。基于以下已通过核验的结论，撰写一份 " + language + " 深度调研报告(markdown)。结构：1) 执行摘要；2) 按研究问题逐节回答，每节给出结论与引用编号 [n]；3) 共识与分歧(矛盾结论并列呈现，不得擅自调和)；4) 置信度说明与证据局限；5) 未解决问题与后续建议。要求：每个承重结论必须带 [n] 引用编号，编号对应 citations 数组；只使用输入中核验通过的结论，禁止新增未经核验的事实；unresolvedGaps 是尚未解决的证据缺口，必须在未解决问题一节如实列出；failedVerifications 大于 0 时必须在证据局限一节说明有多少批次未完成核验；keyTakeaways 给 3 到 5 条最重要的可执行结论。输入(JSON)：" + JSON.stringify(synthInput) + "。最终以 JSON 返回 report、citations、keyTakeaways。", { id: "synthesizer", cli: "codex", label: "撰写报告", schema: synthSchema });
+  const synthInput = { brief: plan.brief, controversies: plan.controversies, confirmed: confirmed, crossClaims: cross === null ? [] : (cross as { claims?: unknown }).claims, unresolvedGaps: crossGaps, failedVerifications: verificationFailures, unresearchedQuestions: unresearched, unverifiedQuestions: unverified };
+  const draft = await agent("你是报告撰写人。基于以下已通过核验的结论，撰写一份 " + language + " 深度调研报告(markdown)。结构：1) 执行摘要；2) 按研究问题逐节回答，每节给出结论与引用编号 [n]；3) 共识与分歧(矛盾结论并列呈现，不得擅自调和)；4) 置信度说明与证据局限；5) 未解决问题与后续建议。要求：每个承重结论必须带 [n] 引用编号，编号对应 citations 数组；只使用输入中核验通过的结论，禁止新增未经核验的事实；unresolvedGaps 是尚未解决的证据缺口，必须在未解决问题一节如实列出；unresearchedQuestions 是调研直接失败、unverifiedQuestions 是核验失败而未能进入本报告的研究问题，两类都必须逐条写进未解决问题一节并说明原因，不得省略、不得用常识补写；failedVerifications 大于 0 时必须在证据局限一节说明有多少批次未完成核验；keyTakeaways 给 3 到 5 条最重要的可执行结论。输入(JSON)：" + JSON.stringify(synthInput) + "。最终以 JSON 返回 report、citations、keyTakeaways。", { id: "synthesizer", cli: "codex", label: "撰写报告", schema: synthSchema });
   if (!draft) throw new Error("报告撰写未能交付。");
   const criticSchema = { type: "object", properties: { issues: { type: "array", maxItems: 10, items: { type: "object", properties: { severity: { type: "string", enum: ["major", "minor"] }, target: { type: "string" }, problem: { type: "string" }, fix: { type: "string" } }, required: ["severity", "target", "problem", "fix"], additionalProperties: false } }, verdict: { type: "string", enum: ["pass", "revise"] }, assessment: { type: "string" } }, required: ["issues", "verdict", "assessment"], additionalProperties: false };
   phase("批判");
   log("红队反向审查报告初稿：单一来源、时效、引用对应与逻辑跳跃。");
-  const criticism = await agent("你是红队评审，反向审查这份调研报告初稿。逐项检查：1) 哪些承重结论可能错误，为什么；2) 哪些结论只依赖单一证据家族或单一来源；3) 时间敏感结论是否与来源日期矛盾；4) 引用 [n] 与结论是否一一对应，有没有无引用的承重结论；5) 有没有逻辑跳跃或以偏概全；6) 研究简报承诺回答的问题中哪些没有被回答。找不到问题就明确写没有，禁止为凑数编造问题。初稿(JSON)：" + JSON.stringify(draft) + "；已核验结论(JSON)：" + JSON.stringify(confirmed) + "。最终以 JSON 返回 issues、verdict、assessment。", { id: "critic", cli: "codex", label: "红队审查", schema: criticSchema });
+  const criticism = await agent("你是红队评审，反向审查这份调研报告初稿。逐项检查：1) 哪些承重结论可能错误，为什么；2) 哪些结论只依赖单一证据家族或单一来源；3) 时间敏感结论是否与来源日期矛盾；4) 引用 [n] 与结论是否一一对应，有没有无引用的承重结论；5) 有没有逻辑跳跃或以偏概全；6) 研究简报承诺回答的问题中哪些没有被回答，特别是输入里 unresearchedQuestions 与 unverifiedQuestions 列出的问题是否在报告中显式说明。找不到问题就明确写没有，禁止为凑数编造问题。初稿(JSON)：" + JSON.stringify(draft) + "；已核验结论(JSON)：" + JSON.stringify(confirmed) + "；未调研成功的问题(JSON)：" + JSON.stringify(unresearched) + "；未通过核验的问题(JSON)：" + JSON.stringify(unverified) + "。最终以 JSON 返回 issues、verdict、assessment。", { id: "critic", cli: "codex", label: "红队审查", schema: criticSchema });
   phase("定稿");
   let finalReport = (draft as { report: string; citations: unknown[]; keyTakeaways: string[] }).report;
   let finalCitations = (draft as { citations: unknown[] }).citations;

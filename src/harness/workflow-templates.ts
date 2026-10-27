@@ -85,7 +85,7 @@ const codeReview = defineTemplate("code-review", 1, templateSource("code-review"
   },
 }, "两个顺序只读 Worker：先审查，再独立复核。只检查明确指定的范围，不修改文件；结果不代表全仓库已验证。");
 
-const deepResearch = defineTemplate("deep-research", 1, templateSource("deep-research"), {
+const deepResearch = defineTemplate("deep-research", 2, templateSource("deep-research"), {
   type: "object", additionalProperties: false, required: ["topic"],
   properties: {
     topic: { type: "string", minLength: 1, maxLength: 500, description: "调研主题，必填，建议一句话说清要调研什么。" },
@@ -96,7 +96,7 @@ const deepResearch = defineTemplate("deep-research", 1, templateSource("deep-res
   },
 }, "深度调研：计划 Agent 把主题拆解为研究问题并经你确认后，并行多源调研；每条结论由独立核验员重新打开原始来源复核；交叉检查矛盾、证据家族与单源风险；deep 模式按缺口做第二轮定向补证；最后撰写-红队-修订产出带引用与置信度分级的报告。全程只读，不修改文件。");
 
-const deepCr = defineTemplate("deep-cr", 2, templateSource("deep-cr"), {
+const deepCr = defineTemplate("deep-cr", 3, templateSource("deep-cr"), {
   type: "object", additionalProperties: false, required: ["target"],
   properties: {
     target: { type: "string", minLength: 1, maxLength: 2000, description: "审查范围，项目内相对路径(如 src/)；所有 Worker 不得越界读取。" },

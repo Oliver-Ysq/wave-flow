@@ -83,7 +83,7 @@ test("深度调研：计划确认、并行调研、逐条核验、缺口补证�
   expect(host.gates).toHaveLength(1);
   expect(host.gates[0]!.id).toBe("approve-research-plan");
   expect(host.gates[0]!.answerSchema).toMatchObject({ required: ["approved", "adjustments"] });
-  expect(host.phases).toEqual(["计划", "调研", "核验", "补证", "综评", "批判", "定稿"]);
+  expect(host.phases).toEqual(["计划", "调研", "核验", "交叉检查与补证", "综评", "批判", "定稿"]);
   const ids = host.agents.map(request => request.id);
   expect(ids).toContain("planner");
   expect(ids).toContain("cross-check");
@@ -112,6 +112,19 @@ test("深度调研：standard 深度不触发第二轮补证，节点数更少",
   const ids = host.agents.map(request => request.id);
   expect(ids.filter(id => id.startsWith("research-r2-"))).toHaveLength(0);
   expect(ids.length).toBeLessThanOrEqual(20);
+});
+
+test("深度调研：standard 模式也把交叉检查的缺口列入未解决问题", async () => {
+  const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
+  const module = compileRestrictedWorkflow(template.source);
+  const host = new ScriptedHost(request => request.id === "cross-check"
+    ? { claims: [], gaps: ["缺少统一基准条件"], summary: "一处缺口" }
+    : researchRespond(request));
+  await executeWorkflow(module, { topic: "端侧推理框架", depth: "standard" }, host, { cwd: await workspace() });
+  const synth = host.agents.find(request => request.id === "synthesizer")!;
+  expect(synth.prompt).toContain("unresolvedGaps");
+  expect(synth.prompt).toContain("缺少统一基准条件");
+  expect(host.agents.some(request => request.id.startsWith("research-r2-"))).toBe(false);
 });
 
 test("深度调研：计划被否决且无调整说明时立即失败，不消耗调研预算", async () => {
@@ -146,6 +159,12 @@ test("深度调研：调研节点失败时继续用其余结果，不产出空�
   expect(result.stats.round1Attempted).toBe(2);
   expect(result.stats.round1Succeeded).toBe(1);
   expect(result.stats.verifiedFindings).toBe(1);
+  // 没调研成的问题必须显式交给撰写人和红队，不能从报告里悄悄消失。
+  const synth = host.agents.find(request => request.id === "synthesizer")!;
+  expect(synth.prompt).toContain("unresearchedQuestions");
+  expect(synth.prompt).toContain("问题二");
+  const critic = host.agents.find(request => request.id === "critic")!;
+  expect(critic.prompt).toContain("未调研成功的问题");
 });
 
 test("深度调研：全部调研失败时以明确错误收敛", async () => {
@@ -300,4 +319,32 @@ test("深度CR：复核全部否决时不产出确认发现，报告仍说明无
   const host = new ScriptedHost(request => request.id.startsWith("verify-") ? { confirmed: [], rejected: [{ title: "x", reason: "无依据" }], notes: [] } : reviewRespond(request));
   const result = await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() }) as { stats: Record<string, number> };
   expect(result.stats.confirmedFindings).toBe(0);
+});
+
+test("深度CR：摸底返回范围外文件时剔除，全部在范围外则拒绝开工", async () => {
+  const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
+  const module = compileRestrictedWorkflow(template.source);
+  const host = new ScriptedHost(request => request.id === "scope-mapper"
+    ? { intentSummary: "混合范围", reviewSurface: [{ path: "./src/a.ts", reason: "核心" }, { path: "test/a.test.ts", reason: "测试" }], changeSurface: ["src/a.ts", "test/a.test.ts"], standards: [], riskAreas: [], testNotes: [] }
+    : reviewRespond(request));
+  await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() });
+  const reviewer = host.agents.find(request => request.id === "review-correctness")!;
+  expect(reviewer.prompt).toContain("src/a.ts");
+  // 范围外的文件既不能进审查清单，也不能出现在变更面里。
+  expect(reviewer.prompt).not.toContain("test/a.test.ts");
+
+  const outside = new ScriptedHost(request => request.id === "scope-mapper"
+    ? { intentSummary: "全在范围外", reviewSurface: [{ path: "test/a.test.ts", reason: "测试" }], changeSurface: ["test/a.test.ts"], standards: [], riskAreas: [], testNotes: [] }
+    : reviewRespond(request));
+  await expect(executeWorkflow(module, { target: "src" }, outside, { cwd: await workspace() })).rejects.toThrow("可审查的文件");
+});
+
+test("深度CR：报告撰写人拿到完成审查的维度总数，不与失败核验混淆", async () => {
+  const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
+  const module = compileRestrictedWorkflow(template.source);
+  const host = new ScriptedHost(reviewRespond);
+  await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() });
+  const writer = host.agents.find(request => request.id === "report-writer")!;
+  expect(writer.prompt).toContain("完成审查的维度总数：6");
+  expect(writer.prompt).toContain("stats.dimensions 必须填写");
 });
