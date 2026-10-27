@@ -96,7 +96,7 @@ const deepResearch = defineTemplate("deep-research", 1, templateSource("deep-res
   },
 }, "深度调研：计划 Agent 把主题拆解为研究问题并经你确认后，并行多源调研；每条结论由独立核验员重新打开原始来源复核；交叉检查矛盾、证据家族与单源风险；deep 模式按缺口做第二轮定向补证；最后撰写-红队-修订产出带引用与置信度分级的报告。全程只读，不修改文件。");
 
-const deepCr = defineTemplate("deep-cr", 1, templateSource("deep-cr"), {
+const deepCr = defineTemplate("deep-cr", 2, templateSource("deep-cr"), {
   type: "object", additionalProperties: false, required: ["target"],
   properties: {
     target: { type: "string", minLength: 1, maxLength: 2000, description: "审查范围，项目内相对路径(如 src/)；所有 Worker 不得越界读取。" },

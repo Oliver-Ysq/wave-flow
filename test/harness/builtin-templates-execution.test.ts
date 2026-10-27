@@ -270,11 +270,21 @@ test("深度CR：提供基线时专项审查员收到增量口径，未提供时
   expect(incrementalPrompt).toContain("基线 main");
   expect(incrementalPrompt).toContain("只审该基线以来的改动");
   expect(incrementalPrompt).toContain("引入任务队列");
+  // 增量模式：复核员必须剔除"非本次变更引入"的历史问题。
+  const incrementalVerify = incremental.agents.find(request => request.id === "verify-concurrency")!.prompt;
+  expect(incrementalVerify).toContain("既有的历史问题(非本次变更引入)");
+  expect(incrementalVerify).not.toContain("无源码依据或问题不成立");
 
   const full = new ScriptedHost(reviewRespond);
   await executeWorkflow(module, { target: "src" }, full, { cwd: await workspace() });
   const fullPrompt = full.agents.find(request => request.id === "review-concurrency")!.prompt;
-  expect(fullPrompt).toContain("按给定的审查面做全量审查");
+  expect(fullPrompt).toContain("按给定审查面做全量审查");
+  // 全量审查必须明确包含历史遗留问题，否则"既有历史问题不报"会让审查员什么都不报。
+  expect(fullPrompt).toContain("包括早于最近提交的历史遗留问题");
+  // 全量模式：复核员不得再以"历史问题"剔除发现，否则会清空所有真实缺陷。
+  const fullVerify = full.agents.find(request => request.id === "verify-concurrency")!.prompt;
+  expect(fullVerify).toContain("无源码依据或问题不成立");
+  expect(fullVerify).not.toContain("既有的历史问题(非本次变更引入)");
 });
 
 test("深度CR：所有专项审查失败时以明确错误收敛", async () => {

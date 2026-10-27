@@ -38,7 +38,10 @@ async function run(args: Args) {
     { id: "compat", name: "接口与数据兼容", checklist: "API 或协议破坏性变更、schema 与数据迁移安全、配置兼容、序列化格式变化、迁移可回滚性、跨版本兼容。" },
     { id: "intent", name: "意图符合与测试", checklist: "对照用户给出的意图与推断的意图，检查变更是否实现了声明的目标、有无 scope creep 或半成品实现；变更行为路径是否被测试覆盖(测试文件只粗审断言正确性，不逐行审)；文档与代码是否一致。" }
   ];
-  const scopeRule = base !== "" ? "本次提供了基线 " + base + "，只审该基线以来的改动：先看改动内容，再看必要的上下文，既有历史问题一律不报。" : "没有提供基线，按给定的审查面做全量审查，既有历史问题同样不报。";
+  // 有基线才是增量审查（既有历史问题不报）；没有基线就是全量审查，历史遗留问题
+  // 也必须报告，否则"既有历史问题不报"会被模型理解成"什么都不要报"。
+  const scoped = base !== "";
+  const scopeRule = scoped ? "本次提供了基线 " + base + "，只审该基线以来的改动：先看改动内容，再看必要的上下文，既有历史问题一律不报。" : "没有提供基线，按给定审查面做全量审查：审查面内所有有源码证据的问题都必须报告，包括早于最近提交的历史遗留问题；无法判断是否与最近提交相关时在 impact 中写 unknown。";
   const sharedRules = "通用规则：0) 所有文件路径一律相对项目根目录书写，审查范围是 " + target + "，不得读取该范围以外的文件；1) 只报有源码证据、能给出具体触发场景的问题，说不出触发场景的不报，不确定的不报，风格与 linter 能抓的问题不报；2) 每条发现必须给出 file(相对路径)、lines(行区间如 120-135)、evidence(相关代码摘录)、trigger(具体触发场景)、impact(后果)、suggestion(可执行修复建议)；3) 低置信度但高影响的发现可以报，必须在 impact 中显式注明不确定性；4) 只审查给定清单内的文件，不得越界；5) 报告中已确认的问题在 coverage 列出你实际审查过的文件。审查范围口径：" + scopeRule + "变更面文件：" + JSON.stringify(map.changeSurface) + "。审查员推断的变更意图：" + map.intentSummary + "。用户给出的变更意图：" + (context.trim() === "" ? "（用户未提供）" : context) + "。审查规范要点：" + JSON.stringify(map.standards) + "。" + focusText;
   phase("分维审查");
   log("六个专项审查员并行审查不同维度：" + dimensions.map((dim) => dim.name).join("、"));
@@ -65,7 +68,7 @@ async function run(args: Args) {
   log("独立复核员逐条打开源码核实每个发现，剔除误报。");
   const verifications = await parallel(batches.map((entry, index) => () => (async () => {
     log("- 开始复核" + entry.dim + "批次");
-    const prompt = "你是一名取证复核员，独立复核 " + entry.dim + " 审查员提交的发现批次，只剔除有依据的误报，不新增发现。批次(JSON)：" + JSON.stringify(entry.batch.findings) + "。逐条处理：1) 重新打开 file 的 lines 区间核对 evidence 代码是否真实存在、问题是否成立；2) 剔除以下情况并在 rejected 给 reason：既有的历史问题(非本次变更引入)、linter 能抓的问题、误读代码(符号在别处定义、上下文被截断导致的误判)、说不出触发场景的推测；3) 确认 severity 与 confidence 是否恰当，明显高估就下调；4) notes 记录你的复核方法与任何保留意见。最终以 JSON 返回 confirmed、rejected、notes。";
+    const prompt = "你是一名取证复核员，独立复核 " + entry.dim + " 审查员提交的发现批次，只剔除有依据的误报，不新增发现。批次(JSON)：" + JSON.stringify(entry.batch.findings) + "。逐条处理：1) 重新打开 file 的 lines 区间核对 evidence 代码是否真实存在、问题是否成立；2) 剔除以下情况并在 rejected 给 reason：" + (scoped ? "既有的历史问题(非本次变更引入)、" : "无源码依据或问题不成立、") + "linter 能抓的问题、误读代码(符号在别处定义、上下文被截断导致的误判)、说不出触发场景的推测；3) 确认 severity 与 confidence 是否恰当，明显高估就下调；4) notes 记录你的复核方法与任何保留意见。最终以 JSON 返回 confirmed、rejected、notes。";
     const result = await agent(prompt, { id: "verify-" + entry.id, cli: "codex", label: "复核 " + entry.dim, schema: verifySchema });
     if (result) {
       const verdict = result as VerifyBatch;
