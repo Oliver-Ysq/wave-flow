@@ -37,9 +37,10 @@ test("v8 Harness 档案兼容读取：空队列、可继续发送与排队派发
   expect(snapshot.messageQueue).toEqual([]);
 
   await service.submit(id, "继续第一条");
-  // 派发是异步的：固定 sleep 在整仓并发跑测试时可能不足，改成有界轮询到答案落盘。
+  // 派发是异步的：必须等到"答案已落盘且回合已回到 idle"，只等消息条数会撞上
+  // 仍在 running 的窗口。有界轮询，派发真的失效时依然会失败。
   let after = await service.snapshot(id);
-  for (let attempt = 0; attempt < 200 && after.messages.length < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 200 && (after.status !== "idle" || after.messages.length < 3); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     after = await service.snapshot(id);
   }
