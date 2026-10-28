@@ -116,6 +116,68 @@ test("原生ACP静默停滞只耐久提示一次，不自动中断；显式compl
   expect(events.filter(event => event.type === "agent.completed")).toHaveLength(1);
 });
 
+test("停滞提示不依赖 Run 互斥区：互斥区被占死后仍能耐久落盘", async () => {
+  const value = await fixture();
+  // 第一次 exclusive（recordSession）正常放行；之后的调用永久挂起，模拟 Run 互斥区被占死。
+  let exclusiveCalls = 0;
+  const control = new ControlServer(value.journal, value.state, <T>(operation: () => Promise<T>): Promise<T> => {
+    exclusiveCalls += 1;
+    return exclusiveCalls === 1 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
+  });
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    // 回合一直挂起、且没有任何 ACP 事件：这正是 Codex 请求长时间无响应时的形态。
+    prompt() { return new Promise<{ readonly stopReason: string }>(() => { /* 永不结束 */ }); },
+    async cancel() {}, close() {}, subscribe() { return () => {}; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }), undefined, false, 20);
+  executor.bindControl(control);
+  const pending = executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 500 && diagnostics.length === 0; i++) {
+    await Bun.sleep(20);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
+  }
+  expect(exclusiveCalls).toBe(1);
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
+  // 收尾走 stop（cancel + 拒绝 completion），不需要互斥区。
+  await executor.stop(value.node);
+  await expect(pending).rejects.toThrow();
+});
+
+test("回合间隙也算静默：end_turn 后读取上下文被占死仍会提示", async () => {
+  const value = await fixture();
+  let exclusiveCalls = 0;
+  const control = new ControlServer(value.journal, value.state, <T>(operation: () => Promise<T>): Promise<T> => {
+    exclusiveCalls += 1;
+    return exclusiveCalls === 1 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
+  });
+  let prompts = 0;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    // 首个回合立刻 end_turn 但没有 complete；收尾提醒需要读上下文，而互斥区已被占死，
+    // 于是节点停在"回合间隙"（active.turn 为 null）。这同样必须被判定为静默。
+    prompt() { prompts += 1; return Promise.resolve({ stopReason: "end_turn" }); },
+    async cancel() {}, close() {}, subscribe() { return () => {}; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }), undefined, false, 20);
+  executor.bindControl(control);
+  const pending = executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 500 && diagnostics.length === 0; i++) {
+    await Bun.sleep(20);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
+  }
+  expect(prompts).toBe(1);
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toMatchObject({ nodeId: "node", diagnostic: expect.stringContaining("停滞") });
+  await executor.stop(value.node);
+  await expect(pending).rejects.toThrow();
+});
+
 test("真实会话事件持续刷新停滞窗口，complete仍只由Control决定", async () => {
   const value = await fixture(); let capability = "";
   let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;

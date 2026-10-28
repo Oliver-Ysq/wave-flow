@@ -171,12 +171,14 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       // 不重发业务任务：可信Worker可能已产生任意外部副作用，read-only标签也不构成安全证明。
       if (unsubscribe) stallTimer = setInterval(() => {
         if (checkingStall || active.stopped || settled || active.stallDiagnosed) return;
-        if (!active.turn || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
+        // 暂停、blocked 与控制等待属于合法等待，刷新计时；"没有进行中的回合"不算豁免：
+        // 回合间隙同样没有实质进展，否则上一回合结束后可能永远等不到提示。
+        // 这里只用同步状态判断，不读 Run 互斥区：采样本身不能依赖可能被占死的锁。
+        if (active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
         checkingStall = true;
         void (async () => {
-          const context = await active.readTurnContext!();
           if (settled || active.stopped || active.stallDiagnosed) return;
-          if (context.status === "blocked" || active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
+          if (active.pauseRequested || active.paused || control.isWorkerWaiting(node.id, node.agentSessionId!)) { lastActivity = performance.now(); return; }
           if (performance.now() - lastActivity < this.stallWindowMs) return;
           // 与社区一致（orca “silence is not evidence” turn 不设超时、vibe-kanban 无信号即
           // stall-forever、Zed/claude-agent-acp 不按沉默杀回合）：静默不自动中断、不cancel、
