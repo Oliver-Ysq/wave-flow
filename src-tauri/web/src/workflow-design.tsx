@@ -12,8 +12,9 @@ const localConfirmations=new ViewCache<string>(64);
 const workspaceConfirmations=new WorkspaceConfirmationCache();
 
 /** Workflow 设计与只读 CLI 展示；只有确认按钮发起执行，读取计划不调度 Worker。 */
-export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,onAdjustViaChat,onAbandonCard,onCreated,input,execution,validateBeforeRun}:{
+export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,onAdjustViaChat,onAbandonCard,onCreated,input,execution,validateBeforeRun,onSourceDrift}:{
  /** 确认前由参数区校验并定位错误；false不发请求、不批准。 */ validateBeforeRun?:()=>boolean;
+ /** 本地来源在启动前被判定已变化时调用，用于揭示“重新预检”入口。 */ onSourceDrift?:()=>void;
  /** 此版本的原执行，历史CLI以冻结配置为准，不拿源码字面量冒充生效值。 */ execution?:WorkflowExecution;
  /** 参数区当前完整草稿；确认时校验并耐久，不要求先单独保存。 */ input?:Record<string,unknown>;
  /** 原Task UUID，响应不能控制其他任务。 */ taskId:string;
@@ -66,7 +67,11 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
        result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input,plan.sceneEvidenceHash):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash,script?input:undefined);
      }
      onCreated(result);
-   }catch(error){setError(userFacingText(error instanceof Error?error.message:String(error)));}finally{setBusy(false);}
+   }catch(error){
+     const message=userFacingText(error instanceof Error?error.message:String(error));
+     if(/启动前已变化|文件已变化|重新预检/.test(message))onSourceDrift?.();
+     setError(message);
+   }finally{setBusy(false);}
  }
  const titles=revision.preview?.phaseTitles??[];
  return <section className="workflow-design"><h3>执行步骤</h3>{groupWorkersByPhase(titles,plan?.previewAgents??revision.preview?.previewAgents??[]).map(group=><section key={group.key}><h4>{group.title}</h4>{group.workers.map(worker=><div className="workflow-design-row" key={worker.key}><strong>{worker.name}{worker.loop&&<small>循环/批量调用</small>}</strong>{cliSelect(worker.nodeId??"*",worker.name)}</div>)}</section>)}

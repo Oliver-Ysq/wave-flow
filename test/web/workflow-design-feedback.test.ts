@@ -56,6 +56,12 @@ test("整工作区授权并入确认运行，结果保留在 worktree，内部�
 test("执行配置预检失败提供重检入口，检查期间与失败状态均禁止确认",async()=>{
  const source=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
  expect(source).toContain("重新检查执行环境");
+ // 本地来源被判定已变化时揭示“重新预检”，避免待确认版本无路可走。
+ const design=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
+ expect(design).toContain("onSourceDrift?.()");
+ const card=await Bun.file("src-tauri/web/src/conversation/revision-card.tsx").text();
+ expect(card).toContain("(revision.acceptedAt!==null||sourceDrift)&&onLocalRevision");
+ expect(card).toContain("onSourceDrift={()=>setSourceDrift(true)}");
  expect(source).toContain("参数已保留，请稍后重新检查");
  expect(source).toContain("setCheckAttempt(attempt=>attempt+1)");
  expect(source).toContain("identity,checkAttempt]");

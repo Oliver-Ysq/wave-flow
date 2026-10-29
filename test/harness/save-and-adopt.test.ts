@@ -93,7 +93,7 @@ test("Tauri 保存对话框权限与保存接管 action 已接线", async () => 
   expect(card).toContain('crypto.randomUUID(),undefined,"save-local"');
   expect(card).toContain("自动预检未完成");
   // 待确认版本已由保存/自动预检准备好，不再显示容易误导的“重新预检”按钮。
-  expect(card).toContain("revision.acceptedAt!==null&&onLocalRevision");
+  expect(card).toContain("(revision.acceptedAt!==null||sourceDrift)&&onLocalRevision");
 });
 
 test("保存并接管拒绝冲突载荷、已存在文件与过期版本，且不改变 Task", async () => {
