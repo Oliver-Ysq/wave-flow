@@ -55,13 +55,13 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.2.8`，支持 macOS 12+ / Apple Silicon。可在终端一键安装：
+当前版本：`v0.2.9`，支持 macOS 12+ / Apple Silicon。可在终端一键安装：
 
 ```sh
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.2.8_aarch64.dmg`，或从源码构建：
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.2.9_aarch64.dmg`，或从源码构建：
 
 ```sh
 bun install

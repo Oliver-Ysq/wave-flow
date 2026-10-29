@@ -1,6 +1,6 @@
 [package]
 name = "wave-flow-desktop"
-version = "0.2.8"
+version = "0.2.9"
 description = "Wave Flow"
 edition = "2021"
 
