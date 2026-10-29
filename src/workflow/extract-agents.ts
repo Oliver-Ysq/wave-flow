@@ -1,8 +1,8 @@
 import ts from "typescript";
-import type { AgentCli } from "../../shared/workflow-types";
+import type { AgentCli } from "../shared/workflow-types";
 
 /**
- * 从冻结受限源码静态枚举出的一个 Worker 声明；只有字面量 id 的 agent() 调用可被枚举。
+ * 从冻结作者模块源码静态枚举出的一个 Worker 声明；只有字面量 id 的 agent() 调用可被枚举。
  * 提取结果只用于分配卡与 config 校验，不代表脚本运行时一定创建该节点（控制流可能跳过）。
  */
 export type ExtractedAgentWorker = {
@@ -46,8 +46,8 @@ export type ExtractedAgentWorkers = {
 };
 
 /**
- * 用 TypeScript AST 扫描受限源码中的 agent(prompt, options) 调用。
- * 纯静态分析，不编译也不执行脚本：受限脚本的结果依赖控制流，dry-run 会枚举出错列表。
+ * 用 TypeScript AST 扫描作者模块源码中的 agent(prompt, options) 调用。
+ * 纯静态分析，不编译也不执行脚本：真实结果依赖控制流，dry-run 会枚举出错列表。
  */
 export function extractAgentWorkers(source: string, fileName = "workflow.generated.ts"): ExtractedAgentWorkers {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);

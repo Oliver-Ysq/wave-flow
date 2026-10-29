@@ -166,7 +166,7 @@ export type JournalEvent = JournalBase & ({
   readonly type: "agent.continued";
   readonly blockRequestId: string;
 } | {
-  /** 受限 Workflow 脚本显式声明的业务决策门；nodeId 固定为 null，不属于任何 Agent 会话。 */
+  /** 作者模块显式声明的业务决策门；nodeId 固定为 null，不属于任何 Agent 会话。 */
   readonly type: "gate.created";
   /** Run 内稳定唯一的决策门 id；replay 按它对齐旧事实。 */
   readonly gateId: string;

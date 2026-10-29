@@ -200,7 +200,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完�
     for (let n = 0; n < 1000; n++) { const value = await engine.handleDesktopAction("harnesses.get", { harnessRunId: taskId }) as import("../../src/desktop/types").HarnessRunResponse; if (value.harness.status === "idle" && value.harness.workflowRevisions.length) break; await Bun.sleep(10); }
     const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId: taskId, revision: 1 }) as import("../../src-tauri/web/src/types").ExecutionPlanResponse;
     const workspaces = { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, workspaceId: crypto.randomUUID() };
-    const request = new DesignConfirmationCache().get(`${taskId}:1`, {}, {}, plan, workspaces);
+    const request = new DesignConfirmationCache().script(`${taskId}:1`, {}, plan, workspaces);
     const created = await engine.handleDesktopAction("executions.confirm", { harnessRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
     console.log(JSON.stringify({ root, taskId, executionId: created.execution.executionId, cli }));
     let detail = created;

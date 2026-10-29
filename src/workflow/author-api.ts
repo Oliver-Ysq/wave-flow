@@ -81,6 +81,27 @@ export function log(message: string): void {
   context.host.log(message);
 }
 
+const decisionGateId = /^[A-Za-z0-9._:/-]{1,120}$/;
+
+/**
+ * 请求一次脚本级用户决策；答案返回后脚本继续。
+ * 仅用于编排层，不替代 Worker 的 block/continue，也不直接改变节点状态。
+ */
+export function decisionGate(
+  idOrRequest: string | { readonly id: string; readonly question: string; readonly answerSchema?: JsonObject },
+  question?: string,
+  answerSchema?: JsonObject,
+): Promise<JsonObject> {
+  const context = requireWorkflowContext();
+  const request = typeof idOrRequest === "string"
+    ? { id: idOrRequest, question, ...(answerSchema === undefined ? {} : { answerSchema }) }
+    : idOrRequest;
+  if (typeof request.id !== "string" || !decisionGateId.test(request.id)) throw new WorkflowContractError("decisionGate() 的 id 必须为 1-120 位允许字符。");
+  if (typeof request.question !== "string" || request.question.trim() === "") throw new WorkflowContractError("decisionGate() 的 question 必须为非空字符串。");
+  if (request.answerSchema !== undefined && !isJsonObject(request.answerSchema)) throw new WorkflowContractError("decisionGate() 的 answerSchema 必须是 JSON-safe 对象。");
+  return trackWorkflowOperation(context.host.decisionGate({ id: request.id, question: request.question, ...(request.answerSchema === undefined ? {} : { answerSchema: request.answerSchema }) }, context.currentPhaseVisit ?? null));
+}
+
 function validateAgentOptions(options: AgentOptions): void {
   if (!options || typeof options !== "object") throw new WorkflowContractError("agent() 必须提供 options。");
   if (!agentId.test(options.id)) throw new WorkflowContractError("agent() 的 id 必须为 1-120 位允许字符。");

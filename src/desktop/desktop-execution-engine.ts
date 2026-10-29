@@ -2,7 +2,7 @@ import { mkdir, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { loadWorkflow } from "../workflow/load-workflow";
-import { preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
+import { inspectWorkflowModuleSource, preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
@@ -40,14 +40,12 @@ import { createIsolatedHarness } from "../harness/isolated-harness";
 import { generateAcpTaskTitle } from "../harness/acp-task-naming";
 import { prepareSessionScratch } from "../workspace/session-scratch";
 import { adapterById, adapterForCli, catalogClis } from "../runtimes/adapter-catalog";
-import { compileRestrictedWorkflow } from "../workflow/restricted/restricted-runtime";
-import { extractAgentWorkers } from "../workflow/restricted/extract-agents";
-import { validateExecutionConfig } from "./execution-assignment";
+import { extractAgentWorkers } from "../workflow/extract-agents";
 import { ProductionWorkspaceExecutor } from "../workspace/production-workspace-executor";
 import { hasWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/write-intent";
 import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager } from "../workspace/workspace-manager";
-import { assertCurrentWorkspaceRecord } from "../workspace/execution-workspaces";
+import { assertCurrentWorkspaceRecord, validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 import { AppSettingsStore, type AppSettings } from "./app-settings";
 import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
 import { readSkillLibrary, skillLibraryRoot } from "../skills/library";
@@ -399,11 +397,12 @@ export class DesktopExecutionEngine {
   /** Execution 的底座执行器；Harness 执行只走用户已验证的本机 ACP Worker 或测试确定性执行器。 */
   private createExecutionExecutor(config: import("../harness/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
+    const fallbackRuntimeId = config && config.assignmentMode !== "script" ? config.fallbackRuntimeId : null;
     if (config?.workspaces) {
-      const base = new ProductionWorkspaceExecutor(config.workspaces, this.workspaceRoot, this.instanceId, this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), config.fallbackRuntimeId, this.skillsRoot);
+      const base = new ProductionWorkspaceExecutor(config.workspaces, this.workspaceRoot, this.instanceId, this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), fallbackRuntimeId, this.skillsRoot);
       return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
     }
-    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, config?.fallbackRuntimeId ?? null, join(dirname(this.storeRoot), "read-only-scratch"), this.skillsRoot);
+    const base: AgentNodeExecutor = new RuntimeAcpWorkerExecutor(this.#cliRuntimes, (identity, scratch) => this.workerControlMcp(identity, scratch), undefined, fallbackRuntimeId, join(dirname(this.storeRoot), "read-only-scratch"), this.skillsRoot);
     return { executor: new LimitedAgentExecutor(base, this.agentStartLimiter), wiring: base };
   }
 
@@ -691,34 +690,28 @@ export class DesktopExecutionEngine {
         if(canonicalJson(input??{})!==canonicalJson(selected.input))throw new Error("输入与已保存批准版本不一致，请保存新版本后确认。");
       }
       if (!this.deterministicForTest) await this.requireWorkerCandidate();
-      if(selected?.localOrigin && (value as CreateExecutionRequest).config !== undefined) throw new Error("本地 Workflow 不接受 CLI 分配配置。");
-      const config = selected?.localOrigin ? undefined : await this.validateExecutionConfigValue(harnessRunId, revision, (value as CreateExecutionRequest).config);
+      if (!selected) throw new Error("创建 Execution 必须绑定当前 revision。");
+      const format = selected.sourceFormat ?? (selected.localOrigin ? "module" : "restricted");
+      if (format !== "module") throw new Error("旧格式草案不可执行，请重新生成。");
+      const write = hasWorkspaceWriteIntent(readWorkspaceWriteIntent(selected.source));
+      const config = this.scriptExecutionConfig((value as CreateExecutionRequest).config, write);
       const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
       return { ...created, controllable: this.#executions.isControllable(created.execution.executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
-  /**
-   * 分配卡快照的创建前复核：受限 Execution 的节点落点只由快照决定，因此创建时
-   * 必须重新核对 runtimeId 已验证、cli/adapter 与 Registry 一致、id 已枚举、
-   * model 仅 cli-default，且回退目标就是当前主控 Runtime。伪造或陈旧快照一律拒绝。
-   */
-  private async validateExecutionConfigValue(harnessRunId: string, revisionNumber: number, raw: unknown): Promise<import("../harness/types").ExecutionConfigSnapshot> {
-    if (!raw) throw new EngineActionError(400, "创建 Harness Execution 必须携带分配卡冻结的执行配置快照。 ");
-    const snapshot = await this.#harness.snapshot(harnessRunId);
-    if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length&&!this.singleWorkflowForAcceptance)throw new EngineActionError(409,"修订现场续作仅专用验收入口可用，尚未正式开放。");
-    const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
-    if (!revision) throw new EngineActionError(400, "创建 Execution 必须绑定当前 revision。 ");
-    const extracted = extractAgentWorkers(revision.source);
-    const list = await this.#cliRuntimes.list();
-    const verified = list.runtimes.filter((runtime) => runtime.status === "verified");
-    let config: import("../harness/types").ExecutionConfigSnapshot;
-    try { config = validateExecutionConfig(raw, extracted.workers, verified); }
-    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
-    if(config.workspaces?.continuation&&snapshot.task?.workflowContract!=="single-workflow-v1")throw new EngineActionError(409,"旧任务不能通过续作配置扩张执行契约。");
-    const harnessRuntimeId = snapshot.runtime?.runtimeId ?? list.harnessRuntimeId;
-    if (!harnessRuntimeId || config.fallbackRuntimeId !== harnessRuntimeId) throw new EngineActionError(400, "执行配置快照的回退目标必须是当前主控 Runtime。 ");
-    return config;
+  /** 作者模块的执行配置只承载工作区授权；只读模块不接受配置，写类只接受 workspaces。 */
+  private scriptExecutionConfig(raw: unknown, write: boolean): import("../harness/types").ExecutionConfigSnapshot | undefined {
+    if (!write) {
+      if (raw !== undefined) throw new EngineActionError(400, "只读模块 Workflow 不接受执行配置。");
+      return undefined;
+    }
+    const allowed = new Set(["version", "assignmentMode", "createdAt", "workspaces"]);
+    if (!isJsonObject(raw) || !isJsonObject(raw.workspaces) || Object.keys(raw).some((key) => !allowed.has(key))) throw new EngineActionError(400, "写类模块 Workflow 只接受 workspaces Git 成果授权。");
+    if (raw.version !== undefined && raw.version !== 1) throw new EngineActionError(400, "执行配置版本无效。");
+    if (raw.assignmentMode !== undefined && raw.assignmentMode !== "script") throw new EngineActionError(400, "模块 Workflow 只接受脚本模式配置。");
+    if (raw.createdAt !== undefined && (typeof raw.createdAt !== "string" || Number.isNaN(Date.parse(raw.createdAt)))) throw new EngineActionError(400, "执行配置时间无效。");
+    return { version: 1, assignmentMode: "script", createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(), workspaces: validateExecutionWorkspaces(raw.workspaces) };
   }
 
   /** executions.plan：编译预检冻结源码并枚举 Worker、已验证池与主控 Runtime，供分配卡渲染。 */
@@ -730,7 +723,9 @@ export class DesktopExecutionEngine {
       if (snapshot.task) assertStartable(snapshot, revisionNumber, true);
       if (!revision || !snapshot.task && revision.acceptedAt===null) throw new Error("只能为当前候选或已批准历史方案规划执行分配。 ");
       // 编译预检保证分配卡永远不针对不可运行的草案；提取只读 AST，不执行脚本。
-      const compiled = revision.localOrigin?{meta:revision.localOrigin.meta}:compileRestrictedWorkflow(revision.source);
+      const format=revision.sourceFormat??(revision.localOrigin?"module":"restricted");
+      if(format!=="module")throw new Error("旧格式草案不可执行，请重新生成。");
+      const inspected = revision.localOrigin?{meta:revision.localOrigin.meta}:inspectWorkflowModuleSource(revision.source,"workflow.ts","生成稿");
       const extracted = extractAgentWorkers(revision.source);
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
@@ -754,7 +749,7 @@ export class DesktopExecutionEngine {
         continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaceId:frozen.workspaceId,head:scene.head};
         workspacePlan={...workspacePlan,baseCommit:frozen.authorization.baseCommit,dirtyPaths:[],diagnostic:null};
       }
-      return { continuationPlan,sceneEvidenceHash, workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: compiled.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
+      return { continuationPlan,sceneEvidenceHash, workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: inspected.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -922,7 +917,6 @@ export class DesktopExecutionEngine {
       }
       case "templates.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value);
       case "executions.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value,false);
-      case "workflows.prepareConfigurationRevision": return {harness:await this.#harness.prepareConfigurationRevision(requiredString(value,"harnessRunId"),requiredString(value,"clientRequestId"),requiredInteger(value,"baseRevision"))};
       case "harnesses.list": return this.listHarnesses();
       case "harnesses.create": return this.createHarness(value);
       case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
@@ -994,6 +988,13 @@ export class DesktopExecutionEngine {
         const { source, ...preview } = result;
         return preview;
       }
+      case "workflows.saveAndAdoptRevision": {
+        const input=object(value).input;
+        if(input!==undefined&&!isJsonObject(input))throw new Error("保存并接管的输入必须是 JSON 对象。");
+        const replace=object(value).replace;
+        if(replace!==undefined&&typeof replace!=="boolean")throw new Error("保存并接管的替换标记必须是布尔值。");
+        return {harness:await this.#harness.saveAndAdoptRevision(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),revision:requiredInteger(value,"revision"),path:requiredString(value,"path"),...(input===undefined?{}:{input}),...(replace===true?{replace:true}:{})})};
+      }
       case "workflows.createLocalTask": {
         const project=await this.#projects.get(requiredString(value,"projectId"));
         const input=object(value).input;
@@ -1003,7 +1004,9 @@ export class DesktopExecutionEngine {
       case "workflows.reviseLocalTask": {
         if(!this.singleWorkflowForAcceptance)throw new Error("本地修订仅专用验收构建可用。");
         const input=object(value).input;if(!isJsonObject(input))throw new Error("本地参数必须是JSON对象。");
-        return {harness:await this.#harness.reviseLocalTask(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")})})};
+        const updateReason=object(value).updateReason;
+        if(updateReason!==undefined&&updateReason!=="save-local"&&updateReason!=="modify-plan"&&updateReason!=="modify-parameters")throw new Error("本地修订的更新原因无效。");
+        return {harness:await this.#harness.reviseLocalTask(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")}),...(updateReason===undefined?{}:{updateReason})})};
       }
       case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
       default: throw new Error(`未知 Desktop action：${action}。`);
@@ -1025,8 +1028,10 @@ export class DesktopExecutionEngine {
       const input=object(value).input??revision.input??{};
       if(!isJsonObject(input))throw new Error("工作流参数必须是JSON-safe对象。");
       const rawConfig=object(value).config;
-      const localWrite=revision.localOrigin?readWorkspaceWriteIntent(revision.source):null;
-      if(revision.localOrigin ? (hasWorkspaceWriteIntent(localWrite!) ? !isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces : rawConfig!==undefined) : !isJsonObject(rawConfig))throw new Error(revision.localOrigin ? "本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。" : "确认配置必须是 JSON-safe 对象。");
+      const format=revision.sourceFormat??(revision.localOrigin?"module":"restricted");
+      if(format!=="module")throw new Error("旧格式草案不可执行，请重新生成。");
+      const write=hasWorkspaceWriteIntent(readWorkspaceWriteIntent(revision.source));
+      if(revision.localOrigin&&(write?(!isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces):rawConfig!==undefined))throw new Error("本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。");
       const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null,...(confirmedScene?{sceneEvidenceHash:confirmedScene}:{})})).digest("hex");
       const receipt=snapshot.executionConfirmations?.find(item=>item.requestId===requestId);
       if(receipt&&(receipt.payloadHash!==payloadHash||receipt.revision!==number))throw new Error("相同确认请求不能更换版本、输入或配置。");
@@ -1046,9 +1051,10 @@ export class DesktopExecutionEngine {
       const candidateNumber=preparedRetry?.parentRevision===number?preparedRetry.revision:number;
       assertStartable(snapshot,candidateNumber,true);
       if(revision.templateOrigin)validateTemplateInput(revision.templateOrigin.inputSchema,input);
-      else if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("生成方案的输入须由主控明确准备，不能在启动时注入未知参数。");
+      else if(revision.localOrigin){if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("本地输入与已预检版本不一致，请重新预检。");}
+      else validateLocalInput(inspectWorkflowModuleSource(revision.source,"workflow.ts","生成稿").inputSchema,input);
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
-      const config=rawConfig===undefined?undefined:await this.validateExecutionConfigValue(id,number,rawConfig);
+      const config=this.scriptExecutionConfig(rawConfig,write);
       if(!receipt)await this.#harness.prepareExecutionConfirmation(id,{requestId,revision:number,payloadHash});
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){

@@ -60,7 +60,7 @@ export type NormalizedAgentRequest = Omit<AgentOptions, "cwd" | "sandbox"> & {
   /** 调用 agent() 时生效的已声明阶段标题。 */
   readonly phase: string | undefined;
   /**
-   * 受限 Execution 由分配快照注入的指派 Runtime id；受信任作者入口不写该字段。
+   * 历史 assigned 配置注入的指派 Runtime id；模块 Workflow 不写该字段，CLI 由作者源码决定。
    * 它参与 replay 指纹：分配变化后同一脚本不再复用旧节点结果。
    */
   readonly assignedRuntimeId?: string;

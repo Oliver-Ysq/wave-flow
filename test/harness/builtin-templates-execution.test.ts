@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv from "ajv";
 import { executeWorkflow } from "../../src/workflow/execute-workflow";
-import { compileRestrictedWorkflow } from "../../src/workflow/restricted/restricted-runtime";
+import { loadWorkflowSource } from "../../src/workflow/load-workflow";
 import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "../../src/runtime/workflow-host";
 import type { JsonObject } from "../../src/shared/json";
@@ -77,7 +77,7 @@ async function workspace(): Promise<string> {
 
 test("深度调研：计划确认、并行调研、逐条核验、缺口补证与红队修订全链路执行", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(researchRespond);
   const result = await executeWorkflow(module, { topic: "端侧推理框架", depth: "deep", questions: ["怎么选"], context: "", language: "中文" }, host, { cwd: await workspace() }) as { report: string; stats: Record<string, number> };
   expect(host.gates).toHaveLength(1);
@@ -106,7 +106,7 @@ test("深度调研：计划确认、并行调研、逐条核验、缺口补证�
 
 test("深度调研：standard 深度不触发第二轮补证，节点数更少", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(researchRespond);
   await executeWorkflow(module, { topic: "端侧推理框架", depth: "standard" }, host, { cwd: await workspace() });
   const ids = host.agents.map(request => request.id);
@@ -116,7 +116,7 @@ test("深度调研：standard 深度不触发第二轮补证，节点数更少",
 
 test("深度调研：standard 模式也把交叉检查的缺口列入未解决问题", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id === "cross-check"
     ? { claims: [], gaps: ["缺少统一基准条件"], summary: "一处缺口" }
     : researchRespond(request));
@@ -129,7 +129,7 @@ test("深度调研：standard 模式也把交叉检查的缺口列入未解决�
 
 test("深度调研：计划被否决且无调整说明时立即失败，不消耗调研预算", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(researchRespond, { approved: false, adjustments: "  " });
   await expect(executeWorkflow(module, { topic: "端侧推理框架" }, host, { cwd: await workspace() })).rejects.toThrow("未获批准");
   expect(host.agents.map(request => request.id)).toEqual(["planner"]);
@@ -137,7 +137,7 @@ test("深度调研：计划被否决且无调整说明时立即失败，不消�
 
 test("深度调研：用户给出调整时重新出计划再继续调研", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(researchRespond, { approved: false, adjustments: "只研究基准测试" });
   await executeWorkflow(module, { topic: "端侧推理框架", depth: "standard" }, host, { cwd: await workspace() });
   const ids = host.agents.map(request => request.id);
@@ -148,7 +148,7 @@ test("深度调研：用户给出调整时重新出计划再继续调研", async
 
 test("深度调研：调研节点失败时继续用其余结果，不产出空报告", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   let calls = 0;
   const host = new ScriptedHost(request => {
     calls += 1;
@@ -169,14 +169,14 @@ test("深度调研：调研节点失败时继续用其余结果，不产出空�
 
 test("深度调研：全部调研失败时以明确错误收敛", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id.startsWith("research-") ? null : researchRespond(request));
   await expect(executeWorkflow(module, { topic: "端侧推理框架" }, host, { cwd: await workspace() })).rejects.toThrow("没有任何可用结果");
 });
 
 test("深度调研：第二轮补证有个别失败时只核验成功批次，不重核第一轮结果", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => {
     if (request.id === "cross-check") return { claims: [], gaps: ["缺口一", "缺口二"], summary: "两处缺口" };
     if (request.id === "research-r2-1") return null;
@@ -195,7 +195,7 @@ test("深度调研：第二轮补证有个别失败时只核验成功批次，�
 
 test("深度CR：复核节点全部失败时拒绝出报告，不把没查过说成没问题", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id.startsWith("verify-") ? null : reviewRespond(request));
   await expect(executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() })).rejects.toThrow("所有复核节点都未能交付");
   // 报告节点不得被调用：没有可信复核就没有可信报告。
@@ -204,7 +204,7 @@ test("深度CR：复核节点全部失败时拒绝出报告，不把没查过说
 
 test("深度CR：裁决节点失败时的回退建议仍按严重度判定", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id === "judge" ? null : reviewRespond(request));
   const result = await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() }) as { mergeRecommendation: string };
   // 桩结果里存在 high 级发现，回退不得给出 needs_review。
@@ -213,7 +213,7 @@ test("深度CR：裁决节点失败时的回退建议仍按严重度判定", asy
 
 test("深度调研：红队节点未交付时如实说明缺少反向审查，不谎报通过", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id === "critic" ? null : researchRespond(request));
   const result = await executeWorkflow(module, { topic: "端侧推理框架", depth: "standard" }, host, { cwd: await workspace() }) as { stats: Record<string, unknown> };
   expect(result.stats.criticDelivered).toBe(false);
@@ -224,13 +224,13 @@ test("深度调研：红队节点未交付时如实说明缺少反向审查，�
 test("内置预置全程只读：所有 Worker 都是 read-only 意图，不写业务文件", async () => {
   const research = listWorkflowTemplates().find(item => item.id === "deep-research")!;
   const researchHost = new ScriptedHost(researchRespond);
-  await executeWorkflow(compileRestrictedWorkflow(research.source), { topic: "端侧推理框架", depth: "standard" }, researchHost, { cwd: await workspace() });
+  await executeWorkflow(await loadWorkflowSource(research.source), { topic: "端侧推理框架", depth: "standard" }, researchHost, { cwd: await workspace() });
   const review = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
   const reviewHost = new ScriptedHost(reviewRespond);
-  await executeWorkflow(compileRestrictedWorkflow(review.source), { target: "src" }, reviewHost, { cwd: await workspace() });
+  await executeWorkflow(await loadWorkflowSource(review.source), { target: "src" }, reviewHost, { cwd: await workspace() });
   const codeReview = listWorkflowTemplates().find(item => item.id === "code-review")!;
   const codeHost = new ScriptedHost(() => ({ findings: [], limitations: "夹具" }));
-  await executeWorkflow(compileRestrictedWorkflow(codeReview.source), { target: "src", focus: ["安全"], maxFindings: 2 }, codeHost, { cwd: await workspace() });
+  await executeWorkflow(await loadWorkflowSource(codeReview.source), { target: "src", focus: ["安全"], maxFindings: 2 }, codeHost, { cwd: await workspace() });
   for (const host of [researchHost, reviewHost, codeHost]) {
     expect(host.agents.length).toBeGreaterThan(0);
     for (const request of host.agents) {
@@ -242,7 +242,7 @@ test("内置预置全程只读：所有 Worker 都是 read-only 意图，不写�
 
 test("深度CR：摸底、六个专项并行审查、逐条取证复核、裁决、盲区与汇总全链路执行", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(reviewRespond);
   const result = await executeWorkflow(module, { target: "src", base: "main", focus: ["并发"], context: "", language: "中文" }, host, { cwd: await workspace() }) as { report: string; mergeRecommendation: string; stats: Record<string, number> };
   expect(host.gates).toHaveLength(0);
@@ -271,7 +271,7 @@ test("深度CR：摸底、六个专项并行审查、逐条取证复核、裁决
 
 test("深度CR：某个维度审查失败时，其余维度的复核节点 id 仍与自己的维度对应", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id === "review-correctness" ? null : reviewRespond(request));
   await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() });
   const ids = host.agents.map(request => request.id);
@@ -282,7 +282,7 @@ test("深度CR：某个维度审查失败时，其余维度的复核节点 id �
 
 test("深度CR：提供基线时专项审查员收到增量口径，未提供时收到全量口径", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const incremental = new ScriptedHost(reviewRespond);
   await executeWorkflow(module, { target: "src", base: "main", context: "引入任务队列" }, incremental, { cwd: await workspace() });
   const incrementalPrompt = incremental.agents.find(request => request.id === "review-concurrency")!.prompt;
@@ -308,14 +308,14 @@ test("深度CR：提供基线时专项审查员收到增量口径，未提供时
 
 test("深度CR：所有专项审查失败时以明确错误收敛", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id.startsWith("review-") ? null : reviewRespond(request));
   await expect(executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() })).rejects.toThrow("所有专项审查都未能交付");
 });
 
 test("深度CR：复核全部否决时不产出确认发现，报告仍说明无确认问题", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id.startsWith("verify-") ? { confirmed: [], rejected: [{ title: "x", reason: "无依据" }], notes: [] } : reviewRespond(request));
   const result = await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() }) as { stats: Record<string, number> };
   expect(result.stats.confirmedFindings).toBe(0);
@@ -323,7 +323,7 @@ test("深度CR：复核全部否决时不产出确认发现，报告仍说明无
 
 test("深度CR：摸底返回范围外文件时剔除，全部在范围外则拒绝开工", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(request => request.id === "scope-mapper"
     ? { intentSummary: "混合范围", reviewSurface: [{ path: "./src/a.ts", reason: "核心" }, { path: "test/a.test.ts", reason: "测试" }], changeSurface: ["src/a.ts", "test/a.test.ts"], standards: [], riskAreas: [], testNotes: [] }
     : reviewRespond(request));
@@ -341,7 +341,7 @@ test("深度CR：摸底返回范围外文件时剔除，全部在范围外则拒
 
 test("深度CR：报告撰写人拿到完成审查的维度总数，不与失败核验混淆", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-cr")!;
-  const module = compileRestrictedWorkflow(template.source);
+  const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(reviewRespond);
   await executeWorkflow(module, { target: "src" }, host, { cwd: await workspace() });
   const writer = host.agents.find(request => request.id === "report-writer")!;

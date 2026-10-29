@@ -106,6 +106,8 @@ export type HarnessEvent =
   | { readonly type: "harness.turn_interrupted"; readonly at: string; readonly harnessRunId: string; readonly diagnostic: string }
   | { readonly type: "harness.completed"; readonly at: string; readonly harnessRunId: string; /** 用户明确放弃未完成总结并同时只读封存；缺省不允许放弃。 */ readonly abandonImpactSummaries?: boolean }
   | { readonly type: "workflow.revision_proposed"; readonly at: string; readonly harnessRunId: string; readonly revision: WorkflowRevision }
+  /** 用户保存并接管：追加一个 localOrigin revision；文件已写入且读回复核通过后才耐久。 */
+  | { readonly type: "workflow.revision_adopted"; readonly at: string; readonly harnessRunId: string; readonly clientRequestId: string; readonly exportedAt: string; readonly revision: WorkflowRevision }
   /** v6：旧草案展示预览补齐或规则升级；只变更展示投影，不变更源码/审批。 */
   | { readonly type: "workflow.revision_preview_saved"; readonly at: string; readonly harnessRunId: string; readonly revision: number; readonly preview: RevisionPreview }
   | { readonly type: "workflow.revision_accepted"; readonly at: string; readonly harnessRunId: string; readonly revision: number }
@@ -244,6 +246,32 @@ export class HarnessProjection {
   #generatedTitle: string | null = null;
   #namingAttempted = false;
   constructor(private readonly manifest: HarnessManifest) {}
+  /**
+   * 追加 revision 的共享投影。只有 save-local 接管事件允许在没有先放弃候选的情况下
+   * 把来源切换为 localOrigin；普通提案仍遵守原有信任替换规则。
+   */
+  private appendRevision(revision: WorkflowRevision, adoptLocalOrigin: boolean): void {
+    if (this.manifest.task) {
+      if (this.manifest.task.workflowContract === "single-workflow-v1") {
+        const prior = this.#workflowRevisions.at(-1);
+        if (!revision.cardId || this.#executions.some(item => item.finishedAt === null) || (prior ? revision.cardId !== prior.cardId || revision.parentRevision !== prior.revision : revision.parentRevision !== null)) throw new Error("单链修订身份或父版本不匹配。");
+        if (adoptLocalOrigin && (!prior || prior.localOrigin)) throw new Error("只能从非本地候选接管为本地来源。");
+        const sourceSwitch = !!prior && !!prior.localOrigin !== !!revision.localOrigin;
+        if (sourceSwitch && !adoptLocalOrigin && (this.#executions.length || !prior.abandonedAt)) throw new Error("来源信任只能在首次执行前显式放弃候选后替换。");
+        if (prior?.localOrigin && revision.localOrigin && prior.localOrigin.path !== revision.localOrigin.path && !adoptLocalOrigin && (this.#executions.length || !prior.abandonedAt)) throw new Error("已有执行或未放弃候选不能更换本地来源路径。");
+      } else {
+        const latest = [...this.#workflowRevisions].reverse().find(item => item.cardId && !item.abandonedAt);
+        const candidate = latest && !this.#executions.some(execution => this.#workflowRevisions.find(item => item.revision === execution.revision)?.cardId === latest.cardId) ? latest : undefined;
+        if (!revision.cardId || this.#executions.some(item => item.finishedAt === null) || (candidate ? candidate.cardId !== revision.cardId || revision.parentRevision !== candidate.revision : revision.parentRevision !== null || this.#workflowRevisions.some(item => item.cardId === revision.cardId))) throw new Error("候选卡或父版本不匹配。");
+      }
+    }
+    if (adoptLocalOrigin) {
+      if (revision.updateReason !== "save-local" || !revision.localOrigin || revision.sourceFormat !== "module" || !revision.exportRequestId || !revision.exportedAt || !revision.exportPayloadHash) throw new Error("保存并接管 revision 的导出或来源字段不完整。");
+      if (this.#workflowRevisions.some(item => item.exportRequestId !== undefined && item.exportRequestId === revision.exportRequestId)) throw new Error("保存并接管请求已存在。");
+    }
+    if (this.#workflowRevisions.length + 1 !== revision.revision || revision.acceptedAt !== null || (revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 序号或状态无效。");
+    this.#workflowRevisions.push(revision);
+  }
   apply(event: HarnessEvent): void {
     this.#snapshotSequence++;
     if (event.harnessRunId !== this.manifest.harnessRunId) throw new Error("Harness 事件不属于当前会话。 ");
@@ -386,21 +414,10 @@ export class HarnessProjection {
       if (!revision || !previewMatchesSource(event.preview, revision.source, revision.sourceHash) || (revision.preview && revision.preview.previewVersion >= event.preview.previewVersion)) throw new Error("Workflow 预览身份或版本无效。");
       this.#workflowRevisions[index] = { ...revision, preview: event.preview }; return;
     }
-    if (event.type === "workflow.revision_proposed") {
-      if (this.manifest.task) {
-        if (this.manifest.task.workflowContract === "single-workflow-v1") {
-          const prior = this.#workflowRevisions.at(-1);
-          if (!event.revision.cardId || this.#executions.some(item => item.finishedAt === null) || (prior ? event.revision.cardId !== prior.cardId || event.revision.parentRevision !== prior.revision : event.revision.parentRevision !== null)) throw new Error("单链修订身份或父版本不匹配。");
-          if(prior && !!prior.localOrigin!==!!event.revision.localOrigin && (this.#executions.length || !prior.abandonedAt))throw new Error("来源信任只能在首次执行前显式放弃候选后替换。");
-          if(prior?.localOrigin&&event.revision.localOrigin&&prior.localOrigin.path!==event.revision.localOrigin.path&&(this.#executions.length||!prior.abandonedAt))throw new Error("已有执行或未放弃候选不能更换本地来源路径。");
-        } else {
-        const latest = [...this.#workflowRevisions].reverse().find(item=>item.cardId&&!item.abandonedAt);
-        const candidate = latest && !this.#executions.some(execution=>this.#workflowRevisions.find(item=>item.revision===execution.revision)?.cardId===latest.cardId) ? latest : undefined;
-        if (!event.revision.cardId || this.#executions.some(item=>item.finishedAt===null) || (candidate ? candidate.cardId!==event.revision.cardId||event.revision.parentRevision!==candidate.revision : event.revision.parentRevision!==null||this.#workflowRevisions.some(item=>item.cardId===event.revision.cardId))) throw new Error("候选卡或父版本不匹配。");
-        }
-      }
-      if(this.#workflowRevisions.length+1!==event.revision.revision||event.revision.acceptedAt!==null||(event.revision.rejectedAt??null)!==null) throw new Error("Workflow revision 序号或状态无效。");
-      this.#workflowRevisions.push(event.revision);return;
+    if (event.type === "workflow.revision_proposed" || event.type === "workflow.revision_adopted") {
+      if (event.type === "workflow.revision_adopted" && (event.revision.exportRequestId !== event.clientRequestId || event.revision.exportedAt !== event.exportedAt)) throw new Error("保存并接管事件身份不一致。");
+      this.appendRevision(event.revision, event.type === "workflow.revision_adopted");
+      return;
     }
     if (event.type === "workflow.revision_accepted") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.parametersPending || revision.revision !== event.revision || revision.acceptedAt !== null || (revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能按最新参数完整、未接受且未拒绝草案冻结。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, acceptedAt: event.at }; return; }
     if (event.type === "workflow.revision_rejected") { const revision = this.#workflowRevisions.at(-1); if (!revision || revision.revision !== event.revision || revision.acceptedAt !== null || (revision.rejectedAt ?? null) !== null) throw new Error("Workflow revision 只能拒绝最新未接受且未拒绝草案。 "); this.#workflowRevisions[this.#workflowRevisions.length - 1] = { ...revision, rejectedAt: event.at }; return; }
@@ -525,7 +542,7 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
   if (item.type === "harness.turn_finished") { if (typeof item.messageId !== "string" || !item.messageId.trim()) throw new Error("Harness turn_finished 无效。 "); return item as unknown as HarnessEvent; }
   if (item.type === "harness.turn_interrupted" && typeof item.diagnostic === "string" && item.diagnostic.trim()) return item as unknown as HarnessEvent;
   if (item.type === "harness.completed") {if(item.abandonImpactSummaries!==undefined&&typeof item.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return item as unknown as HarnessEvent;}
-  if (item.type === "workflow.revision_proposed" && isWorkflowRevision(item.revision)) {
+  if ((item.type === "workflow.revision_proposed" || item.type === "workflow.revision_adopted") && isWorkflowRevision(item.revision)) {
     const revision=item.revision;
     if(revision.updateReason!==undefined&&!["save-template","save-local","generate-plan","modify-plan","modify-parameters","modify-configuration"].includes(revision.updateReason))throw new Error("方案更新原因无效。");
     if(revision.localOrigin!==undefined){
@@ -542,6 +559,9 @@ function validateEvent(value: unknown, harnessRunId: string): HarnessEvent {
       if(revision.parametersPending!==true)validateTemplateInput(revision.templateOrigin.inputSchema,revision.input);
     }
     if(revision.derivedFrom!==undefined&&!isTemplateOrigin(revision.derivedFrom))throw new Error("模板派生来源无效。");
+    if (item.type === "workflow.revision_adopted") {
+      if (typeof item.clientRequestId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(item.clientRequestId) || typeof item.exportedAt !== "string" || Number.isNaN(Date.parse(item.exportedAt)) || revision.exportRequestId !== item.clientRequestId || revision.exportedAt !== item.exportedAt || !revision.localOrigin || revision.sourceFormat !== "module" || !/^[a-f0-9]{64}$/.test(String(revision.exportPayloadHash))) throw new Error("保存并接管事件无效。");
+    }
     return item as unknown as HarnessEvent;
   }
   if (item.type === "workflow.revision_preview_saved" && Number.isInteger(item.revision) && (item.revision as number) > 0 && isRevisionPreview(item.preview)) return item as unknown as HarnessEvent;
@@ -593,13 +613,19 @@ export function interruptConversationEntry(entry: HarnessConversationEntry, at: 
   return { ...entry, status: "interrupted", finishedAt: at };
 }
 function isToolActivity(value: unknown): value is HarnessToolActivity { return plain(value) && typeof value.label === "string" && value.label.trim() !== "" && typeof value.finishedAt === "string" && !Number.isNaN(Date.parse(value.finishedAt)) && (value.outcome === "completed" || value.outcome === "failed") && Object.keys(value).every((key) => key === "label" || key === "finishedAt" || key === "outcome"); }
-function isWorkflowRevision(value: unknown): value is WorkflowRevision { return plain(value) && (value.cardId === undefined || typeof value.cardId === "string" && !!value.cardId && (value.parentRevision === null || Number.isInteger(value.parentRevision)) && typeof value.goal === "string" && !!value.goal.trim() && value.goal.length <= 20000 && typeof value.scope === "string" && !!value.scope.trim() && value.scope.length <= 20000 && value.abandonedAt === null && typeof value.turnId === "string") && Number.isInteger(value.revision) && (value.revision as number) > 0 && typeof value.source === "string" && value.source.length > 0 && value.source.length <= 200_000 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.acceptedAt === null && (value.rejectedAt === undefined || value.rejectedAt === null) && (value.preview === undefined || (isRevisionPreview(value.preview) && previewMatchesSource(value.preview, value.source, String(value.sourceHash)))); }
+function isWorkflowRevision(value: unknown): value is WorkflowRevision {
+  if (!plain(value)) return false;
+  if (value.sourceFormat !== undefined && value.sourceFormat !== "module" && value.sourceFormat !== "restricted") return false;
+  const hasExport = value.exportRequestId !== undefined || value.exportedAt !== undefined || value.exportPayloadHash !== undefined;
+  if (hasExport && (typeof value.exportRequestId !== "string" || !value.exportRequestId || typeof value.exportedAt !== "string" || Number.isNaN(Date.parse(value.exportedAt)) || !/^[a-f0-9]{64}$/.test(String(value.exportPayloadHash)) || value.sourceFormat !== "module" || !plain(value.localOrigin))) return false;
+  return (value.cardId === undefined || typeof value.cardId === "string" && !!value.cardId && (value.parentRevision === null || Number.isInteger(value.parentRevision)) && typeof value.goal === "string" && !!value.goal.trim() && value.goal.length <= 20000 && typeof value.scope === "string" && !!value.scope.trim() && value.scope.length <= 20000 && value.abandonedAt === null && typeof value.turnId === "string") && Number.isInteger(value.revision) && (value.revision as number) > 0 && typeof value.source === "string" && value.source.length > 0 && value.source.length <= 200_000 && /^[a-f0-9]{64}$/i.test(String(value.sourceHash)) && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && value.acceptedAt === null && (value.rejectedAt === undefined || value.rejectedAt === null) && (value.preview === undefined || (isRevisionPreview(value.preview) && previewMatchesSource(value.preview, value.source, String(value.sourceHash))));
+}
 function isExecutionStatus(value: unknown): value is WorkflowExecutionRecord["status"] { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isPolicy(value: unknown): boolean { return plain(value) && Number.isInteger(value.maxNodes) && (value.maxNodes as number) >= 1 && Number.isInteger(value.maxPhaseVisits) && (value.maxPhaseVisits as number) >= 1 && Number.isInteger(value.maxGates) && (value.maxGates as number) >= 1; }
 function isExecutionRecord(value: unknown): value is WorkflowExecutionRecord {
   if(plain(value)&&value.sceneEvidenceHash!==undefined&&(typeof value.sceneEvidenceHash!=="string"||!/^[a-f0-9]{64}$/.test(value.sceneEvidenceHash)))return false;
   if (!plain(value) || typeof value.executionId !== "string") return false;
-  if (value.kind !== undefined && value.kind !== "local-run" && value.kind !== "restricted-execution") return false;
+  if (value.kind !== undefined && value.kind !== "module-run" && value.kind !== "local-run" && value.kind !== "restricted-execution") return false;
   if(value.confirmationRequestId!==undefined||value.confirmationPayloadHash!==undefined){
     if(typeof value.confirmationRequestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.confirmationRequestId)||!/^[a-f0-9]{64}$/.test(String(value.confirmationPayloadHash)))return false;
   }
@@ -613,10 +639,12 @@ function isWorkerAssignment(value: unknown): value is import("./types").WorkerAs
 }
 /** 执行配置快照的耐久形状校验；只验证结构，语义（runtime 已验证、id 已枚举）由创建路径保证。 */
 function isExecutionConfigSnapshot(value: unknown): value is import("./types").ExecutionConfigSnapshot {
-  if (!plain(value)) return false;
-  if (value.version !== 1 || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt)) || typeof value.fallbackRuntimeId !== "string" || !value.fallbackRuntimeId.trim() || (value.ruleText !== null && typeof value.ruleText !== "string") || typeof value.ruleDegraded !== "boolean" || !Array.isArray(value.assignments)) return false;
-  if (!isWorkerAssignment(value.defaultAssignment)) return false;
+  if (!plain(value) || value.version !== 1 || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))) return false;
   if (value.workspaces !== undefined) { try { validateExecutionWorkspaces(value.workspaces); } catch { return false; } }
+  if (value.assignmentMode === "script") return Object.keys(value).every(key => ["version", "assignmentMode", "createdAt", "workspaces"].includes(key));
+  if (value.assignmentMode !== undefined && value.assignmentMode !== "assigned") return false;
+  if (typeof value.fallbackRuntimeId !== "string" || !value.fallbackRuntimeId.trim() || (value.ruleText !== null && typeof value.ruleText !== "string") || typeof value.ruleDegraded !== "boolean" || !Array.isArray(value.assignments)) return false;
+  if (!isWorkerAssignment(value.defaultAssignment)) return false;
   const ids = new Set<string>();
   for (const assignment of value.assignments) {
     if (!isWorkerAssignment(assignment)) return false;

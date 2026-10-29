@@ -1,7 +1,21 @@
-const meta = {
+import { agent, decisionGate, log, parallel, phase } from "wave-flow";
+
+export const meta = {
   name: "deep-research",
   description: "多源深度调研、逐条核验并批判修订",
   phases: [{ title: "计划" }, { title: "调研" }, { title: "核验" }, { title: "交叉检查与补证" }, { title: "综评" }, { title: "批判" }, { title: "定稿" }],
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["topic"],
+    properties: {
+      topic: { type: "string", minLength: 1, maxLength: 500, description: "调研主题，必填，建议一句话说清要调研什么。" },
+      questions: { type: "array", minItems: 1, maxItems: 6, items: { type: "string", minLength: 1, maxLength: 300 }, description: "可选：你明确希望回答的具体问题，计划 Agent 会吸收进研究问题清单。" },
+      context: { type: "string", maxLength: 2000, description: "可选背景与约束，未填与空字符串分别保留。" },
+      depth: { type: "string", enum: ["standard", "deep"], description: "standard=一轮调研+核验+红队修订；deep=额外对证据缺口做第二轮定向补证。" },
+      language: { type: "string", maxLength: 20, description: "报告语言，默认中文。" },
+    },
+  },
   exampleArgs: { topic: "端侧大模型推理框架的现状与选型", depth: "deep" }
 };
 type Args = { topic: string; questions?: string[]; context?: string; depth?: string; language?: string };
@@ -12,7 +26,7 @@ type Finding = { claim: string; evidence: FindingEvidence[]; confidence: string;
 type ResearchBatch = { findings: Finding[]; gaps: string[]; failedSources: string[] };
 type VerifyBatch = { verified: Finding[]; rejected: { claim: string; reason: string }[]; corrections: string[] };
 
-async function run(args: Args) {
+export default async function run(args: Args) {
   const topic = args.topic;
   const language = typeof args.language === "string" && args.language.trim() !== "" ? args.language : "中文";
   const deep = args.depth === "deep";

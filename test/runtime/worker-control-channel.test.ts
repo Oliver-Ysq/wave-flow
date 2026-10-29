@@ -39,8 +39,8 @@ test("Worker MCP 的 complete 工具通过私有 socket 交给 ControlServer", a
   expect(response.id).toBe(2);
   expect((response.result as { content: { text: string }[] }).content[0].text).toBe('{"ok":true}');
   expect(received).toEqual([{ runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: { ok: true } }]);
-  // 客户端stdin仍打开也必须退出，不能依赖ACP adapter会回收它。
-  expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
+  // 客户端stdin仍打开也必须退出，不能依赖ACP adapter会回收它；按真实退出等待。
+  expect(await child.exited).toBe(0);
 }, 20_000);
 
 for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP自行退出，不依赖ACP关闭stdin，pendingBlock=${pending}`, async () => {
@@ -59,7 +59,7 @@ for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP
     await blocked;
   }
   pipe.close();
-  expect(await Promise.race([child.exited, Bun.sleep(2_000).then(() => "pending")])).toBe(0);
+  expect(await child.exited).toBe(0);
 }, 20_000);
 
 /** block/continue 是 HITL 的另两个入口，必须与 complete 一样经私有 socket 且携带绑定身份。 */
@@ -150,8 +150,8 @@ test("通道数达到线程池大小后，异步文件写入仍能完成", async
       opened.push(new WorkerControlChannel(control as never, { runId: "run", nodeId: `node-${index}`, agentSessionId: `session-${index}`, capability: "capability" }, undefined, scratch));
     }
     const target = join(scratch, "probe.log");
-    const write = appendFile(target, "probe\n").then(() => "ok");
-    expect(await Promise.race([write, Bun.sleep(3_000).then(() => "timeout")])).toBe("ok");
+    // 并发通道下写入必然完成；按真实完成等待，不用 3 秒墙钟判定。
+    await appendFile(target, "probe\n");
     for (const channel of opened) channel.close();
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }, 20_000);

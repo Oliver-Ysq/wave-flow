@@ -17,8 +17,9 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 const model: ResolvedHarnessModelConfig = { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" };
 const createPi = (): HarnessSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
 
-const SOURCE = `const meta = { name: "exec-hint", description: "提示证据", phases: [{ title: "工作" }] };
-async function run(args) {
+const SOURCE = `import { agent, phase } from "wave-flow";
+export const meta = { name: "exec-hint", description: "提示证据", phases: [{ title: "工作" }], inputSchema: { type: "object", properties: { note: { type: "string" } }, additionalProperties: false } };
+export default async function run(args) {
   phase("工作");
   const done = await agent("做任务", { id: "w1", cli: "codex" });
   return { ok: true, node: done.nodeId, note: args.note ?? null };
@@ -79,7 +80,7 @@ test("执行器停滞提示在运行快照与 capsule 证据中可见，完成�
   try {
     await harness.proposeWorkflowRevision(harnessRunId, SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1, {}, executionConfig());
+    const { execution } = await executions.createExecution(harnessRunId, 1, {});
     await waitFor(async () => (await executions.listExecutions(harnessRunId))[0].finishedAt !== null);
 
     expect(observed).not.toBeNull();

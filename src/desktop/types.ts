@@ -161,7 +161,7 @@ export type AcceptWorkflowRevisionRequest = { readonly revision: number };
 export type CreateExecutionRequest = {
   /** 已接受冻结的 revision 序号；草稿序号必须被拒绝。 */
   readonly revision: number;
-  /** 传给受限脚本 run(args) 的 JSON-safe 输入；省略时为 {}。 */
+  /** 传给作者模块 run(args) 的 JSON-safe 输入；省略时为 {}。 */
   readonly input?: JsonObject;
   /** 分配卡冻结的执行配置快照；Harness Execution 必填，缺失即拒绝创建。 */
   readonly config?: import("../harness/types").ExecutionConfigSnapshot;
@@ -183,13 +183,13 @@ export type ExecutionPlanResponse = {
   /** 已校验 meta.phases 的声明顺序标题；只作预览词表，不表达执行顺序或依赖。 */
   readonly phaseTitles: readonly string[];
   /** 每个源码 agent() 调用一个展示示意（含动态 id）；不用于分配校验或运行节点定位。 */
-  readonly previewAgents: readonly import("../workflow/restricted/extract-agents").PreviewAgent[];
+  readonly previewAgents: readonly import("../workflow/extract-agents").PreviewAgent[];
   /** 所属 Harness Run id。 */
   readonly harnessRunId: string;
   /** 已接受冻结的 revision 序号。 */
   readonly revision: number;
   /** 静态枚举出的字面量 Worker；分配卡逐 Worker 展示。 */
-  readonly workers: readonly import("../workflow/restricted/extract-agents").ExtractedAgentWorker[];
+  readonly workers: readonly import("../workflow/extract-agents").ExtractedAgentWorker[];
   /** 非字面量 id 的 agent() 调用数；它们运行时落 default 分配。 */
   readonly dynamicCount: number;
   /** 已验证即候选的 Worker Runtime 池；不含文件身份。 */

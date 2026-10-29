@@ -8,7 +8,6 @@ import { agent, parallel, phase, pipeline } from "../../src/workflow/author-api"
 import { WorkflowContractError } from "../../src/workflow/errors";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
 import type { JsonObject } from "../../src/shared/json";
-import { compileRestrictedWorkflow } from "../../src/workflow/restricted/restricted-runtime";
 
 const directories: string[] = [];
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -40,11 +39,4 @@ for (const mode of ["parallel", "pipeline"] as const) test(`${mode}不得吞掉�
   expect(await resumed.run(workflow)).toEqual([{ ok: true }]); expect(executions).toBe(0); expect(finalized).toBe(1); expect(calls).toBe(1);
   const { events } = await RunJournal.open(runtime.snapshot().id, root);
   expect(events.filter(event => event.type === "agent.restarted")).toHaveLength(0);
-});
-
-test("受限vm膜也穿透成果交接契约错误，不把宿主失败变成业务null", async () => {
-  const workflow = compileRestrictedWorkflow('const meta = { name: "restricted-ready", description: "ready", phases: [{ title: "run" }] }; async function run(args) { phase("run"); return await parallel([() => agent("work", { id: "a", cli: "codex" })]); }');
-  const runtime = await create(workflow, async () => { throw new WorkflowContractError("成果关联失败"); });
-  await expect(runtime.run(workflow)).rejects.toThrow("成果关联失败");
-  expect(runtime.snapshot().status).toBe("interrupted"); expect(runtime.snapshot().phases[0].agents[0].status).toBe("completed");
 });

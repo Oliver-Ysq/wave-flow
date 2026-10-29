@@ -15,20 +15,15 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 const model: ResolvedHarnessModelConfig = { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" };
 const createPi = (): HarnessSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
 
-const GATE_SOURCE = `const meta = { name: "exec-gate", description: "带决策门", phases: [{ title: "工作" }] };
-async function run(args) {
+const GATE_SOURCE = `import { agent, decisionGate, phase } from "wave-flow";
+export const meta = { name: "exec-gate", description: "带决策门", phases: [{ title: "工作" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };
+export default async function run(args) {
   phase("工作");
   await agent("第一阶段", { id: "w1", cli: "codex" });
   const answer = await decisionGate({ id: "confirm", question: "是否进入第二阶段？" });
   if (!answer.ok) throw new Error("用户拒绝");
   return agent("第二阶段", { id: "w2", cli: "codex" });
 }`;
-
-/** 测试冻结配置；服务层不核对 runtimeId 真实性（那是 Engine action 的职责）。 */
-function testConfig(): import("../../src/harness/types").ExecutionConfigSnapshot {
-  const assignment = (agentId: string): import("../../src/harness/types").WorkerAssignment => ({ agentId, cli: "codex", model: "cli-default", source: "harness-cli", runtimeId: "test-runtime", adapterId: "codex-acp", adapterVersion: "0.0.0-test" });
-  return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: "test-runtime", ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("w1"), assignment("w2")] };
-}
 
 async function waitFor(condition: () => Promise<boolean> | boolean): Promise<void> {
   const deadline = Date.now() + 10_000;
@@ -52,7 +47,7 @@ describe("DesktopExecutionEngine 启动收敛", () => {
     const { harnessRunId } = await harness.create(root);
     await harness.proposeWorkflowRevision(harnessRunId, GATE_SOURCE);
     await harness.acceptWorkflowRevision(harnessRunId, 1);
-    const { execution } = await executions.createExecution(harnessRunId, 1, {}, testConfig());
+    const { execution } = await executions.createExecution(harnessRunId, 1, {});
     await waitFor(async () => (await executions.snapshotExecution(harnessRunId, execution.executionId)).gates.length === 1);
 
     // 模拟旧版本以 0755 创建的状态目录：读取校验会让 list() 把档案静默丢弃。

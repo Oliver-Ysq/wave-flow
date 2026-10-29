@@ -3,13 +3,14 @@ import { isAbsolute, relative, resolve } from "node:path";
 import ts from "typescript";
 import type { WorkflowModule } from "../shared/workflow-types";
 import { validateWorkflowMeta } from "./validate-meta";
-import { agent, log, parallel, phase, pipeline } from "./author-api";
+import { agent, decisionGate, log, parallel, phase, pipeline } from "./author-api";
 
 const AUTHOR_API_GLOBAL = Symbol.for("wave-flow.author-api");
 const authorApiBridgeUrl = `data:text/javascript;base64,${Buffer.from(`
 const api = globalThis[Symbol.for(${JSON.stringify(AUTHOR_API_GLOBAL.description)})];
 if (!api) throw new Error("Wave Flow 作者 API bridge 不可用。");
 export const agent = (...args) => api.agent(...args);
+export const decisionGate = (...args) => api.decisionGate(...args);
 export const log = (...args) => api.log(...args);
 export const parallel = (...args) => api.parallel(...args);
 export const phase = (...args) => api.phase(...args);
@@ -19,7 +20,7 @@ export const pipeline = (...args) => api.pipeline(...args);
 // 受信任 Workflow 的唯一运行时 import 不应依赖开发 checkout 或编译二进制的 /$bunfs 路径。
 // 仅暴露作者 API；Workflow 仍不获得 Runtime、Journal、Control 或 Session Host 对象。
 Object.defineProperty(globalThis, AUTHOR_API_GLOBAL, {
-  value: Object.freeze({ agent, log, parallel, phase, pipeline }),
+  value: Object.freeze({ agent, decisionGate, log, parallel, phase, pipeline }),
   writable: false,
   configurable: false,
 });
@@ -119,7 +120,7 @@ function isExportedMeta(statement: ts.Statement): statement is ts.VariableStatem
   return declarations.length === 1 && ts.isIdentifier(declarations[0].name) && declarations[0].name.text === "meta";
 }
 
-/** 校验 meta 等声明只含纯字面量；受限 Runtime 的脚本校验复用同一规则。 */
+/** 校验 meta 等声明只含纯字面量；作者模块与历史记录审计共用同一规则。 */
 export function isPureLiteral(expression: ts.Expression): boolean {
   if (ts.isStringLiteral(expression) || ts.isNumericLiteral(expression) || expression.kind === ts.SyntaxKind.TrueKeyword
     || expression.kind === ts.SyntaxKind.FalseKeyword || expression.kind === ts.SyntaxKind.NullKeyword) return true;

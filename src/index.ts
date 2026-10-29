@@ -1,5 +1,5 @@
 /** Workflow 作者可导入的公开编排原语；每个函数仅可在 executeWorkflow() 建立的运行上下文内调用。 */
-export { agent, log, parallel, phase, pipeline } from "./workflow/author-api";
+export { agent, decisionGate, log, parallel, phase, pipeline } from "./workflow/author-api";
 
 /** 供 Runtime 或测试加载受信任本地 Workflow 的模块加载器。 */
 export { loadWorkflow } from "./workflow/load-workflow";

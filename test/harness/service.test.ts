@@ -16,18 +16,18 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm
 test("revision 预览提案时耐久，旧档案并发补齐一次，重开不重复保存", async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'wave-flow-preview-durable-')); directories.push(cwd);
   const root = harnessRunsRoot(cwd);
-  const source = `const meta = { name: 'durable-preview', description: '预览', phases: [{ title: '检查' }] }; async function run(args) { phase('检查'); for (const item of args.items) await agent('检查', { id: item.id, cli: 'kimi', label: '检查 Agent' }); return {}; }`;
+  const source = `import { agent, phase } from "wave-flow";\nexport const meta = { name: 'durable-preview', description: '预览', phases: [{ title: '检查' }], inputSchema: { type: 'object', properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase('检查'); for (const item of args.items) await agent('检查', { id: item.id, cli: 'kimi', label: '检查 Agent' }); return {}; }`;
   const service = new HarnessService(root, async () => new FakePi());
   const created = await service.create(cwd);
   const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
-  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 3,description:"预览",workflowName:"durable-preview", sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
+  expect(proposed.workflowRevisions[0]?.preview).toMatchObject({ previewVersion: 5,description:"预览",workflowName:"durable-preview", sourceHash: proposed.workflowRevisions[0]?.sourceHash, phaseTitles: ['检查'], previewAgents: [{ name: '检查 Agent', loop: true }] });
   const saved = await HarnessJournal.open(created.harnessRunId, root);
   expect(saved.snapshot.workflowRevisions[0]?.preview).toEqual(proposed.workflowRevisions[0]?.preview);
   expect(saved.events.filter(event => event.type === 'workflow.revision_preview_saved')).toHaveLength(0);
 
   const legacyId = crypto.randomUUID();
   const journal = await HarnessJournal.create({ harnessRunId: legacyId, cwd, version: 9, modelFingerprint: 'a'.repeat(64), createdAt: new Date().toISOString() }, root);
-  const revision = { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
+  const revision = { revision: 1, source, sourceHash: createHash('sha256').update(source).digest('hex'), sourceFormat: 'module' as const, createdAt: new Date().toISOString(), acceptedAt: null, rejectedAt: null };
   await journal.append({ type: 'workflow.revision_proposed', at: revision.createdAt, harnessRunId: legacyId, revision });
   await journal.append({ type: 'workflow.revision_accepted', at: revision.createdAt, harnessRunId: legacyId, revision: 1 });
   const opened = new HarnessService(root, async () => new FakePi());
@@ -263,7 +263,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-revision-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     const created = await service.create(cwd);
-    const source = 'const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nasync function run(args) { return args; }';
+    const source = 'import { agent } from "wave-flow";\nexport const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { return args; }';
     const proposed = await service.proposeWorkflowRevision(created.harnessRunId, source);
     expect(proposed.workflowRevisions).toHaveLength(1);
     expect(proposed.workflowRevisions[0]).toMatchObject({ revision: 1, source, acceptedAt: null, sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
@@ -296,7 +296,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-revision-lock-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     const created = await service.create(cwd);
-    const draft = (name: string) => `const meta = { name: "${name}", description: "并发提案", phases: [{ title: "p" }] };\nasync function run(args) { return args; }`;
+    const draft = (name: string) => `import { agent } from "wave-flow";\nexport const meta = { name: "${name}", description: "并发提案", phases: [{ title: "p" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { return args; }`;
     await Promise.all([service.proposeWorkflowRevision(created.harnessRunId, draft("draft-one")), service.proposeWorkflowRevision(created.harnessRunId, draft("draft-two"))]);
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1 }, { revision: 2 }] });
   });
@@ -313,7 +313,7 @@ describe("HarnessService", () => {
     expect(completed).toMatchObject({ status: "completed", completedAt: expect.any(String) });
     expect(pi.closed).toBe(true);
     await expect(service.send(created.harnessRunId, "不应发送")).rejects.toThrow("完成归档");
-    await expect(service.proposeWorkflowRevision(created.harnessRunId, 'const meta = { name: "late", description: "late", phases: [{ title: "p" }] }; async function run(args) { return args; }')).rejects.toThrow("完成归档");
+    await expect(service.proposeWorkflowRevision(created.harnessRunId, 'import { agent } from "wave-flow";\nexport const meta = { name: "late", description: "late", phases: [{ title: "p" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { return args; }')).rejects.toThrow("完成归档");
 
     const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, () => new FakePi());
     await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ status: "completed", completedAt: completed.completedAt });
@@ -336,7 +336,7 @@ describe("HarnessService", () => {
     const created = await service.create(cwd);
     // 主控最常见的生成错误：混入中文引号。拒绝必须发生在冻结之前，诊断必须可行动。
     const invalid = 'const meta = { name: "draft", description: "draft", phases: [{ title: "plan" }] };\nasync function run(args) { return agent(“审查代码”, { id: "a", cli: "codex" }); }';
-    await expect(service.proposeWorkflowRevision(created.harnessRunId, invalid)).rejects.toThrow(/语法无效.*第 2 行.*U\+201C/s);
+    await expect(service.proposeWorkflowRevision(created.harnessRunId, invalid)).rejects.toThrow(/生成稿 语法错误 2:/);
     await expect(service.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [] });
     const reopened = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     await expect(reopened.snapshot(created.harnessRunId)).resolves.toMatchObject({ workflowRevisions: [] });
@@ -351,7 +351,7 @@ describe("HarnessService", () => {
       subscribe: () => () => {},
       async prompt() {
         running = true;
-        await actions!.proposeWorkflowRevision('const meta = { name: "action-revision", description: "来自主控工具", phases: [{ title: "确认" }] };\nasync function run(_args) { phase("确认"); return {}; }');
+        await actions!.proposeWorkflowRevision('import { phase } from "wave-flow";\nexport const meta = { name: "action-revision", description: "来自主控工具", phases: [{ title: "确认" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(_args) { phase("确认"); return {}; }');
         running = false;
         return "草案已提交";
       },
@@ -602,7 +602,7 @@ describe("HarnessService", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-harness-reject-")); directories.push(cwd);
     const service = new HarnessService(harnessRunsRoot(cwd), async () => testModel, (_config, _cwd, _prior) => new FakePi());
     const created = await service.create(cwd);
-    const source = 'const meta = { name: "reject-draft", description: "拒绝路径", phases: [{ title: "p" }] };\nasync function run(args) { return args; }';
+    const source = 'import { agent } from "wave-flow";\nexport const meta = { name: "reject-draft", description: "拒绝路径", phases: [{ title: "p" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { return args; }';
     await service.proposeWorkflowRevision(created.harnessRunId, source);
     await expect(service.rejectWorkflowRevision(created.harnessRunId, 1)).resolves.toMatchObject({ workflowRevisions: [{ revision: 1, acceptedAt: null, rejectedAt: expect.any(String) }] });
     await expect(service.acceptWorkflowRevision(created.harnessRunId, 1)).rejects.toThrow("未接受且未拒绝");

@@ -266,7 +266,18 @@ export type ImpactSummary = {
 export type WorkflowRevision = {
   /** 保存入口记录的更新原因；缺省为旧记录未知。仅用于展示，不改变批准/执行语义。 */
   readonly updateReason?: "save-template" | "save-local" | "generate-plan" | "modify-plan" | "modify-parameters" | "modify-configuration";
-  /** 受信任本地来源快照；缺省为受限源码；只由Engine安全预检写入，主控不能提交。 */
+  /**
+   * 源码形态；module 为作者模块，restricted 为升级前的受限方言。
+   * 缺省时按 localOrigin 是否存在推断：有 localOrigin 视为 module，否则视为 restricted。
+   */
+  readonly sourceFormat?: "module" | "restricted";
+  /** 保存并接管的请求 UUID；仅由用户保存生成的 revision 有，用于同请求幂等。 */
+  readonly exportRequestId?: string;
+  /** 保存并接管的耐久时间；仅由用户保存生成的 revision 有。 */
+  readonly exportedAt?: string;
+  /** 保存并接管的规范载荷指纹；同一 UUID 冲突检测，不构成授权。 */
+  readonly exportPayloadHash?: string;
+  /** 本地来源快照；只由Engine安全预检写入或用户保存接管写入，主控不能提交。 */
   readonly localOrigin?: {
     /** 已验证项目内原文件；恢复不再次读取它。 */ readonly path: string;
     /** 原预检源码hash，须等于revision.sourceHash。 */ readonly sourceHash: string;
@@ -301,7 +312,7 @@ export type WorkflowRevision = {
   readonly preview?: import("./revision-preview").RevisionPreview;
   /** Harness 内递增 revision；同一序号的 source/hash 不可改变。 */
   readonly revision: number;
-  /** 草案 TypeScript 原文；尚未进入受限 Runtime。 */
+  /** 草案 TypeScript 原文；module 形态为作者模块，restricted 为旧格式。 */
   readonly source: string;
   /** source 的 SHA-256，用于后续 Execution 冻结与审计。 */
   readonly sourceHash: string;
@@ -314,8 +325,8 @@ export type WorkflowRevision = {
 };
 
 /**
- * 分配卡冻结的一个 Worker 指派。它覆盖脚本字面量 cli：受限 Execution 中脚本写死的
- * cli/model 不直接生效，只有快照指派决定节点落到哪个已验证 Runtime。
+ * 历史 assigned 配置中的一个 Worker 指派。模块 Workflow 不使用该字段，
+ * 节点 cli/model 由作者源码直接决定。
  */
 export type WorkerAssignment = {
   /** 目标 Worker 节点 id；必须命中静态枚举的字面量 id，defaultAssignment 的兜底条目除外。 */
@@ -335,34 +346,51 @@ export type WorkerAssignment = {
 };
 
 /**
- * 创建 Execution 时由分配卡冻结的不可变执行配置。随 WorkflowExecutionRecord 耐久，
- * resume 从登记事实重新加载；分配变化会让 replay 指纹不匹配，从而诚实拒绝复用旧结果。
+ * 创建 Execution 时冻结的不可变执行配置。随 WorkflowExecutionRecord 耐久，
+ * resume 从登记事实重新加载。assigned 模式由分配卡决定节点 CLI；
+ * script 模式由作者模块自己决定 CLI/模型，配置只承载工作区授权。
  */
-export type ExecutionConfigSnapshot = {
-  /** 快照格式版本；当前固定为 1。 */
-  readonly version: 1;
-  /** 快照创建时间。 */
-  readonly createdAt: string;
-  /** 启动前失败的唯一回退目标：主控 CLI 的 runtimeId；主控不可用则 fail closed。 */
-  readonly fallbackRuntimeId: string;
-  /** 用户输入的自然语言分配规则原文；未使用规则时为 null。 */
-  readonly ruleText: string | null;
-  /** 规则解析失败/超时后是否已显式退化为随机分配；UI 必须如实展示。 */
-  readonly ruleDegraded: boolean;
-  /** 未命中 assignments 的节点（含动态 id Worker）使用的兜底分配。 */
-  readonly defaultAssignment: WorkerAssignment;
-  /** 逐 Worker 指派；agentId 不得重复。 */
-  readonly assignments: readonly WorkerAssignment[];
-  /** Wave Flow新增Git成果授权与绑定；省略仅允许无受管写成果的既有路径，不隐式创建worktree/commit。 */
-  readonly workspaces?: import("../workspace/execution-workspaces").ExecutionWorkspaceConfig;
-};
+export type ExecutionConfigSnapshot =
+  | {
+      /** 快照格式版本；当前固定为 1。 */
+      readonly version: 1;
+      /** 分配模式；缺省 assigned 兼容旧记录。 */
+      readonly assignmentMode?: "assigned";
+      /** 快照创建时间。 */
+      readonly createdAt: string;
+      /** 启动前失败的唯一回退目标：主控 CLI 的 runtimeId；主控不可用则 fail closed。 */
+      readonly fallbackRuntimeId: string;
+      /** 用户输入的自然语言分配规则原文；未使用规则时为 null。 */
+      readonly ruleText: string | null;
+      /** 规则解析失败/超时后是否已显式退化为随机分配；UI 必须如实展示。 */
+      readonly ruleDegraded: boolean;
+      /** 未命中 assignments 的节点（含动态 id Worker）使用的兜底分配。 */
+      readonly defaultAssignment: WorkerAssignment;
+      /** 逐 Worker 指派；agentId 不得重复。 */
+      readonly assignments: readonly WorkerAssignment[];
+      /** Wave Flow新增Git成果授权与绑定；省略仅允许无受管写成果的既有路径，不隐式创建worktree/commit。 */
+      readonly workspaces?: import("../workspace/execution-workspaces").ExecutionWorkspaceConfig;
+    }
+  | {
+      /** 快照格式版本；当前固定为 1。 */
+      readonly version: 1;
+      /** 脚本模式：节点 CLI/模型由作者模块决定，不读取分配字段。 */
+      readonly assignmentMode: "script";
+      /** 快照创建时间。 */
+      readonly createdAt: string;
+      /** 仅写类模块 Workflow 需要；只读模块不带此字段。 */
+      readonly workspaces?: import("../workspace/execution-workspaces").ExecutionWorkspaceConfig;
+    };
 
 /** 一次 WorkflowExecution 的耐久登记；Execution 内部状态由它自己的 Run Journal 负责。 */
 export type WorkflowExecutionRecord = {
   /** 前一终态Execution的启动现场证据；首次缺省，确认时冻结，不作为跨执行Replay或权限。 */
   readonly sceneEvidenceHash?:string;
-  /** 来源控制路由；历史缺省restricted-execution；local-run使用独立Run Store，不变更源码信任。 */
-  readonly kind?: "restricted-execution" | "local-run";
+  /**
+   * 来源控制路由：module-run 为生成模块，local-run 为本地来源文件，
+   * restricted-execution 为历史只读记录。local-run 使用独立 Run Store；其余使用 Harness 内嵌 Store。
+   */
+  readonly kind?: "module-run" | "local-run" | "restricted-execution";
   /** 模板确认请求 UUID；缺省为历史/自动编排执行，同请求重试不再次派发。 */
   readonly confirmationRequestId?: string;
   /** 确认版本/输入/配置规范指纹；只用于冲突检测，不构成授权。 */
@@ -387,7 +415,7 @@ export type WorkflowExecutionRecord = {
   readonly diagnostic: string | null;
   /** 脚本 run() 的 JSON 返回值摘要，供主控汇总；非对象结果或未结束时为 null。 */
   readonly summary: JsonObject | null;
-  /** 受限来源冻结的分配配置；本地来源不保存也不使用，历史受限档案可缺失但不能恢复。 */
+  /** 历史 assigned 配置或模块写类的工作区授权；模块只读执行不保存，旧受限档案缺省即不可恢复。 */
   readonly config?: ExecutionConfigSnapshot;
 };
 

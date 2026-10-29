@@ -1,7 +1,6 @@
 # 编排模式
 
-以下是设计指引，不是 API。示例均按受限草案形状书写（无 import/export）；受信任模块
-只需补上 `import { … } from "wave-flow"` 与 `export`。
+以下是设计指引，不是 API。所有示例都按 Wave Flow 的 ESM 模块形状书写：`import { … } from "wave-flow"`、`export const meta` 与 `export default async function run(args)`。
 
 ## 计划 → 扇出 → 汇总
 
@@ -114,7 +113,7 @@ return agent(`复审刚才的实现，修复已验证的问题并再次运行检
 “集成 Agent”去解冲突，也不得预测 commit/tree hash 或执行 push；宿主在
 Execution 完成后宿主不保存快照，结果只保留在受管 worktree 的当前未提交文件里，不写入主工作区；作者不提供该接口。
 
-## 脚本级人工决策（仅受限草案）
+## 脚本级人工决策
 
 只有真正的业务分叉才用 `decisionGate`；先说明为什么需要人、可选项与影响：
 
@@ -148,8 +147,8 @@ gate  durable-first：先落盘再等待；用户停止 Execution 时等待中�
 ## 循环与回溯
 
 `phase()` 可以重复进入同一已声明阶段（猜测→分析→再猜测），每次进入是一轮新的阶段
-访问。受限草案受护栏限制：`phase()` 切换总数 ≤ 50、`agent()` 总数 ≤ 20，循环必须有
-明确收敛条件，不要写无界循环。
+访问。主控生成的 Execution 受护栏限制：`phase()` 切换总数 ≤ 50、`agent()` 总数 ≤ 20；
+循环必须有明确收敛条件，不要写无界循环。
 
 ## 内置预置是现成参照
 

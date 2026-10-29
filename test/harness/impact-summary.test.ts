@@ -225,8 +225,7 @@ test("总结准备期间用户先发消息，保留pending且用户回合结束�
  let reads=0;
  service.setExecutionCapsuleReader(async()=>{reads++;if(reads===1){readerStarted();return new Promise(done=>{releaseEvidence=done;});}return {status:"cancelled"};});
  await started;await service.send(id,"用户优先反馈");releaseEvidence({status:"cancelled"});
- const pendingDeadline=Date.now()+1_000;
- while((await service.snapshot(id)).impactSummaries![0].status!=="pending"){if(Date.now()>pendingDeadline)throw new Error("总结准备竞态未收敛pending");await Bun.sleep(2);}
+ for(let n=0;n<10_000&&(await service.snapshot(id)).impactSummaries![0].status!=="pending";n++)await Bun.sleep(2);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("pending");expect(calls).toBe(1);
  finishUser("反馈已接收");await summaryStarted(service,id);await settled(service,id);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("completed");expect(calls).toBe(2);
@@ -312,3 +311,16 @@ for(const stopReason of ["max_tokens","max_turn_requests","refusal"]){
   expect(completed.executions).toEqual(interrupted.executions);expect(calls).toBe(2);
  });
 }
+
+test("总结提示词要求面向用户的结果说明，并禁止内部实现信息",async()=>{
+ let promptText="";
+ const {service,id}=await fixture((...args:unknown[])=>{promptText=String(args[0]??"");return Promise.resolve("这次生成了三行摘要。");});
+ await summaryStarted(service,id);await settled(service,id);
+ expect(promptText.startsWith("请总结")).toBe(true);
+ expect(promptText).toContain("普通人能读懂");
+ expect(promptText).toContain("禁止出现任何内部实现信息");
+ expect(promptText).toContain("执行编号");
+ expect(promptText).toContain("Journal");
+ expect(promptText).toContain("目标满足／证据不足／未覆盖项");
+ expect((await service.snapshot(id)).impactSummaries![0].status).toBe("completed");
+});

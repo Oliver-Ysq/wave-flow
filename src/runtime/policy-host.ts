@@ -4,7 +4,7 @@ import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecution
 import { WorkflowContractError } from "../workflow/errors";
 
 /**
- * 受限 Workflow 脚本的资源护栏；只约束 Harness 生成脚本的执行，不影响受信任作者入口。
+ * 模块 Workflow 的资源护栏；用于 Harness 生成模块的 Execution，本地来源 Run 不传。
  * 每个 Execution 创建时冻结快照并随 `workflow.execution_created` 耐久，运行中不得扩大。
  */
 export type WorkflowPolicy = {
@@ -17,7 +17,7 @@ export type WorkflowPolicy = {
 };
 
 /** Harness 生成脚本的默认护栏；取值是实现验证的初始上限，不是性能结论。 */
-export const DEFAULT_RESTRICTED_WORKFLOW_POLICY: WorkflowPolicy = { maxNodes: 20, maxPhaseVisits: 50, maxGates: 10 };
+export const DEFAULT_WORKFLOW_POLICY: WorkflowPolicy = { maxNodes: 20, maxPhaseVisits: 50, maxGates: 10 };
 
 /** 包装任意 WorkflowExecutionHost，在委派前按 Policy 计数拒绝；不持有 Runtime 内部对象。 */
 export class PolicyEnforcingHost implements WorkflowExecutionHost {
@@ -27,7 +27,7 @@ export class PolicyEnforcingHost implements WorkflowExecutionHost {
 
   constructor(
     private readonly inner: WorkflowExecutionHost,
-    readonly policy: WorkflowPolicy = DEFAULT_RESTRICTED_WORKFLOW_POLICY,
+    readonly policy: WorkflowPolicy = DEFAULT_WORKFLOW_POLICY,
   ) {}
 
   agent(request: NormalizedAgentRequest, batch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {

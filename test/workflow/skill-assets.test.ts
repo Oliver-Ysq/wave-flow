@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadWorkflow } from "../../src/workflow/load-workflow";
-import { compileRestrictedWorkflow } from "../../src/workflow/restricted/restricted-runtime";
 
 const assets = join(dirname(fileURLToPath(import.meta.url)), "../../skills/workflow-creator/assets");
 const directories: string[] = [];
@@ -20,16 +19,10 @@ test("受信任模板通过真实 loadWorkflow 加载与 meta 校验", async () 
   expect(typeof module.default).toBe("function");
 });
 
-test("受限草案模板通过真实受限编译门禁", async () => {
-  const module = compileRestrictedWorkflow(await readFile(join(assets, "workflow.restricted.txt"), "utf8"));
-  expect(module.meta.name).toBe("planned-workflow");
-  expect(typeof module.default).toBe("function");
-});
-
-test("SKILL.md 指向双模板，避免资产沉淀后不可发现", async () => {
+test("SKILL.md 指向模块模板，避免资产沉淀后不可发现", async () => {
   const guide = await readFile(join(assets, "../SKILL.md"), "utf8");
   expect(guide).toContain("assets/workflow.ts");
-  expect(guide).toContain("assets/workflow.restricted.txt");
+  expect(guide).not.toContain("workflow.restricted");
 });
 
 test("SKILL.md 声明点名技能默认由 Worker 执行且仅作任务提示", async () => {

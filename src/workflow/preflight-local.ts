@@ -76,11 +76,54 @@ export async function preflightLocalWorkflow(path: string, cwd: string): Promise
 
 /** 冻结源码的静态契约审计；Journal重开复用，不读磁盘、不import、不调用run。 */
 export function inspectLocalWorkflowSource(source: string, fileName = "workflow.ts"): {readonly meta:WorkflowMeta;readonly inputSchema:JsonObject} {
+  return inspectWorkflowModuleSource(source, fileName, "本地 Workflow");
+}
+
+/**
+ * 校验用户保存目标：项目内、`.ts`、父路径无软链且已存在。
+ * 默认目标文件必须不存在；`replace` 仅由用户在系统保存面板明确确认替换后传入，
+ * 且只允许替换常规文件（软链接与目录一律拒绝）。
+ */
+export async function resolveWorkflowWriteTarget(path: string, cwd: string, options: { replace?: boolean } = {}): Promise<string> {
+  const root = await realpath(cwd);
+  const originalRoot = resolve(cwd);
+  let candidate = resolve(originalRoot, path);
+  if (process.platform === "darwin" && candidate.startsWith("/var/")) candidate = resolve(await realpath("/var"), candidate.slice(5));
+  const originalRelative = relative(originalRoot, candidate);
+  const canonicalRelative = relative(root, candidate);
+  const requested = isAbsolute(path) && !canonicalRelative.startsWith("..") && !isAbsolute(canonicalRelative)
+    ? candidate : resolve(root, originalRelative);
+  const within = relative(root, requested);
+  if (!within || within.startsWith("..") || isAbsolute(within) || !requested.endsWith(".ts")) throw new Error("保存目标必须是项目内 .ts 文件。");
+  const parts = within.split("/");
+  let cursor = root;
+  for (const part of parts.slice(0, -1)) {
+    cursor = resolve(cursor, part);
+    let stat;
+    try { stat = await lstat(cursor); } catch { throw new Error("保存目标的父目录必须已存在。"); }
+    if (stat.isSymbolicLink()) throw new Error("保存目标路径不允许软链接。");
+    if (!stat.isDirectory()) throw new Error("保存目标的父路径必须是目录。");
+  }
+  try {
+    const existing = await lstat(requested);
+    if (!options.replace) throw new Error("保存目标已存在，不能覆盖。");
+    if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("保存目标不是常规文件，不能覆盖。");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return requested;
+}
+
+/**
+ * 作者模块的共享静态审计：本地预检、主控提案和 Journal 重开共用同一规则。
+ * 只解析、校验和读取纯字面量 meta，不加载模块、不执行 run()、不访问磁盘。
+ */
+export function inspectWorkflowModuleSource(source: string, fileName = "workflow.ts", label = "Workflow"): {readonly meta:WorkflowMeta;readonly inputSchema:JsonObject} {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
   const diagnostics = (file as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
   if (diagnostics[0]) {
     const at = file.getLineAndCharacterOfPosition(diagnostics[0].start ?? 0);
-    throw new Error(`本地 Workflow 语法错误 ${at.line + 1}:${at.character + 1}：${ts.flattenDiagnosticMessageText(diagnostics[0].messageText, " ")}`);
+    throw new Error(`${label} 语法错误 ${at.line + 1}:${at.character + 1}：${ts.flattenDiagnosticMessageText(diagnostics[0].messageText, " ")}`);
   }
   validateWorkflowSource(source, fileName);
   const statement = file.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === "meta")) as ts.VariableStatement;
@@ -88,7 +131,7 @@ export function inspectLocalWorkflowSource(source: string, fileName = "workflow.
   const meta = literal(initializer);
   validateWorkflowMeta(meta);
   const schema = (meta as WorkflowMeta).inputSchema;
-  if (!isJsonObject(schema) || schema.type !== "object") throw new Error("新本地 Workflow 必须声明 meta.inputSchema 对象 Schema。");
+  if (!isJsonObject(schema) || schema.type !== "object") throw new Error(`${label} 必须声明 meta.inputSchema 对象 Schema。`);
   // 输入必须是 JSON 对象。拒绝远端引用；AJV 无网络加载，所有引用必须静态可解释。
   ajv.compile(schema);
   return { meta, inputSchema: schema };

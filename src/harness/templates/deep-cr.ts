@@ -1,7 +1,21 @@
-const meta = {
+import { agent, log, parallel, phase } from "wave-flow";
+
+export const meta = {
   name: "deep-cr",
   description: "多维度深度代码审查并逐条取证复核",
   phases: [{ title: "摸底" }, { title: "分维审查" }, { title: "取证复核" }, { title: "交叉裁决" }, { title: "盲区扫描" }, { title: "定稿汇总" }],
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["target"],
+    properties: {
+      target: { type: "string", minLength: 1, maxLength: 2000, description: "审查范围，项目内相对路径(如 src/)；所有 Worker 不得越界读取。" },
+      base: { type: "string", maxLength: 200, description: "可选增量基线(如 main、HEAD~3、commit sha)；提供时只审该基线以来的变更，未填则审工作区未提交变更或 target 核心文件。" },
+      focus: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 100 }, description: "可选：特别希望关注的问题类别，会注入每个专项审查员。" },
+      context: { type: "string", maxLength: 4000, description: "可选：变更意图或 PR 描述，用于意图符合性判断，未填与空字符串分别保留。" },
+      language: { type: "string", maxLength: 20, description: "报告语言，默认中文。" },
+    },
+  },
   exampleArgs: { target: "src/", base: "main", context: "本次变更引入任务队列" }
 };
 type Args = { target: string; base?: string; focus?: string[]; context?: string; language?: string };
@@ -11,7 +25,7 @@ type Finding = { title: string; severity: string; confidence: string; file: stri
 type ReviewBatch = { findings: Finding[]; coverage: string[] };
 type VerifyBatch = { confirmed: Finding[]; rejected: { title: string; reason: string }[]; notes: string[] };
 
-async function run(args: Args) {
+export default async function run(args: Args) {
   const target = args.target;
   const language = typeof args.language === "string" && args.language.trim() !== "" ? args.language : "中文";
   const base = typeof args.base === "string" && args.base.trim() !== "" ? args.base : "";

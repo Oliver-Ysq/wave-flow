@@ -136,7 +136,7 @@ export type BlockSnapshot = {
   readonly answered: boolean;
 };
 
-/** 受限 Workflow 脚本声明的业务决策门的查询视图；不属于任何 Agent 节点。 */
+/** 作者模块声明的业务决策门的查询视图；不属于任何 Agent 节点。 */
 export type DecisionGateSnapshot = {
   /** Run 内稳定唯一的决策门 id。 */
   readonly gateId: string;

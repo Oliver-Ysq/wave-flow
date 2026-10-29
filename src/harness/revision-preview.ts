@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import type { PreviewAgent } from "../workflow/restricted/extract-agents";
+import { isJsonObject, type JsonObject } from "../shared/json";
+import type { PreviewAgent } from "../workflow/extract-agents";
 
 /** 展示解析规则版本；规则变化时递增，旧预览只补算一次，不改变草案身份。 */
-export const REVISION_PREVIEW_VERSION = 3;
+export const REVISION_PREVIEW_VERSION = 5;
 
 /** 随 revision 耐久的源码展示投影；不包含 Runtime 池，不构成执行授权或可运行证明。 */
 export type RevisionPreview = {
@@ -16,6 +17,8 @@ export type RevisionPreview = {
   readonly sourceHash: string;
   /** 已校验 meta 的有序阶段词表；不表达执行依赖。 */
   readonly phaseTitles: readonly string[];
+  /** 已校验的 meta.inputSchema；仅用于渲染参数表单，执行仍以冻结 meta 为准。 */
+  readonly inputSchema?: JsonObject;
   /** 每个源码 agent() 调用的展示示意；包含 loop 提示，不是运行节点名单。 */
   readonly previewAgents: readonly PreviewAgent[];
 };
@@ -28,6 +31,7 @@ export function isRevisionPreview(value: unknown): value is RevisionPreview {
   if(item.workflowName!==undefined&&(typeof item.workflowName!=="string"||!item.workflowName.trim()))return false;
   if (!Number.isInteger(item.previewVersion) || (item.previewVersion as number) < 1 || !/^[a-f0-9]{64}$/.test(String(item.sourceHash))) return false;
   if (!Array.isArray(item.phaseTitles) || !item.phaseTitles.length || item.phaseTitles.length > 200_000 || item.phaseTitles.some(title => typeof title !== "string" || !title.trim()) || new Set(item.phaseTitles).size !== item.phaseTitles.length) return false;
+  if (item.inputSchema !== undefined && (!isJsonObject(item.inputSchema) || item.inputSchema.type !== "object")) return false;
   if (!Array.isArray(item.previewAgents) || item.previewAgents.length > 200_000) return false;
   const keys = new Set<string>();
   return item.previewAgents.every((agent: unknown) => {

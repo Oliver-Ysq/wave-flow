@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractAgentWorkers } from "../../src/workflow/restricted/extract-agents";
+import { extractAgentWorkers } from "../../src/workflow/extract-agents";
 
 describe("受限脚本 Worker 静态枚举", () => {
   test("loop 提示覆盖循环体与批量回调，不由动态 id 或循环初始化误判", () => {

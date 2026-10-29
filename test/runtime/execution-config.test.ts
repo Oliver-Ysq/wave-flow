@@ -28,7 +28,8 @@ const twoNodes: WorkflowModule<JsonObject, unknown> = {
 };
 
 /** 测试分配快照；默认指派 kimi 的 assigned-runtime，覆盖脚本字面量 codex。 */
-function testConfig(runtimeId = "assigned-runtime", adapterVersion = "1.0"): ExecutionConfigSnapshot {
+type AssignedConfig = Extract<ExecutionConfigSnapshot, { fallbackRuntimeId: string }>;
+function testConfig(runtimeId = "assigned-runtime", adapterVersion = "1.0"): AssignedConfig {
   const assignment = (agentId: string): WorkerAssignment => ({ agentId, cli: "kimi", model: "cli-default", source: "harness-cli", runtimeId, adapterId: "kimi-acp", adapterVersion });
   return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: runtimeId, ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("worker"), assignment("a"), assignment("b")] };
 }

@@ -21,7 +21,7 @@ export type PhaseVisit = {
   readonly occurrence: number;
 };
 
-/** 受限 Workflow 脚本声明的业务决策门请求；仅受限 Runtime 桥可发起，受信任作者入口不暴露。 */
+/** 作者模块声明的业务决策门请求；本地与生成模块共用，不替代 Worker block/continue。 */
 export type DecisionGateRequest = {
   /** Run 内稳定唯一的决策门 id；replay 按它对齐已耐久事实。 */
   readonly id: string;

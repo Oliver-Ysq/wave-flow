@@ -28,11 +28,12 @@ class DecisionPi implements HarnessSession {
 }
 
 async function waitFor(check: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 1_000;
-  while (!(await check())) {
-    if (Date.now() >= deadline) throw new Error("等待条件超时。 ");
+  // 按次数而非墙钟等待：负载下 sleep 会显著超时，但不能因此误判条件不成立。
+  for (let n = 0; n < 20_000; n++) {
+    if (await check()) return;
     await Bun.sleep(2);
   }
+  throw new Error("等待条件超时。 ");
 }
 
 describe("Harness action tools", () => {

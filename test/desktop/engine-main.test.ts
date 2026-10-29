@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
@@ -30,7 +30,7 @@ test("Engine重启不补成果快照、不重跑业务；completed resume 只读
  const authorization={authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]};
  const workspace=await manager.create(workspaceId,authorization);
  const harness=new HarnessService(harnessRoot,async()=>{throw Error("不会运行主控");});const task=await harness.create(cwd);
- const source='const meta={name:"no-source",description:"无快照",phases:[{title:"write"}]};async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
+ const source='import { agent, phase } from "wave-flow";\nexport const meta={name:"no-source",description:"无快照",phases:[{title:"write"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
  await harness.proposeWorkflowRevision(task.harnessRunId,source);await harness.acceptWorkflowRevision(task.harnessRunId,1);
  const assignment={agentId:"writer",cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test-runtime",adapterId:"codex-acp" as const,adapterVersion:"test"};
  const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test-runtime",ruleText:null,ruleDegraded:false,defaultAssignment:{...assignment,agentId:"*"},assignments:[assignment],workspaces:{version:3 as const,authorization,workspaceId}};
@@ -623,3 +623,159 @@ test("Engine settings action 读写感知模式并在更新后关闭空闲主控
     expect(await engine.handleDesktopAction("settings.get", {})).toEqual({ perceptionMode: true });
   } finally { engine.shutdown(); }
 });
+
+test("Engine action 保存并接管写入项目文件、追加本地来源版本，并支持幂等重试", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-adopt-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-adopt-project-")); roots.push(cwd);
+  const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-adopt", description: "Engine 接管", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return {}; }`;
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"),
+    harnessRoot: join(root, "harness-runs"),
+    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+      isRunning: false,
+      subscribe: () => () => {},
+      abort: () => {},
+      prompt: async () => { await actions.proposeWorkflowRevision(source, "接管目标", "只读检查", undefined, 0); return "草案已提交"; },
+    }),
+  });
+  try {
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备接管" }) as { harness: { harnessRunId: string } };
+    const id = started.harness.harnessRunId;
+    for (let n = 0; n < 200; n++) {
+      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
+      if (current.harness.status === "idle") break;
+      await Bun.sleep(10);
+    }
+    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    const target = join(cwd, ".wave-flow", "workflows", "engine-adopt.ts");
+    const requestId = crypto.randomUUID();
+    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { harness: { workflowRevisions: Array<{ localOrigin?: { path: string }; sourceFormat?: string }> } };
+    expect(saved.harness.workflowRevisions).toHaveLength(2);
+    expect(saved.harness.workflowRevisions[1]).toMatchObject({ sourceFormat: "module", localOrigin: { path: await realpath(target) } });
+    expect(await Bun.file(target).text()).toBe(source);
+    const retry = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { harness: { workflowRevisions: unknown[] } };
+    expect(retry.harness.workflowRevisions).toHaveLength(2);
+  } finally { engine.shutdown(); }
+}, 30_000);
+
+test("Engine 确认生成模块时接受用户输入并按冻结 inputSchema 校验", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-input-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-input-project-")); roots.push(cwd);
+  const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-input", description: "输入验证", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"], additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return { note: args.note }; }`;
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"),
+    harnessRoot: join(root, "harness-runs"),
+    deterministicForTest: true,
+    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+      isRunning: false,
+      subscribe: () => () => {},
+      abort: () => {},
+      prompt: async () => { await actions.proposeWorkflowRevision(source, "输入目标", "只读检查", undefined, 0); return "草案已提交"; },
+    }),
+  });
+  try {
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备输入" }) as { harness: { harnessRunId: string } };
+    const id = started.harness.harnessRunId;
+    for (let n = 0; n < 200; n++) {
+      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
+      if (current.harness.status === "idle") break;
+      await Bun.sleep(10);
+    }
+    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    // 缺少必填 note 时拒绝，不创建 Execution。
+    await expect(engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, input: {}, clientRequestId: crypto.randomUUID() })).rejects.toThrow("参数无效");
+    const confirmed = await engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, input: { note: "来自用户" }, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string } };
+    let detail: { status: string; summary: Record<string, unknown> | null } = { status: "running", summary: null };
+    for (let n = 0; n < 200; n++) {
+      const response = await engine.handleDesktopAction("executions.get", { harnessRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string; summary: Record<string, unknown> | null } };
+      detail = response.execution;
+      if (detail.status !== "running") break;
+      await Bun.sleep(10);
+    }
+    expect(detail).toMatchObject({ status: "completed", summary: { note: "来自用户" } });
+  } finally { engine.shutdown(); }
+}, 30_000);
+
+test("Engine 接受脚本模式写类配置，只把 workspaces 交给执行器", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-script-write-")); roots.push(root);
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-engine-script-write-project-"))); roots.push(cwd);
+  const source = `import { agent, phase } from "wave-flow";\nexport const meta = { name: "engine-script-write", description: "脚本写", phases: [{ title: "写" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("写"); return agent("写文件", { id: "writer", cli: "codex", sandbox: "workspace-write" }); }`;
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"),
+    harnessRoot: join(root, "harness-runs"),
+    deterministicForTest: true,
+    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+      isRunning: false,
+      subscribe: () => () => {},
+      abort: () => {},
+      prompt: async () => { await actions.proposeWorkflowRevision(source, "写目标", "只写", undefined, 0); return "草案已提交"; },
+    }),
+  });
+  try {
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备写" }) as { harness: { harnessRunId: string } };
+    const id = started.harness.harnessRunId;
+    for (let n = 0; n < 200; n++) {
+      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
+      if (current.harness.status === "idle") break;
+      await Bun.sleep(10);
+    }
+    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    const workspaces = { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, workspaceId: crypto.randomUUID() };
+    const config = { version: 1 as const, assignmentMode: "script" as const, createdAt: new Date().toISOString(), workspaces };
+    const confirmed = await engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, config, input: {}, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string; config?: { assignmentMode?: string } } };
+    expect(confirmed.execution.config).toMatchObject({ assignmentMode: "script", workspaces });
+    let detail: { status: string } = { status: "running" };
+    for (let n = 0; n < 200; n++) {
+      const response = await engine.handleDesktopAction("executions.get", { harnessRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string } };
+      detail = response.execution;
+      if (detail.status !== "running") break;
+      await Bun.sleep(10);
+    }
+    expect(detail.status).toBe("completed");
+  } finally { engine.shutdown(); }
+}, 30_000);
+
+test("Engine 保存接管仅在系统面板确认替换时覆盖已有文件", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-replace-")); roots.push(root);
+  const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-replace-project-")); roots.push(cwd);
+  const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-replace", description: "替换接管", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return {}; }`;
+  const engine = new DesktopExecutionEngine({
+    storeRoot: join(root, "runs"),
+    harnessRoot: join(root, "harness-runs"),
+    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+      isRunning: false,
+      subscribe: () => () => {},
+      abort: () => {},
+      prompt: async () => { await actions.proposeWorkflowRevision(source, "替换目标", "只读检查", undefined, 0); return "草案已提交"; },
+    }),
+  });
+  try {
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
+    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备替换接管" }) as { harness: { harnessRunId: string } };
+    const id = started.harness.harnessRunId;
+    for (let n = 0; n < 200; n++) {
+      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
+      if (current.harness.status === "idle") break;
+      await Bun.sleep(10);
+    }
+    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    const target = join(cwd, ".wave-flow", "workflows", "engine-replace.ts");
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, "旧内容", "utf8");
+    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID() })).rejects.toThrow("已存在");
+    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: "yes" })).rejects.toThrow("布尔");
+    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: true }) as { harness: { workflowRevisions: Array<{ localOrigin?: { path: string; sourceHash: string } }> } };
+    expect(saved.harness.workflowRevisions).toHaveLength(2);
+    expect(saved.harness.workflowRevisions[1]?.localOrigin?.path).toBe(await realpath(target));
+    expect(await Bun.file(target).text()).toBe(source);
+    // UI 在保存成功后立即用同一文件预检：action 序列必须可用并标记为保存本地来源。
+    const adopted = saved.harness.workflowRevisions[1]!;
+    await expect(engine.handleDesktopAction("workflows.reviseLocalTask", { harnessRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "bogus" })).rejects.toThrow("更新原因");
+    const prepared = await engine.handleDesktopAction("workflows.reviseLocalTask", { harnessRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "save-local" }) as { harness: { workflowRevisions: Array<{ revision: number; parentRevision: number | null; updateReason?: string; acceptedAt: string | null }> } };
+    expect(prepared.harness.workflowRevisions).toHaveLength(3);
+    expect(prepared.harness.workflowRevisions[2]).toMatchObject({ revision: 3, parentRevision: 2, updateReason: "save-local", acceptedAt: null });
+  } finally { engine.shutdown(); }
+}, 30_000);

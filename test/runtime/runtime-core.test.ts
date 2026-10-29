@@ -45,9 +45,9 @@ describe("RunRuntime ACP-neutral core", () => {
     const initialNodes = new Promise<void>(resolve => { settled = resolve; });
     const initial = await create({execute:async()=>{if(++count===2)settled();return null;}});
     await initial.run(concurrent).catch(()=>undefined); await initialNodes;
-    // 等两个失败节点都完成耐久收敛，避免把活跃旧节点当可resume。
-    const deadline = Date.now()+2_000;
-    while(initial.snapshot().phases[0].agents.some(node=>node.status!=="interrupted")){if(Date.now()>deadline)throw new Error("初始节点未收敛");await Bun.sleep(1);}
+    // 等两个失败节点都完成耐久收敛，避免把活跃旧节点当可resume；按收敛事实等待，不设墙钟预算。
+    for(let n=0;n<20_000&&initial.snapshot().phases[0].agents.some(node=>node.status!=="interrupted");n++)await Bun.sleep(1);
+    expect(initial.snapshot().phases[0].agents.map(node=>node.status)).toEqual(["interrupted","interrupted"]);
     const executed: string[] = [];
     const resumed = await RunRuntime.resume(initial.snapshot().id,{execute:async node=>{executed.push(node.id);return {id:node.id};}},join(initial.journal.directory,".."));
     // 先await以保留Runtime原始诊断，避免resolves matcher掩盖并行恢复错误。
@@ -71,15 +71,15 @@ describe("RunRuntime ACP-neutral core", () => {
     });
     const running=runtime.run(concurrent).catch(()=>undefined);await started;
     if(action==="recover")await runtime.pause();
-    const outcome = runtime[action]().then(()=>"unexpected",error=>String(error));
-    expect(await Promise.race([outcome,Bun.sleep(1_000).then(()=>"pending")])).toContain("第二个");
+    // 控制操作自己会返回；按结果等待，不用 1 秒墙钟猜它是否卡住。
+    expect(await runtime[action]().then(()=>"unexpected",error=>String(error))).toContain("第二个");
     expect(runtime.snapshot().status).toBe("interrupted");
     expect(runtime.snapshot().phases.flatMap(phase=>phase.agents).every(node=>node.status==="interrupted")).toBe(true);
     expect(stopped).toHaveLength(2);
     await RunJournal.open(runtime.snapshot().id,join(runtime.journal.directory,".."));
     if(cleanupPending)for(const fail of failures.values())fail(new Error("测试释放原执行"));
     await running;
-  });
+  }, 20_000);
   test("首个Worker停止失败仍停止后续Worker，所有节点终态先于Run封存", async () => {
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
@@ -153,13 +153,13 @@ describe("RunRuntime ACP-neutral core", () => {
     await cancelStarted;
     if (failure === "end_turn") finish({ stopReason: "end_turn" });
     else fail(new Error("transport failed"));
-    expect(await Promise.race([Promise.all([running, pausing]), Bun.sleep(2_000).then(() => "pending")])).toEqual(["rejected", "rejected"]);
+    expect(await Promise.all([running, pausing])).toEqual(["rejected", "rejected"]);
     expect(runtime.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ status: "interrupted" }] }] });
     expect(prompts).toBe(1); expect(closed).toBe(1);
     const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
     expect(reopened.events.some((event) => (event.type === "agent.status" || event.type === "run.status") && event.status === "paused")).toBe(false);
     expect([...reopened.events].reverse().find((event) => event.type === "run.status")).toMatchObject({ status: "interrupted" });
-  });
+  }, 20_000);
   for (const action of ["stop", "exit"] as const) test(`真实Executor暂停未获确认时${action}可收敛且Journal可重开`, async () => {
     let entered!: () => void;
     let cancelling!: () => void;
@@ -183,9 +183,8 @@ describe("RunRuntime ACP-neutral core", () => {
     const pausing = runtime.pause().then(() => "unexpected", () => "rejected");
     await cancelStarted;
     const stopping = action === "stop" ? runtime.stop() : runtime.cancelForDesktopExit("test-engine");
-    const deadline = Bun.sleep(2_000).then(() => "pending" as const);
-    const outcome = await Promise.race([Promise.all([pausing, stopping, running]), deadline]);
-    expect(outcome).not.toBe("pending");
+    // 三条路径都会返回；按真实终态等待，避免 2 秒墙钟在负载下误判为 pending。
+    await Promise.all([pausing, stopping, running]);
     expect(runtime.snapshot()).toMatchObject({ status: "cancelled", phases: [{ agents: [{ status: "cancelled" }] }] });
     finish({ stopReason: "end_turn" });
     await Bun.sleep(1);
@@ -197,7 +196,7 @@ describe("RunRuntime ACP-neutral core", () => {
     expect(cancelled).toBeGreaterThanOrEqual(0);
     expect(reopened.events.slice(cancelled).some((event) => event.type === "agent.status" && event.status !== "cancelled")).toBe(false);
     expect([...reopened.events].reverse().find((event) => event.type === "run.status")).toMatchObject({ status: "cancelled" });
-  });
+  }, 20_000);
   test("回合间隙 pause/recover 不再把整 Run 收敛为 interrupted", async () => {
     let capability = "";
     let reading!: () => void, releaseRead!: () => void;
@@ -214,11 +213,9 @@ describe("RunRuntime ACP-neutral core", () => {
         prompts.push(text);
         if (prompts.length === 1) return { stopReason: "end_turn" };
         // recover 的投递确认先于节点回到 running；真实 Worker 不会在这一窗口内 complete。
-        const deadline = Date.now() + 5_000;
-        while (runtime.snapshot().phases[0].agents[0].status !== "running") {
-          if (Date.now() > deadline) throw new Error("恢复回合后节点未回到 running。 ");
-          await Bun.sleep(1);
-        }
+        // 按状态收敛等待，不用墙钟预算（负载下 sleep 会显著超时）。
+        for (let n = 0; n < 20_000 && runtime.snapshot().phases[0].agents[0].status !== "running"; n++) await Bun.sleep(1);
+        expect(runtime.snapshot().phases[0].agents[0].status).toBe("running");
         const agentSessionId = runtime.snapshot().phases[0].agents[0].agentSessionId!;
         await control.complete({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability, summary: "done", result: { ok: true } });
         return { stopReason: "end_turn" };
@@ -249,7 +246,7 @@ describe("RunRuntime ACP-neutral core", () => {
     const reopened = await RunJournal.open(runtime.snapshot().id, join(runtime.journal.directory, ".."));
     expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.recovered", nodeId: "worker" }));
     expect(reopened.events.some((event) => event.type === "run.status" && event.status === "interrupted")).toBe(false);
-  });
+  }, 20_000);
   test("Journal fail closed 时 run() 抛出首个写入失败，不用收敛次生错误掩盖", async () => {
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
@@ -438,11 +435,9 @@ describe("RunRuntime ACP-neutral core", () => {
     await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
     // Worker 请求人工确认后未调用 continue/complete 就以 end_turn 结束回合。
     void control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, () => null);
-    const deadline = Date.now() + 5_000;
-    while (runtime.snapshot().phases[0].agents[0].status !== "blocked") {
-      if (Date.now() > deadline) throw new Error("等待节点 blocked 超时。 ");
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    // 按状态等待 block 落库，不用墙钟预算。
+    for (let n = 0; n < 20_000 && runtime.snapshot().phases[0].agents[0].status !== "blocked"; n++) await Bun.sleep(2);
+    expect(runtime.snapshot().phases[0].agents[0].status).toBe("blocked");
     fail(new Error("ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。"));
     const runError = await running;
     expect(runError).toBeInstanceOf(Error);

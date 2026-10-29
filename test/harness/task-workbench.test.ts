@@ -11,7 +11,7 @@ import { taskIdForRequest } from "../../src/harness/task-contract";
 import { writeFile } from "node:fs/promises";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
-const source = `const meta = { name: 'task-test', description: '检查', phases: [{ title: '检查' }] }; async function run(args) { phase('检查'); return {}; }`;
+const source = `import { phase } from "wave-flow";\nexport const meta = { name: 'task-test', description: '检查', phases: [{ title: '检查' }], inputSchema: { type: 'object', properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase('检查'); return {}; }`;
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "wf-task-")); roots.push(root); return root; }
 async function idle(service: HarnessService, id: string) { for (let n=0;n<100;n++) { if ((await service.snapshot(id)).status !== "running") return; await Bun.sleep(2); } throw new Error("timeout"); }
 test("创建请求规范化、标题unicode边界和非法来源不产生档案",async()=>{

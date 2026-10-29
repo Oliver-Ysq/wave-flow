@@ -37,13 +37,13 @@ export type CreateRunOptions = {
   readonly harness?: import("../journal/types").RunHarnessOrigin;
   /** 固定 Run id；仅 Harness Execution 用来让登记 id 与内嵌 Journal runId 一致，省略时生成随机 UUID。 */
   readonly runId?: string;
-  /** 分配卡冻结的执行配置；仅受限 Execution 提供，受信任 Run 省略（脚本 cli/model 直接生效）。 */
+  /** 历史 assigned 执行配置；模块 Workflow 省略，节点 cli/model 由作者源码直接决定。 */
   readonly executionConfig?: import("../harness/types").ExecutionConfigSnapshot;
 };
 
 /** RunRuntime.run 的可选执行约束。 */
 export type RunExecutionOptions = {
-  /** 受限脚本的资源护栏；提供时以 PolicyEnforcingHost 包装内部宿主。 */
+  /** 生成模块 Execution 的资源护栏；本地来源 Run 省略。提供时以 PolicyEnforcingHost 包装内部宿主。 */
   readonly policy?: import("./policy-host").WorkflowPolicy;
 };
 
@@ -112,7 +112,7 @@ export class RunRuntime {
     ));
   }
 
-  /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。options.policy 用于受限脚本的资源护栏。 */
+  /** 执行 Workflow；完成后以 durable run.status 事实封存聚合状态。options.policy 用于生成模块的资源护栏。 */
   async run(workflow: WorkflowModule<JsonObject, unknown>, options: RunExecutionOptions = {}): Promise<unknown> {
     const host: import("./workflow-host").WorkflowExecutionHost = options.policy ? new PolicyEnforcingHost(this.host, options.policy) : this.host;
     try {

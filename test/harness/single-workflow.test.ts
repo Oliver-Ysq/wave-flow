@@ -9,7 +9,7 @@ import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 
 const directories:string[]=[];
 afterEach(async()=>{await Promise.all(directories.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
-const source=`const meta={name:"single",description:"检查",phases:[{title:"检查"}]};async function run(args:unknown){phase("检查");return {};}`;
+const source=`import { phase } from "wave-flow";\nexport const meta={name:"single",description:"检查",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args:unknown){phase("检查");return {};}`;
 async function idle(service:HarnessService,id:string){for(let n=0;n<100;n++){if((await service.snapshot(id)).status!=="running")return;await Bun.sleep(5);}throw Error("回合未结束");}
 test("验收Task冻结单链身份，执行后仍同卡修订，放弃不删除旧版",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-single-"));directories.push(root);
@@ -76,22 +76,5 @@ test("已执行模板参数修订沿用冻结来源同卡，迟到基础版本�
   expect((await HarnessJournal.open(id,root)).snapshot.workflowRevisions[1].updateReason).toBe('modify-parameters');
   await expect(service.saveTemplate(id,crypto.randomUUID(),selection,original.cardId,undefined,1)).rejects.toThrow("参数版本已更新");
   expect((await HarnessJournal.open(id,root)).snapshot.workflowRevisions[0]).toEqual(original);
- }finally{service.close();}
-});
-test("CLI-only修改先追加未批准版本，相同请求幂等且原源码输入批准不变",async()=>{
- const root=await mkdtemp(join(tmpdir(),"wave-flow-config-revision-"));directories.push(root);
- const service=new HarnessService(root,async(_id,_cwd,_prior,actions)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async(text)=>{if(text.startsWith("请总结"))return "完整说明";await actions.proposeWorkflowRevision(source,"目标","只读");return "方案";}}),undefined,async()=>({fingerprint:"injected-harness-session"}),true);
- service.setExecutionCapsuleReader(async()=>({status:"completed"}));
- try{
-  const task=await service.startTask(root,{projectId:"p",clientRequestId:crypto.randomUUID(),text:"检查"}),id=task.harnessRunId;await idle(service,id);await service.acceptWorkflowRevision(id,1);
-  const original=(await service.snapshot(id)).workflowRevisions[0],executionId=crypto.randomUUID();
-  await service.recordExecutionCreated(id,{executionId,revision:1,sourceHash:original.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxGates:10,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,diagnostic:null,summary:null});await service.recordExecutionFinished(id,executionId,"completed",null,{},1);
-  for(let n=0;n<100;n++){if((await service.snapshot(id)).impactSummaries?.[0]?.status==="completed")break;await Bun.sleep(5);}
-  const request=crypto.randomUUID(),next=await service.prepareConfigurationRevision(id,request,1);expect(next.workflowRevisions).toHaveLength(2);
-  expect(original.updateReason).toBe('generate-plan');
-  expect(next.workflowRevisions[1].updateReason).toBe('modify-configuration');
-  expect(next.workflowRevisions[1]).toMatchObject({source:original.source,sourceHash:original.sourceHash,cardId:original.cardId,parentRevision:1,acceptedAt:null});expect(next.workflowRevisions[0]).toEqual(original);expect(next.executions).toHaveLength(1);
-  expect((await service.prepareConfigurationRevision(id,request,1)).workflowRevisions).toHaveLength(2);
-  await expect(service.prepareConfigurationRevision(id,crypto.randomUUID(),1)).rejects.toThrow("当前草案");
  }finally{service.close();}
 });

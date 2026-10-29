@@ -117,7 +117,7 @@ export class CliRuntimeRegistry {
   }
 
   /**
-   * 分配快照按 runtimeId 的直接解析入口；仅供受限 Execution 的指派节点使用。
+   * 分配快照按 runtimeId 的直接解析入口；仅供历史 assigned 配置的指派节点使用。
    * 与 resolveWorker 同一纪律：目标必须 verified，启动前复核身份，漂移即耐久
    * needs-revalidation 并 fail closed，绝不静默换到另一候选。
    */

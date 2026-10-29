@@ -41,7 +41,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly replay = false,
     /** interrupted Run 的 running 事实延迟到首个重跑节点经过调用指纹核验后。 */
     private readonly resumeInterrupted = false,
-    /** 受限 Execution 冻结的分配快照；受信任 Run 为 null，脚本 cli/model 直接生效。 */
+    /** 历史 assigned 执行配置；模块 Workflow 传 null，节点 cli/model 由作者源码直接决定。 */
     private readonly executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null,
     /**
      * 本次 attempt 启动时的技能库摘要；空库为 null。
@@ -84,7 +84,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     });
   }
 
-  /** Runtime 的运行控制只经此受限边界调用执行器，不能直接接触 Adapter 内部。 */
+  /** Runtime 的运行控制只经此窄边界调用执行器，不能直接接触 Adapter 内部。 */
   pauseNode(node: import("./run-types").AgentNodeSnapshot, signal: AbortSignal): Promise<void> {
     if (!this.executor.pause) throw new Error(`节点 ${node.id} 的执行器不支持 pause。`);
     return this.executor.pause(node, signal);
@@ -367,13 +367,12 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   }
 
   /**
-   * 受限 Execution 的分配消费点：把脚本请求改写为生效请求。命中 assignments 按条目
-   * 分配，否则落 defaultAssignment（动态 id Worker 的唯一分配通道）；脚本字面量
-   * cli/model 在受限 Execution 中不直接生效，model 恒省略为 cli-default 语义。
+   * 历史 assigned 配置的消费点：把请求改写为分配结果。模块 Workflow 不经过此路径，
+   * 脚本 cli/model 直接生效；这里只保留旧记录读取与测试兼容。
    */
   private rewriteRequest(request: NormalizedAgentRequest): NormalizedAgentRequest {
     const config = this.executionConfig;
-    if (!config) return request;
+    if (!config || config.assignmentMode === "script") return request;
     const assignment = config.assignments.find((item) => item.agentId === request.id) ?? config.defaultAssignment;
     const rewritten: NormalizedAgentRequest = { ...request, cli: assignment.cli, model: undefined, assignedRuntimeId: assignment.runtimeId };
     return rewritten;
@@ -386,7 +385,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     // 技能库变化优先于分配快照：同一 CLI 下更换 skill 内容也不能复用旧结果。
     if ((recorded.skills?.digest ?? null) !== this.skillsDigest) return false;
     const config = this.executionConfig;
-    if (!config) return true;
+    if (!config || config.assignmentMode === "script") return true;
     const assignment = config.assignments.find((item) => item.agentId === nodeId) ?? config.defaultAssignment;
     return recorded.runtimeId === assignment.runtimeId && recorded.adapterId === assignment.adapterId && recorded.adapterVersion === assignment.adapterVersion;
   }

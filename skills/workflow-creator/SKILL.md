@@ -1,6 +1,6 @@
 ---
 name: workflow-creator
-description: 把用户的任务描述变成可运行的 Wave Flow Workflow 脚本，或修改既有 Workflow。当用户要求把可重复的多步骤任务编排为 Workflow、生成或修改含 agent/phase/parallel/pipeline/decisionGate 的脚本、作为主控起草 workflow revision 草案，或修复不符合加载/受限校验的 Workflow 时使用。
+description: 把用户的任务描述变成可运行的 Wave Flow Workflow 模块，或修改既有 Workflow。当用户要求把可重复的多步骤任务编排为 Workflow、生成或修改含 agent/phase/parallel/pipeline/decisionGate 的模块、作为主控起草 workflow revision 草案，或修复不符合加载/模块校验的 Workflow 时使用。
 ---
 
 # Wave Flow Workflow 作者
@@ -8,18 +8,24 @@ description: 把用户的任务描述变成可运行的 Wave Flow Workflow 脚�
 把用户的任务翻译成一份完整、可被当前 Runtime 真实加载的 Workflow 脚本。
 脚本只负责编排；不臆造尚未实现的 API，也不假设运行时会向全局注入任何函数。
 
-## 先确认作者形态
+## 统一模块形态
 
-Wave Flow 有两种模块形状，规则不同，写代码前必须确认目标：
+Wave Flow 只有一种 Workflow 形状：ESM 作者模块。
 
-1. **受信任本地模块**：用户明确选择并预检的项目内 `.ts` 文件；通过桌面新建任务入口确认运行，不提供历史 `wave-flow run` 命令。
-   是 ESM 模块：`import` 作者 API → `export const meta` → `export default async function run(args)`。
-2. **主控受限草案**：主控（Harness）经 `propose_workflow_revision` 提交、用户审批后由受限 Runtime 执行的脚本。
-   **不是模块**：禁止一切 `import`/`export`；顶层只有 `const meta = { … }`、`async function run(args)` 和类型声明；作者 API 由运行时注入。
+```ts
+import { agent, decisionGate, log, parallel, phase, pipeline } from "wave-flow";
 
-判断依据：在主控会话中起草、或交付物将由用户审批后执行时，一律写受限草案；用户明确要求一个本地 `.ts` 文件时用受信任模块。两种形状的完整契约见 [references/api.md](references/api.md)。
+export const meta = { /* 纯字面量 */ };
 
-不要从零写骨架：以 [assets/workflow.restricted.txt](assets/workflow.restricted.txt)（受限草案，纯文本模板）或 [assets/workflow.ts](assets/workflow.ts)（受信任模块）为起点，替换其中的阶段、prompt 与输入输出。这两份模板持续通过当前真实校验门禁，是唯一可信的形状参照。
+export default async function run(args) { /* 编排 */ }
+```
+
+两种入口共用同一格式与校验：
+
+1. **主控生成**：主控（Harness）经 `propose_workflow_revision` 提交；用户审批后执行，或显式保存并接管为项目内本地来源。
+2. **本地文件**：用户选择项目内 `.ts` 文件，预检后通过桌面任务入口确认运行。
+
+不要从零写骨架：以 [assets/workflow.ts](assets/workflow.ts) 为起点，替换阶段、prompt 与输入输出。完整契约见 [references/api.md](references/api.md)。
 
 ## 建立目标
 
@@ -32,7 +38,7 @@ Workflow 是否读取或修改用户数据时才提问；否则做最小合理�
 
 meta.description 用简短任务名称式说明（建议20个中文字符以内），用于聊天方案标题；不要把完整目标、范围和风险塞进description。详细内容放在提案goal/scope，短标题不替代这些边界。
 
-Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用于新Task时必须声明纯字面量`meta.inputSchema`，为JSON-safe对象Schema（`type: "object"`）；无参数用`{type:"object",properties:{},additionalProperties:false}`。它不等于节点结果schema，不以exampleArgs猜默认或必填。旧模块直接加载/恢复可缺省，主控受限草案不因此自动获得新入口。
+`meta.inputSchema` 是当前 Workflow 的输入契约：必须声明纯字面量、JSON-safe 对象 Schema（`type: "object"`）；无参数用 `{type:"object",properties:{},additionalProperties:false}`。主控生成与本地新 Task 都强制要求；它不等于节点结果 schema，不以 exampleArgs 猜默认或必填。旧记录缺省只读，不再作为新草案形状。
 
 `meta` 必须是纯字面量（无变量、调用、展开、计算属性或模板字符串）：
 
@@ -67,10 +73,15 @@ Wave Flow新增本地Task输入契约（已实现）：受信任本地模块用�
 Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；设置关闭后回到私有Home与全量写隔离，四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主不保存任何成果快照、不创建commit、HEAD与真实index不变；结果只保留在该worktree的当前未提交文件里，不写入主工作区；主分支不移动、不push。用户自行查看、修改、提交或清理，清理会删除未提交内容。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 当前允许 `codex` / `claude` / `dsh`；
-四者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
+三者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
 
 - 每个 prompt 必须自包含：任务、范围、相关上游结果、约束与期望产出。Agent 不会自动
   继承另一个 Agent 的对话内容。
+- 产出是给人读的文本时，prompt 必须写清读者、文体与禁忌：例如“写给没进过这个仓库的同事”、
+  “不要罗列内部包名”“不用‘以……为准’这类公文腔”。只写“返回三行摘要”会让模型交出内部代号清单；
+  `schema` 只校验形状，不校验内容是否可读，Schema 通过不等于结果合格。
+- 让 Worker 先读 `AGENTS.md` 只为避免误操作时，要明确“仓库内部约定、包名、代号不要写进产出”，
+  否则这些内部词会顺着上下文进入给用户的结果。
 - `id` 必填，Run 内唯一且稳定（1–120 位字母数字与 `. _ : / -`）；它参与会话绑定与
   replay 指纹，不要在两次运行间随意改名。循环里只能按轮次生成 id：写节点（`workspace-write`）
   的动态 id 必须以非空字面量开头（如 `"repair-" + round` 或 `` `repair-${round}` ``），
@@ -92,9 +103,9 @@ Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展�
 
 ## 人工决策
 
-- 脚本级的业务决策（仅在受限草案可用）：`decisionGate(id, question, answerSchema?)`，
-  阻塞等待用户在界面上提交经 Schema 校验的 JSON 答案。只用于没有人类决定就无法安全
-  继续的真正分叉；普通错误由脚本自行处理。
+- 脚本级的业务决策：`decisionGate(id, question, answerSchema?)`，阻塞等待用户在界面上
+  提交经 Schema 校验的 JSON 答案。只用于没有人类决定就无法安全继续的真正分叉；
+  普通错误由脚本自行处理。
 - 决策不是节点状态机的一部分；gate 的 id 在同一 Run 内唯一。
 
 ## 保持可观测
@@ -103,9 +114,9 @@ Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展�
 说明它在做什么；扇出时报告各任务开始与完成；汇总前说明有多少可用结果。日志只发
 新信息，不发心跳式空消息，绝不记录密钥、完整 prompt 或大段 Agent 原文。
 
-## 受限草案的额外硬约束
+## 主控生成与保存接管约束
 
-先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task。主控只能准备草案，不能批准或自动启动；用户确认和当前现场证据仍由Engine核验。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
+先读取 read_run_capsule 中 Task 的 workflowContract。若为 single-workflow-v1，同一 Task 只维护当前 Workflow 链：已有执行后，反馈只能修订同链，目标无关时请用户新建 Task。主控只能准备草案，不能批准或自动启动；用户确认和当前现场证据仍由Engine核验。本地来源只由用户编辑并重新预检，不提交生成源码替换；只有首次执行前明确放弃当前候选，才允许重选来源。用户可以把当前生成模块“保存并接管”为项目内本地来源；接管后主控不能再替换源码，后续修改必须由用户编辑文件并重新预检。旧 Task 缺省保留历史多卡规则，不凭名字或路径迁移。
 
 ### 影响面总结与证据读取（Wave Flow 新增设计）
 
@@ -132,26 +143,25 @@ goal/scope 说明目标与范围，parameters={baseRevision:当前版本,input:�
 Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码；版本已变化时重新读取，
 不得覆盖用户修改。此模式只准备未批准候选，不执行、不选择 CLI、不自动注入旧结果。
 
-除"不是模块"外，受限脚本还遵守：
+模块硬约束：
 
-- 草案在**提案时**就必须通过完整受限编译门禁（语法、顶层形状、meta）；不可编译的源码不会被冻结，错误诊断会带行列位置返回给你，修正后重新提交即可。
-- 字符串与标点只使用 ASCII：中文引号（`“”‘’`）、全角分号、省略号等任何非 ASCII 标点都会在编译前被拒绝。脚本正文（含 prompt 里的中文内容）必须用 ASCII 引号包裹。
-
-- 可引用的全局只有 `agent`、`phase`、`parallel`、`pipeline`、`log`、`decisionGate`、`JSON`、`Error`
-  与脚本内声明的标识符；`process`、`Bun`、`fetch`、`Math`、`Date`、`Object`、`globalThis` 等
-  一律在编译前被拒绝。
-- 禁止 class、`this`/`super`、generator、标签语句、动态 `import()`、`constructor`/`prototype`/`__proto__` 成员访问。
-- 资源护栏：`agent()` 调用总数 ≤ 20，`phase()` 切换 ≤ 50，`decisionGate()` ≤ 10。
+- 草案在**提案时**就必须通过完整静态门禁（语法、顶层形状、meta 与 inputSchema）；不可编译的源码不会被冻结，错误诊断会带行列位置返回给你，修正后重新提交即可。
+- 值导入只允许来自 `"wave-flow"`；类型导入不受限；禁止动态 `import()`。`import` 必须位于 `meta` 之前。
+- 顶层只允许 import、`export const meta`、类型声明与 `export default async function run(args)`；不得执行其他顶层语句。
+- 字符串与标点使用合法 TypeScript/ASCII 引号；中文引号（`“”‘’`）、全角分号、省略号等会导致语法错误。
+- 主控生成稿会被用户审批后执行，或在用户显式“保存并接管”后成为项目内本地模块；它与手写 Workflow 同等受信任，可访问本机。不要用它读取、传输或修改用户未明确授权的数据。
+- `decisionGate` 是正式作者 API，本地与生成模块都可使用；它只做编排层人工决策，不替代 Worker 的 block/continue。
+- 资源护栏：主控生成的 Execution 受宿主 `agent()` 总数 ≤ 20、`phase()` 切换 ≤ 50、`decisionGate()` ≤ 10 约束；不要依赖无限循环或动态扩权。
 
 ## 交付前校验
 
-1. 形态正确：受信任模块有 `import`/`export`；受限草案没有任何 `import`/`export`。
+1. 形态正确：ESM 模块包含 `import`、`export const meta` 与 `export default async function run(args)`；没有任何受限方言或无 import 的脚本形态。
 2. `meta` 是纯字面量，含 kebab-case `name`、单行 `description`、唯一非空 `phases`。
 3. 每个 `phase()` 调用精确匹配某个 `meta.phases[].title`；`phase()` 不在并发分支内。
 4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` / `"claude"` / `"dsh"` 之一（三者均已完成真实双角色验收，均可设为主控）；`"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`，且必须是字面量；循环写节点按轮次生成 id 时必须以非空字面量前缀开头，供宿主披露与核验。
 5. `parallel()` 每项都是零参数函数；并发结果在使用前判空。
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
-7. 脚本级人工决策使用 `decisionGate`（仅受限草案）；prompt 不含完成上报指令。
+7. 脚本级人工决策使用 `decisionGate`；prompt 不含完成上报指令。
 8. 每个可能较慢的操作之前都有 `log()`。
 9. 引用的每个 API 都存在于 [references/api.md](references/api.md)；不臆造 `workflow()` 嵌套、
    `danger-full-access`、重试或预算字段。

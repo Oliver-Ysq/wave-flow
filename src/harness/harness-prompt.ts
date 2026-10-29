@@ -1,9 +1,10 @@
 import skillGuide from "../../skills/workflow-creator/SKILL.md" with { type: "text" };
 import apiReference from "../../skills/workflow-creator/references/api.md" with { type: "text" };
 import patternReference from "../../skills/workflow-creator/references/patterns.md" with { type: "text" };
-// 受限模板刻意保持非模块形状（无 import/export），因此以 .txt 存放并走 Bun text import；
-// 不参与 tsc 程序，由 harness-prompt 与 skill-assets 测试保证内容与契约一致。
-import restrictedTemplate from "../../skills/workflow-creator/assets/workflow.restricted.txt" with { type: "text" };
+// 模块模板走 Bun text import 内嵌进 Engine；不参与主工程 tsc，
+// 由 harness-prompt 与 skill-assets 测试保证内容与契约一致。
+// @ts-expect-error Bun 按 text 内嵌 .ts 资产；tsc 未启用 allowImportingTsExtensions。
+import workflowTemplate from "../../skills/workflow-creator/assets/workflow.ts" with { type: "text" };
 
 /**
  * 主控的固定行为边界；工具能力由 session-private MCP sidecar 提供。
@@ -33,13 +34,13 @@ export function buildHarnessSystemPrompt(mode: "isolated" | "perception" = "isol
   if (mode !== "isolated" && mode !== "perception") throw new Error("未知主控会话模式。");
   return [
     mode === "perception" ? PERCEPTION_SYSTEM_PROMPT : HARNESS_SYSTEM_PROMPT,
-    "# Workflow 作者契约\n\n以下是 Wave Flow workflow-creator skill 全文，是 workflow 草案的唯一契约依据。正文中引用的 references/api.md、references/patterns.md 与受限草案完整模板已作为附录完整附在最后，无需也无法再读取磁盘文件。",
+    "# Workflow 作者契约\n\n以下是 Wave Flow workflow-creator skill 全文，是 workflow 草案的唯一契约依据。正文中引用的 references/api.md、references/patterns.md 与模块模板已作为附录完整附在最后，无需也无法再读取磁盘文件。",
     skillGuide,
     "# 附录：references/api.md",
     apiReference,
     "# 附录：references/patterns.md",
     patternReference,
-    "# 附录：assets/workflow.restricted.txt（受限草案完整模板，持续通过真实校验门禁）",
-    restrictedTemplate,
+    "# 附录：assets/workflow.ts（模块完整模板，持续通过真实校验门禁）",
+    workflowTemplate,
   ].join("\n\n");
 }

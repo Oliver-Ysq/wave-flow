@@ -5,7 +5,7 @@ import {dirname,join} from "node:path";
 import {fileURLToPath} from "node:url";
 import {HarnessService} from "../../src/harness/service";
 import {defineTemplate,isTemplateOrigin,listWorkflowTemplates,validateTemplateInput,canonicalJson} from "../../src/harness/workflow-templates";
-import {compileRestrictedWorkflow} from "../../src/workflow/restricted/restricted-runtime";
+import {loadWorkflowSource} from "../../src/workflow/load-workflow";
 import {HarnessJournal} from "../../src/harness/journal";
 const roots:string[]=[];
 const templateDir=join(dirname(fileURLToPath(import.meta.url)),"../../src/harness/templates");
@@ -150,7 +150,7 @@ test("内置预置以文件维护：内嵌源码与磁盘文件一致，且目�
   // 内嵌文本与磁盘文件必须逐字节一致，否则模板指纹与实际审阅到的脚本会分叉。
   expect(await readFile(path,"utf8")).toBe(template.source);
   // 文件本体必须独立通过受限编译门禁，不依赖目录注册时的副作用。
-  const module=compileRestrictedWorkflow(template.source);
+  const module=await loadWorkflowSource(template.source);
   expect(module.meta.name).toBe(template.meta.name);
   expect(module.meta.phases.map(phase=>phase.title)).toEqual(template.meta.phases.map(phase=>phase.title));
  }
@@ -159,7 +159,7 @@ test("深度调研模板：编译合法、Schema 边界与参数校验生效",()
  const templates=listWorkflowTemplates();
  expect(templates.map(item=>item.id)).toEqual(["code-review","deep-research","deep-cr"]);
  const research=templates.find(item=>item.id==="deep-research")!;
- expect(research.version).toBe(2);expect(research.meta.name).toBe("deep-research");
+ expect(research.version).toBe(3);expect(research.meta.name).toBe("deep-research");
  expect(research.meta.phases.map(phase=>phase.title)).toEqual(["计划","调研","核验","交叉检查与补证","综评","批判","定稿"]);
  expect(isTemplateOrigin((({source,...origin})=>origin)(research))).toBe(true);
  validateTemplateInput(research.inputSchema,{topic:"端侧推理框架选型"});
@@ -173,6 +173,7 @@ test("深度调研模板：编译合法、Schema 边界与参数校验生效",()
 });
 test("深度CR模板：编译合法、Schema 边界与参数校验生效",()=>{
  const review=listWorkflowTemplates().find(item=>item.id==="deep-cr")!;
+ expect(review.version).toBe(4);
  expect(review.meta.phases.map(phase=>phase.title)).toEqual(["摸底","分维审查","取证复核","交叉裁决","盲区扫描","定稿汇总"]);
  expect(isTemplateOrigin((({source,...origin})=>origin)(review))).toBe(true);
  validateTemplateInput(review.inputSchema,{target:"src/"});
@@ -188,11 +189,11 @@ test("已保存且目录不再提供的版本仍按冻结源码/Schema编辑，�
  const current=listWorkflowTemplates()[0]!;
  const task=await service.startTask(root,{projectId:"project",clientRequestId:crypto.randomUUID(),text:"目录升级",template:{id:current.id,version:current.version,sourceHash:current.sourceHash,input:{target:"src/",focus:["安全"],maxFindings:2}}});
  const first=task.workflowRevisions[0]!;
- const old=defineTemplate(current.id,99,`const meta={name:"old-review",description:"冻结旧版",phases:[{title:"旧版"}]};async function run(args){phase("旧版");return args;}`,{type:"object",properties:{legacy:{type:"integer"}},required:["legacy"],additionalProperties:false},"旧版本Schema");
+ const old=defineTemplate(current.id,99,`import { phase } from "wave-flow";\nexport const meta={name:"${current.id}",description:"冻结旧版",phases:[{title:"旧版"}],inputSchema:{type:"object",properties:{legacy:{type:"integer"}},required:["legacy"],additionalProperties:false}};\nexport default async function run(args){phase("旧版");return args;}`,"旧版本Schema");
  const {source,...templateOrigin}=old;
  const opened=await HarnessJournal.open(task.harnessRunId,state);
  const at=new Date().toISOString();
- await opened.journal.append({type:"workflow.revision_proposed",harnessRunId:task.harnessRunId,at,revision:{...first,revision:2,parentRevision:1,source,sourceHash:old.sourceHash,preview:undefined,templateOrigin,input:{legacy:3},saveRequestId:crypto.randomUUID(),savePayloadHash:"a".repeat(64),createdAt:at}});
+ await opened.journal.append({type:"workflow.revision_proposed",harnessRunId:task.harnessRunId,at,revision:{...first,revision:2,parentRevision:1,source,sourceHash:old.sourceHash,sourceFormat:"module",preview:undefined,templateOrigin,input:{legacy:3},saveRequestId:crypto.randomUUID(),savePayloadHash:"a".repeat(64),createdAt:at}});
  const reopened=new HarnessService(state,async()=>{throw Error("must not initialize");});
  await reopened.acceptWorkflowRevision(task.harnessRunId,2);
  const next=await reopened.saveTemplate(task.harnessRunId,crypto.randomUUID(),{id:old.id,version:old.version,sourceHash:old.sourceHash,input:{legacy:4}},first.cardId);
@@ -224,7 +225,7 @@ test("预置创建、保存重开只一Task/候选，无模型/执行；参数�
 });
 test("主控修改模板同卡追加generated版本并耐久保留derivedFrom",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wf-template-derived-"));roots.push(root);
- const source=`const meta={name:"derived-review",description:"独立方案",phases:[{title:"复核"}]};async function run(args){phase("复核");return {};}`;
+ const source=`import { phase } from "wave-flow";\nexport const meta={name:"derived-review",description:"独立方案",phases:[{title:"复核"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("复核");return {};}`;
  const service=new HarnessService(join(root,"state"),async(_id,_cwd,_prior,actions)=>({isRunning:false,subscribe:()=>()=>{},abort:()=>{},prompt:async()=>{await actions.proposeWorkflowRevision(source,"修改目标","只读复核");return "已修改";}}));
  const template=listWorkflowTemplates()[0]!;
  const task=await service.startTask(root,{projectId:"project",clientRequestId:crypto.randomUUID(),text:"预置审查",template:{id:template.id,version:template.version,sourceHash:template.sourceHash,input:{target:"src/",focus:["安全"],maxFindings:2}}});

@@ -21,7 +21,7 @@ import { logWorkerLifecycle } from "./worker-lifecycle-log";
  * 但真正启动第一个 Agent 前必须再次读取 Registry 并按节点 cli 复核已验证 Worker
  * 候选的文件身份；没有可用候选时 fail closed，绝不回退到随包 CLI。
  *
- * 受限 Execution 的指派节点（request.assignedRuntimeId）按分配快照直接解析目标；
+ * 历史 assigned 配置的指派节点（request.assignedRuntimeId）按分配快照直接解析目标；
  * 解析、launcher 组装或 ACP session 建立前失败时，允许一次性回退到快照冻结的主控
  * Runtime，并耐久 Journal 诊断。agent.session 已耐久的失败绝不回退——已投递节点
  * 只能收敛为 interrupted，由用户显式 resume。
