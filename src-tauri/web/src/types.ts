@@ -177,6 +177,14 @@ export type EngineEventEnvelope = { generation: number; frame: { type: "event"; 
 export type WorkflowRevision = {
   /** 保存时确定的更新原因；缺省为未知旧记录，仅展示，不影响批准或执行。 */
   updateReason?: "save-template" | "save-local" | "generate-plan" | "modify-plan" | "modify-parameters" | "modify-configuration";
+  /** 源码形态；缺省时按 localOrigin 推断，旧 restricted 稿只读。 */
+  sourceFormat?: "module" | "restricted";
+  /** 保存并接管的请求 UUID；仅由用户保存生成的 revision 有。 */
+  exportRequestId?: string;
+  /** 保存并接管的耐久时间；仅由用户保存生成的 revision 有。 */
+  exportedAt?: string;
+  /** 保存请求载荷指纹；仅用于幂等冲突检测。 */
+  exportPayloadHash?: string;
   /** Engine预检保存的本地来源快照，不能由主控或表单提交源码伪造。 */
   localOrigin?:import("../../../src/harness/types").WorkflowRevision["localOrigin"];
   /** 参数待补齐，不能直接批准运行。 */
@@ -210,6 +218,8 @@ export type WorkflowRevision = {
     sourceHash: string;
     /** 已校验阶段词表，不表达运行依赖。 */
     phaseTitles: string[];
+    /** 已校验 inputSchema；仅用于参数表单，执行仍以冻结 meta 为准。 */
+    inputSchema?: Record<string, unknown>;
     /** 源码调用示意，不是实际执行节点名单。 */
     previewAgents: ExecutionPlanResponse["previewAgents"];
   };
@@ -225,7 +235,9 @@ export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-d
 export type ExecutionWorkspaceConfig = {
  /** 明确接续同Task最近写Execution的共享worktree；缺省首次分配。 */ continuation?:{executionId:string;workspaceId:string;head:string};
  version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>;/** 循环写节点的稳定字面量前缀；用户确认时逐前缀披露，实际节点在执行记录中核验。 */dynamicNodes?:Array<{nodeIdPrefix:string}>}; workspaceId:string };
-export type ExecutionConfigSnapshot = { version: 1; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?:ExecutionWorkspaceConfig };
+export type ExecutionConfigSnapshot =
+  | { version: 1; assignmentMode?: "assigned"; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?: ExecutionWorkspaceConfig }
+  | { version: 1; assignmentMode: "script"; createdAt: string; workspaces?: ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
   /** 已核验原执行共享worktree，写修订自动接续；不复制节点状态。 */

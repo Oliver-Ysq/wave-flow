@@ -43,10 +43,19 @@ export class OperationTracker {
 }
 /** 未读只取完整耐久正文/原消息/版本身份，不把 delta 当作消息。 */
 export function unreadIdentities(task:HarnessSnapshot):string[] {
-  return [...composeConversationTurns(task).flatMap(turn=>{
+  const identities=[...composeConversationTurns(task).flatMap(turn=>{
     const bodies=turn.entries.filter(entry=>entry.kind==="body"&&entry.completed);
-    return bodies.length ? bodies.map(entry=>`body:${entry.entryId}`) : turn.assistant ? [`message:${turn.assistant.id}`] : [];
-  }),...task.workflowRevisions.map(revision=>`revision:${revision.revision}`),...(task.executionHistory??[]).map(event=>event.key)];
+    if(bodies.length)return bodies.map(entry=>`body:${entry.entryId}`);
+    // 与渲染一致：只有完全没有 body 条目时才退回原助手消息，否则正文元素无身份可标记。
+    return turn.assistant&&!turn.entries.some(entry=>entry.kind==="body")?[`message:${turn.assistant.id}`]:[];
+  }),...task.workflowRevisions.filter(revision=>revision.updateReason!=="save-local").map(revision=>`revision:${revision.revision}`),
+  // 同一执行有 created/finished 两条历史，页面上只有一张卡片；身份必须与可见元素一致。
+  ...(task.executionHistory??[]).map(event=>`execution:${event.executionId}`)];
+  return [...new Set(identities)];
+}
+/** 折叠组等容器可承载多个身份：空格分隔，展开与否都以可见容器为准。 */
+export function parseReadIdentities(value:string|undefined):string[] {
+  return value?value.split(/\s+/).filter(Boolean):[];
 }
 /** 阅读标记只保存稳定身份；首次载入历史记录设基线，不把全部历史当未读。 */
 export class UnreadTracker {

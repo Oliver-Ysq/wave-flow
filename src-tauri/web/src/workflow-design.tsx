@@ -6,24 +6,12 @@ import {DesignConfirmationCache,WorkspaceConfirmationCache} from "./workflow-des
 import {groupWorkersByPhase} from "./conversation/plan-groups";
 import {userFacingText} from "./user-facing-text";
 import {cliDisplayName} from "./cli-meta";
-import type {RuntimeCli} from "./types";
-const cliDrafts=new ViewCache<Record<string,string>>(64);
 const plans=new ViewCache<ExecutionPlanResponse>(64);
 const confirmations=new DesignConfirmationCache();
 const localConfirmations=new ViewCache<string>(64);
 const workspaceConfirmations=new WorkspaceConfirmationCache();
 
-/** 每个 CLI 只呈现一个安装（优先当前选中项）；安装切换属于执行底座的职责。 */
-function oneRuntimePerCli(plan:ExecutionPlanResponse){
-  const byCli=new Map<RuntimeCli,ExecutionPlanResponse["pool"][number]>();
-  for(const runtime of plan.pool){
-    const selected=plan.selectedByCli?.[runtime.cli];
-    if(!byCli.has(runtime.cli)||runtime.runtimeId===selected)byCli.set(runtime.cli,runtime);
-  }
-  return [...byCli.values()];
-}
-
-/** Workflow设计与CLI内联选择；只有确认按钮发起执行，读取计划不调度Worker。 */
+/** Workflow 设计与只读 CLI 展示；只有确认按钮发起执行，读取计划不调度 Worker。 */
 export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,onAdjustViaChat,onAbandonCard,onCreated,input,execution,validateBeforeRun}:{
  /** 确认前由参数区校验并定位错误；false不发请求、不批准。 */ validateBeforeRun?:()=>boolean;
  /** 此版本的原执行，历史CLI以冻结配置为准，不拿源码字面量冒充生效值。 */ execution?:WorkflowExecution;
@@ -38,42 +26,35 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
 }){
  const identity=`${taskId}:${revision.cardId??"legacy"}:${revision.revision}`;
  const [plan,setPlan]=useState<ExecutionPlanResponse|null>(plans.get(identity)??null),[error,setError]=useState<string|null>(null);
- const [choices,setChoices]=useState<Record<string,string>>(cliDrafts.get(identity)??{}),[busy,setBusy]=useState(false);
+ const [busy,setBusy]=useState(false);
  const [checking,setChecking]=useState(false),[checkAttempt,setCheckAttempt]=useState(0);
  const [planError,setPlanError]=useState<string|null>(null);
  const local=!!revision.localOrigin;
- useEffect(()=>{let live=true;if(editable){setChecking(true);setPlanError(null);const timeout=setTimeout(()=>{if(!live)return;if(checkAttempt===0){setChecking(true);setCheckAttempt(attempt=>attempt+1);return;}setPlanError("执行环境准备较慢。参数和工具选择已保留，请稍后重新检查。");setChecking(false);},15_000);const done=()=>clearTimeout(timeout);void api.planExecution(taskId,revision.revision).then(result=>{done();if(live){plans.set(identity,result);setPlan(result);setPlanError(local||result.harnessRuntime?null:"还没有选择可用的本地执行工具。请打开右上角执行环境设置完成连接。");}}).catch(error=>{done();if(live&&!String(error).includes("主控必须空闲"))setPlanError(userFacingText(error instanceof Error?error.message:String(error)));}).finally(()=>{if(live)setChecking(false);});}else setChecking(false);return()=>{live=false;};},[taskId,revision.revision,editable,identity,checkAttempt]);
- function cliSelect(id:string,label:string){
-   if(revision.localOrigin){const cli=(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;return <span>{cli ? cliDisplayName(cli) : "自动选择"}</span>;}
-   if(execution){const assignment=execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment;return <span>{assignment?cliDisplayName(assignment.cli):"历史记录未保存工具"}</span>;}
-   if(!editable&&!blockedConfirmReason){
-     const cli=revision.preview?.previewAgents.find(worker=>worker.nodeId===id)?.cli;
-     return <span>{cli?cliDisplayName(cli):'运行时决定'}</span>;
-   }
-   if(!plan){
-     if(checking)return <span className="cli-pending" role="status">正在准备执行环境…</span>;
-     if(planError)return <span>检查未完成 · 见下方错误</span>;
-     return <span className="cli-pending">处理结束后显示可用工具</span>;
-   }
-   const options=oneRuntimePerCli(plan);
-   if(options.length===0)return <span>还没有可用的执行工具</span>;
-   if(options.length===1){const only=options[0]!;return <span>{cliDisplayName(only.cli)}</span>;}
-   const preferred=choices[id]&&options.some(runtime=>runtime.runtimeId===choices[id])?choices[id]:options.find(runtime=>runtime.runtimeId===plan.harnessRuntime?.runtimeId)?.runtimeId??options[0]!.runtimeId;
-   return <select aria-label={`${label} CLI`} disabled={!editable||busy} value={preferred} onChange={event=>setChoices(current=>{const next={...current,[id]:event.target.value};cliDrafts.set(identity,next);return next;})}>{options.map(runtime=><option key={runtime.runtimeId} value={runtime.runtimeId}>{cliDisplayName(runtime.cli)}</option>)}</select>;
+ const moduleRevision=(revision.sourceFormat??(revision.localOrigin?"module":"restricted"))==="module";
+ const script=moduleRevision&&!revision.localOrigin;
+ useEffect(()=>{let live=true;if(editable){setChecking(true);setPlanError(null);const timeout=setTimeout(()=>{if(!live)return;if(checkAttempt===0){setChecking(true);setCheckAttempt(attempt=>attempt+1);return;}setPlanError("执行环境准备较慢。参数已保留，请稍后重新检查。");setChecking(false);},15_000);const done=()=>clearTimeout(timeout);void api.planExecution(taskId,revision.revision).then(result=>{done();if(live){plans.set(identity,result);setPlan(result);setPlanError(local||script||result.harnessRuntime?null:"还没有选择可用的本地执行工具。请打开右上角执行环境设置完成连接。");}}).catch(error=>{done();if(live&&!String(error).includes("主控必须空闲"))setPlanError(userFacingText(error instanceof Error?error.message:String(error)));}).finally(()=>{if(live)setChecking(false);});}else setChecking(false);return()=>{live=false;};},[taskId,revision.revision,editable,identity,checkAttempt]);
+ function cliSelect(id:string,_label:string){
+   const assigned=execution&&execution.config?.assignmentMode!=="script"
+     ? execution.config?.assignments.find(item=>item.agentId===id)??execution.config?.defaultAssignment
+     : null;
+   const cli=assigned?.cli??(plan?.previewAgents??revision.preview?.previewAgents??[]).find(worker=>worker.nodeId===id)?.cli;
+   return <span>{cli?cliDisplayName(cli):"按源码选择"}</span>;
  }
  function workspaceSummary(){
    const diagnostic=plan?.workspacePlan?.diagnostic;
    return diagnostic ? <p role="alert">{diagnostic}</p> : null;
  }
  async function run(){
-   if(!editable||busy||checking||planError||!plan||!revision.localOrigin&&!plan.harnessRuntime)return;
+   if(!editable||busy||checking||planError||!plan||!local&&!script&&!plan.harnessRuntime)return;
    if(validateBeforeRun&&!validateBeforeRun())return;
    setBusy(true);try{
      let result:ExecutionResponse;
      if(revision.localOrigin){
        if(plan.workspacePlan){
-         const localChoices:Record<string,string>={};for(const worker of plan.workers){if(!worker.cli)throw new Error(`本地写节点 ${worker.id} 的CLI必须为固定字面量。`);const runtimeId=plan.selectedByCli[worker.cli]??plan.pool.find(item=>item.cli===worker.cli)?.runtimeId;if(!runtimeId)throw new Error(`没有已验证的 ${worker.cli} Runtime。`);localChoices[worker.id]=runtimeId;}
-         const workspaces=workspaceConfirmations.get(identity,plan.workspacePlan,true,plan.continuationPlan);const confirmation=confirmations.get(identity,input,localChoices,plan,workspaces);result=await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash);}
+         const workspaces=workspaceConfirmations.get(identity,plan.workspacePlan,true,plan.continuationPlan);
+         const confirmation=confirmations.script(identity,input,plan,workspaces);
+         result=await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash);
+       }
        else {const key=`${identity}:${plan.sceneEvidenceHash??"first"}`;let requestId=localConfirmations.get(key);if(!requestId){requestId=crypto.randomUUID();localConfirmations.set(key,requestId);}result=await api.confirmWorkflow(taskId,revision.revision,undefined,requestId,plan.sceneEvidenceHash);}
      }
      else {
@@ -81,7 +62,8 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
        if(plan.workspacePlan){
          workspaces=workspaceConfirmations.get(identity,plan.workspacePlan,true,plan.continuationPlan);
        }
-       const confirmation=confirmations.get(identity,input,choices,plan,workspaces);result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input,plan.sceneEvidenceHash):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash);
+       const confirmation=confirmations.script(identity,input,plan,workspaces);
+       result=revision.templateOrigin?await api.confirmTemplate(taskId,revision.revision,confirmation.config,confirmation.id,input,plan.sceneEvidenceHash):await api.confirmWorkflow(taskId,revision.revision,confirmation.config,confirmation.id,plan.sceneEvidenceHash,script?input:undefined);
      }
      onCreated(result);
    }catch(error){setError(userFacingText(error instanceof Error?error.message:String(error)));}finally{setBusy(false);}
@@ -89,11 +71,9 @@ export function WorkflowDesign({taskId,revision,editable,blockedConfirmReason,on
  const titles=revision.preview?.phaseTitles??[];
  return <section className="workflow-design"><h3>执行步骤</h3>{groupWorkersByPhase(titles,plan?.previewAgents??revision.preview?.previewAgents??[]).map(group=><section key={group.key}><h4>{group.title}</h4>{group.workers.map(worker=><div className="workflow-design-row" key={worker.key}><strong>{worker.name}{worker.loop&&<small>循环/批量调用</small>}</strong>{cliSelect(worker.nodeId??"*",worker.name)}</div>)}</section>)}
    {workspaceSummary()}
-   {!!plan?.dynamicCount&&!revision.localOrigin&&<section className="workflow-design-default"><div className="workflow-design-row"><span>其余动态 Worker 默认使用</span>{cliSelect("*","动态Worker")}</div></section>}
-   {plan&&plan.pool.length===1&&editable&&<small>需要更多选择时，先在执行底座设置中验证其他 CLI。</small>}
    {error&&<p role="alert">{error}</p>}
-   {checking&&<small role="status">正在检查执行配置，参数和 CLI 选择已保留…</small>}
+   {checking&&<small role="status">正在检查执行配置，参数已保留…</small>}
    {planError&&<><p role="alert">{planError}</p>{editable&&<button type="button" className="button-secondary" disabled={checking||busy} onClick={()=>setCheckAttempt(attempt=>attempt+1)}>重新检查执行环境</button>}</>}
-   {(editable||blockedConfirmReason)&&<div className="workflow-design-actions"><small>{editable?(plan?.workspacePlan?"确认后开始执行；完成后改动保留在工作区，不会自动写入项目目录。":"确认后开始执行。"):blockedConfirmReason}</small><div className="actions-group">{onAdjustViaChat&&<button type="button" className="button-secondary" onClick={onAdjustViaChat}>通过对话调整</button>}{onAbandonCard&&<button type="button" className="button-secondary" onClick={()=>void onAbandonCard()}>放弃此方案</button>}<button type="button" className="button-primary" disabled={!editable||busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime} onClick={()=>void run()}>{busy?"正在启动…":"确认并运行"}</button></div></div>}
+   {(editable||blockedConfirmReason)&&<div className="workflow-design-actions"><small>{editable?(plan?.workspacePlan?"确认后开始执行；完成后改动保留在工作区，不会自动写入项目目录。":"确认后开始执行。"):blockedConfirmReason}</small><div className="actions-group">{onAdjustViaChat&&<button type="button" className="button-secondary" onClick={onAdjustViaChat}>通过对话调整</button>}{onAbandonCard&&<button type="button" className="button-secondary" onClick={()=>void onAbandonCard()}>放弃此方案</button>}<button type="button" className="button-primary" disabled={!editable||busy||checking||!!planError||!plan||!local&&!script&&!plan.harnessRuntime} onClick={()=>void run()}>{busy?"正在启动…":"确认并运行"}</button></div></div>}
  </section>;
 }

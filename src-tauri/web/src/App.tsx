@@ -22,7 +22,6 @@ import {
   railWidthFromDrag,
 } from "./rail-width";
 import { summaryBodyStartedAt } from "./conversation/harness-event-merge";
-import { Markdown as MessageBody } from "./conversation/markdown";
 import {
   ConversationView,
 } from "./conversation/conversation-view";
@@ -84,6 +83,7 @@ const detailPositions = new ViewCache<number>();
 import { TeamPanel } from "./execution/team-panel";
 import { ExecutionProgressCard } from "./execution/progress-card";
 import { CopyValue, ExecutionDiagnostics } from "./execution/execution-diagnostics";
+import { ResultValue } from "./execution/result-value";
 import { SchemaForm } from "./forms/schema-form";
 import { TemplatePicker } from "./template-picker";
 import { LocalWorkflowPreview } from "./local-workflow-preview";
@@ -442,15 +442,19 @@ export function App() {
   const [, refreshRead] = useState(0);
   const markRead = useCallback((owner: string, ids: string[]) => {
     const task = harnessRef.current;
-    if (
-      !task ||
-      task.harnessRunId !== owner ||
-      routeRef.current.kind !== "conversation"
-    )
-      return;
+    if (!task || task.harnessRunId !== owner) return;
     unreadTracker.current.mark(owner, ids);
     refreshRead((value) => value + 1);
   }, []);
+  // 方案/执行详情本身就在展示该身份：打开即视为已读，不要求用户再回对话滚一遍。
+  useEffect(() => {
+    if (!harness || route.kind !== "workflow") return;
+    const ids = [
+      `revision:${route.revision}`,
+      ...(route.executionId ? [`execution:${route.executionId}`] : []),
+    ];
+    markRead(harness.harnessRunId, ids);
+  }, [harness, route, markRead]);
   const unreadCounts = new Map(
     harnesses.map((task) => [
       task.harnessRunId,
@@ -4063,8 +4067,7 @@ function HarnessConversation({
           />
           {interruptedSummaryObligations(harness).map((item) => (
             <div className="task-summary-notice" key={item.key}>
-              <ImpactSummaryPanel
-                compact
+              <ImpactSummaryNotice
                 summaryKey={item.key}
                 harness={harness}
                 executionId={item.executionId}
@@ -4466,7 +4469,7 @@ function HistoricalResults({
   return (
     <section className="workflow-results">
       <h2>执行结果</h2>
-      <p>查看已保存的总结与交付，不会重新执行。执行结束不等于目标已验收。</p>
+      <p>查看已保存的运行结果与交付，不会重新执行。执行结束不等于目标已验收。</p>
       <PreviousRecords
         part="notice"
         current={currentAttempt}
@@ -4494,35 +4497,61 @@ function HistoricalResults({
           </span>
         </p>
       )}
-      <ImpactSummaryPanel
-        harness={harness}
-        executionId={executionId}
-        attempt={attempt}
-      />
       {error && <p role="alert">{userFacingText(error)}</p>}
       {!value && !error && <p>正在读取结果…</p>}
       {value && (
         <>
+          <h2>运行结果</h2>
+          <ResultValue summary={value.summary} />
           <h2>节点结果</h2>
           {value.nodes.length === 0 && <p>这份记录没有已完成节点。</p>}
           {value.nodes.map((node) => (
             <PersistedDetails
               identity={`${taskId}:${executionId}:${attempt}:${node.id}:result`}
+              defaultOpen={value.summary === null}
               key={node.id}
             >
               <summary>{node.label}</summary>
               <pre>{JSON.stringify(node.result, null, 2)}</pre>
             </PersistedDetails>
           ))}
-          <details className="execution-diagnostics">
-            <summary>高级 / 诊断信息 · 原始返回 JSON</summary>
-            {value.summary ? (
-              <pre>{JSON.stringify(value.summary, null, 2)}</pre>
-            ) : (
-              <p>这份记录未保存工作流返回结果。</p>
-            )}
-          </details>
         </>
+      )}
+      {(() => {
+        // 总结正文只在主控对话中展示；这里只保留未完成总结的状态与停止/重试操作。
+        const pending =
+          harness.impactSummaries?.filter(
+            (item) =>
+              item.executionId === executionId &&
+              item.attempt === attempt &&
+              !item.supersededBy &&
+              item.status !== "completed" &&
+              item.status !== "cancelled",
+          ) ?? [];
+        if (pending.length === 0) return null;
+        return (
+          <div className="workflow-summary-actions" aria-label="总结状态与操作">
+            {pending.map((item) => (
+              <ImpactSummaryNotice
+                key={item.key}
+                summaryKey={item.key}
+                harness={harness}
+                executionId={executionId}
+                attempt={attempt}
+              />
+            ))}
+          </div>
+        );
+      })()}
+      {value && (
+        <details className="execution-diagnostics">
+          <summary>高级 / 诊断信息 · 原始返回 JSON</summary>
+          {value.summary ? (
+            <pre>{JSON.stringify(value.summary, null, 2)}</pre>
+          ) : (
+            <p>这份记录未保存工作流返回结果。</p>
+          )}
+        </details>
       )}
       <PreviousRecords
         part="list"
@@ -4544,240 +4573,80 @@ function HistoricalResults({
   );
 }
 
-/** 义务与完整回答均来自原Task快照；重试不重跑业务执行。 */
-function ImpactSummaryPanel({
+/** 总结正文只在主控对话中展示；结果页只保留运行结果。这里仅提示未完成的总结义务并提供停止/重试。 */
+function ImpactSummaryNotice({
   harness,
   executionId,
   attempt,
   summaryKey,
-  compact = false,
 }: {
   harness: HarnessSnapshot;
   executionId: string;
   attempt: number;
-  summaryKey?: string;
-  compact?: boolean;
+  summaryKey: string;
 }) {
-  const summaries =
-    harness.impactSummaries?.filter(
-      (item) => item.executionId === executionId && item.attempt === attempt,
-    ) ?? [];
-  const obligation = summaryKey
-    ? summaries.find((item) => item.key === summaryKey)
-    : summaries[0];
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState<string | null>(null);
-  if (!obligation) return <p>此执行未保存总结；请查看下方已保存的结果。</p>;
-  if (compact)
+  const obligation = harness.impactSummaries?.find(
+    (item) =>
+      item.executionId === executionId &&
+      item.attempt === attempt &&
+      item.key === summaryKey,
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!obligation || obligation.status === "completed") return null;
+  const label = summaryWorkLabel(harness, executionId);
+  if (obligation.status === "pending")
     return (
       <div className="summary-compact">
-        <span>
-          {summaryWorkLabel(harness, executionId)}
-          ：这次执行还缺少一份总结。生成后可以继续下一次执行。
-        </span>
-        <button
-          disabled={
-            busy ||
-            harness.status === "running" ||
-            harness.status === "completed"
-          }
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await api.retryImpactSummary(
-                harness.harnessRunId,
-                obligation.key,
-              );
-            } catch (error) {
-              setError(String(error));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? "正在生成…" : "生成总结"}
-        </button>
-        <small>不会重新执行工作流</small>
-        <details>
-          <summary>查看原因</summary>
-          <p>{userFacingText(obligation.diagnostic ?? "总结回合已中断。")}</p>
-        </details>
-        {error && <p role="alert">{userFacingText(error)}</p>}
+        <span>{label}：正在准备执行总结，完成后可在对话中查看。</span>
       </div>
     );
-  if (!summaryKey)
-    return (
-      <section aria-label="原总结与补充">
-        {summaries.map((item) => (
-          <div key={item.key}>
-            {item.supplementOf && <h3>现场变化补充</h3>}
-            <ImpactSummaryPanel
-              harness={harness}
-              executionId={executionId}
-              attempt={attempt}
-              summaryKey={item.key}
-            />
-          </div>
-        ))}
-        {error && <p role="alert">{error}</p>}
-        {harness.status !== "completed" && (
-          <button
-            disabled={
-              busy ||
-              harness.status !== "idle" ||
-              harness.executions.some((item) => item.finishedAt === null)
-            }
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await api.checkExecutionScene(
-                  harness.harnessRunId,
-                  executionId,
-                );
-              } catch (error) {
-                setError(String(error));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? "正在检查…" : "检查项目现状（不会执行）"}
-          </button>
-        )}
-      </section>
-    );
-  if (obligation.supersededBy)
-    return (
-      <p>
-        此补充已被更新的检查结果替代；保留历史，不再阻塞恢复。请查看最新补充。
-      </p>
-    );
-  if (
-    obligation.supplementOf &&
-    obligation.status === "interrupted" &&
-    harness.status !== "completed"
-  )
-    return (
-      <section>
-        <p role="alert">
-          {userFacingText(obligation.diagnostic ?? "补充检查已中断")}
-        </p>
-        {error && <p role="alert">{userFacingText(error)}</p>}
-        <button
-          disabled={busy || harness.status === "running"}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              const checked = await api.checkExecutionScene(
-                harness.harnessRunId,
-                executionId,
-              );
-              const current = checked.harness.impactSummaries?.find(
-                (item) =>
-                  item.executionId === executionId &&
-                  !item.supersededBy &&
-                  item.status === "interrupted",
-              );
-              if (current)
-                await api.retryImpactSummary(harness.harnessRunId, current.key);
-            } catch (error) {
-              setError(String(error));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          重新检查现场
-        </button>
-      </section>
-    );
-  const message = harness.messages.find(
-    (item) => item.id === obligation.messageId,
-  );
-  const gitLimitation = harness.executions.find(
-    (item) => item.executionId === executionId,
-  )?.config?.workspaces
-    ? "受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动，也不证明结果已写入主工作区或外部系统已回滚。"
-    : "尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。";
-  if (obligation.status === "cancelled")
-    return (
-      <article aria-label="执行总结">
-        <h2>执行总结</h2>
-        <p>用户已放弃总结并只读归档；总结未完成，不再开放执行。</p>
-      </article>
-    );
+  const running = obligation.status === "running";
   return (
-    <article aria-label="执行总结">
-      <h2>执行总结</h2>
-      <p role="status">
-        {/* 总结义务状态同样用颜色徽章，中断重试不再被当作普通说明。 */}
-        <span className={`wf-status-text ${obligation.status}`}>
-          {
-            {
-              pending: "准备总结",
-              running: "正在总结",
-              interrupted: "总结未完成",
-              completed: "总结已保存",
-            }[obligation.status]
+    <div className="summary-compact">
+      <span>
+        {label}：
+        {running
+          ? "正在生成执行总结，完成后可在对话中查看。"
+          : "这次执行的总结还没有完成。生成后可以继续下一次执行。"}
+      </span>
+      <button
+        disabled={
+          busy ||
+          (running
+            ? !obligation.turnId
+            : harness.status === "running" || harness.status === "completed")
+        }
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            if (running && obligation.turnId)
+              await api.stopImpactSummary(
+                harness.harnessRunId,
+                obligation.key,
+                obligation.turnId,
+              );
+            else if (!running)
+              await api.retryImpactSummary(harness.harnessRunId, obligation.key);
+          } catch (error) {
+            setError(String(error));
+          } finally {
+            setBusy(false);
           }
-        </span>
-      </p>
-      {obligation.status !== "completed" && (
-        <p>
-          生成总结后才能开始下一次执行；不会重新运行已完成节点。
-        </p>
-      )}
+        }}
+      >
+        {busy ? "正在处理…" : running ? "停止总结" : "生成总结"}
+      </button>
+      {!running && <small>不会重新执行工作流</small>}
       {obligation.diagnostic && (
-        <p role="alert">{userFacingText(obligation.diagnostic)}</p>
+        <details>
+          <summary>查看原因</summary>
+          <p>{userFacingText(obligation.diagnostic)}</p>
+        </details>
       )}
       {error && <p role="alert">{userFacingText(error)}</p>}
-      {obligation.status === "completed" && message && (
-        <MessageBody text={message.text} />
-      )}
-      <details className="summary-evidence-limits">
-        <summary>证据范围与限制</summary>
-        <p>{gitLimitation}</p>
-      </details>
-      {harness.status !== "completed" && obligation.status !== "completed" && (
-        <button
-          disabled={
-            busy ||
-            (obligation.status === "running" && !obligation.turnId) ||
-            (harness.status === "running" && obligation.status !== "running")
-          }
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              if (obligation.status === "running")
-                await api.stopImpactSummary(
-                  harness.harnessRunId,
-                  obligation.key,
-                  obligation.turnId!,
-                );
-              else
-                await api.retryImpactSummary(
-                  harness.harnessRunId,
-                  obligation.key,
-                );
-            } catch (error) {
-              setError(String(error));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy
-            ? "正在处理…"
-            : obligation.status === "running"
-              ? "停止总结"
-              : "生成总结"}
-        </button>
-      )}
-    </article>
+    </div>
   );
 }
 
@@ -4884,14 +4753,16 @@ function ExecutionDetail({
     return (
       <p role="alert">所选执行尝试不存在或尚未读取，请选择当前执行查看。</p>
     );
+  /** 脚本模式只展示源码决定的节点，不伪造分配卡叙事。 */
+  const assignedConfig=detail.execution.config&&detail.execution.config.assignmentMode!=="script"?detail.execution.config:null;
   /** 执行页顶部只保留一行概览：完成度、冻结方案与分配叙事各出现一次。 */
   const executionMeta = [
     `方案 v${detail.execution.revision}（已锁定）`,
-    detail.execution.config
-      ? `${detail.execution.config.assignments.length} 名执行者`
+    assignedConfig
+      ? `${assignedConfig.assignments.length} 名执行者`
       : null,
-    detail.execution.config?.ruleText
-      ? `规则“${detail.execution.config.ruleText}”${detail.execution.config.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
+    assignedConfig?.ruleText
+      ? `规则“${assignedConfig.ruleText}”${assignedConfig.ruleDegraded ? "（解析失败，已退化为随机分配）" : ""}`
       : null,
   ]
     .filter(Boolean)
@@ -4945,7 +4816,7 @@ function ExecutionDetail({
           <ExecutionProgressCard
             snapshot={detail.snapshot}
             dynamicCount={dynamicCount}
-            plannedTotal={detail.execution.config?.assignments.length}
+            plannedTotal={detail.execution.config?.assignmentMode!=="script"?detail.execution.config?.assignments.length:undefined}
             allVisits={allVisits}
             meta={executionMeta}
           />
@@ -5128,7 +4999,7 @@ function ExecutionDetail({
               runtimeVersion={detail.execution.runtimeVersion}
               currentAttempt={detail.snapshot.currentExecutionAttemptId}
               fallbackRuntimeId={
-                detail.execution.config?.fallbackRuntimeId ?? null
+                detail.execution.config?.assignmentMode!=="script"?detail.execution.config?.fallbackRuntimeId??null:null
               }
             />
           )}
@@ -5142,7 +5013,7 @@ function ExecutionDetail({
                 runtimeVersion={detail.execution.runtimeVersion}
                 currentAttempt={detail.snapshot.currentExecutionAttemptId}
                 fallbackRuntimeId={
-                  detail.execution.config?.fallbackRuntimeId ?? null
+                  detail.execution.config?.assignmentMode!=="script"?detail.execution.config?.fallbackRuntimeId??null:null
                 }
               />
               {detail.workspaceEvidence && <article>

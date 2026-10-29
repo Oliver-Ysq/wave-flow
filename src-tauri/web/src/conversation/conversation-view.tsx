@@ -27,6 +27,7 @@ import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
 import {TimelineRecords,type TimelineItem} from './plan-updates';
+import {parseReadIdentities} from "../workbench-state";
 import { MentionComposer } from "./mention-composer";
 import { AttachmentDataCache } from "./attachment-cache";
 
@@ -309,7 +310,7 @@ export function ConversationView({
     if(!visible||!onRead||!scrollRef.current)return;
     const root=scrollRef.current;
     const observer=new IntersectionObserver(entries=>{
-      const ids=entries.filter(entry=>entry.isIntersecting).map(entry=>(entry.target as HTMLElement).dataset.readIdentity!).filter(Boolean);
+      const ids=entries.filter(entry=>entry.isIntersecting).flatMap(entry=>parseReadIdentities((entry.target as HTMLElement).dataset.readIdentity));
       if(ids.length)onRead(harness.harnessRunId,ids);
     },{root,threshold:0.1});
     root.querySelectorAll("[data-read-identity]").forEach(element=>observer.observe(element));

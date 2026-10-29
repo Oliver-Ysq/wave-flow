@@ -1,55 +1,26 @@
 import {expect,test} from "bun:test";
-import {designExecutionConfig,DesignConfirmationCache,WorkspaceConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
+import {DesignConfirmationCache,WorkspaceConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
 import type {ExecutionPlanResponse,RuntimeCli} from "../../src-tauri/web/src/types";
 const runtime=(runtimeId:string,cli:RuntimeCli)=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:`${cli}-acp`,adapterVersion:"1",harnessTools:true}});
 const plan={workers:[{id:"reviewer"},{id:"verifier"}],pool:[runtime("c","codex"),runtime("k","kimi")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
-test("内联CLI默认主控，手工选择记录user，动态默认与固定Worker独立",()=>{
- const config=designExecutionConfig(plan,{verifier:"k","*":"k"},"2026-10-16T00:00:00Z");
- expect(config.assignments[0]).toMatchObject({agentId:"reviewer",cli:"codex",source:"harness-cli"});
- expect(config.assignments[1]).toMatchObject({agentId:"verifier",cli:"kimi",source:"user"});
- expect(config.defaultAssignment).toMatchObject({cli:"kimi",source:"user"});
- expect(config.fallbackRuntimeId).toBe("c");expect(config.ruleText).toBeNull();
-});
-test("内联CLI失效或未知节点拒绝，不静默随机或替换",()=>{
- expect(()=>designExecutionConfig(plan,{reviewer:"missing"})).toThrow("不可用");
- expect(()=>designExecutionConfig(plan,{ghost:"c"})).toThrow("未知");
-});
-test("新增 CLI 种类（claude/dsh）作为 Worker 候选参与分配，不与 codex/kimi 混淆",()=>{
- const wide={workers:[{id:"writer"}],pool:[runtime("a","claude"),runtime("d","dsh"),runtime("c","codex")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
- const config=designExecutionConfig(wide,{writer:"d"},"2026-10-20T00:00:00Z");
- expect(config.assignments[0]).toMatchObject({agentId:"writer",cli:"dsh",adapterId:"dsh-acp",runtimeId:"d",source:"user"});
- expect(config.defaultAssignment.cli).toBe("codex");
-});
-test("导航后相同确认重试复用UUID和原配置，读取副本不能污染缓存",()=>{
+
+test("脚本模式只读确认不产生执行配置，相同载荷复用 UUID",()=>{
  const cache=new DesignConfirmationCache();
- const first=cache.get("task:card:1",{target:"a.ts"},{reviewer:"k"},plan);
- const expected=structuredClone(first);
- first.config.assignments[0]!.runtimeId="mutated";
- const retry=cache.get("task:card:1",{target:"a.ts"},{reviewer:"k"},plan);
- expect(retry).toEqual(expected);
+ const first=cache.script("task:card:1",{target:"a.ts"},plan);
+ expect(first.config).toBeUndefined();
+ expect(cache.script("task:card:1",{target:"a.ts"},plan)).toEqual(first);
+ expect(cache.script("task:card:1",{target:"b.ts"},plan).id).not.toBe(first.id);
+ expect(cache.script("other:card:1",{target:"a.ts"},plan).id).not.toBe(first.id);
 });
-test("参数或CLI改变生成新确认，返回原载荷仍复用原请求，身份之间不串用",()=>{
+test("脚本模式写类确认只承载 workspaces，现场证据变化产生新 UUID",()=>{
  const cache=new DesignConfirmationCache();
- const first=cache.get("task:card:1",{target:"a.ts"},{},plan);
- expect(cache.get("task:card:1",{target:"b.ts"},{},plan).id).not.toBe(first.id);
- expect(cache.get("task:card:1",{target:"a.ts"},{reviewer:"k"},plan).id).not.toBe(first.id);
- expect(cache.get("other:card:1",{target:"a.ts"},{},plan).id).not.toBe(first.id);
- expect(cache.get("task:card:2",{target:"a.ts"},{},plan).id).not.toBe(first.id);
- expect(cache.get("task:card:1",{target:"a.ts"},{},plan)).toEqual(first);
-});
-test("确认缓存有界且App新会话不假装恢复旧请求",()=>{
- const cache=new DesignConfirmationCache();
- const first=cache.get("task:card:1",{}, {},plan);
- for(let i=0;i<64;i++)cache.get(`other:card:${i}`,{}, {},plan);
- expect(cache.get("task:card:1",{}, {},plan).id).not.toBe(first.id);
- expect(new DesignConfirmationCache().get("task:card:1",{}, {},plan).id).not.toBe(first.id);
-});
-test("最新现场证据变化使旧确认UUID失效，返回旧现场仍只复用旧请求",()=>{
- const cache=new DesignConfirmationCache();
- const first=cache.get("task:card:2",{}, {},{...plan,sceneEvidenceHash:"a".repeat(64)});
- const changed=cache.get("task:card:2",{}, {},{...plan,sceneEvidenceHash:"b".repeat(64)});
+ const workspaces={version:3 as const,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:"/repo",baseCommit:"a".repeat(40),excludeExistingDirty:false,nodes:[{nodeId:"reviewer"}]},workspaceId:crypto.randomUUID()};
+ const first=cache.script("task:card:2",{},plan,workspaces);
+ expect(first.config).toMatchObject({version:1,assignmentMode:"script",workspaces});
+ const cloned=structuredClone(first);(cloned.config!.workspaces as {workspaceId:string}).workspaceId="mutated";
+ expect(cache.script("task:card:2",{},plan,workspaces)).toEqual(first);
+ const changed=cache.script("task:card:2",{}, {...plan,sceneEvidenceHash:"b".repeat(64)},workspaces);
  expect(changed.id).not.toBe(first.id);
- expect(cache.get("task:card:2",{}, {},{...plan,sceneEvidenceHash:"a".repeat(64)})).toEqual(first);
 });
 test("Git授权并入确认运行：dirty须明确排除，失败重试复用授权UUID与同一worktree",()=>{
  const cache=new WorkspaceConfirmationCache();const workspacePlan={nodeIds:["a","b"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:["user.txt"],diagnostic:null};
@@ -73,7 +44,6 @@ test("续作自动复用原共享worktree并冻结原HEAD，新基准不串用�
  expect(drifted.authorization.authorizationId).not.toBe(first.authorization.authorizationId);
  expect(drifted.workspaceId).toBe(workspaceId);
 });
-
 test("循环写节点前缀随确认载荷冻结并在重试中复用",()=>{
  const cache=new WorkspaceConfirmationCache();
  const loopPlan={nodeIds:["reviewer"],dynamicNodePrefixes:["repair-"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
@@ -81,7 +51,6 @@ test("循环写节点前缀随确认载荷冻结并在重试中复用",()=>{
  expect(first.authorization.nodes).toEqual([{nodeId:"reviewer"}]);
  expect(first.authorization.dynamicNodes).toEqual([{nodeIdPrefix:"repair-"}]);
  expect(cache.get("task:loop",loopPlan,false)).toEqual(first);
- // 固定节点脚本不产生动态字段，保持旧载荷形状。
  const fixed={nodeIds:["reviewer"],repository:"/repo",baseCommit:"a".repeat(40),dirtyPaths:[],diagnostic:null};
  expect(cache.get("task:fixed",fixed,false).authorization).not.toHaveProperty("dynamicNodes");
 });

@@ -146,6 +146,7 @@ export const api = {
     input: Record<string, unknown>,
     clientRequestId: string,
     path?: string,
+    updateReason?: "save-local" | "modify-plan" | "modify-parameters",
   ) =>
     action<HarnessRunResponse>("workflows.reviseLocalTask", {
       harnessRunId,
@@ -154,17 +155,24 @@ export const api = {
       input,
       clientRequestId,
       ...(path ? { path } : {}),
+      ...(updateReason ? { updateReason } : {}),
     }),
-  /** 当前设计一次确认，不再要求单独接受/分配卡；批准与派发由Engine仲裁。 */
-  prepareConfigurationRevision: (
+  /** 用户把当前生成模块保存到项目并接管为本地来源；不创建执行、不派发 Worker。 */
+  saveAndAdoptRevision: (
     harnessRunId: string,
-    baseRevision: number,
+    revision: number,
+    path: string,
     clientRequestId: string,
+    input?: Record<string, unknown>,
+    replace?: boolean,
   ) =>
-    action<HarnessRunResponse>("workflows.prepareConfigurationRevision", {
+    action<HarnessRunResponse>("workflows.saveAndAdoptRevision", {
       harnessRunId,
-      baseRevision,
+      revision,
+      path,
       clientRequestId,
+      ...(input ? { input } : {}),
+      ...(replace ? { replace } : {}),
     }),
   /** 确认冻结源码/输入/CLI及现场版本，重复UUID只返回原执行。 */
   confirmWorkflow: (
@@ -173,12 +181,14 @@ export const api = {
     config: ExecutionConfigSnapshot | undefined,
     clientRequestId: string,
     sceneEvidenceHash?: string | null,
+    input?: Record<string, unknown>,
   ) =>
     action<ExecutionResponse>("executions.confirm", {
       harnessRunId,
       revision,
       ...(config ? { config } : {}),
       clientRequestId,
+      ...(input ? { input } : {}),
       ...(sceneEvidenceHash ? { sceneEvidenceHash } : {}),
     }),
   /** 获取内置版本化目录，不创建任何运行对象。 */
@@ -219,7 +229,7 @@ export const api = {
   confirmTemplate: (
     harnessRunId: string,
     revision: number,
-    config: ExecutionConfigSnapshot,
+    config: ExecutionConfigSnapshot | undefined,
     clientRequestId: string,
     input?: Record<string, unknown>,
     sceneEvidenceHash?: string | null,
@@ -227,7 +237,7 @@ export const api = {
     action<ExecutionResponse>("templates.confirm", {
       harnessRunId,
       revision,
-      config,
+      ...(config ? { config } : {}),
       clientRequestId,
       ...(input ? { input } : {}),
       ...(sceneEvidenceHash ? { sceneEvidenceHash } : {}),

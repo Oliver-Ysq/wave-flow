@@ -23,7 +23,8 @@ export function groupPlanUpdates(items:TimelineItem[],messageTimes:string[]=[]):
 }
 function UpdateGroup({items}:{items:TimelineItem[]}){
  const [open,setOpen]=useState(false);
- return <details className="plan-update-group" open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>方案更新 · {items.length} 条 <span>· 最近：{items.at(-1)!.planUpdate}</span></summary><div>{items.map(item=><div className="workflow-timeline-item" data-read-identity={item.key} key={item.key}>{item.content}</div>)}</div></details>;
+ // 收起时子条目不可见；身份挂在容器上，看到组标题即视为已读。
+ return <details className="plan-update-group" data-read-identity={items.map(item=>item.key).join(" ")} open={open} onToggle={event=>setOpen(event.currentTarget.open)}><summary>方案更新 · {items.length} 条 <span>· 最近：{items.at(-1)!.planUpdate}</span></summary><div>{items.map(item=><div className="workflow-timeline-item" data-read-identity={item.key} key={item.key}>{item.content}</div>)}</div></details>;
 }
 /** 默认收起连续两条以上更新；稳定首条key保证追加时不重置手动展开。 */
 export function TimelineRecords({items,messageTimes=[]}:{items:TimelineItem[];/** 可见消息发生时间；存在于两次更新之间时禁止合组。 */messageTimes?:string[]}){

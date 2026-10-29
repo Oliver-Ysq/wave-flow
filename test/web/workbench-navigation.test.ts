@@ -22,8 +22,8 @@ test("结果选择更新路由，不读取另一份缓存；切回执行保留�
  expect(source).toContain('此尝试未保存阶段过程记录，不代表没有执行');
  expect(source).toContain('历史过程暂时无法读取');
  expect(source).toContain('正在读取历史过程…');
- expect(source).toContain('查看已保存的总结与交付，不会重新执行。执行结束不等于目标已验收。');
- expect(source).toContain('<summary>证据范围与限制</summary>');
+ expect(source).toContain('查看已保存的运行结果与交付，不会重新执行。执行结束不等于目标已验收。');
+ expect(source).not.toContain('<summary>证据范围与限制</summary>');
  expect(source).not.toContain('原终态：');
 });
 test("每卡一个子项，历史无卡独立投影；旧版本与已运行方案不可编辑",()=>{

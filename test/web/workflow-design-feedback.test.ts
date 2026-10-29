@@ -6,15 +6,14 @@ test("单版本不显示无效版本下拉，多版本保留切换入口",async(
  expect(app).not.toContain('<label>方案版本<select');
 });
 
-test("结果页逐一显示原总结与现场补充，过时义务不暴露重试按钮或计入归档待办", async () => {
+test("执行总结只在主控对话中提示，结果页不重复展示总结与现场补充", async () => {
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
- expect(source).toContain('aria-label="原总结与补充"');
+ expect(source).toContain("ImpactSummaryNotice");
  expect(source).toContain('summaryKey={item.key}');
- expect(source).toContain('if (obligation.supersededBy)');
- expect(source).toContain('此补充已被更新的检查结果替代');
  expect(source).toContain('(item) => !item.supersededBy && item.status !== "completed"');
- expect(source).toContain('重新检查现场');
- expect(source).toContain('api.checkExecutionScene');
+ expect(source).not.toContain('aria-label="原总结与补充"');
+ expect(source).not.toContain("ImpactSummaryPanel");
+ expect(source).not.toContain("重新检查现场");
 });
 test("归档与旧Execution隐藏成果恢复合入清理，不保留变更面板",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
@@ -57,18 +56,17 @@ test("整工作区授权并入确认运行，结果保留在 worktree，内部�
 test("执行配置预检失败提供重检入口，检查期间与失败状态均禁止确认",async()=>{
  const source=await Bun.file("src-tauri/web/src/workflow-design.tsx").text();
  expect(source).toContain("重新检查执行环境");
- expect(source).toContain("参数和工具选择已保留，请稍后重新检查");
+ expect(source).toContain("参数已保留，请稍后重新检查");
  expect(source).toContain("setCheckAttempt(attempt=>attempt+1)");
  expect(source).toContain("identity,checkAttempt]");
- expect(source).toContain("busy||checking||!!planError||!plan||!revision.localOrigin&&!plan.harnessRuntime");
- expect(source).toContain("if(!editable||busy||checking||planError||!plan||!revision.localOrigin&&!plan.harnessRuntime)return");
- expect(source).toContain("setPlanError(local||result.harnessRuntime?null:");
+ expect(source).toContain("busy||checking||!!planError||!plan||!local&&!script&&!plan.harnessRuntime");
+ expect(source).toContain("if(!editable||busy||checking||planError||!plan||!local&&!script&&!plan.harnessRuntime)return");
+ expect(source).toContain("setPlanError(local||script||result.harnessRuntime?null:");
  expect(source).toContain("还没有选择可用的本地执行工具");
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
- expect(source).toContain('confirmations.get(identity,input,choices,plan,workspaces)');
+ expect(source).toContain('confirmations.script(identity,input,plan,workspaces)');
  expect(source).toContain('workspaceConfirmations.get(identity,plan.workspacePlan,true,plan.continuationPlan)');
- expect(source).toContain('localChoices[worker.id]=runtimeId');
 });
 
 test("本地来源替换明确导航到新方案，目标态已有执行不再提示选择无关工作流",async()=>{
@@ -93,12 +91,12 @@ test("窄窗详情底部为固定导航保留安全空间",async()=>{
  expect(css).toContain(".agent-workbench .central-workflow { padding:24px 20px 80px; }");
 });
 
-test("影响面总结按所选Execution的受管配置显示Git证据限制，不固定宣称无基线",async()=>{
+test("结果页不再展示Git证据限制说明，诚实约束由总结正文承担",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
- expect(source).toContain("const gitLimitation = harness.executions.find(");
- expect(source).toContain("受管Git证据仅覆盖受管Git文件；缺失或不可读取的记录不代表没有改动");
- expect(source).toContain("<p>{gitLimitation}</p>");
- expect(source).not.toContain("<p>尚无Git起止基线，不能证明文件归因、完整diff或外部副作用。</p>");
+ const service=await Bun.file("src/harness/service.ts").text();
+ expect(source).not.toContain("const gitLimitation = harness.executions.find(");
+ expect(source).not.toContain("受管Git证据仅覆盖受管Git文件");
+ expect(service).toContain("不要因为结构化校验通过就说结果正确");
 });
 
 test("工作区外写入不再提供文件审批UI或API",async()=>{

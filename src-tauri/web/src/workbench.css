@@ -1169,6 +1169,9 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .workflow-results p { font-size:13px; line-height:1.7; color:var(--wf-muted); }
 .agent-workbench .workflow-results pre { margin:16px 0 24px; padding:20px; border:1px solid var(--wf-line); border-radius:10px; background:var(--wf-panel); color:var(--wf-ink); font:13px/1.75 ui-monospace, "SF Mono", Menlo, monospace; max-height:560px; }
 .agent-workbench .workflow-results details { margin:12px 0; padding:14px 0; border-top:1px solid var(--wf-line); }
+.agent-workbench .workflow-result-lines { margin:16px 0 24px; padding:20px 20px 20px 44px; border:1px solid var(--wf-line); border-radius:10px; background:var(--wf-panel); color:var(--wf-ink); font-size:14px; line-height:1.9; display:grid; gap:10px; }
+.agent-workbench .workflow-result-lines li { padding-left:2px; }
+.agent-workbench .workflow-summary-actions { display:grid; gap:10px; margin:16px 0 8px; }
 .agent-workbench .central-workflow button:focus-visible,.agent-workbench .central-workflow select:focus-visible { outline:2px solid var(--wf-accent); outline-offset:3px; }
 @media(max-width:900px) { .agent-workbench .workflow-page-header { gap:14px; flex-wrap:wrap; }.agent-workbench .workflow-page-header strong { font-size:20px; }.agent-workbench .central-workflow { padding:24px 20px 80px; } }
 @media(max-width:900px){.agent-workbench.nav-open .task-rail{display:grid;}.agent-workbench .navigation-scrim{display:block;}}

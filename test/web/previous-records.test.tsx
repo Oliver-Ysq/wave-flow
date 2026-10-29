@@ -21,7 +21,7 @@ test('执行与结果共用原终态时间，聊天事件不展示恢复次数',
  expect(app).toContain('item.kind === "finished"');
  expect(app).not.toContain('<label>执行尝试');
  expect(events).not.toContain('第 {attempt} 次');
- const result=app.slice(app.indexOf('function HistoricalResults('),app.indexOf('function ImpactSummaryPanel('));
+ const result=app.slice(app.indexOf('function HistoricalResults('),app.indexOf('function ImpactSummaryNotice('));
  expect(result.indexOf('part="list"')).toBeGreaterThan(result.indexOf('高级 / 诊断信息'));
  const execution=app.slice(app.indexOf('function ExecutionDetail('),app.indexOf('function GateCard('));
  expect(execution.indexOf('part="list"')).toBeGreaterThan(execution.indexOf('<TeamPanel'));
