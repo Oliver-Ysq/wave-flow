@@ -115,9 +115,15 @@ export function WorkflowRevisionCard({
     if(!path)return;
     const payload=`adopt:${revision.revision}:${path}`;
     if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};
+    // 保存面板返回路径不等于“用户已确认替换”：新建优先，只有引擎判定目标已存在时才按替换重试。
+    const attempt=(replace:boolean)=>api.saveAndAdoptRevision(harness.harnessRunId,revision.revision,path,saveRequest.current!.id,inputDraft,replace);
     setSaving(true);setSaveError(null);
     try{
-      const result=await api.saveAndAdoptRevision(harness.harnessRunId,revision.revision,path,saveRequest.current.id,inputDraft,true);
+      const result=await attempt(false).catch(async error=>{
+        if(!String(error).includes("已存在"))throw error;
+        saveRequest.current={payload,id:crypto.randomUUID()};
+        return attempt(true);
+      });
       const adopted=result.harness.workflowRevisions.at(-1);
       if(!adopted?.localOrigin){onSaved?.(result.harness);return;}
       // 写入即已读回复核；这里自动按同一文件生成可确认的新版本，用户不必再点一次“重新预检”。

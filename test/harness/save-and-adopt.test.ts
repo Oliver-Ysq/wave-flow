@@ -85,10 +85,12 @@ test("Tauri 保存对话框权限与保存接管 action 已接线", async () => 
   expect(capabilities.permissions).toContain("dialog:allow-save");
   const api = await Bun.file("src-tauri/web/src/api.ts").text();
   expect(api).toContain('"workflows.saveAndAdoptRevision"');
-  // 系统保存面板返回路径即用户在面板确认（含替换）；UI 必须把替换标记传给 Engine。
+  // 系统保存面板返回路径不等于“用户已确认替换”：UI 先按新建提交，只有引擎判定目标已存在时才按替换重试。
   expect(api).toContain("...(replace ? { replace } : {})");
   const card = await Bun.file("src-tauri/web/src/conversation/revision-card.tsx").text();
-  expect(card).toContain("saveAndAdoptRevision(harness.harnessRunId,revision.revision,path,saveRequest.current.id,inputDraft,true)");
+  expect(card).toContain("inputDraft,replace)");
+  expect(card).toContain("await attempt(false)");
+  expect(card).toContain('includes("已存在")');
   // 保存成功后自动预检并生成可确认版本；失败时回到手动入口。
   expect(card).toContain('crypto.randomUUID(),undefined,"save-local"');
   expect(card).toContain("自动预检未完成");
