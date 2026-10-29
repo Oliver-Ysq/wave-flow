@@ -87,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.2.7</span>
+          <span>适用于 v0.2.8</span>
           <span>macOS 12+</span>
           <span>更新于 2026-10</span>
         </div>
@@ -109,7 +109,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.2.7 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.2.8 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -211,10 +211,11 @@ bun run desktop:dev</code></pre>
             <li><code>name</code> 使用 kebab-case，例如 <code>deep-research</code>。</li>
             <li><code>description</code> 是非空单行说明，用于方案标题，不要把完整目标塞进去。</li>
             <li><code>phases</code> 是非空有序数组，标题唯一；每次 <code>phase(title)</code> 必须精确匹配其中一项。</li>
+            <li><code>inputSchema</code> 必填：JSON-safe 对象 Schema，用于确认页参数表单与执行前校验；不是节点结果 Schema。</li>
             <li><code>exampleArgs</code> 可选，键必须对应 <code>run(args)</code> 实际读取的字段。</li>
             <li><code>meta</code> 必须是纯字面量：不能含变量、调用、展开、计算属性或模板字符串。</li>
           </ul>
-          <p>保存方案时会重新预检：只读取文件、校验形状与 Schema，不会运行脚本。主控提交的受限草案不是模块，禁止任何 <code>import</code> / <code>export</code>，只能使用运行时注入的 API；两种形态不要混用。</p>
+          <p>主控生成稿与本地文件是同一种 ESM 作者模块：相同的 <code>meta</code>、相同的加载器与作者 API，没有第二套受限方言。保存并接管时只写文件、读回复核，不会执行脚本；保存成功后会自动按同一文件预检并生成待确认版本，你只需确认运行。之后再编辑文件需要重新预检；若目标文件已存在，只有你在系统保存面板里确认替换才会覆盖该常规文件。</p>
         </section>
 
         <section id="author-api">
