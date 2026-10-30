@@ -50,6 +50,19 @@ export type AcpSessionOptions = {
 /** 允许替换 transport，确保协议测试不依赖真实模型或本地登录。 */
 export type AcpTransportFactory = (launcher: AcpLauncher, signal: AbortSignal) => Promise<AcpTransport>;
 
+/**
+ * 本 ACP 客户端要广告的会话能力。
+ *
+ * 每项都对应协议里"广告即承诺完整消费"的契约：没有消费者的能力不得广告。
+ */
+export type AcpClientSessionCapabilities = {
+  /**
+   * 是否广告压缩契约。开启后 Agent 才会发 compaction_update / compaction_summary_chunk；
+   * 未开启时适配器把压缩降级成一条 tool_call 呈现。
+   */
+  readonly compaction?: boolean;
+};
+
 /** 一条已归一化的 ACP 展示事件；它不是 Worker 业务状态。 */
 export type AcpSessionEvent = {
   /** 事件所属 ACP session。 */
@@ -111,6 +124,15 @@ export class AcpSessionClient {
     private readonly launcher: AcpLauncher,
     private readonly createTransport: AcpTransportFactory = bunAcpTransport,
     private readonly permission: AcpPermissionMode | AcpPermissionResolver = "deny",
+    /**
+     * 本客户端要广告的会话能力。默认不广告任何能力。
+     *
+     * ACP 规定"广告压缩契约"等于承诺完整处理 compaction_update/compaction_summary_chunk
+     * 的生命周期、placement、patch 与 replay 语义。因此只有真正消费压缩事实的会话才能广告；
+     * 不消费却广告既违反契约，也会让适配器把压缩从一条 tool_call 改成结构化事件，
+     * 静默改变该会话的对话投影。
+     */
+    private readonly sessionCapabilities: AcpClientSessionCapabilities = {},
   ) {}
 
   /** 当前已确认 binding；尚未 new/load 时为 null。 */
@@ -140,7 +162,12 @@ export class AcpSessionClient {
     try {
       const result = await connection.agent.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          // 只有真正消费压缩事实的会话才广告压缩契约（见 AcpClientSessionCapabilities）。
+          ...(this.sessionCapabilities.compaction === true ? { session: { compaction: {} } } : {}),
+        },
       }, { cancellationSignal: signal });
       if (result.protocolVersion !== acp.PROTOCOL_VERSION) throw new Error(`ACP 协议版本不匹配：${result.protocolVersion}。`);
       this.#capabilities = result.agentCapabilities ?? {};

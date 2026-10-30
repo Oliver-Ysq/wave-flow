@@ -5,6 +5,7 @@ import type { RunRuntime } from "../runtime/run-runtime";
 import { AcpWorkerExecutor } from "../runtime/acp-worker-executor";
 import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
 import type { AgentNodeSnapshot } from "../runtime/run-types";
+import type { JsonSchema } from "../shared/workflow-types";
 import type { CliRuntimeRegistry } from "../runtimes/registry";
 import { resolveWorkerLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
 import { adapterById } from "../runtimes/adapter-catalog";
@@ -29,7 +30,7 @@ export class ProductionWorkspaceExecutor {
     private readonly engineInstanceId: string,
     private readonly runtimes: CliRuntimeRegistry,
     /** 单节点私有Control MCP，由Engine注册；scratch仅给受管writer。 */
-    private readonly controlMcp: (identity: { runId: string; nodeId: string; agentSessionId: string; capability: string }, scratch?: string) => acp.McpServer,
+    private readonly controlMcp: (identity: { runId: string; nodeId: string; agentSessionId: string; capability: string; resultSchema?: JsonSchema }, scratch?: string) => acp.McpServer,
     private readonly fallbackRuntimeId: string | null,
     /** 技能库根目录；缺省 `waveFlowHome()/skills`，测试与隔离运行可注入。 */
     private readonly skillsRoot?: string,
@@ -59,7 +60,7 @@ export class ProductionWorkspaceExecutor {
       stage("skills_ready");
       const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter, beginWriterStart: binding.beginSpawn, cancelWriterStart: binding.cancelSpawn });
       // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
-      const worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(selected, prepared.evidence), identity => this.controlMcp(identity, binding.scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
+      const worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow", { compaction: true }), runtimeProvenance(selected, prepared.evidence), identity => this.controlMcp(identity, binding.scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       return {
         bindWriter: binding.bindWriter,
         verifyExited: async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)),

@@ -7,6 +7,7 @@ import type { RuntimeProvenance, VerifiedCliRuntime } from "../runtimes/types";
 import { AcpWorkerExecutor } from "./acp-worker-executor";
 import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { JsonObject } from "../shared/json";
+import type { JsonSchema } from "../shared/workflow-types";
 import type * as acp from "@agentclientprotocol/sdk";
 import { prepareSessionScratch } from "../workspace/session-scratch";
 import { prepareSessionSkills } from "../skills/session";
@@ -34,7 +35,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
 
   constructor(
     private readonly runtimes: CliRuntimeRegistry,
-    private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string) => acp.McpServer,
+    private readonly createControlMcp: (value: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string; readonly resultSchema?: JsonSchema }, scratch?: string) => acp.McpServer,
     /** 测试注入的 Worker 构造；生产省略时使用真实 AcpWorkerExecutor。 */
     private readonly createWorker: (launcher: AcpLauncher, runtime: RuntimeProvenance) => AcpWorkerExecutor = (launcher, runtime) => new AcpWorkerExecutor(launcher, undefined, runtime, createControlMcp),
     /** 分配快照冻结的回退目标（主控 CLI runtimeId）；受信任 Run 与不指派节点为 null。 */
@@ -115,7 +116,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
         : await prepareSessionSkills({ scratch, launcher: resolveWorkerLauncher(runtime), capability, libraryRoot: this.skillsRoot });
       stage("skills_ready");
       const transport = ownedAcpTransport({ groups: new WriterProcessGroups(), bindWriter: async () => {} });
-      worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow"), runtimeProvenance(runtime, prepared.evidence), identity => this.createControlMcp(identity, scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
+      worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow", { compaction: true }), runtimeProvenance(runtime, prepared.evidence), identity => this.createControlMcp(identity, scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       owned = true;
     } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);

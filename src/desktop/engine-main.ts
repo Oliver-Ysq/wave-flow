@@ -106,7 +106,10 @@ if (process.argv[2] === "__codex-acp") {
   const { runWorkerMcpServer } = await import("../runtime/worker-mcp-server");
   // 测试注入的小预算走显式参数；生产路径永远使用默认 25s，不读取任何用户配置。
   const budgetOverride = Number(process.env.WF_WORKER_BLOCK_WAIT_BUDGET_MS);
-  await runWorkerMcpServer(Number.isFinite(budgetOverride) && budgetOverride > 0 ? budgetOverride : undefined);
+  // sidecar 启动失败必须以可读诊断非零退出（例如宿主下发的 resultSchema 无法解析）。
+  // 未捕获的顶层 await 拒绝会打印栈噪声，掩盖真正的原因。
+  await runWorkerMcpServer(Number.isFinite(budgetOverride) && budgetOverride > 0 ? budgetOverride : undefined)
+    .catch((error) => { process.stderr.write(`Wave Flow Worker MCP: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
 } else if (process.argv[2] === "__harness-mcp") {
   const { runHarnessMcpServer } = await import("../harness/mcp-server");
   await runHarnessMcpServer();

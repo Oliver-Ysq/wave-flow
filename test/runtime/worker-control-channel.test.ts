@@ -43,6 +43,49 @@ test("Worker MCP 的 complete 工具通过私有 socket 交给 ControlServer", a
   expect(await child.exited).toBe(0);
 }, 20_000);
 
+/**
+ * 完成条件必须进入工具签名：工具定义每次请求都会重发，不随对话历史被压缩折叠，
+ * 因此把节点 resultSchema 内联进 wave_flow_complete 的 inputSchema 是结构性抗压缩手段。
+ */
+test("Worker MCP 把节点 resultSchema 内联进完成工具的 inputSchema", async () => {
+  const control = { async complete() {}, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const schema = { type: "object", properties: { ok: { type: "boolean" }, note: { type: "string" } }, required: ["ok"], additionalProperties: false };
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_RESULT_SCHEMA: JSON.stringify(schema) } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+  const listed = await next();
+  const tools = (listed.result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
+  const complete = tools.find(tool => tool.name === "wave_flow_complete");
+  expect(complete).toBeDefined();
+  expect(complete!.inputSchema.properties.result).toEqual(schema);
+}, 20_000);
+
+/** 节点没有声明结果 Schema 时，完成工具仍按对象形状通告，不得凭空构造 Schema。 */
+test("Worker MCP 在没有节点 Schema 时只通告对象形状", async () => {
+  const control = { async complete() {}, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+  const listed = await next();
+  const tools = (listed.result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
+  const complete = tools.find(tool => tool.name === "wave_flow_complete");
+  expect(complete!.inputSchema.properties.result).toEqual({ type: "object" });
+}, 20_000);
+
 for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP自行退出，不依赖ACP关闭stdin，pendingBlock=${pending}`, async () => {
   let entered!: () => void;
   const blocked = new Promise<void>((resolve) => { entered = resolve; });
@@ -154,4 +197,18 @@ test("通道数达到线程池大小后，异步文件写入仍能完成", async
     await appendFile(target, "probe\n");
     for (const channel of opened) channel.close();
   } finally { rmSync(scratch, { recursive: true, force: true }); }
+}, 20_000);
+
+/**
+ * 已声明但无法解析的 resultSchema 必须让 sidecar 启动即失败。
+ * 静默降级会让模型拿到与 Control 实际校验不同的契约，产出必然被拒，比启动失败更难排查。
+ */
+test("Worker MCP 在 resultSchema 非法时启动即失败并给出可读原因", async () => {
+  const control = { async complete() {}, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_RESULT_SCHEMA: "not-json" } }); children.push(child);
+  const stderr = await new Response(child.stderr).text();
+  expect(await child.exited).not.toBe(0);
+  expect(stderr).toContain("WF_WORKER_RESULT_SCHEMA");
 }, 20_000);

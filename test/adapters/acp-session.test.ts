@@ -43,6 +43,32 @@ test("ACP session client records a binding, forwards stream events, cancels and 
   client.close();
 });
 
+/**
+ * 压缩契约必须由客户端显式广告：未声明 session.compaction 时，Codex 与 Claude Code 适配器
+ * 都会把压缩降级成一条 tool_call 呈现，结构化压缩事实不可得。
+ */
+test("initialize 只在显式要求时广告压缩能力", async () => {
+  const advertised: unknown[] = [];
+  const factory: AcpTransportFactory = async () => {
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const app = acp.agent({ name: "capture-acp" })
+      .onRequest(acp.methods.agent.initialize, (context) => { advertised.push(context.params.clientCapabilities); return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }; })
+      .onRequest(acp.methods.agent.session.new, () => ({ sessionId: "s" }));
+    const connection = app.connect(acp.ndJsonStream(agentToClient.writable, clientToAgent.readable));
+    return { stream: acp.ndJsonStream(clientToAgent.writable, agentToClient.readable), exited: new Promise<number>(() => {}), close: () => connection.close() };
+  };
+  // 默认不广告：没有压缩消费者的会话不得广告，否则等于承诺了却不履行压缩契约。
+  const plain = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, factory);
+  await plain.initialize(new AbortController().signal);
+  expect(advertised[0]).not.toHaveProperty("session");
+  plain.close();
+  const worker = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, factory, "allow", { compaction: true });
+  await worker.initialize(new AbortController().signal);
+  expect(advertised[1]).toMatchObject({ session: { compaction: {} } });
+  worker.close();
+});
+
 test("携带私有 MCP 的 session/new 会等待 MCP startup 后才返回", async () => {
   const hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown> } = { cancelled: 0, loaded: [] };
   const client = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, fakeTransport([], hooks));

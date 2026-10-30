@@ -10,17 +10,18 @@ import { AcpWorkerExecutor, type AcpWorkerSession } from "../../src/runtime/acp-
 import { acpProgressIsMeaningful } from "../../src/adapters/acp-session";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
+import type { JsonSchema } from "../../src/shared/workflow-types";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
-async function fixture() {
+async function fixture(options?: { readonly prompt?: string; readonly schema?: JsonSchema }) {
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-acp-only-")); directories.push(cwd);
   const manifest: RunManifest = { runId: crypto.randomUUID(), clientRequestId: crypto.randomUUID(), runtimeVersion: RUNTIME_VERSION, workflow: { name: "acp", description: "ACP.", phases: [{ title: "run" }] }, workflowHash: "a".repeat(64), workflowPath: join(cwd, "workflow.ts"), workflowProjectCwd: cwd, input: {}, createdAt: new Date().toISOString() };
   const journal = await RunJournal.create(manifest, runsRoot(cwd));
   const state = new RunStateMachine(manifest);
   state.apply({ type: "run.created", at: manifest.createdAt, runId: manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, runStatus: "running" });
-  const request = { id: "node", cli: "codex" as const, sandbox: "workspace-write" as const, cwd, prompt: "complete", phase: "run" };
+  const request = { id: "node", cli: "codex" as const, sandbox: "workspace-write" as const, cwd, prompt: options?.prompt ?? "complete", phase: "run", ...(options?.schema ? { schema: options.schema } : {}) };
   const created: JournalEvent = { type: "agent.created", at: new Date().toISOString(), runId: manifest.runId, nodeId: "node", agentSessionId: null, diagnostic: null, sequence: 1, phase: "run", request };
   await journal.append(created); state.apply(created);
   const sessionId = "worker-session";
@@ -589,6 +590,217 @@ test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", 
   await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
   expect(prompts).toHaveLength(2); expect(prompts[1]).toContain("不要重做业务任务");
   expect(prompts[1]).toContain("工具搜索/发现");
+  // 没有发生上下文压缩时不得凭空附加任务背景：那是只在压缩后才有意义的补偿。
+  expect(prompts[1]).not.toContain("原始任务背景");
+});
+
+/**
+ * 上下文压缩会把早期任务语境折掉：完成协议可能被一起折掉，模型于是"干完了但没上报"。
+ * 宿主必须把压缩落成耐久事实（可归因），并在下一个回合边界把原始任务描述作为只读背景重申。
+ */
+test("上下文压缩落耐久诊断，并在下一回合重申原始任务背景", async () => {
+  const value = await fixture({ prompt: "把 auth 迁移到 OAuth2" });
+  let capability = ""; const prompts: string[] = [];
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} },
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) {
+        // 回合进行中发生上下文压缩；压缩事件先于本回合的 prompt 响应到达。
+        listener?.({ sessionId: "native", update: { sessionUpdate: "compaction_update", compactionId: "c1", status: "completed" } });
+        return { stopReason: "end_turn" };
+      }
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+  expect(prompts).toHaveLength(2);
+  // 首轮投递发生在压缩之前，不带背景；压缩后的补发回合必须带。
+  expect(prompts[0]).not.toContain("原始任务背景");
+  expect(prompts[1]).toContain("原始任务背景（只读参考，不要重新执行）");
+  expect(prompts[1]).toContain("把 auth 迁移到 OAuth2");
+  // 背景是只读参考，不得重新授权执行。
+  expect(prompts[1]).toContain("不要重做业务任务");
+  // 压缩事实必须耐久可归因。
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  expect(events.some(event => event.type === "log.written" && event.diagnostic !== null && event.diagnostic.includes("上下文压缩"))).toBe(true);
+});
+
+/** 压缩归因必须进入收尾诊断：漏报要能区分"模型忘了协议"与"模型丢了任务语境"。 */
+test("发生过压缩的漏报诊断带压缩归因", async () => {
+  const value = await fixture({ prompt: "写点东西" });
+  const prompts: string[] = [];
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} },
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      listener?.({ sessionId: "native", update: { sessionUpdate: "compaction_update", compactionId: "c1", status: "completed" } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => ({ name: "private", command: "fake", args: [], env: [] }));
+  executor.bindControl(value.control);
+  const error = await executor.execute(value.node).catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).toString()).toContain("上下文压缩");
+});
+
+/**
+ * 完成条件必须进入每轮重发的工具签名：工具定义不随对话历史被压缩折叠，
+ * 因此把 resultSchema 内联进 wave_flow_complete 的 inputSchema 是唯一结构性抗压缩手段。
+ */
+test("节点声明结果 Schema 时随私有 MCP 配置下发", async () => {
+  const schema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+  const value = await fixture({ prompt: "写文件", schema });
+  let identity: { readonly resultSchema?: unknown } | undefined;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() { return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, next => { identity = next; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await executor.execute(value.node).catch(() => undefined);
+  expect(identity?.resultSchema).toEqual(schema);
+});
+
+test("blocked 节点收尾漏报诊断区分等待被放弃，且不重发 block", async () => {
+  const value = await fixture(); let capability = ""; const prompts: string[] = [];
+  const blockRequestId = crypto.randomUUID();
+  let endFirstTurn!: () => void;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      // 首个回合挂起，等测试体确认 block.created 耐久后才以 end_turn 结束；
+      // 收尾提醒回合同样 end_turn 且不 complete。
+      if (prompts.length === 1) return new Promise<{ readonly stopReason: string }>((resolve) => { endFirstTurn = () => resolve({ stopReason: "end_turn" }); });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  const running = executor.execute(value.node);
+  // Worker 首个回合内发起 block：先等 agent.session 耐久（block 要求首条投递会话坐标已记录），
+  // 不 await 人类答案；拒绝兜底，不让未处理 rejection 逃逸。
+  let events: readonly JournalEvent[] = [];
+  for (let i = 0; i < 500; i++) {
+    if (capability && prompts.length > 0) {
+      events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+      if (events.some(event => event.type === "agent.session")) break;
+    }
+    await Bun.sleep(10);
+  }
+  expect(events.some(event => event.type === "agent.session")).toBe(true);
+  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认" }).catch(() => undefined);
+  // 确定性屏障：轮询 Journal 直到 block.created 耐久落盘，不用固定 sleep 竞猜时序。
+  let created: JournalEvent[] = [];
+  for (let i = 0; i < 500 && created.length === 0; i++) {
+    await Bun.sleep(10);
+    created = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.created");
+  }
+  expect(created).toHaveLength(1);
+  endFirstTurn();
+  const error = await running.catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  const message = (error as Error).toString();
+  expect(message).toContain("等待被放弃");
+  expect(message).toContain(`blockRequestId=${blockRequestId}`);
+  expect(message).toContain("未收到 wave-flow complete");
+  expect(message).toContain("end_turn");
+  expect(prompts).toHaveLength(2);
+  expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.created")).toHaveLength(1);
+});
+
+test("blocked 节点已收到人工答案但原 Worker 未继续时诊断区分该现场", async () => {
+  const value = await fixture(); let capability = ""; const prompts: string[] = [];
+  const blockRequestId = crypto.randomUUID();
+  let endFirstTurn!: () => void;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) return new Promise<{ readonly stopReason: string }>((resolve) => { endFirstTurn = () => resolve({ stopReason: "end_turn" }); });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  const running = executor.execute(value.node);
+  let events: readonly JournalEvent[] = [];
+  for (let i = 0; i < 500; i++) {
+    if (capability && prompts.length > 0) {
+      events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+      if (events.some(event => event.type === "agent.session")) break;
+    }
+    await Bun.sleep(10);
+  }
+  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认" }).catch(() => undefined);
+  let created: JournalEvent[] = [];
+  for (let i = 0; i < 500 && created.length === 0; i++) {
+    await Bun.sleep(10);
+    created = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.created");
+  }
+  expect(created).toHaveLength(1);
+  // 人类答案已耐久送达，但原 Worker 仍未调用 continue 就结束了回合：与“还在等答案”是两种现场。
+  await value.control.answer({ blockRequestId, answer: { ok: true } });
+  endFirstTurn();
+  const error = await running.catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  const message = (error as Error).toString();
+  expect(message).toContain("已收到人工答案");
+  expect(message).toContain(`blockRequestId=${blockRequestId}`);
+  expect(message).not.toContain("等待被放弃");
+  expect(message).toContain("未收到 wave-flow complete");
+  expect(prompts).toHaveLength(2);
+});
+
+test("无 block 时收尾漏报文案逐字保持旧诊断", async () => {
+  const value = await fixture();
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() { return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }));
+  executor.bindControl(value.control);
+  const error = await executor.execute(value.node).catch((reason: unknown) => reason);
+  expect((error as Error).toString()).toBe("Error: ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。");
+});
+
+test("收尾诊断读取失败降级为旧文案，不改变失败语义", async () => {
+  const value = await fixture();
+  const original = value.control.workerTurnContext.bind(value.control);
+  let reads = 0;
+  // 第一次读取服务于完成提醒回合，正常放行；收尾诊断读取直接抛错，模拟节点已终结。
+  value.control.workerTurnContext = async (identity) => {
+    reads += 1;
+    if (reads === 1) return original(identity);
+    throw new Error("原节点已终结或会话已变化，拒绝收尾。");
+  };
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() { return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }));
+  executor.bindControl(value.control);
+  const error = await executor.execute(value.node).catch((reason: unknown) => reason);
+  expect(reads).toBe(2);
+  expect((error as Error).toString()).toBe("Error: ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。");
 });
 
 test("真实 Worker session 仅注入节点私有的 Control MCP", async () => {
@@ -655,4 +867,98 @@ test("ACP 启动 initialize 超时会中断节点并留下启动阶段诊断", a
   expect(events.some(event => event.type === "log.written" && event.nodeId === "node" && event.message.includes("启动中"))).toBe(true);
   expect(events.some(event => event.type === "log.written" && event.diagnostic?.includes("启动超时"))).toBe(true);
   expect(value.state.agent("node").hint).toContain("正在自动恢复");
+});
+
+/**
+ * 停滞诊断必须带上上下文占用：用户看到"没有实质进展"时，要能区分"模型没进展"与
+ * "上下文快满了"。占用不可信（size 缺失或小于 used）时不得给出假的百分比。
+ */
+test("停滞诊断带上可信的上下文占用", async () => {
+  const value = await fixture(); let capability = "", halted = false;
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    prompt() {
+      void (async () => {
+        while (!halted) {
+          listener?.({ sessionId: "native", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "思考中" } } });
+          listener?.({ sessionId: "native", update: { sessionUpdate: "usage_update", used: 16747, size: 30400 } });
+          await Bun.sleep(8);
+        }
+      })();
+      return new Promise<{ readonly stopReason: string }>(() => {});
+    },
+    async cancel() {}, close() { halted = true; }, subscribe(value) { listener = value; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, false, 20);
+  executor.bindControl(value.control);
+  void executor.execute(value.node);
+  let diagnostics: JournalEvent[] = [];
+  for (let i = 0; i < 200 && diagnostics.length === 0; i++) {
+    await Bun.sleep(10);
+    diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null && event.diagnostic.includes("停滞"));
+  }
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0].diagnostic).toContain("当前上下文占用 16747/30400");
+  await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: {} });
+  halted = true;
+});
+
+/**
+ * 压缩未成功也必须落事实：压缩失败意味着上下文即将溢出而没有被替换，
+ * 是排查"为什么这轮特别慢"的直接线索，不能只记成功的那一次。
+ */
+test("压缩未成功也落耐久诊断并带上原因", async () => {
+  const value = await fixture();
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt() {
+      listener?.({ sessionId: "native", update: { sessionUpdate: "compaction_update", compactionId: "c1", status: "failed", error: "上下文窗口不足" } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+    subscribe(value) { listener = value; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => ({ name: "private", command: "fake", args: [], env: [] }));
+  executor.bindControl(value.control);
+  await executor.execute(value.node).catch(() => undefined);
+  // 诊断是故意不阻塞节点状态的 fire-and-forget 写入；断言耐久事实要轮询，不能赌它先于回合结束落盘。
+  const readNote = async () => (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.find(event => event.type === "log.written" && event.diagnostic !== null && event.diagnostic.includes("上下文压缩"));
+  let note = await readNote();
+  for (let index = 0; index < 200 && !note; index += 1) { await Bun.sleep(10); note = await readNote(); }
+  expect(note).toBeDefined();
+  expect(note!.diagnostic).toContain("未完成");
+  expect(note!.diagnostic).toContain("上下文窗口不足");
+});
+
+/** 背景必须插在"说明"与"事实"之间，不能把工具指南挤到最末尾之外的位置。 */
+test("压缩背景排在工具指南之前", async () => {
+  const value = await fixture({ prompt: "把 auth 迁移到 OAuth2" });
+  let capability = ""; const prompts: string[] = [];
+  let listener: ((event: import("../../src/adapters/acp-session").AcpSessionEvent) => void) | undefined;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} },
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) {
+        listener?.({ sessionId: "native", update: { sessionUpdate: "compaction_update", compactionId: "c1", status: "completed" } });
+        return { stopReason: "end_turn" };
+      }
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+  const reminder = prompts[1]!;
+  expect(reminder.indexOf("原始任务背景")).toBeGreaterThan(-1);
+  expect(reminder.indexOf("原始任务背景")).toBeLessThan(reminder.indexOf("本会话提供私有 MCP server"));
 });
