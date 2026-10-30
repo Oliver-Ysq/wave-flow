@@ -2196,18 +2196,6 @@ export function App() {
                                   prepareRevisionDraft(harness, revision, false)
                               : undefined
                           }
-                          onAbandonCard={
-                            editableRevision(harness, revision)
-                              ? async () => {
-                                  await taskMutation(harness.harnessRunId, () =>
-                                    api.abandonCard(
-                                      harness.harnessRunId,
-                                      revision.cardId!,
-                                    ),
-                                  );
-                                }
-                              : undefined
-                          }
                         />
                         {revision.abandonedAt &&
                           harness.workflowRevisions.at(-1)?.revision ===

@@ -237,7 +237,7 @@ export type ExecutionWorkspaceConfig = {
  version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>;/** 循环写节点的稳定字面量前缀；用户确认时逐前缀披露，实际节点在执行记录中核验。 */dynamicNodes?:Array<{nodeIdPrefix:string}>}; workspaceId:string };
 export type ExecutionConfigSnapshot =
   | { version: 1; assignmentMode?: "assigned"; createdAt: string; fallbackRuntimeId: string; ruleText: string | null; ruleDegraded: boolean; defaultAssignment: WorkerAssignment; assignments: WorkerAssignment[]; workspaces?: ExecutionWorkspaceConfig }
-  | { version: 1; assignmentMode: "script"; createdAt: string; workspaces?: ExecutionWorkspaceConfig };
+  | { version: 1; assignmentMode: "script"; createdAt: string; /** 逐节点 CLI 选择；键为源码中省略 cli 的字面量节点 id。 */ nodeClis?: Record<string, RuntimeCli>; /** 动态节点（无法静态枚举 id）的兜底 CLI。 */ cli?: RuntimeCli; workspaces?: ExecutionWorkspaceConfig };
 /** executions.plan 的分配卡数据。 */
 export type ExecutionPlanResponse = {
   /** 已核验原执行共享worktree，写修订自动接续；不复制节点状态。 */
@@ -270,6 +270,8 @@ export type ExecutionPlanResponse = {
     phaseTitle: string | null;
   }>;
   dynamicCount: number;
+  /** 逐节点 CLI 选择所需事实；仅当存在省略 cli 的节点或动态调用时非空。 */
+  cliChoices?: { available: RuntimeCli[]; suggested: RuntimeCli | null; nodes: Array<{ nodeId: string; label: string | null }>; dynamicCount: number } | null;
   pool: CliRuntime[];
   selectedByCli: Partial<Record<RuntimeCli, string>>;
   harnessRuntime: CliRuntime | null;

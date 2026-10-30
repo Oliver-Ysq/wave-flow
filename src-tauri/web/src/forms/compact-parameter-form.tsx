@@ -8,7 +8,7 @@ import {parameterGroups,parameterErrorKey,parameterErrorMessage} from "./paramet
 const editors=new ViewCache<{value:Record<string,unknown>;listText:Record<string,string>}>(64);
 
 /** 紧凑业务参数编辑：存储Schema继续权威校验，不向用户展示JSON类型树。 */
-export function CompactParameterForm({schema,initialValue={},busy=false,blockedReason,onSubmit,onDraft,submitLabel="保存待运行",identity,validationErrors}:{
+export function CompactParameterForm({schema,initialValue={},busy=false,blockedReason,onSubmit,onDraft,submitLabel="保存待运行",identity,validationErrors,hideSubmit=false}:{
   /** 最终运行校验错误，同步到字段；缺省由表单保存自行校验。 */ validationErrors?:SchemaFieldError[];
   /** 冻结模板输入契约，默认值仅作为建议，不绕过校验。 */ schema:Record<string,unknown>;
   /** 当前已保存/主控整理的参数；缺省为空对象。 */ initialValue?:Record<string,unknown>;
@@ -17,6 +17,13 @@ export function CompactParameterForm({schema,initialValue={},busy=false,blockedR
   /** Schema校验通过后的保存，不自动执行。 */ onSubmit:(input:Record<string,unknown>)=>Promise<void>;
   /** 会话内草稿变化，不构成批准。 */ onDraft?:(input:Record<string,unknown>)=>void;
   /** 主动作文案，缺省保存待运行。 */ submitLabel?:string;
+  /**
+   * 隐藏表单自带的保存按钮。
+   *
+   * 方案页的确认按钮已经"保存参数 + 批准 + 运行"一次完成，参数区再放一个
+   * "保存待运行"只会让用户以为必须先存一次；该场景传 true。创建来源的对话框
+   * 没有确认按钮，仍需保留提交入口。
+   */ hideSubmit?:boolean;
   /** 兼容父级稳定表单身份，由父级key管理挂载。 */ identity?:string;
 }){
   const actionSlot=useContext(WorkflowSourceActions);
@@ -121,6 +128,6 @@ export function CompactParameterForm({schema,initialValue={},busy=false,blockedR
     {primaryKeys.length>0&&<div className="compact-parameter-grid">{primaryKeys.map(key=>field(key,fields[key]!))}</div>}
     {optionalKeys.length>0&&<details ref={optionalDetails} className="parameter-advanced" open={advancedOpen} onToggle={event=>setAdvancedOpen(event.currentTarget.open)}><summary>高级设置{advancedErrors>0?<span>有 {advancedErrors} 项错误</span>:adjusted>0?<span>已调整 {adjusted} 项</span>:<span>可选</span>}</summary><div className="compact-parameter-grid">{optionalKeys.map(key=>field(key,fields[key]!))}</div></details>}
     {blockedReason&&<small role="status">{blockedReason}</small>}
-    {actionSlot?createPortal(action,actionSlot):action}{failure&&<small role="alert">{failure}</small>}
+    {!hideSubmit&&(actionSlot?createPortal(action,actionSlot):action)}{failure&&<small role="alert">{failure}</small>}
   </section>;
 }

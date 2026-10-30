@@ -24,10 +24,10 @@ test("同名 Agent 保留为独立调用示意，不按名称去重", () => {
   expect(groups[0]?.workers.map((item) => item.loop)).toEqual([true, false]);
 });
 
-test("Workflow设计始终使用调用示意，CLI由源码决定且不恢复分配卡", () => {
+test("Workflow设计始终使用调用示意，CLI由源码或逐节点选择决定且不恢复分配卡", () => {
   const source = readFileSync(new URL('../../src-tauri/web/src/workflow-design.tsx', import.meta.url), 'utf8');
   expect(source).toContain('plan?.previewAgents??revision.preview?.previewAgents');
-  expect(source).toContain('worker.nodeId??"*"');
+  expect(source).toContain('worker.nodeId??null');
   expect(source).toContain('循环/批量调用');
   expect(source).not.toContain('ExecutionAssignmentFlow');
   expect(source).not.toContain('parseExecutionRule');

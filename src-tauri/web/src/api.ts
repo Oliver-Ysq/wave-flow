@@ -397,11 +397,6 @@ export const api = {
     action<HarnessRunResponse>("harnesses.retryInitialization", {
       harnessRunId,
     }),
-  abandonCard: (harnessRunId: string, cardId: string) =>
-    action<HarnessRunResponse>("harnesses.abandonCard", {
-      harnessRunId,
-      cardId,
-    }),
   acceptWorkflowRevision: (harnessRunId: string, revision: number) =>
     action<HarnessRunResponse>("harnesses.acceptRevision", {
       harnessRunId,

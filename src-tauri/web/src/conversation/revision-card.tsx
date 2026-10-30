@@ -40,7 +40,6 @@ export function WorkflowRevisionCard({
   onSaved,
   onLocalRevision,
   onAdjustViaChat,
-  onAbandonCard,
   hideGoal=false,
   hideHead=false,
 }: {
@@ -56,8 +55,6 @@ export function WorkflowRevisionCard({
   onLocalRevision?:()=>void;
   /** 聚焦对话并绑定当前版本调整；只准备输入上下文，不发送。 */
   onAdjustViaChat?:()=>void;
-  /** 用户显式放弃整卡；不可逆耐久事实。 */
-  onAbandonCard?:()=>Promise<void>;
   /** 详情页页头已有目标时隐藏重复标题；对话内独立卡片缺省仍展示。 */
   hideGoal?:boolean;
   /** 详情页把版本/状态上移到页签行时隐藏卡片首行，避免顶部留出空状态槽。 */
@@ -149,16 +146,20 @@ export function WorkflowRevisionCard({
       </div>}
       {!hideGoal&&<p className="wf-plan-goal"><span className="wf-plan-label">目标：</span>{revision.goal ?? "历史方案未保存独立目标"}</p>}
       <p className="wf-plan-scope"><span className="wf-plan-label">范围：</span>{revision.scope ?? "历史方案未保存独立范围"}</p>
+      {/* 源码查看放在方案摘要之后、来源/参数之前；默认收起，展开状态按 revision 记忆。 */}
+      <PersistedDetails identity={`${visibilityKey}:source-view`} className="wf-plan-source-code">
+        <summary>查看 workflow.ts</summary>
+        <pre>{revision.source}</pre>
+      </PersistedDetails>
       {canReviseTemplate&&onSaved&&<button disabled={saving} onClick={()=>void prepareParameters().catch(error=>setTransferError(String(error)))}>准备参数新版本</button>}
-      {!revision.templateOrigin&&!revision.localOrigin&&inputSchema&&Object.keys((inputSchema.properties??{}) as Record<string,unknown>).length>0&&<div className="wf-plan-source"><ParameterForm validationErrors={validationErrors} identity={`${visibilityKey}:module-input`} key={`${visibilityKey}:module-input`} schema={inputSchema} initialValue={inputDraft} onDraft={input=>{parameterDrafts.set(visibilityKey,input);setInputDraft(input);}} busy={saving} submitLabel="应用参数" onSubmit={async input=>{setInputDraft(input);}}/></div>}
-      {canSaveAndAdopt&&<div className="wf-plan-source"><button type="button" disabled={saving} onClick={()=>void saveAndAdopt()}>{saving?"正在保存…":"保存并接管为本地 Workflow"}</button><p className="wf-plan-note">保存后当前 Task 将改用该文件；文件与手写 Workflow 同等受信任。之后编辑文件需重新预检，主控不能再替换源码。</p>{saveError&&<p role="alert">{saveError}</p>}</div>}
+      {!revision.templateOrigin&&!revision.localOrigin&&inputSchema&&Object.keys((inputSchema.properties??{}) as Record<string,unknown>).length>0&&<div className="wf-plan-source"><ParameterForm validationErrors={validationErrors} identity={`${visibilityKey}:module-input`} key={`${visibilityKey}:module-input`} schema={inputSchema} initialValue={inputDraft} onDraft={input=>{parameterDrafts.set(visibilityKey,input);setInputDraft(input);}} busy={saving} hideSubmit submitLabel="应用参数" onSubmit={async input=>{setInputDraft(input);}}/></div>}
       {revision.localOrigin&&<div className="wf-plan-source"><p className="wf-plan-meta-row"><span className="wf-plan-label">本地来源</span><code>{revision.localOrigin.path}</code></p><p className="wf-plan-note">参数与源码已锁定；编辑文件后须重新预检。</p>{Object.keys(revision.input??{}).length>0?<pre>{JSON.stringify(revision.input,null,2)}</pre>:<p className="wf-plan-note">无参数</p>}{harness.status==="idle"&&!harness.executions.some(item=>item.finishedAt===null)&&latest?.revision===revision.revision&&(revision.acceptedAt!==null||sourceDrift)&&onLocalRevision&&<button type="button" disabled={saving} onClick={onLocalRevision}>重新预检并准备新版本</button>}{transferError&&<p role="alert">{transferError}</p>}</div>}
-      {revision.templateOrigin&&<div className="wf-plan-source"><p className="wf-plan-meta-row"><span className="wf-plan-label">预置来源</span><code>{revision.templateOrigin.id} · v{revision.templateOrigin.version}</code></p>{(currentCandidate||unsaved&&!harness.executions.some(item=>item.revision===revision.revision))?<ParameterForm validationErrors={validationErrors} identity={`${visibilityKey}:input`} key={`${visibilityKey}:input`} schema={revision.templateOrigin.inputSchema} initialValue={inputDraft} onDraft={input=>{parameterDrafts.set(visibilityKey,input);setInputDraft(input);}} blockedReason={!currentCandidate?"方案已更新，你的修改还在。请选择应用到新方案，或放弃本次修改。":!editable?"Wave Flow 或执行正在处理；参数会保留，结束后可保存。":undefined} busy={saving} onSubmit={async input=>{
+      {revision.templateOrigin&&<div className="wf-plan-source"><p className="wf-plan-meta-row"><span className="wf-plan-label">预置来源</span><code>{revision.templateOrigin.id} · v{revision.templateOrigin.version}</code></p>{(currentCandidate||unsaved&&!harness.executions.some(item=>item.revision===revision.revision))?<ParameterForm validationErrors={validationErrors} identity={`${visibilityKey}:input`} key={`${visibilityKey}:input`} hideSubmit schema={revision.templateOrigin.inputSchema} initialValue={inputDraft} onDraft={input=>{parameterDrafts.set(visibilityKey,input);setInputDraft(input);}} blockedReason={!currentCandidate?"方案已更新，你的修改还在。请选择应用到新方案，或放弃本次修改。":!editable?"Wave Flow 或执行正在处理；参数会保留，结束后可确认运行。":undefined} busy={saving} onSubmit={async input=>{
         await saveInput(input);
       }}/>:Object.keys(revision.input??{}).length>0?<pre>{JSON.stringify(revision.input,null,2)}</pre>:<p className="wf-plan-note">无参数</p>}</div>}
       {canTransfer&&<><button className="button-secondary" disabled={saving} onClick={()=>{const errors=validateAnswer(latest!.templateOrigin!.inputSchema,inputDraft);setValidationErrors(errors);if(errors.length)return;void saveInput(inputDraft,latest).catch(error=>setTransferError(String(error)));}}>将我的修改应用到新方案</button><button className="button-secondary" disabled={saving} onClick={()=>{parameterDrafts.delete(visibilityKey);setInputDraft(suggestedParameters(latest!.templateOrigin!.inputSchema,latest!.input??{}));setValidationErrors([]);setTransferError(null);}}>放弃本次修改</button><small>新方案会保留；你的参数会另存为未批准版本，不会自动执行。</small>{transferError&&<p role="alert">{transferError}</p>}</>}
       {transferError&&!revision.localOrigin&&!canTransfer&&<p role="alert">{transferError}</p>}
-      <WorkflowDesign taskId={harness.harnessRunId} revision={revision} editable={editable&&!rejected} blockedConfirmReason={rejected?null:blockedConfirmReason} onAdjustViaChat={onAdjustViaChat} onAbandonCard={onAbandonCard} onCreated={onAssignmentCreated} input={inputDraft} onSourceDrift={()=>setSourceDrift(true)} validateBeforeRun={()=>{const errors=inputSchema?validateAnswer(inputSchema,inputDraft):[];setValidationErrors(errors);return !errors.length;}} execution={harness.executions.find(item=>item.revision===revision.revision)}/>
+      <WorkflowDesign taskId={harness.harnessRunId} revision={revision} editable={editable&&!rejected} blockedConfirmReason={rejected?null:blockedConfirmReason} onAdjustViaChat={onAdjustViaChat} onSaveAsLocal={canSaveAndAdopt?saveAndAdopt:undefined} savingAsLocal={saving} saveAsLocalError={saveError} onCreated={onAssignmentCreated} input={inputDraft} onSourceDrift={()=>setSourceDrift(true)} validateBeforeRun={()=>{const errors=inputSchema?validateAnswer(inputSchema,inputDraft):[];setValidationErrors(errors);return !errors.length;}} execution={harness.executions.find(item=>item.revision===revision.revision)}/>
       {/* 诊断折叠统一放到卡片底部：不让它孤立地夹在正文与执行步骤之间。 */}
       <PersistedDetails identity={`${visibilityKey}:diagnostic`}>
         <summary>诊断信息</summary>
@@ -174,10 +175,6 @@ export function WorkflowRevisionCard({
           <dt>拒绝时间</dt>
           <dd>{localeTime(revision.rejectedAt)}</dd>
         </dl>
-        <PersistedDetails identity={`${visibilityKey}:source`}>
-          <summary>查看 workflow.ts</summary>
-          <pre>{revision.source}</pre>
-        </PersistedDetails>
       </PersistedDetails>
     </article>
   );

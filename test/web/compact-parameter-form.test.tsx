@@ -80,3 +80,13 @@ test("同一字段多个AJV错误只计一项，不建立不存在的多字段�
  expect(source).toContain('<summary ref={errorSummary} tabIndex={-1}>');
  expect(source).not.toContain('if(next.length>1)');
 });
+
+/** 方案页已有确认按钮完成"保存+批准+运行"，参数区不再重复一个保存入口。 */
+test("hideSubmit 隐藏表单自带保存按钮，创建流程仍保留",()=>{
+ const schema={type:"object",properties:{target:{type:"string"}},required:["target"]};
+ const hidden=renderToStaticMarkup(<CompactParameterForm schema={schema} hideSubmit onSubmit={async()=>{}}/>);
+ expect(hidden).not.toContain("保存待运行");
+ expect(hidden).toContain("审查范围");
+ const shown=renderToStaticMarkup(<CompactParameterForm schema={schema} onSubmit={async()=>{}}/>);
+ expect(shown.match(/保存待运行/g)?.length).toBe(1);
+});
