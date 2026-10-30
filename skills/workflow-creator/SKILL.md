@@ -88,6 +88,9 @@ Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与�
   宿主按该前缀向用户披露并核验实际写节点；`sandbox` 必须是字面量，`id` 只能是字面量或上述
   前缀形式。不要用展开、变量或 `id`/`sandbox` 简写，否则写意图不可核验，草案会被拒绝。
 - 下游代码要解析结果时提供 `schema`（JSON-safe 对象），并配套 TypeScript 类型。
+  这个 `schema` 会同时成为完成工具的入参签名：模型每轮都能看到"必须交什么形状的结果"，
+  不依赖它在提示词里记住一句"结果要符合某 Schema"。因此 `schema` 要能直接表达为工具入参
+  （根为 object），否则完成上报会被 Control 的复验拒绝。
 - `sandbox` 只允许 `read-only`（默认）或 `workspace-write`；没有更高权限模式。
 - 直接 `await agent()` 的失败会抛出并把节点标记为 interrupted；`parallel()` 内失败的
   任务结果为 `null`，使用前必须过滤或判空。
@@ -97,7 +100,7 @@ Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与�
   注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
   Worker 需要人工输入时会自行 `block`，无需作者编排。
 
-Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt，不保证上下文压缩后业务判断无损；作者不新增重试/收尾API，也不把回合结束当作交付。
+Runtime在原Worker回合结束但未完成时，最多补发一次由Control当前事实生成的收尾回合：只上报已有结果，或沿用原人工请求取得答案后由Worker判断continue。它不重做业务、不自动新建attempt；作者不新增重试/收尾API，也不把回合结束当作交付。上下文被压缩后，下一个回合边界会把原始任务描述作为**只读背景**附回（明确不重新授权执行），恢复任务语境；模型已丢失的业务判断与已发生的外部副作用宿主无法恢复，只能由用户显式resume重跑。
 
 Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展（正文/工具/计划事件）时只记录一条耐久停滞提示，不自动中断、不cancel、不杀进程、不重发任务或创建attempt，唯一出口是用户显式停止；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、writer退出与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的恢复只读返回原终态，不补成果快照、不重做Worker，也不自动应用。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
 
@@ -158,7 +161,7 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 1. 形态正确：ESM 模块包含 `import`、`export const meta` 与 `export default async function run(args)`；没有任何受限方言或无 import 的脚本形态。
 2. `meta` 是纯字面量，含 kebab-case `name`、单行 `description`、唯一非空 `phases`。
 3. 每个 `phase()` 调用精确匹配某个 `meta.phases[].title`；`phase()` 不在并发分支内。
-4. 每个 `agent()` 都有唯一稳定 `id` 且 `cli` 为 `"codex"` / `"claude"` / `"dsh"` 之一（三者均已完成真实双角色验收，均可设为主控）；`"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`，且必须是字面量；循环写节点按轮次生成 id 时必须以非空字面量前缀开头，供宿主披露与核验。
+4. 每个 `agent()` 都有唯一稳定 `id`。`cli` 可以省略：省略时由用户在启动前**逐节点**为该节点选择一个本机已验证的 CLI（同一份模块的不同节点可以跑在不同 CLI 上，粒度与主控生成稿逐节点声明一致）；写死时只接受 `"codex"` / `"claude"` / `"dsh"`（三者均已完成真实双角色验收，均可设为主控），且不会被节点选择覆盖。可移植模块与内置预置应当省略 `cli`，让同一份源码能在只装了某一个 CLI 的机器上运行；循环/变量 id 的动态调用无法逐节点列出，需要一个兜底选择。`"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`，且必须是字面量；循环写节点按轮次生成 id 时必须以非空字面量前缀开头，供宿主披露与核验。
 5. `parallel()` 每项都是零参数函数；并发结果在使用前判空。
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
 7. 脚本级人工决策使用 `decisionGate`；prompt 不含完成上报指令。

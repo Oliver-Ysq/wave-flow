@@ -55,7 +55,16 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.2.10`，支持 macOS 12+ / Apple Silicon。可在终端一键安装：
+当前版本：`v0.2.10`，支持 macOS 12+ / Apple Silicon。
+
+运行前提（Wave Flow 不内置、也不自动安装这些工具）：
+
+- **至少一个受支持的本机 CLI**：Codex、Claude Code 或 DeepSeek Harness，已自行安装并用你的账号登录。设置页只扫描与验证本机已有安装，不代你下载。
+- **系统 Git**：受管写执行、现场核验与 worktree 交接都依赖它。macOS 上由 Xcode Command Line Tools 提供；缺失时执行会给出安装提示。
+- **系统 `unzip`**：仅用于导入单个 `skill.zip`，macOS 自带。
+- 可选：`ripgrep`（`rg`）只影响 Harness 的只读全文搜索；未安装时该项能力明确报不可用，其他功能不受影响。
+
+可在终端一键安装：
 
 ```sh
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
@@ -79,7 +88,7 @@ bun run desktop:build # 生成 release 安装包
 
 ## 快速开始
 
-运行桌面应用，在项目里直接描述目标，或选择“预置工作流”“本地工作流”。本地来源须是项目内受信任 `.ts` 文件，声明纯字面量 `meta.inputSchema` 对象参数 Schema；预检只读取、不会运行脚本。保存方案后，在方案页确认参数、CLI 和必要的 Git 授权才启动。
+运行桌面应用，在项目里直接描述目标，或选择“预置工作流”“本地工作流”。本地来源须是项目内受信任 `.ts` 文件，声明纯字面量 `meta.inputSchema` 对象参数 Schema；预检只读取、不会运行脚本。保存方案后，在方案页确认参数、CLI 和必要的 Git 授权才启动。内置预置不绑定具体 CLI：方案页会为每个节点分别提供 CLI 选择（每个节点可以不同；默认预填主控使用的 CLI，可按需逐个改；循环/变量 id 的动态节点使用同一个默认兜底）；主控生成的方案与本地文件若写死了 `cli`，则按源码执行。
 
 内置预置工作流：
 

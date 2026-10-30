@@ -55,7 +55,16 @@ Large evidence path lists are collected as complete streams rather than truncate
 
 ## Download and installation
 
-Current version: `v0.2.10`, supporting macOS 12+ / Apple Silicon. Install from a terminal:
+Current version: `v0.2.10`, supporting macOS 12+ / Apple Silicon.
+
+Prerequisites (Wave Flow neither bundles nor installs these):
+
+- **At least one supported local CLI** — Codex, Claude Code or DeepSeek Harness, already installed and signed in with your own account. The settings page only scans and verifies existing installs.
+- **System Git** — managed write executions, workspace verification and worktree hand-off depend on it. On macOS it comes with Xcode Command Line Tools; when missing, execution reports how to install it.
+- **System `unzip`** — only used to import a single `skill.zip`; bundled with macOS.
+- Optional: `ripgrep` (`rg`) only affects the harness read-only full-text search; when absent that capability reports itself unavailable and nothing else changes.
+
+Install from a terminal:
 
 ```sh
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
@@ -79,7 +88,7 @@ Build output is under `src-tauri/target/release/bundle/`. Development machines w
 
 ## Quick start
 
-Open the desktop app and choose a project, then describe the goal directly, or choose a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start.
+Open the desktop app and choose a project, then describe the goal directly, or choose a built-in template or a trusted local TypeScript workflow. Preflight only reads local source; saving a proposal does not execute it. Confirm parameters, CLI choices and any Git authorization on the proposal page to start. Built-in presets do not pin a CLI: the proposal page lets you choose a CLI **per node** (nodes may differ; pre-filled with the main-controller CLI and adjustable per node; dynamic nodes with loop/variable ids share that default fallback); generated proposals and local files that hard-code `cli` follow their source.
 
 Built-in presets:
 

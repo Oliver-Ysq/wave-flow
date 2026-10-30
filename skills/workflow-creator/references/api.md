@@ -79,7 +79,7 @@ interrupted；在 `parallel()` / `pipeline()` 内失败时该任务结果为 `nu
 ```ts
 type AgentOptions = {
   id: string;          // 必填；Run 内唯一稳定，1–120 位 [A-Za-z0-9._:/-]
-  cli: "codex" | "claude" | "dsh"; // 必填；选择执行该节点的本机 Agent CLI 种类，该 Runtime 必须在设置页验证通过；三种 CLI 均已完成真实双角色验收并可设为主控；"kimi" 支持已暂时下线
+  cli?: "codex" | "claude" | "dsh"; // 可省略：省略时由用户在确认页为「这个节点」单独选择 CLI（必须在本机验证通过）；不同节点可不同；写死时只接受这三种且不被节点选择覆盖；可移植模块与内置预置应省略；"kimi" 支持已暂时下线
   label?: string;      // 可选展示名；缺省用 id
   cwd?: string;        // 可选；相对路径必须位于 Workflow 项目目录内
   model?: string;      // 可选；由 Adapter 决定是否支持

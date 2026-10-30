@@ -30,7 +30,6 @@ export default async function run(args: Args): Promise<Report> {
     `把这个目标拆解为互相独立的任务清单：\n${args.objective}`,
     {
       id: "planner",
-      cli: "codex",
       schema: {
         type: "object",
         properties: { tasks: { type: "array", items: { type: "string" }, minItems: 1 } },
@@ -47,7 +46,7 @@ export default async function run(args: Args): Promise<Report> {
   const raw = await parallel(
     plan.tasks.map((task, index) => async () => {
       log(`- 开始 \`${task}\``);
-      const finding = await agent(`完成这项独立任务：\n${task}`, { id: `task-${index + 1}`, cli: "codex" });
+      const finding = await agent(`完成这项独立任务：\n${task}`, { id: `task-${index + 1}` });
       if (finding) log(`- 完成 \`${task}\``);
       return finding;
     }),
@@ -64,7 +63,6 @@ export default async function run(args: Args): Promise<Report> {
     ].join("\n\n"),
     {
       id: "synthesizer",
-      cli: "codex",
       sandbox: "workspace-write",
       schema: {
         type: "object",
