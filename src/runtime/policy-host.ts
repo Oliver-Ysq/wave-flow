@@ -1,5 +1,5 @@
 import type { JsonObject } from "../shared/json";
-import type { NormalizedAgentRequest } from "../shared/workflow-types";
+import type { AuthorAgentRequest } from "../shared/workflow-types";
 import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "./workflow-host";
 import { WorkflowContractError } from "../workflow/errors";
 
@@ -30,7 +30,7 @@ export class PolicyEnforcingHost implements WorkflowExecutionHost {
     readonly policy: WorkflowPolicy = DEFAULT_WORKFLOW_POLICY,
   ) {}
 
-  agent(request: NormalizedAgentRequest, batch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
+  agent(request: AuthorAgentRequest, batch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
     this.#nodes += 1;
     if (this.#nodes > this.policy.maxNodes) throw new WorkflowContractError(`脚本 agent() 调用超过 Policy 上限 ${this.policy.maxNodes}。`);
     return this.inner.agent(request, batch, phaseVisit);

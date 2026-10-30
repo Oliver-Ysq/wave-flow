@@ -374,10 +374,25 @@ export type ExecutionConfigSnapshot =
   | {
       /** 快照格式版本；当前固定为 1。 */
       readonly version: 1;
-      /** 脚本模式：节点 CLI/模型由作者模块决定，不读取分配字段。 */
+      /** 脚本模式：每个节点优先取作者字面量 cli，省略时取本次执行按节点选择的结果。 */
       readonly assignmentMode: "script";
       /** 快照创建时间。 */
       readonly createdAt: string;
+      /**
+       * 逐节点 CLI 选择：键是源码中省略 `cli` 的字面量节点 id，值是本次执行选定的 CLI。
+       *
+       * 与主控生成稿"每个节点各自声明 CLI"的语义对齐：同一份预置里两个节点可以分别跑在
+       * 不同 CLI 上。作者写死的 cli 优先，不会被这里的条目覆盖；未列出的字面量节点会回落到
+       * `cli`（若存在），否则在任何 Worker 启动前以契约错误拒绝。值必须是本机已验证的 CLI，
+       * 并随 Journal 生效请求与 Replay 指纹参与复用判定。
+       */
+      readonly nodeClis?: Readonly<Record<string, import("../runtimes/types").RuntimeCli>>;
+      /**
+       * 动态节点的兜底 CLI；只用于无法静态枚举 id 的 `agent()` 调用（循环/变量 id）。
+       *
+       * 静态节点应优先用 `nodeClis` 逐节点选择；`cli` 只为"名单外的节点"（含动态节点）兜底。
+       */
+      readonly cli?: import("../runtimes/types").RuntimeCli;
       /** 仅写类模块 Workflow 需要；只读模块不带此字段。 */
       readonly workspaces?: import("../workspace/execution-workspaces").ExecutionWorkspaceConfig;
     };

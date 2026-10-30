@@ -200,12 +200,15 @@ export class HarnessExecutionService {
     const sourceFormat = revision.sourceFormat ?? (revision.localOrigin ? "module" : "restricted");
     if (sourceFormat !== "module") throw new Error("旧格式草案不可执行，请重新生成。");
     const intent=readWorkspaceWriteIntent(revision.source);
+    // 模块/本地来源只接受脚本模式配置：历史 assigned 分配不能借配置旁路重新生效。
+    if (config && config.assignmentMode !== "script") throw new Error("模块 Workflow 只接受脚本模式执行配置。 ");
+    // 只读模块可以携带执行级 CLI 选择（内置预置不再写死 CLI），但不能携带 Git 成果授权。
     if (revision.localOrigin) {
       if((hasWorkspaceWriteIntent(intent))&&!config?.workspaces)throw new Error("本地 Workflow 的workspace-write必须携带用户Git成果授权。 ");
-      if(!hasWorkspaceWriteIntent(intent)&&config)throw new Error("纯只读本地 Workflow 不接受执行配置。 ");
+      if(!hasWorkspaceWriteIntent(intent)&&config?.workspaces)throw new Error("纯只读本地 Workflow 不接受 Git 成果授权。 ");
     } else {
       if((hasWorkspaceWriteIntent(intent))&&!config?.workspaces)throw new Error("写类模块 Workflow 必须携带用户Git成果授权。 ");
-      if(!hasWorkspaceWriteIntent(intent)&&config)throw new Error("只读模块 Workflow 不接受执行配置。 ");
+      if(!hasWorkspaceWriteIntent(intent)&&config?.workspaces)throw new Error("只读模块 Workflow 不接受 Git 成果授权。 ");
     }
     // 模块加载失败在任何耐久事实之前拒绝，不产生 Execution。
     if(revision.localOrigin){
@@ -237,7 +240,8 @@ export class HarnessExecutionService {
       executor: created.executor,
       harness: { harnessRunId, revision: revision.revision, sourceHash: revision.sourceHash },
       runId: executionId,
-      executionConfig: undefined,
+      // 执行级 CLI 选择必须进入 Run 宿主：省略 cli 的节点在下一次脚本调用里靠它补齐。
+      executionConfig: config ?? undefined,
     });
     } catch(error) {
       // prepare 尚未取得Task关联；只清理本调用生成的UUID目录，不触碰用户工作区。
@@ -561,7 +565,8 @@ export class HarnessExecutionService {
     // interrupted/cancelled；用户授权 resume 后必须先耐久地重开外层登记，后续新 attempt
     // 才能写入新的 execution_finished，而不是被旧终态拒绝。
     if (record.status === "interrupted" || record.status === "cancelled") await this.harness.recordExecutionResumed(harnessRunId, executionId);
-    const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root, null, this.skillsRoot);
+    // 恢复必须沿用原 Execution 冻结的执行级 CLI；否则省略 cli 的节点在新 attempt 里无法解析。
+    const runtime = await RunRuntime.resume(executionId, resumedExecutor.executor, root, record.config ?? null, this.skillsRoot);
     let releaseControl:void|(()=>void);
     try { releaseControl = await this.hooks.wireControl?.(runtime, resumedExecutor.wiring); }
     catch(error){

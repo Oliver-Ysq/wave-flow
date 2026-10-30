@@ -74,11 +74,11 @@ function templateSource(id: string): string {
   return source;
 }
 
-const codeReview = defineTemplate("code-review", 2, templateSource("code-review"), "两个顺序只读 Worker：先审查，再独立复核。只检查明确指定的范围，不修改文件；结果不代表全仓库已验证。");
+const codeReview = defineTemplate("code-review", 3, templateSource("code-review"), "两个顺序只读 Worker：先审查，再独立复核。只检查明确指定的范围，不修改文件；结果不代表全仓库已验证。");
 
-const deepResearch = defineTemplate("deep-research", 3, templateSource("deep-research"), "深度调研：计划 Agent 把主题拆解为研究问题并经你确认后，并行多源调研；每条结论由独立核验员重新打开原始来源复核；交叉检查矛盾、证据家族与单源风险；deep 模式按缺口做第二轮定向补证；最后撰写-红队-修订产出带引用与置信度分级的报告。全程只读，不修改文件。");
+const deepResearch = defineTemplate("deep-research", 4, templateSource("deep-research"), "深度调研：计划 Agent 把主题拆解为研究问题并经你确认后，并行多源调研；每条结论由独立核验员重新打开原始来源复核；交叉检查矛盾、证据家族与单源风险；deep 模式按缺口做第二轮定向补证；最后撰写-红队-修订产出带引用与置信度分级的报告。全程只读，不修改文件。");
 
-const deepCr = defineTemplate("deep-cr", 4, templateSource("deep-cr"), "深度代码审查：先摸底变更面、模块结构与仓库审查规范；六个专项审查员(正确性/安全/并发与状态/错误处理与资源/接口与数据兼容/意图与测试)并行审查；每个发现由独立复核员重新打开源码逐条核实并剔除误报；交叉裁决去重排序并给出合并建议；盲区扫描披露未被覆盖的高风险文件；最终产出带证据、触发场景与修复建议的分级报告。全程只读，不修改文件、不运行构建或测试。");
+const deepCr = defineTemplate("deep-cr", 5, templateSource("deep-cr"), "深度代码审查：先摸底变更面、模块结构与仓库审查规范；六个专项审查员(正确性/安全/并发与状态/错误处理与资源/接口与数据兼容/意图与测试)并行审查；每个发现由独立复核员重新打开源码逐条核实并剔除误报；交叉裁决去重排序并给出合并建议；盲区扫描披露未被覆盖的高风险文件；最终产出带证据、触发场景与修复建议的分级报告。全程只读，不修改文件、不运行构建或测试。");
 
 /** 返回独立 JSON 快照，调用方不能修改进程内目录。 */
 export function listWorkflowTemplates(): readonly WorkflowTemplate[] {

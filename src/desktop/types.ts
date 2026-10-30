@@ -192,6 +192,23 @@ export type ExecutionPlanResponse = {
   readonly workers: readonly import("../workflow/extract-agents").ExtractedAgentWorker[];
   /** 非字面量 id 的 agent() 调用数；它们运行时落 default 分配。 */
   readonly dynamicCount: number;
+  /**
+   * 逐节点 CLI 选择所需的事实；仅在存在省略 `cli` 的节点或动态调用时出现。
+   *
+   * `available` 只含本机已验证且当前可选（未下线）的 CLI；`suggested` 只在恰好一个候选时
+   * 给出，多个候选时为 null——UI 必须让用户逐节点选择，不得代选。`nodes` 是需要选择的
+   * 字面量节点；`dynamicCount` 是无法静态枚举 id 的调用数，它们需要一个兜底 CLI。
+   */
+  readonly cliChoices?: {
+    /** 本机已验证的候选 CLI；可能为空（此时必须先完成设置页验证）。 */
+    readonly available: readonly RuntimeCli[];
+    /** 唯一候选时的建议值；多个候选必须由用户逐个选择。 */
+    readonly suggested: RuntimeCli | null;
+    /** 源码中省略 `cli` 的字面量节点；每个节点各自选择，互不牵连。 */
+    readonly nodes: readonly { readonly nodeId: string; readonly label: string | null }[];
+    /** 无法静态枚举 id 的 `agent()` 调用数；>0 时需要为它们提供兜底 CLI。 */
+    readonly dynamicCount: number;
+  } | null;
   /** 已验证即候选的 Worker Runtime 池；不含文件身份。 */
   readonly pool: readonly import("../runtimes/types").CliRuntimeView[];
   /** 每个 CLI 的用户偏好 runtime id；Engine 解析 cli → Runtime 时优先使用。 */

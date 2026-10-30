@@ -1,7 +1,7 @@
 import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
 import type { JsonObject } from "../shared/json";
-import type { NormalizedAgentRequest } from "../shared/workflow-types";
+import type { AuthorAgentRequest, NormalizedAgentRequest } from "../shared/workflow-types";
 import type { DecisionGateRequest, WorkflowExecutionHost } from "./workflow-host";
 import type { ExecutionBatch, PhaseVisit } from "./workflow-host";
 import type { AgentNodeExecutor } from "./run-types";
@@ -157,12 +157,12 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   }
 
   /** 创建、启动并执行节点；只有结果与 Journal 均耐久后才返回对象。 */
-  async agent(request: NormalizedAgentRequest, executionBatch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
+  async agent(request: AuthorAgentRequest, executionBatch: ExecutionBatch, phaseVisit: PhaseVisit): Promise<JsonObject | null> {
     while (this.#schedulingPaused) await this.#schedulingGate;
     if (this.#schedulingAborted) throw new WorkflowContractError("Run 已停止，不再调度新 Agent 节点。");
-    // 分配快照改写必须先于指纹比较与 agent.created 落盘：Journal 记录的永远是生效请求
-    // （分配的 cli、cli-default 语义下的 model 省略、assignedRuntimeId），而不是脚本字面量。
-    const effectiveRequest = this.rewriteRequest(request);
+    // 生效请求必须先于指纹比较与 agent.created 落盘：Journal 记录的永远是实际生效的
+    // cli（脚本字面量或本次执行选择的 CLI）与 assignedRuntimeId，而不是省略形式。
+    const effectiveRequest = this.resolveRequest(request);
     if (effectiveRequest.phase === undefined) throw new WorkflowContractError("agent() 前必须调用 phase() 选择已声明阶段。");
     const nodeId = effectiveRequest.id;
     const logicalSequence = ++this.#logicalSequence;
@@ -367,15 +367,28 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   }
 
   /**
-   * 历史 assigned 配置的消费点：把请求改写为分配结果。模块 Workflow 不经过此路径，
-   * 脚本 cli/model 直接生效；这里只保留旧记录读取与测试兼容。
+   * 把作者请求解析为生效请求。
+   *
+   * 优先级：历史 assigned 分配 > 脚本字面量 `cli` > 该节点的执行级选择（`nodeClis[id]`）
+   * > 动态节点兜底（`cli`）。都没有时，在任何 Journal 事实或 Worker 会话之前以契约错误
+   * 拒绝——省略 cli 不是"让宿主随便挑一个"，而是"必须由本次执行逐节点明确选择"。
    */
-  private rewriteRequest(request: NormalizedAgentRequest): NormalizedAgentRequest {
+  private resolveRequest(request: AuthorAgentRequest): NormalizedAgentRequest {
     const config = this.executionConfig;
-    if (!config || config.assignmentMode === "script") return request;
-    const assignment = config.assignments.find((item) => item.agentId === request.id) ?? config.defaultAssignment;
-    const rewritten: NormalizedAgentRequest = { ...request, cli: assignment.cli, model: undefined, assignedRuntimeId: assignment.runtimeId };
-    return rewritten;
+    const assigned = config && config.assignmentMode !== "script"
+      ? config.assignments.find((item) => item.agentId === request.id) ?? config.defaultAssignment
+      : null;
+    // 脚本模式：源码字面量优先，其次该节点自己的选择，最后是动态节点兜底。
+    const scriptCli = config?.assignmentMode === "script" ? config.nodeClis?.[request.id] ?? config.cli : undefined;
+    const cli = assigned?.cli ?? request.cli ?? scriptCli;
+    if (!cli) {
+      throw new WorkflowContractError(`agent() 节点 ${request.id} 未声明 cli，且本次执行没有为它选择 CLI；请在确认页为每个节点选择本机已验证的 CLI，或在源码中写死 cli。`);
+    }
+    return {
+      ...request,
+      cli,
+      ...(assigned ? { model: undefined, assignedRuntimeId: assigned.runtimeId } : {}),
+    };
   }
 
   /** 当前节点的分配与已耐久 session provenance 是否一致；缺任一证据时不否决复用。 */

@@ -6,6 +6,7 @@ import { harnessRunDirectory, harnessRunsRoot, validateRunId, waveFlowHome } fro
 import { isJsonObject, type JsonObject } from "../shared/json";
 import type { HarnessConversationEntry, HarnessDecision, HarnessMessage, HarnessQueuedMessage, HarnessSnapshot, HarnessStatus, HarnessToolActivity, HarnessToolEntry, WorkflowExecutionRecord, WorkflowRevision } from "./types";
 import type { RuntimeProvenance } from "../runtimes/types";
+import { isRuntimeCli } from "../shared/cli-availability";
 import { isRevisionPreview, previewMatchesSource, type RevisionPreview } from "./revision-preview";
 import { isTemplateOrigin, isTemplateSelection, validateTemplateInput } from "./workflow-templates";
 import {inspectLocalWorkflowSource,validateLocalInput} from "../workflow/preflight-local";
@@ -641,7 +642,17 @@ function isWorkerAssignment(value: unknown): value is import("./types").WorkerAs
 function isExecutionConfigSnapshot(value: unknown): value is import("./types").ExecutionConfigSnapshot {
   if (!plain(value) || value.version !== 1 || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))) return false;
   if (value.workspaces !== undefined) { try { validateExecutionWorkspaces(value.workspaces); } catch { return false; } }
-  if (value.assignmentMode === "script") return Object.keys(value).every(key => ["version", "assignmentMode", "createdAt", "workspaces"].includes(key));
+  if (value.assignmentMode === "script") {
+    // 逐节点 CLI 选择（v10 起）：兜底 `cli` 与 `nodeClis` 只能包含已验证的 CLI 标识。
+    if (value.cli !== undefined && !isRuntimeCli(value.cli)) return false;
+    if (value.nodeClis !== undefined) {
+      if (!plain(value.nodeClis)) return false;
+      for (const [nodeId, cli] of Object.entries(value.nodeClis as Record<string, unknown>)) {
+        if (!nodeId.trim() || nodeId.length > 120 || !isRuntimeCli(cli)) return false;
+      }
+    }
+    return Object.keys(value).every(key => ["version", "assignmentMode", "createdAt", "cli", "nodeClis", "workspaces"].includes(key));
+  }
   if (value.assignmentMode !== undefined && value.assignmentMode !== "assigned") return false;
   if (typeof value.fallbackRuntimeId !== "string" || !value.fallbackRuntimeId.trim() || (value.ruleText !== null && typeof value.ruleText !== "string") || typeof value.ruleDegraded !== "boolean" || !Array.isArray(value.assignments)) return false;
   if (!isWorkerAssignment(value.defaultAssignment)) return false;

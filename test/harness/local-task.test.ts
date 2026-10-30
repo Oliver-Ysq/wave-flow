@@ -62,7 +62,7 @@ test("本地Task保存不执行，确认在原Run Store运行，旧源编辑后�
  harness.setExecutionCapsuleReader((task,ex,attempt)=>executions.capsuleEvidence(task,ex,attempt));
  const assignment=(agentId:string)=>({agentId,cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test",adapterId:"codex-acp" as const,adapterVersion:"test"});
  const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test",ruleText:null,ruleDegraded:false,defaultAssignment:assignment("*"),assignments:[assignment("a")]};
- await expect(executions.createExecution(task.harnessRunId,1,{x:42},config)).rejects.toThrow("不接受");
+ await expect(executions.createExecution(task.harnessRunId,1,{x:42},config)).rejects.toThrow("只接受脚本模式执行配置");
  const created=await executions.createExecution(task.harnessRunId,1,{x:42});
  expect(created.execution.config).toBeUndefined();
  for(let i=0;i<100&&(await executions.listExecutions(task.harnessRunId))[0]!.finishedAt===null;i++)await Bun.sleep(5);

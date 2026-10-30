@@ -159,7 +159,7 @@ test("深度调研模板：编译合法、Schema 边界与参数校验生效",()
  const templates=listWorkflowTemplates();
  expect(templates.map(item=>item.id)).toEqual(["code-review","deep-research","deep-cr"]);
  const research=templates.find(item=>item.id==="deep-research")!;
- expect(research.version).toBe(3);expect(research.meta.name).toBe("deep-research");
+ expect(research.version).toBe(4);expect(research.meta.name).toBe("deep-research");
  expect(research.meta.phases.map(phase=>phase.title)).toEqual(["计划","调研","核验","交叉检查与补证","综评","批判","定稿"]);
  expect(isTemplateOrigin((({source,...origin})=>origin)(research))).toBe(true);
  validateTemplateInput(research.inputSchema,{topic:"端侧推理框架选型"});
@@ -173,7 +173,7 @@ test("深度调研模板：编译合法、Schema 边界与参数校验生效",()
 });
 test("深度CR模板：编译合法、Schema 边界与参数校验生效",()=>{
  const review=listWorkflowTemplates().find(item=>item.id==="deep-cr")!;
- expect(review.version).toBe(4);
+ expect(review.version).toBe(5);
  expect(review.meta.phases.map(phase=>phase.title)).toEqual(["摸底","分维审查","取证复核","交叉裁决","盲区扫描","定稿汇总"]);
  expect(isTemplateOrigin((({source,...origin})=>origin)(review))).toBe(true);
  validateTemplateInput(review.inputSchema,{target:"src/"});

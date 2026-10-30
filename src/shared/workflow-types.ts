@@ -33,8 +33,14 @@ export type WorkflowMeta = {
 export type AgentOptions = {
   /** Run 内唯一且稳定的节点身份；最长 120 字符，参与后续会话和 replay 绑定。 */
   readonly id: string;
-  /** 要启动的正常交互式 CLI Adapter；当前可选 codex、claude、dsh，kimi 支持已暂时下线。 */
-  readonly cli: AgentCli;
+  /**
+   * 要启动的正常交互式 CLI Adapter；当前可选 codex、claude、dsh，kimi 支持已暂时下线。
+   *
+   * 省略表示"由本次执行在启动前选择"：内置预置与可移植模块不绑定具体 CLI，用户在确认页选一个
+   * 本机已验证的 CLI，本次执行的所有省略节点都用它。显式字面量优先，且不接受执行级覆盖。
+   * 省略但执行没有提供 CLI 时，`agent()` 在任何 Worker 启动前以契约错误拒绝。
+   */
+  readonly cli?: AgentCli;
   /** 可选展示名称；省略时运行时使用 id，不影响节点稳定身份。 */
   readonly label?: string;
   /** 可选工作目录；省略时后续 Runtime 使用 Run 的项目 cwd。 */
@@ -50,7 +56,9 @@ export type AgentOptions = {
 };
 
 /** Runtime 规范化后的 Agent 请求；所有默认值已固定，供宿主安全消费。 */
-export type NormalizedAgentRequest = Omit<AgentOptions, "cwd" | "sandbox"> & {
+export type NormalizedAgentRequest = Omit<AgentOptions, "cwd" | "sandbox" | "cli"> & {
+  /** 实际生效的 CLI；作者省略时由本次执行的选择补齐。 */
+  readonly cli: AgentCli;
   /** 实际请求的 sandbox；总是 read-only 或 workspace-write。 */
   readonly sandbox: AgentSandbox;
   /** 实际工作目录；总是 Run cwd 或其已验证的子目录。 */
@@ -65,6 +73,9 @@ export type NormalizedAgentRequest = Omit<AgentOptions, "cwd" | "sandbox"> & {
    */
   readonly assignedRuntimeId?: string;
 };
+
+/** 作者交给宿主、CLI 可能尚未确定的请求；宿主按执行级选择补齐后才允许落盘。 */
+export type AuthorAgentRequest = Omit<NormalizedAgentRequest, "cli"> & { readonly cli?: AgentCli };
 
 /** 一个接受前一阶段值并返回下一阶段值的 pipeline 函数。 */
 export type PipelineStage = (value: unknown) => Promise<unknown> | unknown;

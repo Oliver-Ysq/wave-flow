@@ -8,7 +8,7 @@ import { loadWorkflowSource } from "../../src/workflow/load-workflow";
 import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
 import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "../../src/runtime/workflow-host";
 import type { JsonObject } from "../../src/shared/json";
-import type { NormalizedAgentRequest } from "../../src/shared/workflow-types";
+import type { AuthorAgentRequest } from "../../src/shared/workflow-types";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
@@ -21,12 +21,12 @@ const ajv = new Ajv({ allErrors: true, strict: false });
  * 会被 Control Server 拒绝，而这种契约错误在假宿主里不会暴露。
  */
 class ScriptedHost implements WorkflowExecutionHost {
-  readonly agents: NormalizedAgentRequest[] = [];
+  readonly agents: AuthorAgentRequest[] = [];
   readonly phases: string[] = [];
   readonly gates: DecisionGateRequest[] = [];
   readonly agentBatches = new Map<string, ExecutionBatch>();
-  constructor(private readonly respond: (request: NormalizedAgentRequest) => JsonObject | null, private readonly answer: JsonObject = { approved: true, adjustments: "" }) {}
-  async agent(request: NormalizedAgentRequest, batch: ExecutionBatch): Promise<JsonObject | null> {
+  constructor(private readonly respond: (request: AuthorAgentRequest) => JsonObject | null, private readonly answer: JsonObject = { approved: true, adjustments: "" }) {}
+  async agent(request: AuthorAgentRequest, batch: ExecutionBatch): Promise<JsonObject | null> {
     this.agents.push(request);
     this.agentBatches.set(request.id, batch);
     const result = this.respond(request);
@@ -44,7 +44,7 @@ class ScriptedHost implements WorkflowExecutionHost {
 const finding = { title: "越界读", severity: "high", confidence: "high", file: "src/a.ts", lines: "10-14", evidence: "const x = arr[i]", trigger: "i 越界", impact: "崩溃", suggestion: "加边界判断" };
 const researchFinding = { claim: "框架 A 更快", evidence: [{ title: "Bench", url: "https://example.com/bench", excerpt: "A 2x" }], confidence: "high", asOf: "2026-01" };
 
-const researchRespond = (request: NormalizedAgentRequest): JsonObject | null => {
+const researchRespond = (request: AuthorAgentRequest): JsonObject | null => {
   const id = request.id;
   if (id === "planner" || id === "planner-revised") return { brief: "研究简报", questions: [{ title: "问题一", keyPoints: ["要点"], searchHints: ["kw"] }, { title: "问题二", keyPoints: ["要点"], searchHints: ["kw"] }], controversies: ["争议"] };
   if (id.startsWith("research-")) return { findings: [researchFinding], gaps: [], failedSources: [] };
@@ -56,7 +56,7 @@ const researchRespond = (request: NormalizedAgentRequest): JsonObject | null => 
   return null;
 };
 
-const reviewRespond = (request: NormalizedAgentRequest): JsonObject | null => {
+const reviewRespond = (request: AuthorAgentRequest): JsonObject | null => {
   const id = request.id;
   if (id === "scope-mapper") return { intentSummary: "引入任务队列", reviewSurface: [{ path: "src/queue.ts", reason: "核心逻辑" }], changeSurface: ["src/queue.ts"], standards: ["必须幂等"], riskAreas: ["并发"], testNotes: ["测试在 test/queue.test.ts"] };
   if (id.startsWith("review-")) return { findings: [finding], coverage: ["src/queue.ts"] };
@@ -235,7 +235,7 @@ test("内置预置全程只读：所有 Worker 都是 read-only 意图，不写�
     expect(host.agents.length).toBeGreaterThan(0);
     for (const request of host.agents) {
       expect(request.sandbox).toBe("read-only");
-      expect(request.cli).toBe("codex");
+      expect(request.cli).toBeUndefined();
     }
   }
 });

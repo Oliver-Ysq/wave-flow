@@ -145,3 +145,65 @@ describe("RunRuntimeHost 分配快照消费", () => {
     expect(resumed.snapshot()).toMatchObject({ status: "completed", currentExecutionAttemptId: 2 });
   });
 });
+
+/**
+ * 执行级 CLI 选择：作者可以省略 `cli`，由本次执行在启动前选定；它必须进入生效请求与
+ * Journal，才能让 Replay 指纹随后续选择变化，而不是把"省略"当成某个隐式默认。
+ */
+describe("RunRuntimeHost 执行级 CLI 选择", () => {
+  const scriptConfig = (cli: "codex" | "claude" | "dsh"): ExecutionConfigSnapshot => ({ version: 1, assignmentMode: "script", createdAt: new Date().toISOString(), cli });
+  const portable: WorkflowModule<JsonObject, unknown> = {
+    meta: { name: "portable", description: "可移植模块", phases: [{ title: "run" }] },
+    default: async () => { phase("run"); return agent("work", { id: "worker" }); },
+  };
+
+  test("省略 cli 时使用本次执行的选择，并作为生效 cli 落入 Journal", async () => {
+    const runtime = await create({ execute: async () => ({ ok: true }) }, portable, scriptConfig("claude"));
+    await expect(runtime.run(portable)).resolves.toEqual({ ok: true });
+    const node = runtime.snapshot().phases[0].agents[0];
+    expect(node.cli).toBe("claude");
+    expect(node.request.cli).toBe("claude");
+    const reopened = await RunJournal.open(runtime.snapshot().id, storeRootOf(runtime));
+    expect(reopened.events.find((event) => event.type === "agent.created")).toMatchObject({ request: { cli: "claude" } });
+  });
+
+  test("逐节点选择：同一份模块的两个节点可以跑在不同 CLI 上", async () => {
+    const twoPortable: WorkflowModule<JsonObject, unknown> = {
+      meta: { name: "portable-two", description: "两个可移植节点", phases: [{ title: "run" }] },
+      default: async () => { phase("run"); const a = await agent("甲", { id: "a" }); const b = await agent("乙", { id: "b" }); return { a, b }; },
+    };
+    const config: ExecutionConfigSnapshot = { version: 1, assignmentMode: "script", createdAt: new Date().toISOString(), nodeClis: { a: "claude", b: "dsh" } };
+    const runtime = await create({ execute: async node => ({ ok: node.cli }) }, twoPortable, config);
+    await expect(runtime.run(twoPortable)).resolves.toEqual({ a: { ok: "claude" }, b: { ok: "dsh" } });
+    const agents = runtime.snapshot().phases[0].agents;
+    expect(agents.map(node => `${node.id}:${node.cli}`)).toEqual(["a:claude", "b:dsh"]);
+    const reopened = await RunJournal.open(runtime.snapshot().id, storeRootOf(runtime));
+    expect(reopened.events.filter(event => event.type === "agent.created").map(event => (event as { request: { cli: string } }).request.cli)).toEqual(["claude", "dsh"]);
+  });
+
+  test("源码字面量优先：执行级选择不覆盖写死的 cli", async () => {
+    const runtime = await create({ execute: async () => ({ ok: true }) }, single, scriptConfig("claude"));
+    await runtime.run(single);
+    expect(runtime.snapshot().phases[0].agents[0]).toMatchObject({ cli: "codex", request: { cli: "codex" } });
+  });
+
+  test("既没有字面量也没有执行级选择时，在任何 Journal 事实与 Worker 之前拒绝", async () => {
+    const executed: string[] = [];
+    const runtime = await create({ execute: async (node) => { executed.push(node.id); return { ok: true }; } }, portable, { version: 1, assignmentMode: "script", createdAt: new Date().toISOString() });
+    await expect(runtime.run(portable)).rejects.toThrow("未声明 cli");
+    // 契约错误发生在节点创建前：没有启动任何执行器，也没有 agent.created 事实。
+    expect(executed).toEqual([]);
+    const reopened = await RunJournal.open(runtime.snapshot().id, storeRootOf(runtime));
+    expect(reopened.events.some((event) => event.type === "agent.created")).toBe(false);
+  });
+
+  test("恢复沿用同一执行级选择：省略 cli 的节点在新 attempt 仍能解析", async () => {
+    const executed: string[] = [];
+    const initial = await create({ execute: async (node) => { executed.push(node.id); return node.id === "worker" ? null : { ok: true }; } }, portable, scriptConfig("dsh"));
+    await initial.run(portable).catch(() => undefined);
+    // 首个 attempt 的节点未完成；resume 必须带上同一选择才能重放脚本。
+    const resumed = await RunRuntime.resume(initial.snapshot().id, { execute: async (node) => { executed.push(node.id); return { ok: node.id }; } }, storeRootOf(initial), scriptConfig("dsh"));
+    await expect(resumed.run(portable)).resolves.toEqual({ ok: "worker" });
+    expect(resumed.snapshot().phases[0].agents[0].cli).toBe("dsh");
+  });
+});

@@ -41,3 +41,8 @@ export function cliUnavailableReason(cli: RuntimeCli): string | null {
 export function cliDisplayLabel(cli: RuntimeCli): string {
   return CLI_LABELS[cli] ?? cli;
 }
+
+/** 校验任意输入是否为受支持的 CLI 标识；不接受大小写变体、别名或未知值。 */
+export function isRuntimeCli(value: unknown): value is RuntimeCli {
+  return value === "codex" || value === "kimi" || value === "claude" || value === "dsh";
+}

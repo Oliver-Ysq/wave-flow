@@ -32,8 +32,8 @@ test("Engine重启不补成果快照、不重跑业务；completed resume 只读
  const harness=new HarnessService(harnessRoot,async()=>{throw Error("不会运行主控");});const task=await harness.create(cwd);
  const source='import { agent, phase } from "wave-flow";\nexport const meta={name:"no-source",description:"无快照",phases:[{title:"write"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
  await harness.proposeWorkflowRevision(task.harnessRunId,source);await harness.acceptWorkflowRevision(task.harnessRunId,1);
- const assignment={agentId:"writer",cli:"codex" as const,model:"cli-default" as const,source:"harness-cli" as const,runtimeId:"test-runtime",adapterId:"codex-acp" as const,adapterVersion:"test"};
- const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test-runtime",ruleText:null,ruleDegraded:false,defaultAssignment:{...assignment,agentId:"*"},assignments:[assignment],workspaces:{version:3 as const,authorization,workspaceId}};
+ // 模块 Workflow 只接受脚本模式配置；CLI 由源码字面量决定，这里只冻结 Git 成果授权。
+ const config={version:1 as const,assignmentMode:"script" as const,createdAt:new Date().toISOString(),workspaces:{version:3 as const,authorization,workspaceId}};
  let calls=0,runId="";
  const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer",{pgid:54321,startedAt:"test-fingerprint"});await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.release(lease,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},harnessRoot,join(root,"runs"),join(root,"workspaces"));
  const {execution}=await executions.createExecution(task.harnessRunId,1,{},config);

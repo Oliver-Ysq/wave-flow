@@ -5,6 +5,7 @@ import { loadWorkflow } from "../workflow/load-workflow";
 import { inspectWorkflowModuleSource, preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
+import type { JsonSchema } from "../shared/workflow-types";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
 import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessCommandCatalogResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
@@ -47,7 +48,8 @@ import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager } from "../workspace/workspace-manager";
 import { assertCurrentWorkspaceRecord, validateExecutionWorkspaces } from "../workspace/execution-workspaces";
 import { AppSettingsStore, type AppSettings } from "./app-settings";
-import { cliUnavailableReason, isCliSelectable } from "../shared/cli-availability";
+import { cliUnavailableReason, isCliSelectable, isRuntimeCli } from "../shared/cli-availability";
+import { managedWriteBoundaryAvailable } from "../workspace/managed-acp-transport";
 import { readSkillLibrary, skillLibraryRoot } from "../skills/library";
 import { missingRequiredBins, skillDependencyPath } from "../skills/dependencies";
 import { discoverSkills, importSkillFromDirectory, importSkillZip } from "../skills/import";
@@ -457,18 +459,28 @@ export class DesktopExecutionEngine {
     return { commands: await this.#harness.commandCatalog(project.cwd, runtime?.runtimeId) };
   }
   /** Worker 专属 MCP 只代理当前节点的 Control；token/capability 不会进入 Web 或 Journal。 */
-  private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string): import("@agentclientprotocol/sdk").McpServer {
+  private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string; readonly resultSchema?: JsonSchema }, scratch?: string): import("@agentclientprotocol/sdk").McpServer {
     const control = this.#controls.get(identity.runId);
     if (!control) throw new Error("Worker MCP 创建时找不到当前 Engine 的 ControlServer。 ");
     const key = `${identity.runId}\0${identity.nodeId}\0${identity.agentSessionId}`;
     if (this.#workerControlPipes.has(key)) throw new Error("当前 Worker 已有私有 Control 通道。 ");
-    const pipe = new WorkerControlChannel(control, identity, () => this.#workerControlPipes.delete(key), scratch);
+    // 通道身份只有四项绑定坐标。节点结果 Schema 属于工具声明，必须留在 MCP 配置里，
+    // 不能混进每次 complete/block/continue 的上报请求。
+    const pipe = new WorkerControlChannel(control, {
+      runId: identity.runId,
+      nodeId: identity.nodeId,
+      agentSessionId: identity.agentSessionId,
+      capability: identity.capability,
+    }, () => this.#workerControlPipes.delete(key), scratch);
     this.#workerControlPipes.set(key, pipe);
     const command = process.execPath;
     const compiled = import.meta.dir.startsWith("/$bunfs/");
     const args = compiled ? ["__worker-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-mcp"];
     const server = { name: "wave-flow-worker-control", command, args, env: [
         { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+        // 本节点声明了结果 Schema 时一并下发：sidecar 把它内联进完成工具的 inputSchema。
+        // 工具定义每次请求都会重发，是唯一不随对话历史被压缩折叠的完成条件载体。
+        ...(identity.resultSchema ? [{ name: "WF_WORKER_RESULT_SCHEMA", value: JSON.stringify(identity.resultSchema) }] : []),
       ] };
     assertAbsoluteMcpCommand(server);
     return {
@@ -542,8 +554,13 @@ export class DesktopExecutionEngine {
   private async openSkillLibrary(): Promise<{ readonly opened: true }> {
     await mkdir(this.skillsRoot, { recursive: true, mode: 0o700 });
     if (process.platform === "darwin") {
-      const child = Bun.spawn(["/usr/bin/open", this.skillsRoot], { stdio: ["ignore", "ignore", "ignore"] });
-      child.unref();
+      // /usr/bin/open 是 macOS 自带工具；缺失时给出可复制的路径，而不是裸露的 spawn 错误。
+      try {
+        const child = Bun.spawn(["/usr/bin/open", this.skillsRoot], { stdio: ["ignore", "ignore", "ignore"] });
+        child.unref();
+      } catch (error) {
+        throw new EngineActionError(500, `无法打开技能库目录（/usr/bin/open 不可用：${error instanceof Error ? error.message : String(error)}）；请手动打开 ${this.skillsRoot}。 `);
+      }
     }
     return { opened: true };
   }
@@ -642,6 +659,29 @@ export class DesktopExecutionEngine {
     if (!await this.#cliRuntimes.hasWorkerCandidate()) throw new EngineActionError(400, "没有已验证的 Worker 执行底座。请在设置页扫描并验证一个本机 CLI。 ");
   }
 
+  /**
+   * 核对源码声明的 Worker CLI 是否在本机已验证池中。
+   *
+   * 宿主不预设用户装了某个应用：内置模板与作者模块都可能写死 `cli`，缺失时必须在这里
+   * 讲清楚需要哪些 CLI、当前有哪些可用，让用户先验证或改用其他 Workflow；而不是等节点
+   * 启动后才以 interrupted 收场。非字面量 options 的调用（`dynamicCount`）无法静态取值，
+   * 仍由运行时按 cli fail closed。
+   */
+  private assertRequiredWorkerClis(
+    workers: readonly { readonly cli: import("../runtimes/types").RuntimeCli | null }[],
+    pool: readonly { readonly cli: import("../runtimes/types").RuntimeCli }[],
+  ): void {
+    const required = [...new Set(workers.map((worker) => worker.cli).filter((cli): cli is import("../runtimes/types").RuntimeCli => cli !== null))];
+    if (required.length === 0) return;
+    const offline = required.filter((cli) => !isCliSelectable(cli)).map((cli) => cliUnavailableReason(cli) ?? `${cli} 已暂时下线。 `);
+    if (offline.length > 0) throw new Error(offline.join("；"));
+    const available = new Set(pool.map((runtime) => runtime.cli));
+    const missing = required.filter((cli) => !available.has(cli));
+    if (missing.length === 0) return;
+    const installed = [...available];
+    throw new Error(`该 Workflow 需要本机已验证的 ${missing.join(" / ")} Worker，但当前没有可用候选${installed.length > 0 ? `（已有：${installed.join(" / ")}）` : ""}；请在设置页扫描并验证对应 CLI，或改用其他 Workflow。 `);
+  }
+
   /** 用户显式选择主控 runtime；有主控回合进行中时拒绝切换，只影响空闲后的新会话。 */
   private async selectCliRuntime(runtimeId: string, value: unknown): Promise<SelectCliRuntimeResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "选择 CLI Runtime 不接受请求字段。 ");
@@ -693,25 +733,110 @@ export class DesktopExecutionEngine {
       if (!selected) throw new Error("创建 Execution 必须绑定当前 revision。");
       const format = selected.sourceFormat ?? (selected.localOrigin ? "module" : "restricted");
       if (format !== "module") throw new Error("旧格式草案不可执行，请重新生成。");
+      if (!this.deterministicForTest) {
+        // 与规划阶段同一核对：客户端可以跳过 plan 直接创建，这里不能只查“至少有任一 Worker”。
+        const extracted = extractAgentWorkers(selected.source);
+        const pool = (await this.#cliRuntimes.list()).runtimes.filter((runtime) => runtime.status === "verified");
+        this.assertRequiredWorkerClis(extracted.workers, pool);
+      }
       const write = hasWorkspaceWriteIntent(readWorkspaceWriteIntent(selected.source));
-      const config = this.scriptExecutionConfig((value as CreateExecutionRequest).config, write);
+      const parsed = this.scriptExecutionConfig((value as CreateExecutionRequest).config, write);
+      // 逐节点 CLI 是本次执行的事实：解析后写入冻结配置，进入 Journal 生效请求与 Replay 指纹。
+      const selection = await this.resolveScriptClis(selected.source, { ...(parsed?.assignmentMode === "script" && parsed.cli !== undefined ? { cli: parsed.cli } : {}), ...(parsed?.assignmentMode === "script" && parsed.nodeClis !== undefined ? { nodeClis: parsed.nodeClis } : {}) });
+      const config = this.withCliSelection(parsed, selection);
       const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
       return { ...created, controllable: this.#executions.isControllable(created.execution.executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
-  /** 作者模块的执行配置只承载工作区授权；只读模块不接受配置，写类只接受 workspaces。 */
+  /**
+   * 作者模块的执行配置：脚本模式只承载「逐节点 CLI 选择」「动态节点兜底」和（写类）Git 成果授权。
+   *
+   * 只读模块也可以带 CLI 选择：内置预置不再写死 CLI，由用户在确认页逐节点选择。除此之外的
+   * 字段一律拒绝，避免配置悄悄扩张成第二套分配机制。
+   */
   private scriptExecutionConfig(raw: unknown, write: boolean): import("../harness/types").ExecutionConfigSnapshot | undefined {
-    if (!write) {
-      if (raw !== undefined) throw new EngineActionError(400, "只读模块 Workflow 不接受执行配置。");
-      return undefined;
-    }
-    const allowed = new Set(["version", "assignmentMode", "createdAt", "workspaces"]);
-    if (!isJsonObject(raw) || !isJsonObject(raw.workspaces) || Object.keys(raw).some((key) => !allowed.has(key))) throw new EngineActionError(400, "写类模块 Workflow 只接受 workspaces Git 成果授权。");
+    if (raw === undefined) return undefined;
+    const allowed = new Set(["version", "assignmentMode", "createdAt", "cli", "nodeClis", "workspaces"]);
+    if (!isJsonObject(raw) || Object.keys(raw).some((key) => !allowed.has(key))) throw new EngineActionError(400, write ? "写类模块 Workflow 只接受 cli/nodeClis 与 workspaces Git 成果授权。" : "只读模块 Workflow 只接受 cli/nodeClis 选择。");
     if (raw.version !== undefined && raw.version !== 1) throw new EngineActionError(400, "执行配置版本无效。");
     if (raw.assignmentMode !== undefined && raw.assignmentMode !== "script") throw new EngineActionError(400, "模块 Workflow 只接受脚本模式配置。");
     if (raw.createdAt !== undefined && (typeof raw.createdAt !== "string" || Number.isNaN(Date.parse(raw.createdAt)))) throw new EngineActionError(400, "执行配置时间无效。");
-    return { version: 1, assignmentMode: "script", createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(), workspaces: validateExecutionWorkspaces(raw.workspaces) };
+    if (raw.cli !== undefined && !isRuntimeCli(raw.cli)) throw new EngineActionError(400, "动态节点兜底 CLI 无效。");
+    const nodeClis: Record<string, import("../runtimes/types").RuntimeCli> = {};
+    if (raw.nodeClis !== undefined) {
+      if (!isJsonObject(raw.nodeClis)) throw new EngineActionError(400, "逐节点 CLI 选择必须是对象。");
+      for (const [nodeId, value] of Object.entries(raw.nodeClis)) {
+        if (!nodeId.trim() || nodeId.length > 120 || !isRuntimeCli(value)) throw new EngineActionError(400, `逐节点 CLI 选择无效：${nodeId || "(空)"}。`);
+        nodeClis[nodeId] = value;
+      }
+    }
+    // 空配置没有语义：既不带 CLI 也不带 Git 授权时必须明确拒绝，而不是静默当作"没有配置"。
+    if (raw.cli === undefined && Object.keys(nodeClis).length === 0 && !write) throw new EngineActionError(400, "只读模块 Workflow 的执行配置必须包含逐节点 CLI 选择。");
+    if (!write && raw.workspaces !== undefined) throw new EngineActionError(400, "只读模块 Workflow 不接受 Git 成果授权。");
+    if (write && !isJsonObject(raw.workspaces)) throw new EngineActionError(400, "写类模块 Workflow 必须提供 workspaces Git 成果授权。");
+    const config: import("../harness/types").ExecutionConfigSnapshot = { version: 1, assignmentMode: "script", createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(), ...(raw.cli !== undefined ? { cli: raw.cli } : {}), ...(Object.keys(nodeClis).length > 0 ? { nodeClis } : {}), ...(write ? { workspaces: validateExecutionWorkspaces(raw.workspaces) } : {}) };
+    if (!write && config.cli === undefined && config.nodeClis === undefined) return undefined;
+    return config;
+  }
+
+  /**
+   * 解析本次执行的逐节点 CLI 选择。
+   *
+   * 只影响源码中省略 `cli` 的字面量节点；显式字面量优先，不会被覆盖。每个省略节点各自选择
+   * （与主控生成稿逐节点声明 CLI 对齐）；无法静态枚举 id 的动态节点用 `cli` 兜底。只有一个
+   * 已验证 CLI 时自动采用它（没有可做的选择），多个时要求用户逐个选择，绝不替用户挑。
+   */
+  private async resolveScriptClis(
+    source: string,
+    requested: { readonly cli?: import("../runtimes/types").RuntimeCli; readonly nodeClis?: Readonly<Record<string, import("../runtimes/types").RuntimeCli>> },
+  ): Promise<{ readonly cli?: import("../runtimes/types").RuntimeCli; readonly nodeClis?: Readonly<Record<string, import("../runtimes/types").RuntimeCli>> }> {
+    const extracted = extractAgentWorkers(source);
+    const missing = extracted.workers.filter((worker) => worker.cli === null).map((worker) => worker.id);
+    const requestedNodes = requested.nodeClis ?? {};
+    const requestedAny = requested.cli !== undefined || Object.keys(requestedNodes).length > 0;
+    if (missing.length === 0 && extracted.dynamicCount === 0) {
+      if (requestedAny) throw new EngineActionError(400, "该 Workflow 的节点都写明了 CLI，不接受执行级 CLI 选择。");
+      return {};
+    }
+    const unknown = Object.keys(requestedNodes).filter((nodeId) => !missing.includes(nodeId));
+    if (unknown.length > 0) throw new EngineActionError(400, `逐节点 CLI 选择包含未省略 cli 的节点：${unknown.join("、")}；这些节点的 CLI 由源码决定。`);
+    const pool = (await this.#cliRuntimes.list()).runtimes.filter((runtime) => runtime.status === "verified" && isCliSelectable(runtime.cli));
+    const available = [...new Set(pool.map((runtime) => runtime.cli))];
+    const ensure = (value: import("../runtimes/types").RuntimeCli, where: string): void => {
+      if (!available.includes(value)) throw new EngineActionError(400, `${where}选择的 CLI ${value} 在本机没有已验证候选${available.length > 0 ? `（可用：${available.join(" / ")}）` : ""}；请先在设置页验证，或改选其他 CLI。`);
+    };
+    if (requested.cli !== undefined) ensure(requested.cli, "动态节点兜底");
+    const defaultCli = available.length === 1 ? available[0] : undefined;
+    const nodeClis: Record<string, import("../runtimes/types").RuntimeCli> = {};
+    const unresolved: string[] = [];
+    for (const nodeId of missing) {
+      const value = requestedNodes[nodeId] ?? requested.cli ?? defaultCli;
+      if (value === undefined) { unresolved.push(nodeId); continue; }
+      if (requestedNodes[nodeId] !== undefined) ensure(value, `节点 ${nodeId} `);
+      nodeClis[nodeId] = value;
+    }
+    if (unresolved.length > 0) {
+      throw new EngineActionError(400, available.length === 0
+        ? "该 Workflow 有节点未声明 CLI，但本机还没有已验证的 CLI；请先在设置页扫描并验证一个。"
+        : `以下节点未声明 CLI，请在启动前逐个选择本机已验证的 CLI（可用：${available.join(" / ")}）：${unresolved.join("、")}。`);
+    }
+    // 动态调用无法逐节点选择：给它们一个明确的兜底 CLI，缺失时拒绝而不是留到运行时才失败。
+    const fallback = requested.cli ?? (extracted.dynamicCount > 0 ? defaultCli : undefined);
+    if (extracted.dynamicCount > 0 && fallback === undefined) {
+      throw new EngineActionError(400, `该 Workflow 有 ${extracted.dynamicCount} 个无法静态枚举的动态节点，请为它们选择一个兜底 CLI${available.length > 0 ? `（可用：${available.join(" / ")}）` : ""}。`);
+    }
+    return { ...(fallback !== undefined ? { cli: fallback } : {}), ...(Object.keys(nodeClis).length > 0 ? { nodeClis } : {}) };
+  }
+
+  /** 把解析后的 CLI 选择并入冻结配置；未产生任何选择时保持原配置。 */
+  private withCliSelection(
+    parsed: import("../harness/types").ExecutionConfigSnapshot | undefined,
+    selection: { readonly cli?: import("../runtimes/types").RuntimeCli; readonly nodeClis?: Readonly<Record<string, import("../runtimes/types").RuntimeCli>> },
+  ): import("../harness/types").ExecutionConfigSnapshot | undefined {
+    if (selection.cli === undefined && selection.nodeClis === undefined) return parsed;
+    const script = parsed?.assignmentMode === "script" ? parsed : undefined;
+    return { version: 1, assignmentMode: "script", createdAt: script?.createdAt ?? new Date().toISOString(), ...(selection.cli !== undefined ? { cli: selection.cli } : {}), ...(selection.nodeClis !== undefined ? { nodeClis: selection.nodeClis } : {}), ...(script?.workspaces ? { workspaces: script.workspaces } : {}) };
   }
 
   /** executions.plan：编译预检冻结源码并枚举 Worker、已验证池与主控 Runtime，供分配卡渲染。 */
@@ -729,12 +854,33 @@ export class DesktopExecutionEngine {
       const extracted = extractAgentWorkers(revision.source);
       const list = await this.#cliRuntimes.list();
       const pool = list.runtimes.filter((runtime) => runtime.status === "verified");
+      // 不预设用户装了某个 CLI：源码要求的 Worker CLI 若本机没有已验证候选，
+      // 必须在规划阶段讲清楚，而不是等节点启动后才以 interrupted 收场。
+      this.assertRequiredWorkerClis(extracted.workers, pool);
+      // 有节点省略 cli 时，确认页必须逐节点让用户选择；这里只给采集所需事实。
+      const missingCliWorkers = extracted.workers.filter((worker) => worker.cli === null);
       const harnessRuntimeId=snapshot.runtime?.runtimeId??list.harnessRuntimeId;
+      const cliChoices = missingCliWorkers.length > 0 || extracted.dynamicCount > 0
+        ? (() => {
+            const available = [...new Set(pool.filter((runtime) => isCliSelectable(runtime.cli)).map((runtime) => runtime.cli))];
+            // 默认预填主控使用的 CLI：Worker 应优先与主控同源，用户再按需逐节点改。
+            const harnessCli = harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId)?.cli : undefined;
+            const suggested = harnessCli !== undefined && available.includes(harnessCli) ? harnessCli : available.length === 1 ? available[0]! : null;
+            return {
+              available,
+              suggested,
+              nodes: missingCliWorkers.map((worker) => ({ nodeId: worker.id, label: worker.label })),
+              dynamicCount: extracted.dynamicCount,
+            };
+          })()
+        : null;
       const intent = readWorkspaceWriteIntent(revision.source);
       let workspacePlan: ExecutionPlanResponse["workspacePlan"] = null;
       if (hasWorkspaceWriteIntent(intent)) {
         workspacePlan = { nodeIds: intent.nodeIds, ...(intent.dynamicNodePrefixes.length?{dynamicNodePrefixes:intent.dynamicNodePrefixes}:{}), repository: snapshot.cwd, baseCommit: null, dirtyPaths: [], diagnostic: intent.uncertain ? "写意图包含无法静态核验的选项或 id，需改为字面量 sandbox 与可披露前缀的 id。" : null };
         if (!intent.uncertain) try { const git = await (await GitRepository.open(snapshot.cwd)).inspect(); workspacePlan = { ...workspacePlan, baseCommit: git.head, dirtyPaths: git.changedPaths }; } catch (error) { workspacePlan = { ...workspacePlan, diagnostic: error instanceof Error ? error.message : String(error) }; }
+        // 受管写还依赖系统沙箱执行器；缺失时在规划阶段就标出，禁止用户确认后才在启动期失败。
+        if (workspacePlan && workspacePlan.diagnostic === null && !managedWriteBoundaryAvailable()) workspacePlan = { ...workspacePlan, diagnostic: "受管写隔离依赖系统 /usr/bin/sandbox-exec（macOS 自带），但本机不可用；请先用只读 Workflow 或修复系统。" };
       }
       const sceneEvidenceHash=snapshot.task?.workflowContract==="single-workflow-v1"?await this.#harness.currentImpactEvidence(harnessRunId):null;
       let continuationPlan:ExecutionPlanResponse["continuationPlan"]=null;
@@ -749,7 +895,7 @@ export class DesktopExecutionEngine {
         continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaceId:frozen.workspaceId,head:scene.head};
         workspacePlan={...workspacePlan,baseCommit:frozen.authorization.baseCommit,dirtyPaths:[],diagnostic:null};
       }
-      return { continuationPlan,sceneEvidenceHash, workspacePlan, harnessRunId, revision: revisionNumber, phaseTitles: inspected.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
+      return { continuationPlan,sceneEvidenceHash, workspacePlan, cliChoices, harnessRunId, revision: revisionNumber, phaseTitles: inspected.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -1031,8 +1177,11 @@ export class DesktopExecutionEngine {
       const format=revision.sourceFormat??(revision.localOrigin?"module":"restricted");
       if(format!=="module")throw new Error("旧格式草案不可执行，请重新生成。");
       const write=hasWorkspaceWriteIntent(readWorkspaceWriteIntent(revision.source));
-      if(revision.localOrigin&&(write?(!isJsonObject(rawConfig)||!(rawConfig as Record<string,unknown>).workspaces):rawConfig!==undefined))throw new Error("本地 Workflow 的workspace-write必须提供Git成果授权；纯只读本地Workflow不接受执行配置。");
-      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:rawConfig??null,...(confirmedScene?{sceneEvidenceHash:confirmedScene}:{})})).digest("hex");
+      const parsedConfig=this.scriptExecutionConfig(rawConfig,write);
+      // 逐节点 CLI 选择在哈希之前解析：它属于本次执行事实，同请求重试必须得到同一份配置。
+      const selection=await this.resolveScriptClis(revision.source,{...(parsedConfig?.assignmentMode==="script"&&parsedConfig.cli!==undefined?{cli:parsedConfig.cli}:{}),...(parsedConfig?.assignmentMode==="script"&&parsedConfig.nodeClis!==undefined?{nodeClis:parsedConfig.nodeClis}:{})});
+      const resolvedConfig=this.withCliSelection(parsedConfig,selection);
+      const payloadHash=createHash("sha256").update(canonicalJson({revision:number,input,config:resolvedConfig??null,...(confirmedScene?{sceneEvidenceHash:confirmedScene}:{})})).digest("hex");
       const receipt=snapshot.executionConfirmations?.find(item=>item.requestId===requestId);
       if(receipt&&(receipt.payloadHash!==payloadHash||receipt.revision!==number))throw new Error("相同确认请求不能更换版本、输入或配置。");
       const previous=snapshot.executions.find(item=>item.confirmationRequestId===requestId);
@@ -1054,7 +1203,7 @@ export class DesktopExecutionEngine {
       else if(revision.localOrigin){if(canonicalJson(input)!==canonicalJson(revision.input??{}))throw new Error("本地输入与已预检版本不一致，请重新预检。");}
       else validateLocalInput(inspectWorkflowModuleSource(revision.source,"workflow.ts","生成稿").inputSchema,input);
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
-      const config=this.scriptExecutionConfig(rawConfig,write);
+      const config=resolvedConfig;
       if(!receipt)await this.#harness.prepareExecutionConfirmation(id,{requestId,revision:number,payloadHash});
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
