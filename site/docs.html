@@ -87,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.2.10</span>
+          <span>适用于 v0.2.11</span>
           <span>macOS 12+</span>
           <span>更新于 2026-10</span>
         </div>
@@ -109,7 +109,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.2.10 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.2.11 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -227,7 +227,7 @@ bun run desktop:dev</code></pre>
                 <tr><th>API</th><th>用途</th></tr>
               </thead>
               <tbody>
-                <tr><td><code>agent(prompt, options)</code></td><td>启动一次受管 CLI 会话。每个节点必须提供 Run 内唯一且稳定的 <code>id</code> 与 <code>cli</code>；需要解析结果时提供 <code>schema</code>。</td></tr>
+                <tr><td><code>agent(prompt, options)</code></td><td>启动一次受管 CLI 会话。每个节点必须提供 Run 内唯一且稳定的 <code>id</code>；<code>cli</code> 可省略，省略时由你在方案页为每个节点分别选择本机已验证的 CLI（可移植预置就是这样写的），需要解析结果时提供 <code>schema</code>。</td></tr>
                 <tr><td><code>phase(title)</code></td><td>声明当前阶段，进入并发前调用一次。绝不在 <code>parallel()</code> 任务或 <code>pipeline()</code> 阶段内调用。</td></tr>
                 <tr><td><code>parallel(tasks)</code></td><td>并行执行零参数任务并汇合。失败项返回 <code>null</code>，使用前必须过滤或判空。</td></tr>
                 <tr><td><code>pipeline(items, ...stages)</code></td><td>让每个 item 独立经过同一组阶段，适合逐项处理。</td></tr>
@@ -265,7 +265,7 @@ bun run desktop:dev</code></pre>
 
         <section id="cli">
           <h2>支持的 CLI</h2>
-          <p>三个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。当前由你手动分配 CLI，不提供自动模型路由。</p>
+          <p>三个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。源码写了 <code>cli</code> 的节点按源码执行；没写的节点在方案页逐节点选择，默认预填主控所用 CLI，也可以让不同节点跑在不同 CLI 上。不提供自动模型路由。</p>
           <div class="table-wrap">
             <table>
               <thead>

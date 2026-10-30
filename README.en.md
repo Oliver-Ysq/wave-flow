@@ -55,7 +55,7 @@ Large evidence path lists are collected as complete streams rather than truncate
 
 ## Download and installation
 
-Current version: `v0.2.10`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.2.11`, supporting macOS 12+ / Apple Silicon.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -70,7 +70,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.2.10_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.2.11_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install
