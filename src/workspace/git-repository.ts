@@ -178,9 +178,31 @@ const GIT_FIXED_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=
 /** 受管 Git 固定环境：无系统/全局配置、无凭据提示，固定作者身份。 */
 const GIT_FIXED_ENV = { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "Wave Flow", GIT_AUTHOR_EMAIL: "workspace@wave-flow.local", GIT_COMMITTER_NAME: "Wave Flow", GIT_COMMITTER_EMAIL: "workspace@wave-flow.local" } as const;
 
+/** 受管 Git 子进程的固定 IO 形态：stdin 可选管道，stdout/stderr 始终管道。 */
+type GitSpawnOptions = {
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+  readonly stdin: "ignore" | "pipe";
+  readonly stdout: "pipe";
+  readonly stderr: "pipe";
+};
+
+/**
+ * 固定 `/usr/bin/git` 启动：不从 PATH 猜，也不随包分发。
+ *
+ * 缺失（精简系统或未安装 Command Line Tools）时 Bun.spawn 会抛底层错误；
+ * 统一转成可操作诊断，避免用户只看到 "ENOENT" 而不知道受管工作区依赖系统 Git。
+ */
+function spawnGit(args: readonly string[], options: GitSpawnOptions): Bun.Subprocess<"ignore" | "pipe", "pipe", "pipe"> {
+  try { return Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], options); }
+  catch (error) {
+    throw new GitCommandError(`本机 Git 不可用（/usr/bin/git）：${error instanceof Error ? error.message : String(error)}。受管工作区依赖系统 Git；macOS 请安装 Xcode Command Line Tools 后重试。 `);
+  }
+}
+
 /** Git输出始终有界；普通操作默认15秒，创建180秒，删除不中途kill大型checkout。strictUtf8仅用于路径类输出。 */
 async function git(cwd: string, args: readonly string[], allowMissing = false, extra: Record<string, string> = {}, input?: string, timeoutMs: number | null = 15_000, strictUtf8 = false): Promise<string> {
-  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], {
+  const child = spawnGit(args, {
     cwd, env: { ...GIT_FIXED_ENV, ...extra }, stdin: input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe",
   });
   if (input !== undefined) { child.stdin!.write(input); child.stdin!.end(); }
@@ -238,7 +260,7 @@ async function readIntoDigest(stream: ReadableStream<Uint8Array>, hash: ReturnTy
 
 /** 对只用于指纹的 Git 输出做流式摘要；不把完整输出放进内存，因此大仓库索引不会触发证据上限。 */
 async function gitDigest(cwd: string, args: readonly string[]): Promise<string> {
-  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const child = spawnGit(args, { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   try {
     const hash = createHash("sha256");
     const [, err, code] = await Promise.all([readIntoDigest(child.stdout, hash), readBounded(child.stderr), boundedChildExit(child, 15_000)]);
@@ -268,7 +290,7 @@ async function readNulEntries(stream: ReadableStream<Uint8Array>, consume: (entr
 /** 执行 Git 并流式收集 NUL 分隔路径列表：完整无截断（不受 2MiB 证据读取上限约束），
  * 内存只随真实路径列表增长；非法 UTF-8 立即拒绝。用于 inspect 等大列表。 */
 async function gitPaths(cwd: string, args: readonly string[], timeoutMs: number | null = 15_000): Promise<string[]> {
-  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, ...args], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const child = spawnGit(args, { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const paths: string[] = [];
   try {
     const [, err, code] = await Promise.all([readNulEntries(child.stdout, entry => paths.push(entry)), readBounded(child.stderr), boundedChildExit(child, timeoutMs)]);
@@ -279,7 +301,7 @@ async function gitPaths(cwd: string, args: readonly string[], timeoutMs: number 
 
 /** 流式提取HEAD中的gitlink路径；cleanup不把完整tree列表装入内存。 */
 async function gitTreeGitlinks(cwd: string, tree: string): Promise<Set<string>> {
-  const child = Bun.spawn(["/usr/bin/git", ...GIT_FIXED_ARGS, "ls-tree", "-r", "-z", tree], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const child = spawnGit(["ls-tree", "-r", "-z", tree], { cwd, env: { ...GIT_FIXED_ENV }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const paths = new Set<string>();
   try {
     const [, err, code] = await Promise.all([

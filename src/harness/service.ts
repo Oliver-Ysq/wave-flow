@@ -794,16 +794,27 @@ ${evidence.text}`, false, undefined, key);
         const diagnostic = error instanceof Error ? error.message : String(error);
         // 退出/重启路径可能已先耐久 interrupted；原 prompt 随后 rejection 时不能
         // 再追加第二条 turn_interrupted，否则 Journal 重开会拒绝该 Harness。
-        await this.mutate(harnessRunId,async()=>{if (entry.projection.snapshot().status === "running" && entry.turnToken===turnToken) {
-          // 条目终结失败时保留 running 现场，交由下次启动的 convergeStaleTurns 诚实
-          // 收敛；绝不补写一个会让重放因未终结条目而 fail closed 的 turn_interrupted。
-          const finalized = await entry.recorder?.abortTurn().then(() => true, () => false) ?? true;
-          if (finalized) {
-            const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
-            await entry.journal.append(interrupted); entry.projection.apply(interrupted);
-            this.emit(entry, harnessRunId, { type: "turn_interrupted", diagnostic });
+        try {
+          await this.mutate(harnessRunId,async()=>{if (entry.projection.snapshot().status === "running" && entry.turnToken===turnToken) {
+            // 条目终结失败时保留 running 现场，交由下次启动的 convergeStaleTurns 诚实
+            // 收敛；绝不补写一个会让重放因未终结条目而 fail closed 的 turn_interrupted。
+            const finalized = await entry.recorder?.abortTurn().then(() => true, () => false) ?? true;
+            if (finalized) {
+              const interrupted = { type: "harness.turn_interrupted" as const, at: new Date().toISOString(), harnessRunId, diagnostic };
+              await entry.journal.append(interrupted); entry.projection.apply(interrupted);
+              this.emit(entry, harnessRunId, { type: "turn_interrupted", diagnostic });
+            }
+          }});
+        } catch (recoveryFailure) {
+          // 收尾写入本身也可能失败（状态目录已被删除、档案已归档、写盘错误）。`entry.turn` 的
+          // 契约是"内部捕获全部异常、调用方按耐久快照判断结果"；在这里再抛只会变成无人观察的
+          // rejection（普通路径没人 await 它），把一次可收敛的写盘失败放大成进程级错误。
+          // 因此这里只把两个原因交给监听者做内存态诊断：不重试、不补写任何耐久事实，
+          // 现场仍由下次启动的 convergeStaleTurns 收敛。
+          if (entry.projection.snapshot().status === "running" && entry.turnToken === turnToken) {
+            this.emit(entry, harnessRunId, { type: "turn_interrupted", diagnostic: `${diagnostic}；收尾失败：${recoveryFailure instanceof Error ? recoveryFailure.message : String(recoveryFailure)}` });
           }
-        }});
+        }
         // 不认领 provider 可能遗留的 partial assistant state。下一条消息只能从
         // 已耐久 capsule 重建独立 ACP session，避免未完成文本/工具调用进入新回合。
         if(entry.turnToken===turnToken){entry.session?.close?.();entry.session = null;}

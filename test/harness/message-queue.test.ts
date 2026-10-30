@@ -292,3 +292,26 @@ describe("Harness 耐久消息队列", () => {
     await waitFor(async () => (await service.snapshot(harnessRunId)).status === "idle", "全部收敛");
   });
 });
+
+/**
+ * 回合收敛写入本身失败时（例如状态目录被删除、写盘错误），`entry.turn` 的契约是
+ * "内部捕获全部异常、调用方按耐久快照判断结果"。收尾失败不得把该 promise 变成
+ * 无人观察的 rejection：普通路径没人 await 它，那会放大成进程级 unhandled rejection。
+ * 现场由下次启动的 convergeStaleTurns 收敛，这里只允许出现内存态诊断。
+ */
+describe("Harness 回合异常收尾的失败边界", () => {
+  test("状态目录已消失时收尾失败只产生内存诊断，不抛出未观察 rejection", async () => {
+    const rig = await makeRig();
+    const harnessRunId = (rig as unknown as { harnessRunId: string }).harnessRunId;
+    await rig.service.submit(harnessRunId, "第一条");
+    await waitFor(() => rig.sessions.length === 1 && rig.sessions[0]!.prompts.length === 1, "首个回合开始");
+    // 让 catch 分支的耐久收尾必然失败：删掉该会话的档案目录。
+    await rm(join(rig.root, harnessRunId), { recursive: true, force: true });
+    rig.sessions[0]!.fail(new Error("provider 断线"));
+    await waitFor(() => rig.events.some((event) => event.type === "turn_interrupted" && (event.diagnostic ?? "").includes("收尾失败")), "收尾失败诊断");
+    const diagnostic = rig.events.find((event) => event.type === "turn_interrupted" && (event.diagnostic ?? "").includes("收尾失败"))!;
+    // 原始失败原因与收尾失败原因都要保留，否则用户看不到回合为什么结束。
+    expect(diagnostic.type === "turn_interrupted" ? diagnostic.diagnostic : "").toContain("provider 断线");
+    rig.service.close();
+  });
+});

@@ -1,9 +1,18 @@
+import { existsSync } from "node:fs";
 import { bunAcpTransport, type AcpTransportFactory } from "../adapters/acp-session";
 import { WorkflowContractError } from "../workflow/errors";
 import { macosWriteProfile, type MacosWriteBoundary } from "./macos-write-sandbox";
 import type { WriterBindingEvidence } from "./workspace-manager";
 import { captureWriterStartedAt } from "./writer-process-control";
 import type { WriterProcessGroups } from "./writer-process-group";
+
+/** macOS 写边界依赖的系统沙箱执行器；宿主不随包分发，缺失时必须给出可操作诊断。 */
+const SYSTEM_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+/** 受管写边界是否可用；供规划/预检在不启动 Worker 的前提下给出原因。 */
+export function managedWriteBoundaryAvailable(): boolean {
+  return process.platform === "darwin" && existsSync(SYSTEM_SANDBOX_EXEC);
+}
 
 /** 可信Worker的原生stdio传输；不改变HOME/CLI配置，不施加OS文件隔离。
  * 仍在initialize前登记真实进程组，close不等于退出证明。
@@ -46,11 +55,14 @@ export function managedAcpTransport(options: {
   /** 自动测试替换底层stdio，不替换OS profile路径校验。 */ readonly transport?: AcpTransportFactory;
 }): AcpTransportFactory {
   return async (launcher, signal) => {
+    if (!managedWriteBoundaryAvailable()) {
+      throw new WorkflowContractError(`受管写隔离依赖系统 ${SYSTEM_SANDBOX_EXEC}（macOS 自带），但本机不可用；请改用只读 Workflow 或修复系统后重试。 `);
+    }
     const profile = await macosWriteProfile(options.boundary);
     // isolated 模式禁止读取用户 git 配置，避免黑盒 CLI 借全局配置扩大行为；感知模式
     // 刻意保留用户原生 git 环境，因为主控可能用用户自己的 skill/CLI 读取资料。
     const env: Record<string, string> = { ...launcher.env, TMPDIR: options.boundary.scratch, ...(options.boundary.mode === "perception" ? {} : { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }) };
-    const transport = await (options.transport ?? bunAcpTransport)({ ...launcher, command: "/usr/bin/sandbox-exec", args: ["-p", profile, launcher.command, ...launcher.args], env }, signal);
+    const transport = await (options.transport ?? bunAcpTransport)({ ...launcher, command: SYSTEM_SANDBOX_EXEC, args: ["-p", profile, launcher.command, ...launcher.args], env }, signal);
     const writer = transport.writerProcess;
     if (!writer) { transport.close(); throw new WorkflowContractError("受管ACP transport没有真实进程组，拒绝启动写Worker。"); }
     const identity = options.groups.register(writer);

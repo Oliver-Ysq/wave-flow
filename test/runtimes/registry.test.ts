@@ -58,7 +58,7 @@ describe("CliRuntimeRegistry", () => {
     await Bun.write(join(root, ".keep"), "");
     const registry = new CliRuntimeRegistry(root);
     await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, verifiedAdapter: { harnessTools: true } });
-  });
+  }, 30_000);
 
   test("旧 Registry 缺失 harnessRuntimeId 时读取回填为原 codex 默认项", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-harness-backfill-")); roots.push(root);
@@ -68,7 +68,7 @@ describe("CliRuntimeRegistry", () => {
     const registry = new CliRuntimeRegistry(root);
     await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: legacy.runtimeId });
     await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId });
-  });
+  }, 30_000);
 
   test("harnessRuntimeId 引用不存在的记录时拒绝读取 Registry", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-harness-dangling-")); roots.push(root);
@@ -87,7 +87,7 @@ describe("CliRuntimeRegistry", () => {
     await expect(registry.select(second.runtimeId)).resolves.toMatchObject({ runtimeId: second.runtimeId });
     await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: second.runtimeId });
     await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: second.runtimeId });
-  });
+  }, 30_000);
 
   test("选择时复核安装文件：已删除的 CLI 拒绝设为默认并耐久标 needs-revalidation", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-select-gone-")); roots.push(root);

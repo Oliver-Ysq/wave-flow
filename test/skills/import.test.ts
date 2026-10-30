@@ -66,7 +66,7 @@ describe("从 skill.zip 导入", () => {
     const workspace = await root();
     await skill(join(workspace, "zip-skill"), "zip body", "zip description");
     const zipPath = join(workspace, "skill.zip");
-    const zipped = Bun.spawnSync(["zip", "-qr", zipPath, "zip-skill"], { cwd: workspace });
+    const zipped = Bun.spawnSync(["/usr/bin/zip", "-qr", zipPath, "zip-skill"], { cwd: workspace });
     expect(zipped.exitCode).toBe(0);
     const libraryRoot = join(workspace, "library");
     const imported = await importSkillZip(zipPath, libraryRoot);
@@ -80,7 +80,7 @@ describe("从 skill.zip 导入", () => {
     const source = join(workspace, "root-skill");
     await skill(source, "root body", "root description");
     const zipPath = join(workspace, "root.zip");
-    const zipped = Bun.spawnSync(["zip", "-qr", zipPath, "."], { cwd: source });
+    const zipped = Bun.spawnSync(["/usr/bin/zip", "-qr", zipPath, "."], { cwd: source });
     expect(zipped.exitCode).toBe(0);
     const imported = await importSkillZip(zipPath, join(workspace, "library"));
     expect(imported).toMatchObject({ name: "root-skill", description: "root description" });
@@ -94,12 +94,12 @@ describe("从 skill.zip 导入", () => {
     await skill(join(workspace, "one"));
     await skill(join(workspace, "two"));
     const multi = join(workspace, "multi.zip");
-    expect(Bun.spawnSync(["zip", "-qr", multi, "one", "two"], { cwd: workspace }).exitCode).toBe(0);
+    expect(Bun.spawnSync(["/usr/bin/zip", "-qr", multi, "one", "two"], { cwd: workspace }).exitCode).toBe(0);
     await expect(importSkillZip(multi, join(workspace, "library"))).rejects.toThrow("只包含一个 skill");
     const broken = join(workspace, "broken", "bad-skill"); await mkdir(broken, { recursive: true });
     await writeFile(join(broken, "SKILL.md"), "no frontmatter", "utf8");
     const brokenZip = join(workspace, "broken.zip");
-    expect(Bun.spawnSync(["zip", "-qr", brokenZip, "bad-skill"], { cwd: join(workspace, "broken") }).exitCode).toBe(0);
+    expect(Bun.spawnSync(["/usr/bin/zip", "-qr", brokenZip, "bad-skill"], { cwd: join(workspace, "broken") }).exitCode).toBe(0);
     await expect(importSkillZip(brokenZip, join(workspace, "library"))).rejects.toThrow("frontmatter");
   });
 });

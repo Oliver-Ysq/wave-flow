@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { cp, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -174,7 +175,7 @@ export async function importSkillZip(zipPath: string, libraryRoot: string): Prom
   if (zipUncompressedBytes(zipPath) > MAX_ZIP_BYTES) throw new Error("skill.zip 解压后超过 50MiB 上限。");
   const scratch = await mkdtemp(join(tmpdir(), "wave-flow-skill-zip-"));
   try {
-    const extracted = Bun.spawnSync(["unzip", "-q", "-o", zipPath, "-d", scratch], { stdout: "pipe", stderr: "pipe" });
+    const extracted = runSystemUnzip(["-q", "-o", zipPath, "-d", scratch]);
     if (extracted.exitCode !== 0) throw new Error(`skill.zip 解压失败：${extracted.stderr.toString().trim().slice(0, 200) || "未知错误"}`);
     const root = await locateZipSkillRoot(scratch);
     // 根目录布局没有稳定 basename，skill 身份由 frontmatter.name 决定。
@@ -212,9 +213,22 @@ async function copyIntoLibrary(source: string, libraryRoot: string, name: string
 }
 
 function listZipEntries(zipPath: string): string[] {
-  const listed = Bun.spawnSync(["unzip", "-Z1", zipPath], { stdout: "pipe", stderr: "pipe" });
+  const listed = runSystemUnzip(["-Z1", zipPath]);
   if (listed.exitCode !== 0) throw new Error(`无法读取 skill.zip：${listed.stderr.toString().trim().slice(0, 200) || "未知错误"}`);
   return listed.stdout.toString().split("\n").map(line => line.trim()).filter(Boolean);
+}
+
+/**
+ * 系统自带解压器：固定 `/usr/bin/unzip`，不从 PATH 猜、不随包分发。
+ *
+ * macOS 自带该工具；缺失（极少数精简环境）时给出可操作诊断，而不是让 spawn 抛出底层错误。
+ * 解压前的路径/大小护栏仍以解压器列出的条目为准。
+ */
+const SYSTEM_UNZIP = "/usr/bin/unzip";
+
+function runSystemUnzip(args: readonly string[]): Bun.SyncSubprocess<"pipe", "pipe"> {
+  if (!existsSync(SYSTEM_UNZIP)) throw new Error("导入 .zip 需要系统 unzip（/usr/bin/unzip），但本机不可用；请先解压，再导入 skill 目录。");
+  return Bun.spawnSync([SYSTEM_UNZIP, ...args], { stdout: "pipe", stderr: "pipe" });
 }
 
 /** 拒绝绝对路径、`..` 穿越、反斜杠与空路径段；允许目录项以 / 结尾。 */
@@ -226,7 +240,7 @@ function assertZipEntry(entry: string): void {
 }
 
 function zipUncompressedBytes(zipPath: string): number {
-  const listed = Bun.spawnSync(["unzip", "-l", zipPath], { stdout: "pipe", stderr: "pipe" });
+  const listed = runSystemUnzip(["-l", zipPath]);
   if (listed.exitCode !== 0) throw new Error("无法读取 skill.zip 大小。");
   let total = 0;
   for (const line of listed.stdout.toString().split("\n")) {

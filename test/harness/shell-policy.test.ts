@@ -7,11 +7,34 @@ import { executeReadOnlyProjectQuery, readProjectFile } from "../../src/harness/
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
+/** rg 是可选加速器而不是产品依赖：没装它的机器上只跳过"真实搜索"，不因此判失败。 */
+const rgInstalled = Bun.which("rg") !== null;
+
 describe("Harness Shell Policy", () => {
-  test("允许结构化的项目只读查询，不经 shell 解释", async () => {
+  test.skipIf(!rgInstalled)("允许结构化的项目只读查询，不经 shell 解释", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-policy-")); directories.push(cwd);
     await writeFile(join(cwd, "needle.txt"), "needle\n", "utf8");
     await expect(executeReadOnlyProjectQuery(cwd, { command: "rg", args: ["-n", "needle"] })).resolves.toContain("needle.txt:1:needle");
+  });
+
+  /**
+   * 本机没有 rg 时必须给出可执行的诊断，而不是让 spawn 抛底层 ENOENT：
+   * 前者能让调用方退回读取文件或 CLI 原生搜索，后者只是一句看不出原因的失败。
+   * 通过把 PATH 指向空目录来模拟"未安装"，不依赖测试机是否装了 rg。
+   */
+  test("本机没有 rg 时明确报不可用，不尝试 spawn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-policy-no-rg-")); directories.push(cwd);
+    const emptyPath = await mkdtemp(join(tmpdir(), "wave-flow-empty-path-")); directories.push(emptyPath);
+    const previous = process.env.PATH;
+    process.env.PATH = emptyPath;
+    try {
+      await writeFile(join(cwd, "needle.txt"), "needle\n", "utf8");
+      await expect(executeReadOnlyProjectQuery(cwd, { command: "rg", args: ["-n", "needle"] })).rejects.toThrow("需要 ripgrep（rg），但本机未安装");
+    } finally { process.env.PATH = previous; }
+    // git 缺失同样只报不可用，绝不回退到任意二进制或 shell。
+    process.env.PATH = emptyPath;
+    try { await expect(executeReadOnlyProjectQuery(cwd, { command: "git", args: ["status", "--short"] })).rejects.toThrow("在本机不可用"); }
+    finally { process.env.PATH = previous; }
   });
 
   test("拒绝写命令、shell 语法和未知 flag", async () => {
@@ -22,7 +45,7 @@ describe("Harness Shell Policy", () => {
     await expect(executeReadOnlyProjectQuery(cwd, { command: "git", args: ["diff", "--stat"] })).rejects.toThrow("白名单");
   });
 
-  test("忽略 ripgrep 注入配置与 Git 外部执行配置", async () => {
+  test.skipIf(!rgInstalled)("忽略 ripgrep 注入配置与 Git 外部执行配置", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-policy-env-")); directories.push(cwd);
     const config = join(cwd, "rg-config");
     await writeFile(config, "--pre=touch should-not-exist\n", "utf8");

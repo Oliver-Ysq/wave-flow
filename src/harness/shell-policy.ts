@@ -23,6 +23,9 @@ const MAX_ARGUMENTS = 12;
 export async function executeReadOnlyProjectQuery(cwd: string, query: ReadOnlyProjectQuery, signal?: AbortSignal): Promise<string> {
   const root = await projectRoot(cwd);
   validateQuery(query);
+  // rg 是可选加速器而不是产品依赖：本机没装时必须给出可执行诊断，
+  // 不能让 spawn 抛出底层 ENOENT 把“没装工具”伪装成查询失败。
+  ensureQueryCommandAvailable(query.command);
   const child = Bun.spawn([query.command, ...query.args], { cwd: root, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: safeEnvironment(query.command) });
   const timeout = setTimeout(() => child.kill(), 8_000);
   const abort = () => child.kill();
@@ -101,6 +104,23 @@ function isSafeRg(args: readonly string[]): boolean {
 }
 
 function isSafeLs(args: readonly string[]): boolean { return args.length <= 2 && args.every(arg => arg === "-la" || arg === "-l" || arg === "."); }
+
+/**
+ * 查询命令是否可用（只看命令名，不接受路径）。
+ *
+ * `rg`（ripgrep）是**可选加速器**，不是产品依赖：只有本机已安装时才提供全文搜索。
+ * 宿主不自动下载、安装或随包分发二进制；缺失时调用方必须能看到明确的不可用原因，
+ * 并退回读取文件或 CLI 原生搜索，而不是把缺失伪装成一次查询失败。
+ */
+function readOnlyQueryCommandAvailable(command: ReadOnlyProjectQuery["command"]): boolean {
+  return Bun.which(command, { PATH: safeEnvironment(command).PATH }) !== null;
+}
+
+function ensureQueryCommandAvailable(command: ReadOnlyProjectQuery["command"]): void {
+  if (readOnlyQueryCommandAvailable(command)) return;
+  if (command === "rg") throw new Error("主控全文搜索需要 ripgrep（rg），但本机未安装；请改用读取文件或 CLI 原生搜索，安装 rg 后重试即可恢复。 ");
+  throw new Error(`主控只读查询所需的 ${command} 在本机不可用。 `);
+}
 async function projectRoot(cwd: string): Promise<string> { const root = await realpath(cwd).catch(() => { throw new Error("Harness cwd 不可验证。 "); }); const info = await lstat(root); if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Harness cwd 必须是常规目录。 "); return root; }
 function within(root: string, value: string): boolean { const fromRoot = relative(root, value); return !fromRoot.startsWith("..") && !isAbsolute(fromRoot); }
 async function readLimited(stream: ReadableStream<Uint8Array>): Promise<string> { const reader = stream.getReader(); const chunks: Uint8Array[] = []; let size = 0; while (true) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > MAX_OUTPUT_BYTES) { reader.cancel(); throw new Error(`主控只读查询输出超过 ${MAX_OUTPUT_BYTES} 字节。 `); } chunks.push(next.value); } return new TextDecoder().decode(concat(chunks, size)); }
