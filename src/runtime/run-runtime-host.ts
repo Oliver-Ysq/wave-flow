@@ -41,7 +41,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     private readonly replay = false,
     /** interrupted Run 的 running 事实延迟到首个重跑节点经过调用指纹核验后。 */
     private readonly resumeInterrupted = false,
-    /** 历史 assigned 执行配置；模块 Workflow 传 null，节点 cli/model 由作者源码直接决定。 */
+    /** 执行配置：assigned 只读兼容；script 模式承载逐节点 CLI（nodeClis）与动态兜底（cli）。 */
     private readonly executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null,
     /**
      * 本次 attempt 启动时的技能库摘要；空库为 null。
