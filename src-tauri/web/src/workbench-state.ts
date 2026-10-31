@@ -1,16 +1,16 @@
-import type { HarnessSnapshot } from "./types";
-import { composeConversationTurns } from "./conversation/harness-event-merge";
+import type { LeadSnapshot } from "./types";
+import { composeConversationTurns } from "./conversation/lead-event-merge";
 
 /** 同档案耐久序号较旧时拒绝覆盖；身份不同不合并。 */
-export function newerTaskSnapshot(current:HarnessSnapshot,next:HarnessSnapshot):HarnessSnapshot {
-  if(current.harnessRunId!==next.harnessRunId)return current;
+export function newerTaskSnapshot(current:LeadSnapshot,next:LeadSnapshot):LeadSnapshot {
+  if(current.leadRunId!==next.leadRunId)return current;
   return (current.snapshotSequence??0)>(next.snapshotSequence??0)?current:next;
 }
 
 /** 详情导航组合身份校验；旧版本/执行/attempt不匹配时不展示其他记录。 */
-export function routeMatchesTask(task:HarnessSnapshot,route:import("./workbench-navigation").WorkbenchRoute):boolean {
+export function routeMatchesTask(task:LeadSnapshot,route:import("./workbench-navigation").WorkbenchRoute):boolean {
   if(route.kind!=="workflow")return true;
-  if(route.taskId!==task.harnessRunId)return false;
+  if(route.taskId!==task.leadRunId)return false;
   const revision=task.workflowRevisions.find(item=>item.revision===route.revision);
   if(!revision||(revision.cardId??`legacy:${revision.revision}`)!==route.cardId)return false;
   if(route.executionId&&!task.executions.some(item=>item.executionId===route.executionId&&item.revision===route.revision))return false;
@@ -42,7 +42,7 @@ export class OperationTracker {
   action(owner:string):string|null {return this.active.get(owner)?.action??null;}
 }
 /** 未读只取完整耐久正文/原消息/版本身份，不把 delta 当作消息。 */
-export function unreadIdentities(task:HarnessSnapshot):string[] {
+export function unreadIdentities(task:LeadSnapshot):string[] {
   const identities=[...composeConversationTurns(task).flatMap(turn=>{
     const bodies=turn.entries.filter(entry=>entry.kind==="body"&&entry.completed);
     if(bodies.length)return bodies.map(entry=>`body:${entry.entryId}`);
@@ -60,9 +60,9 @@ export function parseReadIdentities(value:string|undefined):string[] {
 /** 阅读标记只保存稳定身份；首次载入历史记录设基线，不把全部历史当未读。 */
 export class UnreadTracker {
   private seen=new ViewCache<Set<string>>();
-  count(task:HarnessSnapshot,reading:boolean):number {
-    const ids=unreadIdentities(task),prior=this.seen.get(task.harnessRunId);
-    if(!prior||reading){this.seen.set(task.harnessRunId,new Set(ids));return 0;}
+  count(task:LeadSnapshot,reading:boolean):number {
+    const ids=unreadIdentities(task),prior=this.seen.get(task.leadRunId);
+    if(!prior||reading){this.seen.set(task.leadRunId,new Set(ids));return 0;}
     return ids.filter(id=>!prior.has(id)).length;
   }
   /** 仅标记当前视口已展示的稳定身份；不会把离屏新消息全量标已读。 */

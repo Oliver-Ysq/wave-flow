@@ -2,7 +2,6 @@ import { codexAcpAdapterEntry } from "./codex-acp-entry";
 import { claudeAcpAdapterEntry } from "./claude-acp-entry";
 import { createClaudeWorkerEnvironment, createDshWorkerEnvironment, createKimiWorkerEnvironment, createWorkerEnvironment } from "./worker-environment";
 import type { RuntimeCli, VerifiedCliRuntime } from "./types";
-import { claudeSessionIsolation, codexSessionIsolation, dshSessionIsolation, kimiSessionIsolation, type SessionIsolationProfile } from "./session-isolation";
 import { claudeSkillInjection, codexSkillInjection, dshSkillInjection } from "../skills/injection";
 import type { SkillInjectionCapability } from "../skills/types";
 
@@ -14,8 +13,8 @@ export const CLAUDE_ACP_ADAPTER = { id: "claude-acp" as const, version: "0.94.0"
 
 /** 内置 Adapter 的能力声明；能力未验证前一律为 false，绝不占位。 */
 export type AdapterCapabilities = {
-  /** 是否支持为主控注入 session-scoped Harness 窄工具；codex-acp 与 kimi-acp 已验证。 */
-  readonly harnessTools: boolean;
+  /** 是否支持为主控注入 session-scoped Lead 窄工具；codex-acp 与 kimi-acp 已验证。 */
+  readonly leadTools: boolean;
   /** 是否支持 Worker session 私有的完成协议 MCP；已由 ACP 探针验证。 */
   readonly workerControlMcp: boolean;
   /** 是否支持 Workflow 请求模型覆盖；本期未实现。 */
@@ -51,8 +50,6 @@ export type AdapterCatalogEntry = {
   readonly launcher: (runtime: VerifiedCliRuntime) => { readonly command: string; readonly args: readonly string[] };
   /** 由已复核 runtime 构造最小白名单环境。 */
   readonly environment: (runtime: VerifiedCliRuntime) => Readonly<Record<string, string>>;
-  /** 私有状态与隔离启动配置；缺省不支持，宿主按角色能力拒绝，不以CLI名称分支。 */
-  readonly sessionIsolation?: SessionIsolationProfile;
   /**
    * 执行期技能注入能力；缺省表示该 CLI 未验证，技能库非空时必须 fail closed。
    * 只声明机制与应用函数，不在此处读取技能库或启动进程。
@@ -68,11 +65,10 @@ const entries: readonly AdapterCatalogEntry[] = [
     probeMcp: true,
     adapterVersion: CODEX_ACP_ADAPTER.version,
     acpProtocolVersion: CODEX_ACP_ADAPTER.protocolVersion,
-    capabilities: { harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: true,
     launcher: () => codexAcpAdapterEntry(),
     environment: (runtime) => createWorkerEnvironment(runtime),
-    sessionIsolation: codexSessionIsolation,
     skills: codexSkillInjection,
   },
   {
@@ -82,12 +78,11 @@ const entries: readonly AdapterCatalogEntry[] = [
     probeMcp: true,
     adapterVersion: null,
     acpProtocolVersion: 1,
-    capabilities: { harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: false,
     // Kimi CLI 自身即 ACP server；命令直接是用户已验证的 realpath。
     launcher: (runtime) => ({ command: runtime.executablePath, args: ["acp"] }),
     environment: (runtime) => createKimiWorkerEnvironment(runtime),
-    sessionIsolation: kimiSessionIsolation,
   },
   {
     adapterId: "claude-acp",
@@ -96,14 +91,13 @@ const entries: readonly AdapterCatalogEntry[] = [
     probeMcp: true,
     adapterVersion: CLAUDE_ACP_ADAPTER.version,
     acpProtocolVersion: CLAUDE_ACP_ADAPTER.protocolVersion,
-    // 主控窄工具经真实隔离 Home + MCP 注入验收后声明（见 chapter 14.2）。
+    // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
     // Claude Code 2.x 的 CLI 是原生二进制（claude.exe）；adapter 进程由 Engine 自带运行时启动，
     // 不要求用户安装 node。旧版 JS 入口由用户环境自行提供 node。
-    capabilities: { harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: false,
     launcher: () => claudeAcpAdapterEntry(),
     environment: (runtime) => createClaudeWorkerEnvironment(runtime),
-    sessionIsolation: claudeSessionIsolation,
     skills: claudeSkillInjection,
   },
   {
@@ -114,15 +108,14 @@ const entries: readonly AdapterCatalogEntry[] = [
     // dsh 是 developer preview，握手 agentInfo.version 才是权威 adapter 版本。
     adapterVersion: null,
     acpProtocolVersion: 1,
-    // 主控窄工具经真实隔离 Home + MCP 注入验收后声明（见 chapter 14.2）。
-    capabilities: { harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
+    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: true,
     // dsh 入口使用 import.meta.main；Node ≤22 下静默退出 0 且零输出，必须 Node ≥ 24。
     minNodeVersion: 24,
     // dsh CLI 自身即 ACP server；命令直接是用户已验证的 realpath。
     launcher: (runtime) => ({ command: runtime.executablePath, args: ["acp"] }),
     environment: (runtime) => createDshWorkerEnvironment(runtime),
-    sessionIsolation: dshSessionIsolation,
     skills: dshSkillInjection,
   },
 ];

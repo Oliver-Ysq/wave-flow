@@ -38,7 +38,7 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
       ...(node ? { nodeExecutable: { path: node.executablePath, identity: node.executableIdentity } } : {}),
       version, discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell,
       // adapterVersion：Catalog 锁定值优先；未锁定（kimi）时先占位 --version 摘要，握手后以 agentInfo.version 为准。
-      verifiedAdapter: { adapterId: entry.adapterId, adapterVersion: entry.adapterVersion ?? version, acpProtocolVersion: entry.acpProtocolVersion, harnessTools: entry.capabilities.harnessTools },
+      verifiedAdapter: { adapterId: entry.adapterId, adapterVersion: entry.adapterVersion ?? version, acpProtocolVersion: entry.acpProtocolVersion, leadTools: entry.capabilities.leadTools },
       verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null,
     } satisfies CliRuntimeRecord;
     const launched = entry.launcher(runtime as VerifiedCliRuntime);

@@ -42,7 +42,7 @@ describe("validateCliRuntime / kimi", () => {
     const hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string } } = { agentInfo: { name: "kimi", version: "2.1.1" } };
     const record = await validateCliRuntime("kimi", { executablePath: await fakeCli(root, "kimi", "kimi 2.1.1"), discoveredFrom: "manual", discoveredShell: null, createTransport: fakeTransport(hooks) });
     expect(record).toMatchObject({ cli: "kimi", status: "verified", version: "kimi 2.1.1", diagnostic: null });
-    expect(record.verifiedAdapter).toEqual({ adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: true });
     expect("nodeExecutable" in record).toBe(false);
     // 探针 server 必须真实作为 stdio MCP 注入 session/new，证明 session 私有 MCP 能力。
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
@@ -70,7 +70,7 @@ describe("validateCliRuntime / codex", () => {
     const record = await validateCliRuntime("codex", { executablePath: await fakeCli(root, "codex", "codex-cli 1.0"), discoveredFrom: "manual", discoveredShell: null, createTransport: fakeTransport(hooks) });
     expect(record).toMatchObject({ cli: "codex", status: "verified", version: "codex-cli 1.0", diagnostic: null });
     // adapterVersion 锁定，绝不跟随握手 agentInfo.version。
-    expect(record.verifiedAdapter).toEqual({ adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true });
     expect(typeof record.nodeExecutable?.path).toBe("string");
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
   }, 20_000);
@@ -82,7 +82,7 @@ describe("validateCliRuntime / claude", () => {
     const hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string } } = { agentInfo: { name: "claude-agent-acp", version: "9.9.9" } };
     const record = await validateCliRuntime("claude", { executablePath: await fakeCli(root, "claude", "2.0.0 (Claude Code)"), discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v22.17.1"), createTransport: fakeTransport(hooks) });
     expect(record).toMatchObject({ cli: "claude", status: "verified", version: "2.0.0 (Claude Code)", diagnostic: null });
-    expect(record.verifiedAdapter).toEqual({ adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, harnessTools: true });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, leadTools: true });
     expect(record.nodeExecutable).toBeUndefined();
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
   });
@@ -94,7 +94,7 @@ describe("validateCliRuntime / dsh", () => {
     const hooks: { sessionNewParams?: { mcpServers?: unknown[] }; agentInfo?: { name: string; version: string } } = { agentInfo: { name: "dsh", version: "0.0.1" } };
     const record = await validateCliRuntime("dsh", { executablePath: await fakeCli(root, "dsh", "0.2.1-rc.2"), discoveredFrom: "manual", discoveredShell: null, nodeExecutablePath: await fakeNode(root, "node", "v24.22.0"), createTransport: fakeTransport(hooks) });
     expect(record).toMatchObject({ cli: "dsh", status: "verified", version: "0.2.1-rc.2", diagnostic: null });
-    expect(record.verifiedAdapter).toEqual({ adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: true });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, leadTools: true });
     expect(typeof record.nodeExecutable?.path).toBe("string");
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
   });

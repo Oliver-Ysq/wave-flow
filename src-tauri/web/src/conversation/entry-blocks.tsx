@@ -2,9 +2,9 @@ import { useState, type ReactNode } from "react";
 import { ViewCache } from "../workbench-state";
 const entryExpansion=new ViewCache<boolean>(256);
 import type {
-  HarnessThoughtEntry,
-  HarnessToolEntry,
-  HarnessToolKind,
+  LeadThoughtEntry,
+  LeadToolEntry,
+  LeadToolKind,
 } from "../types";
 import { toolGroupLabel, toolGroupStatus, toolGroupTimes } from "./entry-groups";
 
@@ -35,7 +35,7 @@ function statusBadge(status: string): { text: string; className: string } {
 }
 
 /** 统一的内联 SVG 图标；不引入图标库，按条目种类区分图形。 */
-function EntryGlyph({ kind }: { kind: HarnessToolKind | "thought" }) {
+function EntryGlyph({ kind }: { kind: LeadToolKind | "thought" }) {
   const paths: Record<string, ReactNode> = {
     thought: (
       <path d="M8 3a4.5 4.5 0 0 0-2.6 8.2c.5.4.6 1 .6 1.8h4c0-.8.1-1.4.6-1.8A4.5 4.5 0 0 0 8 3ZM6.5 14h3" />
@@ -80,7 +80,7 @@ function CollapsibleEntryRow({
   identity,
 }: {
   /** 左侧小图标种类。 */
-  glyph: HarnessToolKind | "thought";
+  glyph: LeadToolKind | "thought";
   /** 行标题（工具名或"思考过程"），可附带徽标等内联元素。 */
   name: ReactNode;
   /** 无障碍纯文本名称；name 含 JSX 时由它提供可读标签。 */
@@ -143,7 +143,7 @@ function CollapsibleEntryRow({
  * 连续工具调用的聚合摘要行："读取了 2 个文件 · 运行了 1 条命令 ›"。
  * 进行中默认展开以便逐条看到实时状态；展开后组内仍复用单条 ToolBlock。
  */
-export function ToolGroupBlock({ entries }: { entries: HarnessToolEntry[] }) {
+export function ToolGroupBlock({ entries }: { entries: LeadToolEntry[] }) {
   const label = toolGroupLabel(entries);
   const status = toolGroupStatus(entries);
   const { startedAt, finishedAt } = toolGroupTimes(entries);
@@ -170,7 +170,7 @@ export function ToolGroupBlock({ entries }: { entries: HarnessToolEntry[] }) {
 }
 
 /** 思考条目块：折叠行显示耗时与状态；展开显示思考正文纯文本。 */
-export function ThoughtBlock({ entry }: { entry: HarnessThoughtEntry }) {
+export function ThoughtBlock({ entry }: { entry: LeadThoughtEntry }) {
   if (entry.legacy) {
     return (
       <CollapsibleEntryRow
@@ -229,7 +229,7 @@ function CopyButton({ text }: { text: string }) {
 }
 
 /** 按 toolKind 分类的工具条目详情；engine-mcp 来源的任何 kind 都带 MCP 徽标。 */
-export function ToolBlock({ entry }: { entry: HarnessToolEntry }) {
+export function ToolBlock({ entry }: { entry: LeadToolEntry }) {
   const isMcp = entry.source === "engine-mcp";
   const name = (
     <>

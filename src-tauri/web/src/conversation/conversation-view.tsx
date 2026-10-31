@@ -8,12 +8,12 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  HarnessAvailableCommand,
-  HarnessBodyEntry,
-  HarnessMessageAttachment,
-  HarnessQueuedMessage,
-  HarnessSnapshot,
-  HarnessToolActivity as HarnessToolActivitySummary,
+  LeadAvailableCommand,
+  LeadBodyEntry,
+  LeadMessageAttachment,
+  LeadQueuedMessage,
+  LeadSnapshot,
+  LeadToolActivity as LeadToolActivitySummary,
   StagedAttachment,
 } from "../types";
 import { api } from "../api";
@@ -22,7 +22,7 @@ import {
   composeConversationTurns,
   turnNeedsAssistantFallback,
   type ConversationTurn,
-} from "./harness-event-merge";
+} from "./lead-event-merge";
 import { Markdown } from "./markdown";
 import { ThoughtBlock, ToolBlock, ToolGroupBlock } from "./entry-blocks";
 import { groupToolEntries } from "./entry-groups";
@@ -39,28 +39,28 @@ const attachmentDataCache = new AttachmentDataCache();
 
 /** 已发送消息中的图片附件：按需从 Engine 读取耐久字节渲染缩略图。 */
 function MessageAttachmentView({
-  harnessRunId,
+  leadRunId,
   messageId,
   attachment,
 }: {
-  harnessRunId: string;
+  leadRunId: string;
   messageId: string;
-  attachment: HarnessMessageAttachment;
+  attachment: LeadMessageAttachment;
 }) {
-  const key = `${harnessRunId}:${messageId}:${attachment.id}`;
+  const key = `${leadRunId}:${messageId}:${attachment.id}`;
   const [dataUrl, setDataUrl] = useState<string | null>(() => attachmentDataCache.get(key) ?? null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (dataUrl || failed) return;
     let active = true;
-    api.attachmentData(harnessRunId, messageId, attachment.id)
+    api.attachmentData(leadRunId, messageId, attachment.id)
       .then((response) => {
         attachmentDataCache.set(key, response.dataUrl);
         if (active) setDataUrl(response.dataUrl);
       })
       .catch(() => { if (active) setFailed(true); });
     return () => { active = false; };
-  }, [harnessRunId, messageId, attachment.id, dataUrl, failed, key]);
+  }, [leadRunId, messageId, attachment.id, dataUrl, failed, key]);
   return (
     <figure className="message-attachment">
       {dataUrl ? (
@@ -98,7 +98,7 @@ export function shouldSubmitComposer(
 
 /** 主控正文条目：Markdown 渲染；同一回合内被工具/思考打断后的后续正文续排，
  * 不重复头像与说话人，避免一次回复看起来像两条消息。 */
-function BodyBlock({ entry, continuation = false }: { entry: HarnessBodyEntry; continuation?: boolean }) {
+function BodyBlock({ entry, continuation = false }: { entry: LeadBodyEntry; continuation?: boolean }) {
   const streaming = !entry.completed && entry.finishedAt === null;
   return (
     <article
@@ -128,14 +128,14 @@ function BodyBlock({ entry, continuation = false }: { entry: HarnessBodyEntry; c
 }
 
 /** MCP 工具是回复的低密度尾注；只展示、也只耐久最小安全摘要（legacy 回合）。 */
-function HarnessToolActivity({
+function LeadToolActivity({
   activity,
 }: {
-  activity: HarnessToolActivitySummary;
+  activity: LeadToolActivitySummary;
 }) {
   const stateText = activity.outcome === "completed" ? "已完成" : "未完成";
   return (
-    <details className={`harness-tool ${activity.outcome}`}>
+    <details className={`lead-tool ${activity.outcome}`}>
       <summary>
         <span aria-hidden="true">⌁</span>
         {activity.label}
@@ -149,13 +149,13 @@ function HarnessToolActivity({
 /** 单个回合：用户气泡 → 按 seq 排列的条目 → 无正文时回落渲染完整 assistant 消息。 */
 function ConversationTurnView({
   turn,
-  harness,
+  lead,
   records=[],
 }: {
   /** 已组装的回合数据。 */
   turn: ConversationTurn;
   /** 当前会话快照，用于 legacy 回合的工具尾注。 */
-  harness: HarnessSnapshot;
+  lead: LeadSnapshot;
   /** 此回合发生的原更新/执行记录，按时间插入回复之间。 */
   records?:TimelineItem[];
 }) {
@@ -165,7 +165,7 @@ function ConversationTurnView({
     if(item.kind==='body'){const continuation=bodySeen;bodySeen=true;return {key:`entry:${item.entryId}`,at:item.startedAt,content:<BodyBlock entry={item} continuation={continuation}/>};}
     return {key:`entry:${item.entryId}`,at:item.startedAt,content:item.kind==='thought'?<ThoughtBlock entry={item}/>:<ToolBlock entry={item}/>};
   });
-  if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">V</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(harness.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><HarnessToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
+  if(turnNeedsAssistantFallback(turn)&&turn.assistant)entries.push({key:`assistant:${turn.assistant.id}`,at:turn.assistant.createdAt,content:<Fragment><article className="chat-message assistant" data-read-identity={`message:${turn.assistant.id}`}><div className="chat-avatar">V</div><div><span>Wave Flow</span><Markdown text={turn.assistant.text}/></div></article>{(lead.toolActivitiesByMessageId[turn.assistant.id]??[]).map((activity,index)=><LeadToolActivity key={`${turn.assistant!.id}:tool:${index}`} activity={activity}/>)}</Fragment>});
   return (
     <Fragment>
       {!turn.user.summaryKey&&<article className="chat-message user">
@@ -176,7 +176,7 @@ function ConversationTurnView({
           {turn.user.attachments?.map((attachment) => (
             <MessageAttachmentView
               key={attachment.id}
-              harnessRunId={harness.harnessRunId}
+              leadRunId={lead.leadRunId}
               messageId={turn.user.id}
               attachment={attachment}
             />
@@ -190,7 +190,7 @@ function ConversationTurnView({
 
 /** 排队消息的真实状态文案；只从耐久快照推导，不用模糊 loading。 */
 function queueStateLabel(
-  item: HarnessQueuedMessage,
+  item: LeadQueuedMessage,
   running: boolean,
   interrupted: boolean,
   position: number,
@@ -207,7 +207,7 @@ function queueStateLabel(
  * 草案卡/Execution/决策卡由调用方作为 children 传入，渲染在时间线之后。
  */
 export function ConversationView({
-  harness,
+  lead,
   draft,
   onDraft,
   onSend,
@@ -234,8 +234,8 @@ export function ConversationView({
   planPendingBar,
   availableCommands = [],
 }: {
-  /** 当前 Harness 会话权威快照。 */
-  harness: HarnessSnapshot;
+  /** 当前 Lead 会话权威快照。 */
+  lead: LeadSnapshot;
   /** 输入框草稿文本。 */
   draft: string;
   /** 更新输入框草稿。 */
@@ -283,13 +283,13 @@ export function ConversationView({
   /** 当前草稿绑定的方案版本提示；不修改输入内容或自动发送。 */ draftContext?:string;
   /** 当前工作与历史入口；位于滚动对话外，不改变运行权限。 */ activity?: ReactNode;
   /** 当前 ACP 会话广告的斜杠命令/技能；缺省只显示 Wave Flow 的 /wave-flow。 */
-  availableCommands?: readonly HarnessAvailableCommand[];
+  availableCommands?: readonly LeadAvailableCommand[];
 }) {
   const attachmentButton=useRef<HTMLButtonElement>(null);
   const stopButton=useRef<HTMLButtonElement>(null);
-  const running = harness.status === "running";
-  const turns = composeConversationTurns(harness);
-  const messageTimes=[...harness.messages.map(message=>message.createdAt),...harness.conversationEntries.filter(entry=>entry.kind==='body'&&entry.text.trim()).map(entry=>entry.startedAt)];
+  const running = lead.status === "running";
+  const turns = composeConversationTurns(lead);
+  const messageTimes=[...lead.messages.map(message=>message.createdAt),...lead.conversationEntries.filter(entry=>entry.kind==='body'&&entry.text.trim()).map(entry=>entry.startedAt)];
 
   const scrollRef = useRef<HTMLDivElement>(null);
   /** 贴底状态同时保存在 ref（滚动回调内读取）与 state（驱动"回到最新"按钮）。 */
@@ -311,13 +311,13 @@ export function ConversationView({
     const root=scrollRef.current;
     const observer=new IntersectionObserver(entries=>{
       const ids=entries.filter(entry=>entry.isIntersecting).flatMap(entry=>parseReadIdentities((entry.target as HTMLElement).dataset.readIdentity));
-      if(ids.length)onRead(harness.harnessRunId,ids);
+      if(ids.length)onRead(lead.leadRunId,ids);
     },{root,threshold:0.1});
     root.querySelectorAll("[data-read-identity]").forEach(element=>observer.observe(element));
     return()=>observer.disconnect();
-  },[harness,visible,onRead]);
+  },[lead,visible,onRead]);
   useLayoutEffect(() => {
-    const saved = conversationPositions.get(harness.harnessRunId);
+    const saved = conversationPositions.get(lead.leadRunId);
     if (saved && scrollRef.current) {
       scrollRef.current.scrollTop = saved.top;
       historyTop.current = saved.top;
@@ -326,9 +326,9 @@ export function ConversationView({
     }
     return ()=>{
       const el=scrollRef.current;
-      if(el){conversationPositions.set(harness.harnessRunId,{top:el.scrollTop,stuck:stuckRef.current});if(conversationPositions.size>64)conversationPositions.delete(conversationPositions.keys().next().value!);}
+      if(el){conversationPositions.set(lead.leadRunId,{top:el.scrollTop,stuck:stuckRef.current});if(conversationPositions.size>64)conversationPositions.delete(conversationPositions.keys().next().value!);}
     };
-  }, [harness.harnessRunId]);
+  }, [lead.leadRunId]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -339,8 +339,8 @@ export function ConversationView({
     historyTop.current = el.scrollTop;
     stuckRef.current = near;
     setStuck(near);
-    conversationPositions.delete(harness.harnessRunId);
-    conversationPositions.set(harness.harnessRunId, { top: el.scrollTop, stuck: near });
+    conversationPositions.delete(lead.leadRunId);
+    conversationPositions.set(lead.leadRunId, { top: el.scrollTop, stuck: near });
     if (conversationPositions.size > 64) conversationPositions.delete(conversationPositions.keys().next().value!);
     if (near) setPendingNew(false);
   };
@@ -352,7 +352,7 @@ export function ConversationView({
     } else {
       setPendingNew(true);
     }
-  }, [harness]);
+  }, [lead]);
 
   // running 期间每秒重渲染一次，仅用于"等待新的输出"计时展示，不推断模型状态。
   const [, tick] = useState(0);
@@ -364,9 +364,9 @@ export function ConversationView({
   /** 停止是破坏性动作：先确认，避免误点中断当前回合。 */
   const [confirmStop, setConfirmStop] = useState(false);
   useEffect(() => { if (!running) setConfirmStop(false); }, [running]);
-  const waitingBase = lastEventAt ?? Date.parse(harness.createdAt);
+  const waitingBase = lastEventAt ?? Date.parse(lead.createdAt);
   const waitingSeconds = Number.isFinite(waitingBase) ? Math.max(0, Math.floor((Date.now() - waitingBase) / 1_000)) : 0;
-  const streamingBody = harness.conversationEntries.some(entry => entry.kind === "body" && !entry.completed && entry.finishedAt === null);
+  const streamingBody = lead.conversationEntries.some(entry => entry.kind === "body" && !entry.completed && entry.finishedAt === null);
   const waiting = running && !streamingBody && Number.isFinite(waitingBase) && Date.now() - waitingBase > 3_000;
   // 一次安静等待只在"开始出现新正文"或回合结束时收起；工具进展不应该让提示反复闪烁。
   const [waitingVisible, setWaitingVisible] = useState(false);
@@ -381,16 +381,16 @@ export function ConversationView({
     >
       <header>
         <div>
-          <span className={`task-presence ${harness.status}`} />
+          <span className={`task-presence ${lead.status}`} />
           <div>
-            <strong>{conversationTitle(harness)}</strong>
-            <small title={harness.cwd}>{harness.cwd.split("/").filter(Boolean).at(-1)}</small>
+            <strong>{conversationTitle(lead)}</strong>
+            <small title={lead.cwd}>{lead.cwd.split("/").filter(Boolean).at(-1)}</small>
           </div>
         </div>
       </header>
       {activity}
       <div className="conversation-scroll" ref={scrollRef} onScroll={handleScroll}>
-        {harness.messages.length === 0 && (
+        {lead.messages.length === 0 && (
           <div className="conversation-intro">
             <span>Wave Flow 已就绪</span>
             <h2>你想完成什么任务？</h2>
@@ -406,15 +406,15 @@ export function ConversationView({
           <ConversationTurnView
             key={turn.turnId}
             turn={turn}
-            harness={harness}
+            lead={lead}
             records={timelineEvents.filter(event => !event.beforeTurnId&&event.at >= turn.user.createdAt && (!turns[index + 1] || event.at < turns[index + 1].user.createdAt))}
           />
           </Fragment>
         ))}
-        {harness.diagnostic?.includes("主控启动失败") && (
+        {lead.diagnostic?.includes("主控启动失败") && (
           <article className="conversation-interruption" role="alert">
             <strong>Wave Flow 暂时无法启动</strong>
-            <p>{userFacingText(harness.diagnostic)}</p>
+            <p>{userFacingText(lead.diagnostic)}</p>
           </article>
         )}
         {waitingVisible && (
@@ -440,15 +440,15 @@ export function ConversationView({
           回到最新
         </button>
       )}
-      {harness.status !== "completed" && planPendingBar}
-      {harness.status !== "completed" && (
+      {lead.status !== "completed" && planPendingBar}
+      {lead.status !== "completed" && (
         <div className="conversation-composer">
-          {harness.messageQueue.length > 0 && (
+          {lead.messageQueue.length > 0 && (
             <ul className="message-queue" aria-label="待发送消息队列">
-              {harness.messageQueue.map((item, index) => (
+              {lead.messageQueue.map((item, index) => (
                 <li key={item.message.id} className={item.priority ? "priority" : ""}>
                   <span className="queue-state">
-                    {queueStateLabel(item, running, harness.status === "interrupted", index + 1)}
+                    {queueStateLabel(item, running, lead.status === "interrupted", index + 1)}
                   </span>
                   <span className="queue-text">{item.message.text}</span>
                   {onCancelQueued && (
@@ -499,7 +499,7 @@ export function ConversationView({
             value={draft}
             ariaLabel="补充要求或反馈"
             onChange={onDraft}
-            placeholder={running ? "可以补充要求 · 消息将排队发送" : harness.status === "interrupted" ? "回合已中断 · 发送消息继续" : "补充要求，或反馈执行结果…"}
+            placeholder={running ? "可以补充要求 · 消息将排队发送" : lead.status === "interrupted" ? "回合已中断 · 发送消息继续" : "补充要求，或反馈执行结果…"}
             commands={availableCommands}
             onSubmit={() => {
               if (draft.trim() && !attachmentBusy) onSend();
@@ -527,7 +527,7 @@ export function ConversationView({
                 <span aria-hidden="true">＋</span>
               )}
               {attachmentBusy&&<small role="status">正在添加图片…</small>}
-              {harness.status === "interrupted" ? (
+              {lead.status === "interrupted" ? (
                 <small role="status">
                   回合已中断 · 发送消息继续
                   {onRecover && (
@@ -628,12 +628,12 @@ function formatWaitTime(seconds: number): string {
 }
 
 /** 会话标题：第一条用户消息前 28 字，退化为目录名。 */
-function conversationTitle(harness: HarnessSnapshot): string {
+function conversationTitle(lead: LeadSnapshot): string {
   return (
-    harness.task?.title || harness.messages
+    lead.task?.title || lead.messages
       .find((message) => message.role === "user")
       ?.text.slice(0, 28) ||
-    harness.cwd.split("/").filter(Boolean).at(-1) ||
+    lead.cwd.split("/").filter(Boolean).at(-1) ||
     "新任务"
   );
 }

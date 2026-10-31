@@ -10,7 +10,6 @@ import { AcpWorkerExecutor } from "../../src/runtime/acp-worker-executor";
 import { RuntimeAcpWorkerExecutor } from "../../src/runtime/runtime-acp-worker-executor";
 import type { AgentNodeSnapshot } from "../../src/runtime/run-types";
 import type { AgentCli } from "../../src/shared/workflow-types";
-import { adapterById } from "../../src/runtimes/adapter-catalog";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -18,7 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function claudeRecord(root: string): Promise<CliRuntimeRecord> {
   const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.304", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.304", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 function node(cli: AgentCli): AgentNodeSnapshot {
@@ -73,8 +72,6 @@ test("只读Worker退出核验失败保留原句柄，重试只核验不重新�
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-readonly-close-")));roots.push(root);const registry=new CliRuntimeRegistry(root);await registry.saveVerified(await claudeRecord(root));const cwd=join(root,"project");await mkdir(cwd);
  const executor=new RuntimeAcpWorkerExecutor(registry,()=>({name:"private",command:"fake",args:[],env:[]}) as never,undefined,null,join(root,"scratch"));executor.bindControl({} as ControlServer);
  let checks=0,starts=0;
- const profile=adapterById("claude-acp")!.sessionIsolation!;
- const prepare=spyOn(profile,"prepare").mockImplementation(async launcher=>launcher);
  const execute=spyOn(AcpWorkerExecutor.prototype,"execute").mockImplementation(async()=>{starts++;return{ok:true};});
  const finalize=spyOn(AcpWorkerExecutor.prototype,"finalizeCompleted").mockImplementation(async()=>{checks++;if(checks<=2)throw new Error("原进程仍存在");});
  const value={...node("claude"),sandbox:"read-only" as const,cwd,request:{...node("claude").request,sandbox:"read-only" as const,cwd}};
@@ -82,7 +79,7 @@ test("只读Worker退出核验失败保留原句柄，重试只核验不重新�
   await expect(executor.execute(value)).rejects.toThrow("原进程仍存在");expect(starts).toBe(1);expect(checks).toBe(2);
   await executor.finalizeCompleted(value);expect(starts).toBe(1);expect(checks).toBe(3);
   await executor.finalizeCompleted(value);expect(checks).toBe(3);
- }finally{prepare.mockRestore();execute.mockRestore();finalize.mockRestore();}
+ }finally{execute.mockRestore();finalize.mockRestore();}
 });
 
 /** 携带分配快照指派的节点；assignedRuntimeId 写在生效请求上。 */

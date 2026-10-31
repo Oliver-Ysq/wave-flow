@@ -7,7 +7,7 @@ import { droppedProjectPath } from "./project-navigation";
 /** 仅登记现有本机目录；拖入/选择/关闭不创建Task或启动执行。 */
 export function ProjectCreateDialog({ onClose, onCreated }: {
   /** 取消草稿并恢复原入口焦点；提交中不允许关闭。 */ onClose: () => void;
-  /** Engine确认登记成功后回传原项目，重复目录仍使用原身份。 */ onCreated: (project: import("./types").HarnessProject) => void;
+  /** Engine确认登记成功后回传原项目，重复目录仍使用原身份。 */ onCreated: (project: import("./types").LeadProject) => void;
 }) {
   const [cwd, setCwd] = useState(""), [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [hover, setHover] = useState(false), [checking, setChecking] = useState(false);

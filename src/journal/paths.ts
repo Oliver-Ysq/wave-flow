@@ -23,8 +23,8 @@ export function waveFlowHome(): string {
 /** 返回用户级 Run 档案根目录。root 仅供测试注入，生产调用不传。 */
 export function runsRoot(root = waveFlowHome()): string { return join(root, "runs"); }
 
-/** 返回独立 Harness 对话档案根目录；不得与 Workflow Run Journal 混用。 */
-export function harnessRunsRoot(root = waveFlowHome()): string { return join(root, "harness-runs"); }
+/** 返回独立 Lead 对话档案根目录；不得与 Workflow Run Journal 混用。 */
+export function leadRunsRoot(root = waveFlowHome()): string { return join(root, "lead-runs"); }
 
 /** 返回用户级运行目录。root 仅供测试注入，生产调用不传。 */
 export function runtimeRoot(root = waveFlowHome()): string { return join(root, "runtime"); }
@@ -39,13 +39,13 @@ export function runDirectory(root: string, runId: string): string {
   return directory;
 }
 
-/** 返回指定 Harness Run 的耐久目录；与 Workflow Run 使用相同 UUID 路径防穿越规则。 */
-export function harnessRunDirectory(root: string, harnessRunId: string): string {
-  validateRunId(harnessRunId);
+/** 返回指定 Lead Run 的耐久目录；与 Workflow Run 使用相同 UUID 路径防穿越规则。 */
+export function leadRunDirectory(root: string, leadRunId: string): string {
+  validateRunId(leadRunId);
   const resolvedRoot = resolve(root);
-  const directory = resolve(resolvedRoot, harnessRunId);
+  const directory = resolve(resolvedRoot, leadRunId);
   const fromRoot = relative(resolvedRoot, directory);
-  if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) throw new Error("Harness Run 目录超出状态根目录。 ");
+  if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) throw new Error("Lead Run 目录超出状态根目录。 ");
   return directory;
 }
 

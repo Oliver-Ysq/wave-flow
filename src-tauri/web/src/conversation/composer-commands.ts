@@ -1,4 +1,4 @@
-import type { HarnessAvailableCommand } from "../types";
+import type { LeadAvailableCommand } from "../types";
 
 /** 主控输入框斜杠菜单中的一条命令；token 是最终进入纯文本消息的精确文本。 */
 export type ComposerSlashCommand = {
@@ -34,11 +34,11 @@ const HIDDEN_ACP_COMMANDS = new Set(["compact", "autocompact"]);
  * 只展示 ACP 实际提供的内容；Codex 技能以 `$` 开头，其他 CLI 的命令按 `/name` 发送。
  */
 export function mergeManagedSkillCommands(
-  available: readonly HarnessAvailableCommand[],
+  available: readonly LeadAvailableCommand[],
   skills: readonly { readonly name: string; readonly description: string }[],
   cli: "codex" | "claude" | "dsh",
-): readonly HarnessAvailableCommand[] {
-  const merged: HarnessAvailableCommand[] = available.map(command => ({ ...command }));
+): readonly LeadAvailableCommand[] {
+  const merged: LeadAvailableCommand[] = available.map(command => ({ ...command }));
   const normalized = (name: string) => name.trim().replace(/^\$/, "").replace(/^\//, "");
   for (const skill of skills) {
     const index = merged.findIndex(command => {
@@ -53,7 +53,7 @@ export function mergeManagedSkillCommands(
 }
 
 export function buildComposerSlashCommands(
-  available: readonly HarnessAvailableCommand[],
+  available: readonly LeadAvailableCommand[],
 ): readonly ComposerSlashCommand[] {
   const seen = new Set([WAVE_FLOW_COMMAND.token]);
   // Codex 同时广告内置命令与 `$` 技能；菜单只保留技能，避免把 /plan、/status 等

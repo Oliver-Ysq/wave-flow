@@ -1,6 +1,6 @@
 import type { JsonObject } from "../shared/json";
-import type { HarnessSnapshot, WorkflowExecutionRecord } from "../harness/types";
-import type { HarnessProject } from "../harness/projects";
+import type { LeadSnapshot, WorkflowExecutionRecord } from "../lead/types";
+import type { LeadProject } from "../lead/projects";
 import type { CliRuntimeView, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import type { CliProbeStatus } from "../runtimes/cli-probe";
 import type { CurrentAttemptSummary, PhaseVisitSnapshot, RunSnapshot } from "../runtime/run-types";
@@ -53,8 +53,8 @@ export type DesktopStatusResponse = {
   readonly activeRuns: number;
   /** 等待人工协助的 Run 数量。 */
   readonly blockedRuns: number;
-  /** 正在生成回复的 Harness 回合数。 */
-  readonly activeHarnesses: number;
+  /** 正在生成回复的 Lead 回合数。 */
+  readonly activeLeads: number;
   /** ACP 不支持跨 Engine 认领、需要用户显式恢复的 Worker 数量。 */
   readonly acpWorkersNeedingResume: number;
 };
@@ -119,16 +119,16 @@ export type ResumeRunRequest = {
   readonly authorized: true;
 };
 
-/** 完成 Harness 会话请求；空对象表示无额外参数。 */
-export type CompleteHarnessRequest = Record<string, never>;
+/** 完成 Lead 会话请求；空对象表示无额外参数。 */
+export type CompleteLeadRequest = Record<string, never>;
 
-/** 创建只读 Harness 主控会话的 Desktop action 参数；不创建 Workflow Run 或 Worker。 */
-export type CreateHarnessRunRequest = {
+/** 创建只读 Lead 主控会话的 Desktop action 参数；不创建 Workflow Run 或 Worker。 */
+export type CreateLeadRunRequest = {
   /** 已选择的耐久项目 id；Engine 从 Project Store 获取 cwd。 */
   readonly projectId: string;
 };
-/** 首次发送创建 Harness；草稿文本只在浏览器内存中，Engine 仅在此 action 抵达后创建档案。 */
-export type StartHarnessConversationRequest = {
+/** 首次发送创建 Lead；草稿文本只在浏览器内存中，Engine 仅在此 action 抵达后创建档案。 */
+export type StartLeadConversationRequest = {
   /** 首条消息的图片暂存身份；默认空，沿用每条最多5个与图片能力校验。 */ readonly stagedAttachmentIds?: readonly string[];
   /** Task 创建重试 UUID，必填；重试保持原身份，无字段请求拒绝且不创建档案。 */
   readonly clientRequestId: string;
@@ -136,24 +136,24 @@ export type StartHarnessConversationRequest = {
   readonly title?: string;
   /** 已选择的耐久项目 id；Engine 从 Project Store 获取 cwd。 */
   readonly projectId: string;
-  /** 新会话的首条非空用户消息；成功后才产生 Harness manifest 与 Journal。 */
+  /** 新会话的首条非空用户消息；成功后才产生 Lead manifest 与 Journal。 */
   readonly text: string;
 };
 /** 创建侧边栏项目；cwd 会 realpath 校验，title 省略时取目录名。 */
-export type CreateHarnessProjectRequest = { readonly cwd: string; readonly title?: string };
+export type CreateLeadProjectRequest = { readonly cwd: string; readonly title?: string };
 /** 创建或查询单个侧边栏项目。 */
-export type HarnessProjectResponse = { readonly project: HarnessProject };
+export type LeadProjectResponse = { readonly project: LeadProject };
 /** 当前用户全部耐久项目。 */
-export type HarnessProjectListResponse = { readonly projects: readonly HarnessProject[] };
+export type LeadProjectListResponse = { readonly projects: readonly LeadProject[] };
 
-/** Harness 主控会话的 Engine 权威响应。 */
-export type HarnessRunResponse = { readonly harness: HarnessSnapshot };
-/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Harness 或 Journal。 */
-export type HarnessCommandCatalogResponse = { readonly commands: readonly import("../harness/types").HarnessAvailableCommand[] };
+/** Lead 主控会话的 Engine 权威响应。 */
+export type LeadRunResponse = { readonly lead: LeadSnapshot };
+/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Lead 或 Journal。 */
+export type LeadCommandCatalogResponse = { readonly commands: readonly import("../lead/types").LeadAvailableCommand[] };
 /** 当前用户的已耐久主控会话列表；不扫描、创建或接管 Workflow Run。 */
-export type HarnessRunListResponse = { readonly harnesses: readonly HarnessSnapshot[] };
+export type LeadRunListResponse = { readonly leads: readonly LeadSnapshot[] };
 /** 发送一条用户消息；响应确认 Engine 已耐久接收，完整消息由后续快照读取。 */
-export type HarnessMessageRequest = { readonly text: string; /** 客户端生成的 UUID，用于重试幂等；重复提交不重复入队或开回合。 */ readonly clientMessageId?: string; /** true 表示“立即发送”：中断当前回合后优先投递。 */ readonly immediate?: boolean; /** Engine 暂存区的待发送附件身份；发送时才耐久绑定，不传输路径。 */ readonly stagedAttachmentIds?: string[] };
+export type LeadMessageRequest = { readonly text: string; /** 客户端生成的 UUID，用于重试幂等；重复提交不重复入队或开回合。 */ readonly clientMessageId?: string; /** true 表示“立即发送”：中断当前回合后优先投递。 */ readonly immediate?: boolean; /** Engine 暂存区的待发送附件身份；发送时才耐久绑定，不传输路径。 */ readonly stagedAttachmentIds?: string[] };
 /** 用户明确接受最新草案；接受后 hash 冻结，仍不创建 Run。 */
 export type AcceptWorkflowRevisionRequest = { readonly revision: number };
 
@@ -163,8 +163,8 @@ export type CreateExecutionRequest = {
   readonly revision: number;
   /** 传给作者模块 run(args) 的 JSON-safe 输入；省略时为 {}。 */
   readonly input?: JsonObject;
-  /** 分配卡冻结的执行配置快照；Harness Execution 必填，缺失即拒绝创建。 */
-  readonly config?: import("../harness/types").ExecutionConfigSnapshot;
+  /** 分配卡冻结的执行配置快照；Lead Execution 必填，缺失即拒绝创建。 */
+  readonly config?: import("../lead/types").ExecutionConfigSnapshot;
 };
 
 /** executions.plan 的响应：枚举 Worker、已验证池与主控 Runtime 摘要，供分配卡渲染。 */
@@ -184,8 +184,8 @@ export type ExecutionPlanResponse = {
   readonly phaseTitles: readonly string[];
   /** 每个源码 agent() 调用一个展示示意（含动态 id）；不用于分配校验或运行节点定位。 */
   readonly previewAgents: readonly import("../workflow/extract-agents").PreviewAgent[];
-  /** 所属 Harness Run id。 */
-  readonly harnessRunId: string;
+  /** 所属 Lead Run id。 */
+  readonly leadRunId: string;
   /** 已接受冻结的 revision 序号。 */
   readonly revision: number;
   /** 静态枚举出的字面量 Worker；分配卡逐 Worker 展示。 */
@@ -215,14 +215,14 @@ export type ExecutionPlanResponse = {
   /** 每个 CLI 的用户偏好 runtime id；Engine 解析 cli → Runtime 时优先使用。 */
   readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>;
   /** 主控 Runtime（回退目标）；未设置时为 null，UI 必须阻止创建。 */
-  readonly harnessRuntime: import("../runtimes/types").CliRuntimeView | null;
+  readonly leadRuntime: import("../runtimes/types").CliRuntimeView | null;
 };
 
 /** Execution 创建、控制或答题后的权威响应。 */
 export type ExecutionResponse = {
   /** 原冻结源码静态无法枚举的调用数；只作进度分母提示，不代表实际节点数。 */
   readonly dynamicCount?:number;
-  /** Execution 登记事实；终态与摘要由 harness.execution_finished 固定。 */
+  /** Execution 登记事实；终态与摘要由 lead.execution_finished 固定。 */
   readonly execution: WorkflowExecutionRecord;
   /** Execution 内嵌 Run 的 Engine 权威快照；gates 字段携带决策门状态。 */
   readonly snapshot: RunSnapshot;
@@ -267,10 +267,10 @@ export type ExecutionAttemptResultsResponse = {
   }[];
 };
 
-/** Harness 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */
+/** Lead 顺序拥有的 Execution 登记列表；执行细节需按 executionId 单独读取。 */
 export type ExecutionListResponse = {
-  /** 所属 Harness Run id。 */
-  readonly harnessRunId: string;
+  /** 所属 Lead Run id。 */
+  readonly leadRunId: string;
   /** 按创建顺序排列的 Execution 登记。 */
   readonly executions: readonly WorkflowExecutionRecord[];
 };
@@ -292,7 +292,7 @@ export type CliRuntimeListResponse = {
   /** 每个 CLI 的 Worker 偏好 runtime id。 */
   readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>;
   /** 新建主控会话使用的 runtime id；未设置时为 null。 */
-  readonly harnessRuntimeId: string | null;
+  readonly leadRuntimeId: string | null;
   /** 设置页可展示的 runtime 列表。 */
   readonly runtimes: readonly CliRuntimeView[];
 };

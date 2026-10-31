@@ -63,7 +63,7 @@ export type ControlSocketHandler = (
 export function startControlSocket(options: {
   /** Engine 私有 scratch 根；通道目录在其下随机创建。 */
   readonly root: string;
-  /** 目录前缀，便于区分 Worker 与 Harness 通道。 */
+  /** 目录前缀，便于区分 Worker 与 Lead 通道。 */
   readonly prefix: string;
   /** 逐行处理请求；返回的 Promise 失败只影响该请求。 */
   readonly onLine: ControlSocketHandler;

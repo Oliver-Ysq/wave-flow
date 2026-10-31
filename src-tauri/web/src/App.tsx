@@ -21,7 +21,7 @@ import {
   persistRailWidth,
   railWidthFromDrag,
 } from "./rail-width";
-import { summaryBodyStartedAt } from "./conversation/harness-event-merge";
+import { summaryBodyStartedAt } from "./conversation/lead-event-merge";
 import {
   ConversationView,
 } from "./conversation/conversation-view";
@@ -60,22 +60,22 @@ import { ViewCache } from "./workbench-state";
 const COMMAND_CACHE_KEY = "wave-flow.available-commands.v1";
 
 /** 跨草稿缓存最近一次 ACP 命令目录；新任务首条消息前也能展示技能。 */
-function readCachedCommands(): HarnessAvailableCommand[] {
+function readCachedCommands(): LeadAvailableCommand[] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(COMMAND_CACHE_KEY) ?? "[]");
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is HarnessAvailableCommand => Boolean(item) && typeof item === "object"
-      && typeof (item as HarnessAvailableCommand).name === "string"
-      && typeof (item as HarnessAvailableCommand).description === "string"
-      && (typeof (item as HarnessAvailableCommand).inputHint === "string" || (item as HarnessAvailableCommand).inputHint === null));
+    return parsed.filter((item): item is LeadAvailableCommand => Boolean(item) && typeof item === "object"
+      && typeof (item as LeadAvailableCommand).name === "string"
+      && typeof (item as LeadAvailableCommand).description === "string"
+      && (typeof (item as LeadAvailableCommand).inputHint === "string" || (item as LeadAvailableCommand).inputHint === null));
   } catch { return []; }
 }
 /** 判断目录是否含真实技能；普通 ACP 内置命令不能覆盖 ACP 技能目录。 */
-function hasSkillCommands(commands: readonly HarnessAvailableCommand[]): boolean {
+function hasSkillCommands(commands: readonly LeadAvailableCommand[]): boolean {
   return commands.some((command) => command.name.startsWith("$"));
 }
 
-function rememberCommands(commands: readonly HarnessAvailableCommand[]): void {
+function rememberCommands(commands: readonly LeadAvailableCommand[]): void {
   if (commands.length === 0) return;
   try { localStorage.setItem(COMMAND_CACHE_KEY, JSON.stringify(commands)); } catch { /* 缓存失败不影响当前菜单。 */ }
 }
@@ -90,18 +90,18 @@ import { LocalWorkflowPreview } from "./local-workflow-preview";
 import { PersistedDetails } from "./persisted-details";
 import {
   acceptEnvelope,
-  applyHarnessEventToSnapshot,
+  applyLeadEventToSnapshot,
   createStreamTracker,
-} from "./conversation/harness-event-merge";
+} from "./conversation/lead-event-merge";
 import type {
   CliRuntime,
   CliRuntimeListResponse,
   DesktopStatusResponse,
   ExecutionResponse,
-  HarnessDecision,
-  HarnessAvailableCommand,
-  HarnessProject,
-  HarnessSnapshot,
+  LeadDecision,
+  LeadAvailableCommand,
+  LeadProject,
+  LeadSnapshot,
   PhaseVisit,
   RunSnapshot,
   RuntimeCli,
@@ -143,15 +143,15 @@ function announceFirstFrame(): void {
 }
 
 /** 执行摘要展示用版本序号；缺失方案时返回 null，不从 revision 数字冒充展示版本。 */
-function executionVersion(task: HarnessSnapshot, revision: number): number | null {
+function executionVersion(task: LeadSnapshot, revision: number): number | null {
   const found = task.workflowRevisions.find((item) => item.revision === revision);
   return found ? visibleVersion(task, found) : null;
 }
 
 
 export function App() {
-  const [harnesses, setHarnesses] = useState<HarnessSnapshot[]>([]);
-  const [projects, setProjects] = useState<HarnessProject[]>([]);
+  const [leads, setLeads] = useState<LeadSnapshot[]>([]);
+  const [projects, setProjects] = useState<LeadProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
@@ -173,22 +173,22 @@ export function App() {
       });
     };
   };
-  const [harness, setHarness] = useState<HarnessSnapshot | null>(null);
+  const [lead, setLead] = useState<LeadSnapshot | null>(null);
   /** 已打开过的最新方案身份；输入框上方的待确认条只对尚未打开的新版本出现。 */
   const [openedPlanKey, setOpenedPlanKey] = useState<string | null>(null);
   /** 上一次看到的最新方案身份；用于识别“正在看旧版时新版本到达”。 */
   const latestPlanKeyRef = useRef<string | null>(null);
   /** 当前主控 ACP 会话广告的斜杠命令/技能；只来自事件，不进入快照。 */
-  const [acpCommands, setAcpCommands] = useState<HarnessAvailableCommand[]>(readCachedCommands);
+  const [acpCommands, setAcpCommands] = useState<LeadAvailableCommand[]>(readCachedCommands);
   const [archiveConfirmation, setArchiveConfirmation] = useState<{
-    harnessRunId: string;
+    leadRunId: string;
     count: number;
   } | null>(null);
-  const [archiveTarget, setArchiveTarget] = useState<HarnessSnapshot | null>(
+  const [archiveTarget, setArchiveTarget] = useState<LeadSnapshot | null>(
     null,
   );
   /** 普通归档不确认、不放弃总结或候选；后端门禁仍是权威。 */
-  async function archiveTask(target: HarnessSnapshot) {
+  async function archiveTask(target: LeadSnapshot) {
     if (
       target.impactSummaries?.some(
         (item) => !item.supersededBy && item.status !== "completed",
@@ -197,26 +197,26 @@ export function App() {
       setArchiveTarget(target);
       return;
     }
-    const id = target.harnessRunId,
-      finishBusy = beginBusy(`task:${id}`, "complete-harness");
+    const id = target.leadRunId,
+      finishBusy = beginBusy(`task:${id}`, "complete-lead");
     try {
-      await taskMutation(id, () => api.completeHarness(id));
-      if (harnessRef.current?.harnessRunId !== id) return;
-      setHarness(null);
+      await taskMutation(id, () => api.completeLead(id));
+      if (leadRef.current?.leadRunId !== id) return;
+      setLead(null);
       setDraftProjectId(target.projectId);
       setSelectedProjectId(target.projectId);
       setRoute({ kind: "conversation" });
-      setHarnessText("");
+      setLeadText("");
       setWorkflowPanelOpen(false);
-      setHarnessView("active");
+      setLeadView("active");
     } catch (cause) {
       setError(String(cause));
     } finally {
       finishBusy();
     }
   }
-  useEffect(() => setArchiveConfirmation(null), [harness?.harnessRunId]);
-  /** 新会话仅是浏览器草稿；首次发送前没有 Harness id、目录或 Journal。 */
+  useEffect(() => setArchiveConfirmation(null), [lead?.leadRunId]);
+  /** 新会话仅是浏览器草稿；首次发送前没有 Lead id、目录或 Journal。 */
   const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
 
   const [creatingProject, setCreatingProject] = useState(false);
@@ -280,7 +280,7 @@ export function App() {
     }
   }, [adjustFocus, route.kind]);
   const [localRevision, setLocalRevision] = useState<null | {
-    harnessRunId: string;
+    leadRunId: string;
     baseRevision: number;
     path: string;
     input: Record<string, unknown>;
@@ -296,7 +296,7 @@ export function App() {
   } | null>(null);
   /** 待发送图片按任务/项目草稿隔离；切换保留，成功只清除本次已接受的图片。 */
   const attachmentOwner =
-    harness?.harnessRunId ??
+    lead?.leadRunId ??
     `draft:${draftProjectId ?? selectedProjectId ?? "none"}`;
   const [attachmentDrafts, setAttachmentDrafts] = useState<
     Map<string, import("./types").StagedAttachment[]>
@@ -417,23 +417,23 @@ export function App() {
   }
   const routeRef = useRef(route);
   routeRef.current = route;
-  const harnessRef = useRef(harness);
-  harnessRef.current = harness;
+  const leadRef = useRef(lead);
+  leadRef.current = lead;
   const detailToken = useRef(0);
   const requestFence = useRef(new RequestFence());
   const unreadTracker = useRef(new UnreadTracker());
   const prepareRevisionDraft = (
-    task: HarnessSnapshot,
+    task: LeadSnapshot,
     revision: import("./types").WorkflowRevision,
     abandoned: boolean,
   ) => {
     setAdjustContext({
-      taskId: task.harnessRunId,
+      taskId: task.leadRunId,
       revision: revision.revision,
       abandoned,
     });
-    if (!harnessText.trim())
-      updateHarnessText(
+    if (!leadText.trim())
+      updateLeadText(
         abandoned ? "原方案已放弃，我希望新方案……" : "我希望调整……",
       );
     setRoute({ kind: "conversation" });
@@ -441,26 +441,26 @@ export function App() {
   };
   const [, refreshRead] = useState(0);
   const markRead = useCallback((owner: string, ids: string[]) => {
-    const task = harnessRef.current;
-    if (!task || task.harnessRunId !== owner) return;
+    const task = leadRef.current;
+    if (!task || task.leadRunId !== owner) return;
     unreadTracker.current.mark(owner, ids);
     refreshRead((value) => value + 1);
   }, []);
   // 方案/执行详情本身就在展示该身份：打开即视为已读，不要求用户再回对话滚一遍。
   useEffect(() => {
-    if (!harness || route.kind !== "workflow") return;
+    if (!lead || route.kind !== "workflow") return;
     const ids = [
       `revision:${route.revision}`,
       ...(route.executionId ? [`execution:${route.executionId}`] : []),
     ];
-    markRead(harness.harnessRunId, ids);
-  }, [harness, route, markRead]);
+    markRead(lead.leadRunId, ids);
+  }, [lead, route, markRead]);
   const unreadCounts = new Map(
-    harnesses.map((task) => [
-      task.harnessRunId,
+    leads.map((task) => [
+      task.leadRunId,
       unreadTracker.current.count(
-        harness?.harnessRunId === task.harnessRunId
-          ? newerTaskSnapshot(task, harness)
+        lead?.leadRunId === task.leadRunId
+          ? newerTaskSnapshot(task, lead)
           : task,
         false,
       ),
@@ -471,7 +471,7 @@ export function App() {
   const previousTask = useRef<string | null>(null);
   useEffect(() => {
     navigationToken.current += 1;
-    const currentTask = harness?.harnessRunId ?? null;
+    const currentTask = lead?.leadRunId ?? null;
     if (previousTask.current !== currentTask) {
       workflowLocations.current.clear();
       previousTask.current = currentTask;
@@ -484,27 +484,27 @@ export function App() {
       workflowLocations.current.delete(
         workflowLocations.current.keys().next().value!,
       );
-  }, [route, harness?.harnessRunId, draftProjectId]);
+  }, [route, lead?.leadRunId, draftProjectId]);
   const workflowPanelOpen = route.kind === "workflow";
   useEffect(() => {
     // 切换 Task 时清空“已看过”和增量基线，避免把另一个任务的旧版本误判为新到达。
     setOpenedPlanKey(null);
-    const latest = harness?.workflowRevisions.at(-1);
+    const latest = lead?.workflowRevisions.at(-1);
     latestPlanKeyRef.current = latest
-      ? `${harness!.harnessRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
+      ? `${lead!.leadRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
       : null;
-  }, [harness?.harnessRunId]);
+  }, [lead?.leadRunId]);
   useEffect(() => {
-    const latest = harness?.workflowRevisions.at(-1);
+    const latest = lead?.workflowRevisions.at(-1);
     const latestKey = latest
-      ? `${harness!.harnessRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
+      ? `${lead!.leadRunId}:${latest.cardId ?? `legacy:${latest.revision}`}:${latest.revision}`
       : null;
     const previous = latestPlanKeyRef.current;
     latestPlanKeyRef.current = latestKey;
     if (!latest || !latestKey || !previous || previous === latestKey) return;
     // 用户正在看旧版方案时新修订到达：直接关闭详情，再打开默认落到最新版。
     if (!workflowPanelOpen || route.kind !== "workflow" || route.section !== "plan") return;
-    const viewed = harness!.workflowRevisions.find(
+    const viewed = lead!.workflowRevisions.find(
       (item) =>
         (item.cardId ?? `legacy:${item.revision}`) === route.cardId &&
         item.revision === route.revision,
@@ -516,7 +516,7 @@ export function App() {
     ) {
       setWorkflowPanelOpen(false);
     }
-  }, [harness, route, workflowPanelOpen]);
+  }, [lead, route, workflowPanelOpen]);
   /** 详情面包屑只标示当前页签，避免整句用户输入挤占头部。 */
   const sectionLabel =
     route.kind === "workflow"
@@ -537,7 +537,7 @@ export function App() {
         wasWorkflowOpen.current = workflowPanelOpen;
         return;
       }
-      if (prior?.taskId === (harness?.harnessRunId ?? null)) {
+      if (prior?.taskId === (lead?.leadRunId ?? null)) {
         const target = prior.button.isConnected
           ? prior.button
           : document.querySelector<HTMLElement>(".task-current-actions button");
@@ -545,7 +545,7 @@ export function App() {
       }
     }
     wasWorkflowOpen.current = workflowPanelOpen;
-  }, [workflowPanelOpen, harness?.harnessRunId]);
+  }, [workflowPanelOpen, lead?.leadRunId]);
   // 大弹窗支持 Esc 返回对话；其上若还有别的弹层（预置选择、清理确认、归档确认等），先让内层处理。
   useEffect(() => {
     if (!workflowPanelOpen) return;
@@ -580,18 +580,18 @@ export function App() {
     if (!open) setRoute({ kind: "conversation" });
   }
   function openWorkflow(
-    task: HarnessSnapshot,
+    task: LeadSnapshot,
     revision: import("./types").WorkflowRevision,
     section?: "plan" | "execution" | "results",
     executionId?: string,
   ) {
     setTemplatePicker(false);
-    setHarness(task);
+    setLead(task);
     setDraftProjectId(null);
     const cardId = revision.cardId ?? `legacy:${revision.revision}`;
     const saved =
-      harnessRef.current?.harnessRunId === task.harnessRunId
-        ? workflowLocations.current.get(`${task.harnessRunId}:${cardId}`)
+      leadRef.current?.leadRunId === task.leadRunId
+        ? workflowLocations.current.get(`${task.leadRunId}:${cardId}`)
         : undefined;
     const linked = task.executions.find(
       (item) => item.revision === revision.revision,
@@ -604,7 +604,7 @@ export function App() {
         ? saved
         : {
             kind: "workflow",
-            taskId: task.harnessRunId,
+            taskId: task.leadRunId,
             cardId,
             revision: revision.revision,
             section: section ?? (linked ? "execution" : "plan"),
@@ -613,36 +613,36 @@ export function App() {
     setRoute(next);
     setNavOpen(false);
     setSelectedExecutionId(next.executionId ?? null);
-    if (next.section === "plan") setOpenedPlanKey(`${task.harnessRunId}:${cardId}:${revision.revision}`);
+    if (next.section === "plan") setOpenedPlanKey(`${task.leadRunId}:${cardId}:${revision.revision}`);
     setExecutionDetail(null);
   }
-  const [harnessText, setHarnessText] = useState("");
-  /** 最近一次 Harness 条目事件到达时间；切换会话或重读快照时重置。 */
+  const [leadText, setLeadText] = useState("");
+  /** 最近一次 Lead 条目事件到达时间；切换会话或重读快照时重置。 */
   const [lastEventAt, setLastEventAt] = useState<number | null>(null);
   /** 输入框草稿按会话/项目缓存；每次击键即写入，切换时按键恢复。 */
   const draftCacheRef = useRef(new Map<string, string>());
   const draftKey =
-    harness?.harnessRunId ??
+    lead?.leadRunId ??
     `draft:${draftProjectId ?? selectedProjectId ?? "none"}`;
-  const updateHarnessText = useCallback(
+  const updateLeadText = useCallback(
     (value: string) => {
       draftCacheRef.current.set(draftKey, value);
       if (draftCacheRef.current.size > 64)
         draftCacheRef.current.delete(
           draftCacheRef.current.keys().next().value!,
         );
-      setHarnessText(value);
+      setLeadText(value);
     },
     [draftKey],
   );
   useEffect(() => {
-    setHarnessText(draftCacheRef.current.get(draftKey) ?? "");
+    setLeadText(draftCacheRef.current.get(draftKey) ?? "");
   }, [draftKey]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** Runtime 列表只来自 Engine；页面不能把发现结果当作已验证或默认选择。 */
   const [runtimeState, setRuntimeState] =
     useState<CliRuntimeListResponse | null>(null);
-  const harnessRuntimeId = runtimeState?.harnessRuntimeId ?? null;
+  const leadRuntimeId = runtimeState?.leadRuntimeId ?? null;
   /** 托管技能库中的 skill；用于把设置页导入的 skill 合并进斜线菜单。 */
   const [managedSkills, setManagedSkills] = useState<SkillLibraryStatus["skills"]>([]);
   useEffect(() => {
@@ -667,7 +667,7 @@ export function App() {
     };
   }, []);
   const controllerCli: "codex" | "claude" | "dsh" | null = (() => {
-    const runtimeId = harness?.runtime?.runtimeId ?? harnessRuntimeId;
+    const runtimeId = lead?.runtime?.runtimeId ?? leadRuntimeId;
     const cli = runtimeState?.runtimes.find(runtime => runtime.runtimeId === runtimeId)?.cli;
     return cli === "codex" || cli === "claude" || cli === "dsh" ? cli : null;
   })();
@@ -678,44 +678,44 @@ export function App() {
   );
   /** 命令目录与运行时绑定；切换主控 CLI 后必须丢弃旧缓存并重新发现。 */
   const catalogProbe = useRef<string | null>(null);
-  const previousHarnessRuntimeId = useRef<string | null | undefined>(undefined);
+  const previousLeadRuntimeId = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (previousHarnessRuntimeId.current === undefined) {
-      previousHarnessRuntimeId.current = harnessRuntimeId;
+    if (previousLeadRuntimeId.current === undefined) {
+      previousLeadRuntimeId.current = leadRuntimeId;
       // 启动时缓存没有 runtime 身份；清掉后按当前 runtime 重新发现，避免沿用旧 CLI 的技能。
       setAcpCommands([]);
       catalogProbe.current = null;
       try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞启动。 */ }
       return;
     }
-    if (previousHarnessRuntimeId.current === harnessRuntimeId) return;
-    previousHarnessRuntimeId.current = harnessRuntimeId;
+    if (previousLeadRuntimeId.current === leadRuntimeId) return;
+    previousLeadRuntimeId.current = leadRuntimeId;
     setAcpCommands([]);
     catalogProbe.current = null;
     try { localStorage.removeItem(COMMAND_CACHE_KEY); } catch { /* 缓存清理失败不阻塞切换。 */ }
-  }, [harnessRuntimeId]);
+  }, [leadRuntimeId]);
   useEffect(() => {
-    const known = harnesses
-      .filter((item) => !harnessRuntimeId || item.runtime?.runtimeId === harnessRuntimeId)
+    const known = leads
+      .filter((item) => !leadRuntimeId || item.runtime?.runtimeId === leadRuntimeId)
       .flatMap((item) => item.availableCommands ?? []);
     if (known.length > 0) {
       setAcpCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(known) ? current : known);
       if (hasSkillCommands(known)) rememberCommands(known);
     }
-  }, [harnesses, harnessRuntimeId]);
+  }, [leads, leadRuntimeId]);
   useEffect(() => {
     const projectId = draftProjectId ?? selectedProjectId;
-    const probeKey = `${harnessRuntimeId ?? "none"}:${projectId ?? "none"}`;
-    if (!projectId || harness || acpCommands.length > 0 || catalogProbe.current === probeKey) return;
+    const probeKey = `${leadRuntimeId ?? "none"}:${projectId ?? "none"}`;
+    if (!projectId || lead || acpCommands.length > 0 || catalogProbe.current === probeKey) return;
     catalogProbe.current = probeKey;
     let cancelled = false;
-    void api.harnessCommandCatalog(projectId).then((response) => {
+    void api.leadCommandCatalog(projectId).then((response) => {
       if (cancelled || response.commands.length === 0) return;
       setAcpCommands([...response.commands]);
       rememberCommands(response.commands);
     }).catch(() => { /* 目录发现失败时保留 /wave-flow；不阻塞任务创建。 */ });
     return () => { cancelled = true; };
-  }, [draftProjectId, selectedProjectId, harness, acpCommands.length, harnessRuntimeId]);
+  }, [draftProjectId, selectedProjectId, lead, acpCommands.length, leadRuntimeId]);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
   /** 首次发现是否已完成；未完成时不把"空列表"渲染成"没有可用工具"的错误态。 */
   const [runtimeScanCompleted, setRuntimeScanCompleted] = useState(false);
@@ -728,13 +728,13 @@ export function App() {
   /** 当前详情 revision 的动态节点数；plan 不可用或为 0 时按 0 处理。 */
   const [executionDynamicCount, setExecutionDynamicCount] = useState(0);
   useEffect(() => {
-    if (!harness || !executionDetail) return;
+    if (!lead || !executionDetail) return;
     setExecutionDynamicCount(executionDetail.dynamicCount ?? 0);
-  }, [harness?.harnessRunId, executionDetail?.execution.revision]);
+  }, [lead?.leadRunId, executionDetail?.execution.revision]);
   /** 分配卡当前服务的已接受 revision；非 null 时展示两卡横滑流程。 */
   const [theme, setTheme] = useState<ColorTheme>(readColorTheme);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
-  const [harnessView, setHarnessView] = useState<"active" | "completed">(
+  const [leadView, setLeadView] = useState<"active" | "completed">(
     "active",
   );
 
@@ -775,16 +775,16 @@ export function App() {
   const refresh = useCallback(async () => {
     const valid = requestFence.current.begin("task-list");
     try {
-      const [harnessList, projectList, runtimes] = await Promise.all([
-        api.listHarnesses(),
+      const [leadList, projectList, runtimes] = await Promise.all([
+        api.listLeads(),
         api.projects(),
         api.cliRuntimes(),
       ]);
       if (!valid()) return;
-      setHarnesses((current) =>
-        harnessList.harnesses.map((next) => {
+      setLeads((current) =>
+        leadList.leads.map((next) => {
           const old = current.find(
-            (item) => item.harnessRunId === next.harnessRunId,
+            (item) => item.leadRunId === next.leadRunId,
           );
           return old ? newerTaskSnapshot(old, next) : next;
         }),
@@ -844,8 +844,8 @@ export function App() {
         const summary =
           status.activeRuns > 0
             ? `${status.activeRuns} 个运行中${status.blockedRuns ? `，${status.blockedRuns} 个等待决定` : ""}`
-            : status.activeHarnesses > 0
-              ? `${status.activeHarnesses} 个 Wave Flow 会话进行中`
+            : status.activeLeads > 0
+              ? `${status.activeLeads} 个 Wave Flow 会话进行中`
               : "后台服务待命";
         await invoke("update_tray_summary", { summary });
       } catch {
@@ -859,25 +859,25 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const taskBusy = harness
-    ? (busyOperations[`task:${harness.harnessRunId}`] ?? null)
+  const taskBusy = lead
+    ? (busyOperations[`task:${lead.leadRunId}`] ?? null)
     : null;
   const executionBusy = selectedExecutionId
     ? (busyOperations[`execution:${selectedExecutionId}`] ?? null)
     : null;
   useEffect(() => {
-    if (!harness?.harnessRunId) return;
+    if (!lead?.leadRunId) return;
     let active = true;
     let request = 0;
-    const refreshHarness = () => {
+    const refreshLead = () => {
       const token = ++request;
-      const valid = requestFence.current.begin(`task:${harness.harnessRunId}`);
+      const valid = requestFence.current.begin(`task:${lead.leadRunId}`);
       void api
-        .harness(harness.harnessRunId)
+        .lead(lead.leadRunId)
         .then((response) => {
           if (active && token === request && valid())
-            setHarness((current) =>
-              current ? newerTaskSnapshot(current, response.harness) : current,
+            setLead((current) =>
+              current ? newerTaskSnapshot(current, response.lead) : current,
             );
         })
         .catch((cause) => {
@@ -885,34 +885,34 @@ export function App() {
             setError(cause instanceof Error ? cause.message : String(cause));
         });
     };
-    refreshHarness();
+    refreshLead();
     // 事件流为主通道；4 秒轮询只是断帧兜底。
-    const timer = window.setInterval(refreshHarness, 4_000);
+    const timer = window.setInterval(refreshLead, 4_000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [harness?.harnessRunId]);
+  }, [lead?.leadRunId]);
 
   /** Engine 事件驱动会话增量更新；条目先耐久后发布，事件与快照同源。 */
   useEffect(() => {
-    const harnessRunId = harness?.harnessRunId;
-    if (!harnessRunId) return;
+    const leadRunId = lead?.leadRunId;
+    if (!leadRunId) return;
     const tracker = createStreamTracker();
     let disposed = false;
     setLastEventAt(null);
     const resync = () => {
-      const valid = requestFence.current.begin(`task:${harnessRunId}`);
+      const valid = requestFence.current.begin(`task:${leadRunId}`);
       void api
-        .harness(harnessRunId)
+        .lead(leadRunId)
         .then((response) => {
           if (disposed || !valid()) return;
-          setHarness((current) =>
-            current ? newerTaskSnapshot(current, response.harness) : current,
+          setLead((current) =>
+            current ? newerTaskSnapshot(current, response.lead) : current,
           );
           // 命令目录是瞬时字段，防倒退合并可能保留旧快照；从权威响应刷新并跨草稿缓存。
-          if (response.harness.availableCommands?.length) {
-            const nextCommands = response.harness.availableCommands;
+          if (response.lead.availableCommands?.length) {
+            const nextCommands = response.lead.availableCommands;
             setAcpCommands((current) => current.length > 0 && hasSkillCommands(current) && !hasSkillCommands(nextCommands) ? current : [...nextCommands]);
             if (hasSkillCommands(nextCommands)) rememberCommands(nextCommands);
           }
@@ -922,8 +922,8 @@ export function App() {
     };
     const unlisten = api.listenEngineEvents((envelope) => {
       if (disposed) return;
-      if (envelope.frame.stream !== "harness") return;
-      if (envelope.frame.harnessRunId !== harnessRunId) return;
+      if (envelope.frame.stream !== "lead") return;
+      if (envelope.frame.leadRunId !== leadRunId) return;
       if (tracker.generation !== -1 && tracker.generation < envelope.generation)
         requestFence.current.advance();
       const decision = acceptEnvelope(tracker, envelope);
@@ -934,7 +934,7 @@ export function App() {
         return;
       }
       const event = envelope.frame.event;
-      requestFence.current.begin(`task:${harnessRunId}`);
+      requestFence.current.begin(`task:${leadRunId}`);
       if (event.type === "commands_changed") {
         // ACP 命令目录是会话内存态，不触发快照重读；只更新斜杠菜单数据源。
         if (event.commands.length > 0) {
@@ -955,9 +955,9 @@ export function App() {
         resync();
         return;
       }
-      setHarness((current) =>
-        current && current.harnessRunId === harnessRunId
-          ? applyHarnessEventToSnapshot(current, event)
+      setLead((current) =>
+        current && current.leadRunId === leadRunId
+          ? applyLeadEventToSnapshot(current, event)
           : current,
       );
       setLastEventAt(Date.now());
@@ -966,36 +966,36 @@ export function App() {
       disposed = true;
       void unlisten.then((release) => release());
     };
-  }, [harness?.harnessRunId]);
+  }, [lead?.leadRunId]);
 
-  function beginHarnessDraft(projectId = selectedProjectId) {
-    setHarnessView("active");
+  function beginLeadDraft(projectId = selectedProjectId) {
+    setLeadView("active");
     if (!projectId) return;
     setSelectedProjectId(projectId);
     setDraftProjectId(projectId);
-    setHarness(null);
-    setHarnessText("");
+    setLead(null);
+    setLeadText("");
     createRequest.current = null;
     setWorkflowPanelOpen(false);
     setError(null);
   }
-  async function sendHarness(immediate = false) {
+  async function sendLead(immediate = false) {
     if (
-      !harnessText.trim() ||
+      !leadText.trim() ||
       sending.current ||
       stagingOwner === attachmentOwner
     )
       return;
     sending.current = true;
-    const owner = harness?.harnessRunId;
-    const text = harnessText;
+    const owner = lead?.leadRunId;
+    const text = leadText;
     const context = adjustContext?.taskId === owner ? adjustContext : null;
     const message = context
       ? `${context.abandoned ? "第 " + context.revision + " 版方案已放弃，请按以下要求重新设计" : "请调整工作流第 " + context.revision + " 版"}：\n${text}`
       : text;
     const pageToken = navigationToken.current;
     try {
-      if (harness) {
+      if (lead) {
         // 同一份未确认草稿重试复用同一消息 id：Engine 幂等去重，重复点击/重试不产生第二条。
         const attachmentIds = pendingAttachments
           .map((item) => item.stagedId)
@@ -1014,8 +1014,8 @@ export function App() {
           };
         const clientMessageId = pendingMessage.current.id;
         const stagedIds = pendingAttachments.map((item) => item.stagedId);
-        const sent = await api.sendHarnessMessage(
-          harness.harnessRunId,
+        const sent = await api.sendLeadMessage(
+          lead.leadRunId,
           message,
           {
             clientMessageId,
@@ -1024,8 +1024,8 @@ export function App() {
           },
         );
         if (
-          sent.harness.messages.some((item) => item.id === clientMessageId) ||
-          sent.harness.messageQueue.some(
+          sent.lead.messages.some((item) => item.id === clientMessageId) ||
+          sent.lead.messageQueue.some(
             (item) => item.message.id === clientMessageId,
           )
         ) {
@@ -1038,12 +1038,12 @@ export function App() {
         if (context) setAdjustContext(null);
         if (draftCacheRef.current.get(owner!) === text)
           draftCacheRef.current.set(owner!, "");
-        const next = (await api.harness(owner!)).harness;
-        if (harnessRef.current?.harnessRunId === owner) {
-          setHarness((current) =>
+        const next = (await api.lead(owner!)).lead;
+        if (leadRef.current?.leadRunId === owner) {
+          setLead((current) =>
             current ? newerTaskSnapshot(current, next) : current,
           );
-          setHarnessText(draftCacheRef.current.get(owner!) ?? "");
+          setLeadText(draftCacheRef.current.get(owner!) ?? "");
         }
       } else {
         const projectId = draftProjectId ?? selectedProjectId;
@@ -1057,32 +1057,32 @@ export function App() {
           undefined,
           stagedIds,
         );
-        setHarnesses((current) => [
-          response.harness,
+        setLeads((current) => [
+          response.lead,
           ...current.filter(
-            (item) => item.harnessRunId !== response.harness.harnessRunId,
+            (item) => item.leadRunId !== response.lead.leadRunId,
           ),
         ]);
         if (
-          response.harness.messages.some(
+          response.lead.messages.some(
             (item) => item.role === "user" && item.attachments?.length,
           )
         )
           setPendingAttachments((current) =>
             current.filter((item) => !stagedIds.includes(item.stagedId)),
           );
-        if (navigationToken.current === pageToken && !harnessRef.current) {
+        if (navigationToken.current === pageToken && !leadRef.current) {
           // 创建失败保留原图预览到原任务，后续显式重试使用manifest冻结的原身份。
           setAttachmentDrafts((current) => {
             const next = new Map(current),
               remaining = next.get(attachmentOwner);
             if (remaining?.length)
-              next.set(response.harness.harnessRunId, remaining);
+              next.set(response.lead.leadRunId, remaining);
             next.delete(attachmentOwner);
             return next;
           });
-          setHarness(response.harness);
-          updateHarnessText("");
+          setLead(response.lead);
+          updateLeadText("");
           setDraftProjectId(null);
         }
       }
@@ -1094,19 +1094,19 @@ export function App() {
   }
   const selectExecution = useCallback(
     async (executionId: string, attempt?: number) => {
-      if (!harness) return;
-      const execution = harness.executions.find(
+      if (!lead) return;
+      const execution = lead.executions.find(
         (item) => item.executionId === executionId,
       );
-      const revision = harness.workflowRevisions.find(
+      const revision = lead.workflowRevisions.find(
         (item) => item.revision === execution?.revision,
       );
       if (revision) {
-        openWorkflow(harness, revision, "execution", executionId);
+        openWorkflow(lead, revision, "execution", executionId);
         if (attempt)
           setRoute({
             kind: "workflow",
-            taskId: harness.harnessRunId,
+            taskId: lead.leadRunId,
             cardId: revision.cardId ?? `legacy:${revision.revision}`,
             revision: revision.revision,
             section: "execution",
@@ -1115,20 +1115,20 @@ export function App() {
           });
       }
     },
-    [harness],
+    [lead],
   );
   useEffect(() => {
     if (
-      !harness ||
+      !lead ||
       !selectedExecutionId ||
       route.kind !== "workflow" ||
-      route.taskId !== harness.harnessRunId
+      route.taskId !== lead.leadRunId
     )
       return;
     let active = true;
     let requestPending = false;
     setExecutionDetail(null);
-    const owner = harness.harnessRunId;
+    const owner = lead.leadRunId;
     const reload = () => {
       // 大证据响应可能超过轮询间隔；不得用新请求持续作废旧响应，否则页面永远饥饿。
       if (requestPending) return;
@@ -1138,13 +1138,13 @@ export function App() {
         `execution:${owner}:${selectedExecutionId}`,
       );
       void api
-        .execution(harness.harnessRunId, selectedExecutionId)
+        .execution(lead.leadRunId, selectedExecutionId)
         .then((value) => {
           if (
             active &&
             valid() &&
             token === detailToken.current &&
-            harnessRef.current?.harnessRunId === owner
+            leadRef.current?.leadRunId === owner
           )
             setExecutionDetail(value);
         })
@@ -1161,21 +1161,21 @@ export function App() {
       active = false;
       window.clearInterval(fallback);
     };
-  }, [harness?.harnessRunId, selectedExecutionId, route.kind]);
+  }, [lead?.leadRunId, selectedExecutionId, route.kind]);
   async function finishAssignment(detail: ExecutionResponse) {
-    if (!harness) return;
-    const owner = harness.harnessRunId;
-    const next = (await api.harness(owner)).harness;
+    if (!lead) return;
+    const owner = lead.leadRunId;
+    const next = (await api.lead(owner)).lead;
     const executionRevision = next.workflowRevisions.find(
       (item) => item.revision === detail.execution.revision,
     );
     if (
-      harnessRef.current?.harnessRunId !== owner ||
+      leadRef.current?.leadRunId !== owner ||
       routeRef.current.kind !== "workflow" ||
       executionRevision?.cardId !== routeRef.current.cardId
     )
       return;
-    setHarness((current) =>
+    setLead((current) =>
       current ? newerTaskSnapshot(current, next) : current,
     );
     setExecutionDetail(detail);
@@ -1192,27 +1192,27 @@ export function App() {
   /** 所有 Task mutation 回包共享同资源门禁；后台动作完成不改变当前导航。 */
   async function taskMutation(
     owner: string,
-    operation: () => Promise<{ harness: HarnessSnapshot }>,
+    operation: () => Promise<{ lead: LeadSnapshot }>,
   ) {
     const valid = requestFence.current.begin(`task:${owner}`);
     const response = await operation();
     if (valid())
-      setHarnesses((current) =>
+      setLeads((current) =>
         current.map((item) =>
-          item.harnessRunId === owner ? response.harness : item,
+          item.leadRunId === owner ? response.lead : item,
         ),
       );
-    if (valid() && harnessRef.current?.harnessRunId === owner)
-      setHarness((current) =>
-        current ? newerTaskSnapshot(current, response.harness) : current,
+    if (valid() && leadRef.current?.leadRunId === owner)
+      setLead((current) =>
+        current ? newerTaskSnapshot(current, response.lead) : current,
       );
     return response;
   }
   async function controlExecution(
     action: "pause" | "recover" | "stop" | "resume",
   ) {
-    if (!harness || !executionDetail) return;
-    const owner = harness.harnessRunId;
+    if (!lead || !executionDetail) return;
+    const owner = lead.leadRunId;
     const executionId = executionDetail.execution.executionId;
     const valid = requestFence.current.begin(
       `execution:${owner}:${executionId}`,
@@ -1238,14 +1238,14 @@ export function App() {
           : response;
       if (
         valid() &&
-        harnessRef.current?.harnessRunId === owner &&
+        leadRef.current?.leadRunId === owner &&
         routeRef.current.kind === "workflow" &&
         routeRef.current.executionId === detail.execution.executionId
       )
         setExecutionDetail(detail);
-      const next = (await api.harness(owner)).harness;
-      if (harnessRef.current?.harnessRunId === owner)
-        setHarness((current) =>
+      const next = (await api.lead(owner)).lead;
+      if (leadRef.current?.leadRunId === owner)
+        setLead((current) =>
           current ? newerTaskSnapshot(current, next) : current,
         );
       setError(null);
@@ -1256,21 +1256,21 @@ export function App() {
     }
   }
 
-  const latestPlanRevision = harness?.workflowRevisions.at(-1) ?? null;
+  const latestPlanRevision = lead?.workflowRevisions.at(-1) ?? null;
   const pendingPlanRevision =
-    harness &&
-    harness.status !== "completed" &&
+    lead &&
+    lead.status !== "completed" &&
     latestPlanRevision &&
-    revisionSummaryState(harness, latestPlanRevision).status === "待确认"
+    revisionSummaryState(lead, latestPlanRevision).status === "待确认"
       ? latestPlanRevision
       : null;
   const pendingPlanVersion =
-    harness && pendingPlanRevision ? visibleVersion(harness, pendingPlanRevision) : null;
+    lead && pendingPlanRevision ? visibleVersion(lead, pendingPlanRevision) : null;
   const pendingPlanBar =
-    harness &&
+    lead &&
     pendingPlanRevision &&
     openedPlanKey !==
-      `${harness.harnessRunId}:${pendingPlanRevision.cardId ?? `legacy:${pendingPlanRevision.revision}`}:${pendingPlanRevision.revision}` ? (
+      `${lead.leadRunId}:${pendingPlanRevision.cardId ?? `legacy:${pendingPlanRevision.revision}`}:${pendingPlanRevision.revision}` ? (
       <div className="plan-pending-bar">
         <i aria-hidden="true" />
         <span role="status">
@@ -1281,7 +1281,7 @@ export function App() {
           type="button"
           onClick={() =>
             openWorkflow(
-              harness,
+              lead,
               pendingPlanRevision,
               "plan",
             )
@@ -1300,16 +1300,16 @@ export function App() {
         <div className="desktop-titlebar" data-tauri-drag-region="deep">
           <div
             title={
-              harness
-                ? `${harness.cwd.split("/").filter(Boolean).at(-1)} / ${conversationTitle(harness)}`
+              lead
+                ? `${lead.cwd.split("/").filter(Boolean).at(-1)} / ${conversationTitle(lead)}`
                 : "Wave Flow"
             }
           >
-            {harness ? (
+            {lead ? (
               <>
-                <span>{harness.cwd.split("/").filter(Boolean).at(-1)}</span>
+                <span>{lead.cwd.split("/").filter(Boolean).at(-1)}</span>
                 <span className="title-divider">/</span>
-                <strong>{conversationTitle(harness)}</strong>
+                <strong>{conversationTitle(lead)}</strong>
               </>
             ) : (
               <strong>Wave Flow</strong>
@@ -1354,26 +1354,26 @@ export function App() {
           onClose={() => setArchiveTarget(null)}
           onConfirm={() => {
             const target = archiveTarget,
-              id = target.harnessRunId;
+              id = target.leadRunId;
             const unfinished = target.impactSummaries?.some(
               (item) => !item.supersededBy && item.status !== "completed",
             );
-            const finishBusy = beginBusy(`task:${id}`, "complete-harness");
+            const finishBusy = beginBusy(`task:${id}`, "complete-lead");
             setArchiveTarget(null);
             void taskMutation(id, () =>
               unfinished
                 ? api.archiveAbandoningSummaries(id)
-                : api.completeHarness(id),
+                : api.completeLead(id),
             )
               .then(() => {
-                if (harnessRef.current?.harnessRunId !== id) return;
-                setHarness(null);
+                if (leadRef.current?.leadRunId !== id) return;
+                setLead(null);
                 setDraftProjectId(target.projectId);
                 setSelectedProjectId(target.projectId);
                 setRoute({ kind: "conversation" });
-                setHarnessText("");
+                setLeadText("");
                 setWorkflowPanelOpen(false);
-                setHarnessView("active");
+                setLeadView("active");
               })
               .catch((cause) => setError(String(cause)))
               .finally(finishBusy);
@@ -1422,7 +1422,7 @@ export function App() {
         <button
           className="new-task"
           onClick={() => {
-            if (selectedProjectId) beginHarnessDraft();
+            if (selectedProjectId) beginLeadDraft();
             else {
               setCreatingProject(true);
             }
@@ -1453,20 +1453,20 @@ export function App() {
           </button>
         </div>
         <div className="task-section-title" hidden={!projectsExpanded}>
-          <div className="harness-tabs" role="tablist" aria-label="会话状态">
+          <div className="lead-tabs" role="tablist" aria-label="会话状态">
             <button
-              className={harnessView === "active" ? "active" : ""}
-              onClick={() => setHarnessView("active")}
+              className={leadView === "active" ? "active" : ""}
+              onClick={() => setLeadView("active")}
               role="tab"
-              aria-selected={harnessView === "active"}
+              aria-selected={leadView === "active"}
             >
               进行中
             </button>
             <button
-              className={harnessView === "completed" ? "active" : ""}
-              onClick={() => setHarnessView("completed")}
+              className={leadView === "completed" ? "active" : ""}
+              onClick={() => setLeadView("completed")}
               role="tab"
-              aria-selected={harnessView === "completed"}
+              aria-selected={leadView === "completed"}
             >
               已完成
             </button>
@@ -1477,10 +1477,10 @@ export function App() {
             <ProjectGroup
               key={project.projectId}
               project={project}
-              harnesses={harnesses.filter(
+              leads={leads.filter(
                 (item) =>
                   item.projectId === project.projectId &&
-                  (harnessView === "completed"
+                  (leadView === "completed"
                     ? item.status === "completed"
                     : item.status !== "completed"),
               )}
@@ -1488,18 +1488,18 @@ export function App() {
               onSelectWorkflow={openWorkflow}
               onArchive={(target) => void archiveTask(target)}
               onRename={async (target, title) => {
-                const response = await api.renameTitle(target.harnessRunId, title);
-                setHarnesses(current => current.map(item => item.harnessRunId === target.harnessRunId ? newerTaskSnapshot(item, response.harness) : item));
-                setHarness(current => current?.harnessRunId === target.harnessRunId ? newerTaskSnapshot(current, response.harness) : current);
+                const response = await api.renameTitle(target.leadRunId, title);
+                setLeads(current => current.map(item => item.leadRunId === target.leadRunId ? newerTaskSnapshot(item, response.lead) : item));
+                setLead(current => current?.leadRunId === target.leadRunId ? newerTaskSnapshot(current, response.lead) : current);
               }}
               busyOperations={busyOperations}
-              activeHarnessId={harness?.harnessRunId ?? null}
+              activeLeadId={lead?.leadRunId ?? null}
               unreadCounts={unreadCounts}
-              showNewSession={harnessView === "active"}
-              onNewSession={() => beginHarnessDraft(project.projectId)}
-              onSelectHarness={(item) => {
+              showNewSession={leadView === "active"}
+              onNewSession={() => beginLeadDraft(project.projectId)}
+              onSelectLead={(item) => {
                 setSelectedProjectId(project.projectId);
-                setHarness(item);
+                setLead(item);
                 setRoute({ kind: "conversation" });
                 setNavOpen(false);
                 setDraftProjectId(null);
@@ -1553,12 +1553,12 @@ export function App() {
           );
           if (button)
             workflowReturn.current = {
-              taskId: harness?.harnessRunId ?? null,
+              taskId: lead?.leadRunId ?? null,
               button,
             };
         }}
       >
-        {!harness ? (
+        {!lead ? (
           <DraftConversation
             availableCommands={availableCommands}
             project={
@@ -1567,9 +1567,9 @@ export function App() {
                   project.projectId === (draftProjectId ?? selectedProjectId),
               ) ?? null
             }
-            text={harnessText}
-            onText={updateHarnessText}
-            onSend={() => void sendHarness()}
+            text={leadText}
+            onText={updateLeadText}
+            onSend={() => void sendLead()}
             onTemplate={() => setTemplatePicker(true)}
             onLocal={() => setLocalPreview(true)}
             hasProjects={projects.length > 0}
@@ -1586,16 +1586,16 @@ export function App() {
             }
           />
         ) : (
-          <HarnessConversation
-            harness={harness}
+          <LeadConversation
+            lead={lead}
             planPendingBar={pendingPlanBar}
-            text={harnessText}
-            onText={updateHarnessText}
-            onSend={() => void sendHarness()}
-            onSendImmediate={() => void sendHarness(true)}
+            text={leadText}
+            onText={updateLeadText}
+            onSend={() => void sendLead()}
+            onSendImmediate={() => void sendLead(true)}
             onCancelQueued={(messageId) =>
-              void taskMutation(harness.harnessRunId, () =>
-                api.cancelQueuedMessage(harness.harnessRunId, messageId),
+              void taskMutation(lead.leadRunId, () =>
+                api.cancelQueuedMessage(lead.leadRunId, messageId),
               ).catch((cause) =>
                 setError(
                   cause instanceof Error ? cause.message : String(cause),
@@ -1604,7 +1604,7 @@ export function App() {
             }
             onRecover={() =>
               void api
-                .recoverController(harness.harnessRunId)
+                .recoverController(lead.leadRunId)
                 .catch((cause) =>
                   setError(
                     cause instanceof Error ? cause.message : String(cause),
@@ -1621,42 +1621,42 @@ export function App() {
                 current.filter((item) => item.stagedId !== stagedId),
               )
             }
-            onAbort={() => void api.abortHarness(harness.harnessRunId)}
+            onAbort={() => void api.abortLead(lead.leadRunId)}
             onComplete={() => {
               const unfinished =
-                harness.impactSummaries?.filter(
+                lead.impactSummaries?.filter(
                   (item) => !item.supersededBy && item.status !== "completed",
                 ) ?? [];
               if (unfinished.length) {
                 setArchiveConfirmation({
-                  harnessRunId: harness.harnessRunId,
+                  leadRunId: lead.leadRunId,
                   count: unfinished.length,
                 });
                 return;
               }
               const finishBusy = beginBusy(
-                  `task:${harness.harnessRunId}`,
-                  "complete-harness",
+                  `task:${lead.leadRunId}`,
+                  "complete-lead",
                 ),
                 pageToken = navigationToken.current;
-              void taskMutation(harness.harnessRunId, () =>
-                api.completeHarness(harness.harnessRunId),
+              void taskMutation(lead.leadRunId, () =>
+                api.completeLead(lead.leadRunId),
               )
                 .then((response) => {
                   if (
                     pageToken !== navigationToken.current ||
-                    harnessRef.current?.harnessRunId !==
-                      response.harness.harnessRunId
+                    leadRef.current?.leadRunId !==
+                      response.lead.leadRunId
                   )
                     return;
                   // 会话归档成功后，明确回到进行中视图的第一项目草稿页；不能依赖
-                  // beginHarnessDraft 的早退或当前已完成会话的渲染状态。
+                  // beginLeadDraft 的早退或当前已完成会话的渲染状态。
                   const firstProjectId = projects[0]?.projectId ?? null;
-                  setHarnessView("active");
+                  setLeadView("active");
                   setSelectedProjectId(firstProjectId);
                   setDraftProjectId(firstProjectId);
-                  setHarness(null);
-                  setHarnessText("");
+                  setLead(null);
+                  setLeadText("");
                   setWorkflowPanelOpen(false);
                   setError(null);
                 })
@@ -1668,22 +1668,22 @@ export function App() {
                 .finally(finishBusy);
             }}
             onOpenWorkflow={() => {
-              const revision = workflowCells(harness).at(-1);
-              if (revision) openWorkflow(harness, revision);
+              const revision = workflowCells(lead).at(-1);
+              if (revision) openWorkflow(lead, revision);
             }}
-            hasWorkflow={harness.workflowRevisions.length > 0}
+            hasWorkflow={lead.workflowRevisions.length > 0}
             onDraft={() => {}}
             onTemplate={() => setTemplatePicker(true)}
             onRuntimeSettings={() => setSettingsOpen(true)}
             onRetryInitialization={() =>
-              taskMutation(harness.harnessRunId, () =>
-                api.retryInitialization(harness.harnessRunId),
+              taskMutation(lead.leadRunId, () =>
+                api.retryInitialization(lead.leadRunId),
               )
             }
             onAccept={async (revision) => {
               try {
-                await taskMutation(harness.harnessRunId, () =>
-                  api.acceptWorkflowRevision(harness.harnessRunId, revision),
+                await taskMutation(lead.leadRunId, () =>
+                  api.acceptWorkflowRevision(lead.leadRunId, revision),
                 );
               } catch (cause) {
                 setError(
@@ -1692,47 +1692,47 @@ export function App() {
               }
             }}
             onReject={async (revision) => {
-              await taskMutation(harness.harnessRunId, () =>
-                api.rejectWorkflowRevision(harness.harnessRunId, revision),
+              await taskMutation(lead.leadRunId, () =>
+                api.rejectWorkflowRevision(lead.leadRunId, revision),
               );
             }}
             onAssignmentCreated={(detail) => void finishAssignment(detail)}
             onSelectRevision={(revision) =>
-              openWorkflow(harness, revision, "plan")
+              openWorkflow(lead, revision, "plan")
             }
             onSelectResults={(executionId) => {
-              const execution = harness.executions.find(
+              const execution = lead.executions.find(
                 (item) => item.executionId === executionId,
               );
               const revision =
                 execution &&
-                harness.workflowRevisions.find(
+                lead.workflowRevisions.find(
                   (item) => item.revision === execution.revision,
                 );
               if (revision)
-                openWorkflow(harness, revision, "results", executionId);
+                openWorkflow(lead, revision, "results", executionId);
             }}
             draftContext={
-              adjustContext?.taskId === harness.harnessRunId
+              adjustContext?.taskId === lead.leadRunId
                 ? `针对${adjustContext.abandoned ? "已放弃的" : ""}第 ${adjustContext.revision} 版方案`
                 : undefined
             }
-            availableCommands={acpCommands.length > 0 ? availableCommands : (harness.runtime?.runtimeId === harnessRuntimeId && controllerCli ? mergeManagedSkillCommands(harness.availableCommands ?? [], managedSkills, controllerCli) : (harness.availableCommands ?? []))}
+            availableCommands={acpCommands.length > 0 ? availableCommands : (lead.runtime?.runtimeId === leadRuntimeId && controllerCli ? mergeManagedSkillCommands(lead.availableCommands ?? [], managedSkills, controllerCli) : (lead.availableCommands ?? []))}
             onAdjustRevision={(revision) =>
-              prepareRevisionDraft(harness, revision, !!revision.abandonedAt)
+              prepareRevisionDraft(lead, revision, !!revision.abandonedAt)
             }
             onSelectExecution={(executionId, attempt) =>
               void selectExecution(executionId, attempt)
             }
             onAnswerDecision={async (decisionId, answer) => {
               const finishBusy = beginBusy(
-                `task:${harness.harnessRunId}`,
+                `task:${lead.leadRunId}`,
                 `decision:${decisionId}`,
               );
               try {
-                await taskMutation(harness.harnessRunId, () =>
-                  api.answerHarnessDecision(
-                    harness.harnessRunId,
+                await taskMutation(lead.leadRunId, () =>
+                  api.answerLeadDecision(
+                    lead.leadRunId,
                     decisionId,
                     answer,
                   ),
@@ -1752,12 +1752,12 @@ export function App() {
           />
         )}
         {archiveConfirmation &&
-          harness?.harnessRunId === archiveConfirmation.harnessRunId && (
+          lead?.leadRunId === archiveConfirmation.leadRunId && (
             <ArchiveImpactConfirmation
               count={archiveConfirmation.count}
               onClose={() => setArchiveConfirmation(null)}
               onConfirm={() => {
-                const id = archiveConfirmation.harnessRunId,
+                const id = archiveConfirmation.leadRunId,
                   pageToken = navigationToken.current,
                   finishBusy = beginBusy(
                     `task:${id}`,
@@ -1768,20 +1768,20 @@ export function App() {
                   .then(() => {
                     if (
                       pageToken !== navigationToken.current ||
-                      harnessRef.current?.harnessRunId !== id
+                      leadRef.current?.leadRunId !== id
                     )
                       return;
-                    setHarnessView("active");
+                    setLeadView("active");
                     setDraftProjectId(projects[0]?.projectId ?? null);
-                    setHarness(null);
-                    setHarnessText("");
+                    setLead(null);
+                    setLeadText("");
                     setWorkflowPanelOpen(false);
                     setError(null);
                   })
                   .catch((error) => {
                     if (
                       pageToken === navigationToken.current &&
-                      harnessRef.current?.harnessRunId === id
+                      leadRef.current?.leadRunId === id
                     )
                       setError(String(error));
                   })
@@ -1792,27 +1792,27 @@ export function App() {
         {templatePicker && (
           <TemplatePicker
             key={
-              harness?.harnessRunId ??
+              lead?.leadRunId ??
               `project:${draftProjectId ?? selectedProjectId}`
             }
             identity={
-              harness?.harnessRunId ??
+              lead?.leadRunId ??
               `project:${draftProjectId ?? selectedProjectId}`
             }
             blockedReason={
-              harness &&
-              (harness.status !== "idle" ||
-                harness.executions.some((item) => item.finishedAt === null))
+              lead &&
+              (lead.status !== "idle" ||
+                lead.executions.some((item) => item.finishedAt === null))
                 ? "Wave Flow 或执行仍在处理中；参数保留，结束后才能保存。"
                 : undefined
             }
             onClose={() => setTemplatePicker(false)}
             onSave={async (selection, requestId, description) => {
-              const owner = harnessRef.current,
+              const owner = leadRef.current,
                 token = navigationToken.current;
               const response = owner
-                ? await taskMutation(owner.harnessRunId, () =>
-                    api.saveTemplate(owner.harnessRunId, requestId, selection),
+                ? await taskMutation(owner.leadRunId, () =>
+                    api.saveTemplate(owner.leadRunId, requestId, selection),
                   )
                 : await api.createTemplateTask(
                     draftProjectId ?? selectedProjectId!,
@@ -1820,27 +1820,27 @@ export function App() {
                     requestId,
                     selection,
                   );
-              setHarnesses((current) => [
-                response.harness,
+              setLeads((current) => [
+                response.lead,
                 ...current.filter(
-                  (item) => item.harnessRunId !== response.harness.harnessRunId,
+                  (item) => item.leadRunId !== response.lead.leadRunId,
                 ),
               ]);
               if (
                 token === navigationToken.current &&
                 (owner
-                  ? harnessRef.current?.harnessRunId === owner.harnessRunId
-                  : !harnessRef.current)
+                  ? leadRef.current?.leadRunId === owner.leadRunId
+                  : !leadRef.current)
               ) {
                 if (selection.needsGuidance) {
                   setTemplatePicker(false);
-                  setHarness(response.harness);
+                  setLead(response.lead);
                   setDraftProjectId(null);
                   setRoute({ kind: "conversation" });
                 } else
                   openWorkflow(
-                    response.harness,
-                    response.harness.workflowRevisions.at(-1)!,
+                    response.lead,
+                    response.lead.workflowRevisions.at(-1)!,
                   );
               }
             }}
@@ -1848,17 +1848,17 @@ export function App() {
         )}
       </section>
       {localPreview &&
-        (harness?.projectId ?? draftProjectId ?? selectedProjectId) && (
+        (lead?.projectId ?? draftProjectId ?? selectedProjectId) && (
           <LocalWorkflowPreview
             projectId={
-              (harness?.projectId ?? draftProjectId ?? selectedProjectId)!
+              (lead?.projectId ?? draftProjectId ?? selectedProjectId)!
             }
             revision={localRevision ?? undefined}
             replacement={
-              !localRevision && harness
+              !localRevision && lead
                 ? {
-                    harnessRunId: harness.harnessRunId,
-                    baseRevision: harness.workflowRevisions.at(-1)!.revision,
+                    leadRunId: lead.leadRunId,
+                    baseRevision: lead.workflowRevisions.at(-1)!.revision,
                   }
                 : undefined
             }
@@ -1869,17 +1869,17 @@ export function App() {
             onPrepared={(response) => {
               setLocalPreview(false);
               setLocalRevision(null);
-              setHarness(response.harness);
-              setHarnesses((current) => [
-                response.harness,
+              setLead(response.lead);
+              setLeads((current) => [
+                response.lead,
                 ...current.filter(
-                  (item) => item.harnessRunId !== response.harness.harnessRunId,
+                  (item) => item.leadRunId !== response.lead.leadRunId,
                 ),
               ]);
               setDraftProjectId(null);
               openWorkflow(
-                response.harness,
-                response.harness.workflowRevisions.at(-1)!,
+                response.lead,
+                response.lead.workflowRevisions.at(-1)!,
                 "plan",
               );
             }}
@@ -1907,8 +1907,8 @@ export function App() {
           <header className="workflow-page-header">
             <div className="workflow-page-heading">
               <span>
-                {harness
-                  ? detailBreadcrumb(harness, sectionLabel)
+                {lead
+                  ? detailBreadcrumb(lead, sectionLabel)
                   : "工作流详情"}
               </span>
               <strong
@@ -1920,7 +1920,7 @@ export function App() {
                 {(() => {
                   const headerRevision =
                     route.kind === "workflow"
-                      ? harness?.workflowRevisions.find(
+                      ? lead?.workflowRevisions.find(
                           (item) => item.revision === route.revision,
                         )
                       : undefined;
@@ -1933,17 +1933,17 @@ export function App() {
             <button
               className="workflow-page-return"
               onClick={() => setWorkflowPanelOpen(false)}
-              aria-label={`返回对话${harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0 ? `（${unreadCounts.get(harness.harnessRunId)} 条未读）` : ""}`}
+              aria-label={`返回对话${lead && (unreadCounts.get(lead.leadRunId) ?? 0) > 0 ? `（${unreadCounts.get(lead.leadRunId)} 条未读）` : ""}`}
             >
               <span>返回对话</span>
-              {harness && (unreadCounts.get(harness.harnessRunId) ?? 0) > 0 && (
-                <em>{unreadCounts.get(harness.harnessRunId)} 条未读</em>
+              {lead && (unreadCounts.get(lead.leadRunId) ?? 0) > 0 && (
+                <em>{unreadCounts.get(lead.leadRunId)} 条未读</em>
               )}
             </button>
           </header>
-          {harness &&
+          {lead &&
             route.kind === "workflow" &&
-            !routeMatchesTask(harness, route) && (
+            !routeMatchesTask(lead, route) && (
               <div className="workflow-page-nav" role="alert">
                 <p>所选工作流记录暂时不可用；请返回对话后重新打开。</p>
                 <button
@@ -1954,9 +1954,9 @@ export function App() {
                 </button>
               </div>
             )}
-          {harness &&
+          {lead &&
             route.kind === "workflow" &&
-            routeMatchesTask(harness, route) && (
+            routeMatchesTask(lead, route) && (
               <div className="workflow-page-nav">
                 <div className="workflow-page-nav-row">
                 <div
@@ -2003,12 +2003,12 @@ export function App() {
                     role="tab"
                     aria-selected={route.section === "execution"}
                     disabled={
-                      !harness.executions.some(
+                      !lead.executions.some(
                         (item) => item.revision === route.revision,
                       )
                     }
                     onClick={() => {
-                      const ex = harness.executions.find(
+                      const ex = lead.executions.find(
                         (item) => item.revision === route.revision,
                       );
                       if (ex) setSelectedExecutionId(ex.executionId);
@@ -2025,12 +2025,12 @@ export function App() {
                     role="tab"
                     aria-selected={route.section === "results"}
                     disabled={
-                      !harness.executions.some(
+                      !lead.executions.some(
                         (item) => item.revision === route.revision,
                       )
                     }
                     onClick={() => {
-                      const ex = harness.executions.find(
+                      const ex = lead.executions.find(
                         (item) => item.revision === route.revision,
                       );
                       if (ex) setSelectedExecutionId(ex.executionId);
@@ -2046,20 +2046,20 @@ export function App() {
                 </div>
                 {route.section === "plan" &&
                   (() => {
-                    const planRevision = harness.workflowRevisions.find(
+                    const planRevision = lead.workflowRevisions.find(
                       (item) =>
                         (item.cardId ?? `legacy:${item.revision}`) ===
                           route.cardId && item.revision === route.revision,
                     );
                     if (!planRevision) return null;
-                    const planState = revisionSummaryState(harness, planRevision);
+                    const planState = revisionSummaryState(lead, planRevision);
                     const statusClass = planRevision.rejectedAt
                       ? "rejected"
                       : planRevision.acceptedAt
                         ? "accepted"
                         : "pending";
-                    const versionText = versionLabel(harness, planRevision);
-                    const planRevisions = harness.workflowRevisions.filter(
+                    const versionText = versionLabel(lead, planRevision);
+                    const planRevisions = lead.workflowRevisions.filter(
                       (item) =>
                         (item.cardId ?? `legacy:${item.revision}`) === route.cardId,
                     );
@@ -2099,23 +2099,23 @@ export function App() {
                 detailPositions.set(pageKey, centralScroll.current.scrollTop);
             }}
           >
-          {harness &&
+          {lead &&
             route.kind === "workflow" &&
-            routeMatchesTask(harness, route) && (
+            routeMatchesTask(lead, route) && (
               <div className="central-plan workflow-page-content">
                 <div className="workflow-page-banners">
-                  {harness.status === "running" && (
+                  {lead.status === "running" && (
                     <button onClick={() => setRoute({ kind: "conversation" })}>
-                      {harness.decisions.some((item) => !item.answer)
+                      {lead.decisions.some((item) => !item.answer)
                         ? "需要你的回答"
                         : "Wave Flow 正在处理"}{" "}
                       · 返回对话
                     </button>
                   )}
-                  {harness.executions
+                  {lead.executions
                     .filter((execution) => {
-                      const attention = harnesses.find(
-                        (task) => task.harnessRunId === harness.harnessRunId,
+                      const attention = leads.find(
+                        (task) => task.leadRunId === lead.leadRunId,
                       )?.executionAttention?.[execution.executionId];
                       return (
                         execution.finishedAt === null &&
@@ -2137,7 +2137,7 @@ export function App() {
                 </div>
                 {route.section === "plan" &&
                   (() => {
-                    const revisions = harness.workflowRevisions.filter(
+                    const revisions = lead.workflowRevisions.filter(
                       (item) =>
                         (item.cardId ?? `legacy:${item.revision}`) ===
                         route.cardId,
@@ -2151,13 +2151,13 @@ export function App() {
                         <WorkflowRevisionCard
                           key={`${route.taskId}:${revision.revision}`}
                           revision={revision}
-                          harness={harness}
+                          lead={lead}
                           hideHead
                           onLocalRevision={
                             revision.localOrigin
                               ? () => {
                                   setLocalRevision({
-                                    harnessRunId: harness.harnessRunId,
+                                    leadRunId: lead.leadRunId,
                                     baseRevision: revision.revision,
                                     path: revision.localOrigin!.path,
                                     input: revision.input ?? {},
@@ -2167,16 +2167,16 @@ export function App() {
                               : undefined
                           }
                           onSaved={(next) => {
-                            setHarnesses((current) =>
+                            setLeads((current) =>
                               current.map((item) =>
-                                item.harnessRunId === next.harnessRunId
+                                item.leadRunId === next.leadRunId
                                   ? newerTaskSnapshot(item, next)
                                   : item,
                               ),
                             );
                             if (
-                              harnessRef.current?.harnessRunId ===
-                                next.harnessRunId &&
+                              leadRef.current?.leadRunId ===
+                                next.leadRunId &&
                               routeRef.current.kind === "workflow" &&
                               routeRef.current.cardId === revision.cardId &&
                               routeRef.current.revision === revision.revision
@@ -2193,26 +2193,26 @@ export function App() {
                           onAdjustViaChat={
                             !revision.localOrigin
                               ? () =>
-                                  prepareRevisionDraft(harness, revision, false)
+                                  prepareRevisionDraft(lead, revision, false)
                               : undefined
                           }
                         />
                         {revision.abandonedAt &&
-                          harness.workflowRevisions.at(-1)?.revision ===
+                          lead.workflowRevisions.at(-1)?.revision ===
                             revision.revision &&
-                          harness.status !== "completed" && (
+                          lead.status !== "completed" && (
                             <AbandonedPlan
                               onRedesign={() =>
-                                prepareRevisionDraft(harness, revision, true)
+                                prepareRevisionDraft(lead, revision, true)
                               }
                               onTemplate={
-                                !harness.executions.length
+                                !lead.executions.length
                                   ? () => setTemplatePicker(true)
                                   : undefined
                               }
                               disabled={
-                                harness.status !== "idle" ||
-                                harness.executions.some(
+                                lead.status !== "idle" ||
+                                lead.executions.some(
                                   (item) => !item.finishedAt,
                                 )
                               }
@@ -2223,8 +2223,8 @@ export function App() {
                   })()}
                 {route.section === "results" && executionDetail && (
                   <HistoricalResults
-                    key={`${harness.harnessRunId}:${executionDetail.execution.executionId}`}
-                    taskId={harness.harnessRunId}
+                    key={`${lead.leadRunId}:${executionDetail.execution.executionId}`}
+                    taskId={lead.leadRunId}
                     executionId={executionDetail.execution.executionId}
                     currentAttempt={
                       executionDetail.snapshot.currentExecutionAttemptId
@@ -2233,22 +2233,22 @@ export function App() {
                     onSelectAttempt={(attempt) =>
                       setRoute({ ...route, attempt })
                     }
-                    harness={harness}
+                    lead={lead}
                   />
                 )}
               </div>
             )}
           {executionDetail &&
-          harness &&
+          lead &&
           route.kind === "workflow" &&
-          routeMatchesTask(harness, route) &&
+          routeMatchesTask(lead, route) &&
           route.section === "execution" ? (
             <div className="workflow-page-content">
               <ExecutionDetail
                 readOnly={
-                  harness.status === "completed" ||
-                  (harness.task?.workflowContract === "single-workflow-v1" &&
-                    harness.executions.at(-1)?.executionId !==
+                  lead.status === "completed" ||
+                  (lead.task?.workflowContract === "single-workflow-v1" &&
+                    lead.executions.at(-1)?.executionId !==
                       executionDetail.execution.executionId)
                 }
                 detail={executionDetail}
@@ -2256,8 +2256,8 @@ export function App() {
                 onSelectAttempt={(attempt) => setRoute({ ...route, attempt })}
                 busy={executionBusy}
                 dynamicCount={executionDynamicCount}
-                harnessRunId={harness.harnessRunId}
-                previousRecords={(harness.executionHistory ?? [])
+                leadRunId={lead.leadRunId}
+                previousRecords={(lead.executionHistory ?? [])
                   .filter(
                     (item) =>
                       item.executionId ===
@@ -2271,7 +2271,7 @@ export function App() {
                   }))}
                 onControl={controlExecution}
                 onSavePartial={async () => {
-                  const owner = harness.harnessRunId,
+                  const owner = lead.leadRunId,
                     id = executionDetail.execution.executionId;
                   const valid = requestFence.current.begin(
                     `execution:${owner}:${id}`,
@@ -2282,7 +2282,7 @@ export function App() {
                   );
                   try {
                     const next = await api.savePartial(owner, id);
-                    if (valid() && harnessRef.current?.harnessRunId === owner)
+                    if (valid() && leadRef.current?.leadRunId === owner)
                       setExecutionDetail(next);
                   } finally {
                     finishBusy();
@@ -2290,7 +2290,7 @@ export function App() {
                 }}
                 onAnswerBlock={async (blockId, answer) => {
                   const valid = requestFence.current.begin(
-                    `execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`,
+                    `execution:${lead.leadRunId}:${executionDetail.execution.executionId}`,
                   );
                   const finishBusy = beginBusy(
                     `execution:${executionDetail.execution.executionId}`,
@@ -2299,13 +2299,13 @@ export function App() {
                   try {
                     await api.answer(blockId, answer);
                     const next = await api.execution(
-                      harness.harnessRunId,
+                      lead.leadRunId,
                       executionDetail.execution.executionId,
                     );
                     if (
                       valid() &&
-                      harnessRef.current?.harnessRunId ===
-                        harness.harnessRunId &&
+                      leadRef.current?.leadRunId ===
+                        lead.leadRunId &&
                       routeRef.current.kind === "workflow" &&
                       routeRef.current.executionId ===
                         next.execution.executionId
@@ -2317,7 +2317,7 @@ export function App() {
                 }}
                 onAnswer={async (gateId, answer) => {
                   const valid = requestFence.current.begin(
-                    `execution:${harness.harnessRunId}:${executionDetail.execution.executionId}`,
+                    `execution:${lead.leadRunId}:${executionDetail.execution.executionId}`,
                   );
                   const finishBusy = beginBusy(
                     `execution:${executionDetail.execution.executionId}`,
@@ -2325,15 +2325,15 @@ export function App() {
                   );
                   try {
                     const next = await api.answerExecutionGate(
-                      harness.harnessRunId,
+                      lead.leadRunId,
                       executionDetail.execution.executionId,
                       gateId,
                       answer,
                     );
                     if (
                       valid() &&
-                      harnessRef.current?.harnessRunId ===
-                        harness.harnessRunId &&
+                      leadRef.current?.leadRunId ===
+                        lead.leadRunId &&
                       routeRef.current.kind === "workflow" &&
                       routeRef.current.executionId ===
                         next.execution.executionId
@@ -2362,11 +2362,11 @@ export function App() {
             setProjectsExpanded(true);
             setCreatingProject(false);
             setError(null);
-            beginHarnessDraft(project.projectId);
+            beginLeadDraft(project.projectId);
           }}
         />
       )}
-      {settingsOpen && runtimeState?.harnessRuntimeId && (
+      {settingsOpen && runtimeState?.leadRuntimeId && (
         <RuntimeConnectionPanel
           runtimeState={runtimeState}
           scanning={runtimeScanning}
@@ -2378,7 +2378,7 @@ export function App() {
           onTheme={setTheme}
         />
       )}
-      {runtimeState && !runtimeState.harnessRuntimeId && (
+      {runtimeState && !runtimeState.leadRuntimeId && (
         <RuntimeConnectionPanel
           gateMode
           runtimeState={runtimeState}
@@ -2742,17 +2742,9 @@ function RuntimeConnectionPanel({
   const [engineStatusError, setEngineStatusError] = useState<string | null>(
     null,
   );
-  /** 感知模式设置值；null 表示尚未读取成功，此时不猜测开关状态。 */
-  const [perceptionMode, setPerceptionMode] = useState<boolean | null>(null);
-  /** 感知模式读取/写入失败的中文提示；只在本行就地显示，不阻塞其他设置。 */
-  const [perceptionError, setPerceptionError] = useState<string | null>(null);
-  /** 感知模式请求类型；读取与写入期间禁用开关，避免旧请求覆盖新选择。 */
-  const [perceptionBusy, setPerceptionBusy] = useState<"load" | "save" | null>(
-    null,
-  );
   const selected =
     runtimeState.runtimes.find(
-      (runtime) => runtimeState.harnessRuntimeId === runtime.runtimeId,
+      (runtime) => runtimeState.leadRuntimeId === runtime.runtimeId,
     ) ?? null;
   // 与 Orca 一致：每个 CLI 只呈现当前选中的那个安装，其余安装默认折叠。
   const preferredByCli = (() => {
@@ -2792,44 +2784,6 @@ function RuntimeConnectionPanel({
   useEffect(() => {
     if (section === "diagnostics") void loadEngineStatus();
   }, [section, loadEngineStatus]);
-  const loadPerceptionMode = useCallback(async () => {
-    setPerceptionBusy("load");
-    try {
-      const loaded = await api.settings();
-      setPerceptionMode(loaded.perceptionMode);
-      setPerceptionError(null);
-    } catch (cause) {
-      setPerceptionMode(null);
-      setPerceptionError(
-        `读取感知模式失败：${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    } finally {
-      setPerceptionBusy(null);
-    }
-  }, []);
-  useEffect(() => {
-    // gate 模式不展示通用分区，避免在 CLI 门禁阶段请求无关设置。
-    if (!gateMode && section === "general") void loadPerceptionMode();
-  }, [gateMode, section, loadPerceptionMode]);
-  /** 切换感知模式；失败恢复到上次已确认值并就地提示，其他设置不受影响。 */
-  async function togglePerceptionMode(enabled: boolean) {
-    if (perceptionBusy) return;
-    const previous = perceptionMode;
-    setPerceptionMode(enabled);
-    setPerceptionBusy("save");
-    setPerceptionError(null);
-    try {
-      const updated = await api.updateSettings({ perceptionMode: enabled });
-      setPerceptionMode(updated.perceptionMode);
-    } catch (cause) {
-      setPerceptionMode(previous);
-      setPerceptionError(
-        `更新感知模式失败：${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    } finally {
-      setPerceptionBusy(null);
-    }
-  }
   async function scan() {
     // PATH 扫描护栏：进行中禁止重复触发；结果写回 App 级 runtimeState，
     // 扫描期间切换分区不会丢弃返回结果。探测结论单独展示，不能把
@@ -2919,7 +2873,7 @@ function RuntimeConnectionPanel({
   }
 
   const runtimeRow = (runtime: CliRuntime, removable = false) => {
-    const isDefault = runtimeState.harnessRuntimeId === runtime.runtimeId;
+    const isDefault = runtimeState.leadRuntimeId === runtime.runtimeId;
     const statusLabel =
       runtime.status === "verified"
         ? null
@@ -2943,14 +2897,14 @@ function RuntimeConnectionPanel({
             <CopyablePath path={runtime.executablePath} />
             <small>
               adapter {runtime.verifiedAdapter.adapterId} ·{" "}
-              {runtime.verifiedAdapter.harnessTools ? "对话与执行" : "仅执行"}
+              {runtime.verifiedAdapter.leadTools ? "对话与执行" : "仅执行"}
             </small>
           </details>
           {runtime.diagnostic && <p>{userFacingText(runtime.diagnostic)}</p>}
         </div>
         <div className="runtime-row-actions">
           {isDefault ? null : runtime.status === "verified" &&
-            runtime.verifiedAdapter.harnessTools ? (
+            runtime.verifiedAdapter.leadTools ? (
             <button
               className="button-secondary"
               disabled={runtimeBusy}
@@ -3316,42 +3270,6 @@ function RuntimeConnectionPanel({
                     浅色
                   </label>
                 </div>
-                <div className="section-row settings-perception">
-                  <div>
-                    <strong>感知模式</strong>
-                    <span>
-                      默认开启：主控可使用本机 skill/MCP/CLI 读取信息；
-                      项目文件仍不可写，修改项目必须走 Workflow。
-                      关闭后主控只能使用原生读取与四个控制工具。
-                      设置对新建或空闲重开的主控会话生效。
-                    </span>
-                  </div>
-                  <label className="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={perceptionMode === true}
-                      disabled={perceptionBusy !== null}
-                      onChange={(event) =>
-                        void togglePerceptionMode(event.target.checked)
-                      }
-                    />
-                    {perceptionBusy === "load"
-                      ? "正在读取…"
-                      : perceptionBusy === "save"
-                        ? "正在保存…"
-                        : perceptionMode === true
-                          ? "已开启"
-                          : perceptionMode === false
-                            ? "已关闭"
-                            : "未读取"}
-                  </label>
-                </div>
-                {perceptionError && (
-                  <div className="manual-runtime-error" role="alert">
-                    <span>!</span>
-                    <p>{perceptionError}</p>
-                  </div>
-                )}
               </section>
             )}
             {section === "cli" && cliContent}
@@ -3381,7 +3299,7 @@ function RuntimeConnectionPanel({
                     <dt>等待决定的 Run</dt>
                     <dd>{engineStatus.blockedRuns}</dd>
                     <dt>正在处理的会话</dt>
-                    <dd>{engineStatus.activeHarnesses}</dd>
+                    <dd>{engineStatus.activeLeads}</dd>
                     <dt>待恢复的 ACP Worker</dt>
                     <dd>{engineStatus.acpWorkersNeedingResume}</dd>
                   </dl>
@@ -3464,14 +3382,14 @@ class WorkflowPanelErrorBoundary extends Component<
   }
 }
 
-function HarnessListItem({
+function LeadListItem({
   item,
   active,
   onClick,
   unread = 0,
   onRename,
 }: {
-  item: HarnessSnapshot;
+  item: LeadSnapshot;
   active: boolean;
   onClick: () => void;
   /** 未阅读的耐久条目数；不按流式片段计数。 */
@@ -3480,7 +3398,7 @@ function HarnessListItem({
 }) {
   return (
     <TaskTitleEditor
-      className={`harness-list-item ${active ? "active" : ""}`}
+      className={`lead-list-item ${active ? "active" : ""}`}
       title={conversationTitle(item)}
       readOnly={item.status === "completed" || !item.task}
       onSelect={onClick}
@@ -3513,7 +3431,7 @@ function TaskTreeItem({
   onWorkflow,
   onRename,
 }: {
-  item: HarnessSnapshot;
+  item: LeadSnapshot;
   unread: number;
   active: boolean;
   route: WorkbenchRoute;
@@ -3523,7 +3441,7 @@ function TaskTreeItem({
 }) {
   return (
     <div className="task-tree-item">
-      <HarnessListItem
+      <LeadListItem
         item={item}
         unread={unread}
         active={active}
@@ -3535,8 +3453,8 @@ function TaskTreeItem({
 }
 function ProjectGroup({
   project,
-  harnesses,
-  activeHarnessId,
+  leads,
+  activeLeadId,
   unreadCounts,
   route,
   onSelectWorkflow,
@@ -3545,34 +3463,34 @@ function ProjectGroup({
   busyOperations,
   showNewSession,
   onNewSession,
-  onSelectHarness,
+  onSelectLead,
 }: {
-  project: HarnessProject;
-  harnesses: HarnessSnapshot[];
-  activeHarnessId: string | null;
+  project: LeadProject;
+  leads: LeadSnapshot[];
+  activeLeadId: string | null;
   /** 各 Task 的本地阅读计数；不构成业务状态。 */
   unreadCounts: Map<string, number>;
   route: WorkbenchRoute;
   /** 点击任务行归档入口，先确认，不切换阅读任务。 */
-  onArchive: (task: HarnessSnapshot) => void;
-  /** 保存指定Task名称，不依赖当前阅读选择。 */ onRename: (task: HarnessSnapshot, title: string) => Promise<void>;
+  onArchive: (task: LeadSnapshot) => void;
+  /** 保存指定Task名称，不依赖当前阅读选择。 */ onRename: (task: LeadSnapshot, title: string) => Promise<void>;
   /** 任务级操作状态，用于防止重复归档。 */
   busyOperations: Record<string, string>;
   onSelectWorkflow: (
-    task: HarnessSnapshot,
+    task: LeadSnapshot,
     revision: import("./types").WorkflowRevision,
     section?: "plan" | "execution" | "results",
     executionId?: string,
   ) => void;
   showNewSession: boolean;
   onNewSession: () => void;
-  onSelectHarness: (harness: HarnessSnapshot) => void;
+  onSelectLead: (lead: LeadSnapshot) => void;
 }) {
   const [expandedPref, setExpanded] = useProjectExpanded(
     `project:${project.projectId}`,
   );
   /** 空项目没有可展开的子项；展开只会留出一段空白，因此保持收起。 */
-  const expanded = projectExpanded(harnesses.length > 0, expandedPref);
+  const expanded = projectExpanded(leads.length > 0, expandedPref);
   return (
     <section className="project-group">
       <header>
@@ -3580,9 +3498,9 @@ function ProjectGroup({
           title={project.title}
           aria-expanded={expanded}
           aria-controls={`project-tasks-${project.projectId}`}
-          disabled={harnesses.length === 0}
-          aria-disabled={harnesses.length === 0}
-          onClick={() => { if (harnesses.length > 0) setExpanded(!expanded); }}
+          disabled={leads.length === 0}
+          aria-disabled={leads.length === 0}
+          onClick={() => { if (leads.length > 0) setExpanded(!expanded); }}
         >
           <span className="folder-glyph" aria-hidden="true">
             ⌑
@@ -3611,24 +3529,24 @@ function ProjectGroup({
           id={`project-tasks-${project.projectId}`}
           hidden={!expanded}
         >
-          {harnesses.map((item) => (
+          {leads.map((item) => (
             <div
-              key={item.harnessRunId}
-              className={`task-row ${item.harnessRunId === activeHarnessId ? "selected" : ""}`}
+              key={item.leadRunId}
+              className={`task-row ${item.leadRunId === activeLeadId ? "selected" : ""}`}
             >
               <TaskTreeItem
                 item={item}
-                unread={unreadCounts.get(item.harnessRunId) ?? 0}
-                active={item.harnessRunId === activeHarnessId}
+                unread={unreadCounts.get(item.leadRunId) ?? 0}
+                active={item.leadRunId === activeLeadId}
                 route={route}
-                onClick={() => onSelectHarness(item)}
+                onClick={() => onSelectLead(item)}
                 onWorkflow={(revision) => onSelectWorkflow(item, revision)}
                 onRename={title => onRename(item, title)}
               />
               {item.status !== "completed" && (
                 <button
                   className="task-archive"
-                  data-archive-task={item.harnessRunId}
+                  data-archive-task={item.leadRunId}
                   aria-label={`归档任务：${conversationTitle(item)}`}
                   title={
                     item.status === "running" ||
@@ -3637,7 +3555,7 @@ function ProjectGroup({
                       : "归档任务"
                   }
                   disabled={
-                    !!busyOperations[`task:${item.harnessRunId}`] ||
+                    !!busyOperations[`task:${item.leadRunId}`] ||
                     item.status === "running" ||
                     item.executions.some((execution) => !execution.finishedAt)
                   }
@@ -3655,7 +3573,7 @@ function ProjectGroup({
     </section>
   );
 }
-/** 仅由浏览器维护的新会话草稿；首次发送前不会创建 Harness、目录或 Journal。 */
+/** 仅由浏览器维护的新会话草稿；首次发送前不会创建 Lead、目录或 Journal。 */
 function DraftConversation({
   project,
   text,
@@ -3673,7 +3591,7 @@ function DraftConversation({
   onDismissAttachmentError,
   availableCommands = [],
 }: {
-  project: HarnessProject | null;
+  project: LeadProject | null;
   text: string;
   onText: (value: string) => void;
   onSend: () => void;
@@ -3690,7 +3608,7 @@ function DraftConversation({
   /** 打开已有系统图片选择器。 */ onAddAttachments: () => void;
   /** 仅移除尚未发送的指定附件。 */ onRemoveAttachment: (id: string) => void;
   /** ACP 原始命令与托管技能合并后的菜单；草稿页也用它提前展示技能。 */
-  availableCommands?: readonly HarnessAvailableCommand[];
+  availableCommands?: readonly LeadAvailableCommand[];
 }) {
   const ready = project !== null;
   const attachmentButton = useRef<HTMLButtonElement>(null);
@@ -3907,8 +3825,8 @@ function DraftConversation({
   );
 }
 
-function HarnessConversation({
-  harness,
+function LeadConversation({
+  lead,
   planPendingBar,
   text,
   onText,
@@ -3945,7 +3863,7 @@ function HarnessConversation({
   draftContext,
   availableCommands = [],
 }: {
-  harness: HarnessSnapshot;
+  lead: LeadSnapshot;
   /** 输入框上方待确认方案条；父层按最新版本与已读状态计算。 */
   planPendingBar?: ReactNode;
   text: string;
@@ -3973,7 +3891,7 @@ function HarnessConversation({
   /** 用户显式选择预置工作流，不自动执行。 */ onTemplate: () => void;
   /** 自动检查失败后打开已有底座设置，不改变默认CLI。 */ onRuntimeSettings: () => void;
   /** 按原Task身份重试并更新权威快照；不重复创建任务。 */ onRetryInitialization: () => Promise<
-    import("./types").HarnessRunResponse
+    import("./types").LeadRunResponse
   >;
   onAccept: (revision: number) => void;
   /** 拒绝草案；最新会话快照由调用方写回 state。 */
@@ -3988,7 +3906,7 @@ function HarnessConversation({
   onAdjustRevision: (revision: import("./types").WorkflowRevision) => void;
   /** 输入草稿关联版本，不覆盖用户内容。 */ draftContext?: string;
   /** ACP 原始命令与托管技能合并后的斜杠菜单；缺省只显示 /wave-flow。 */
-  availableCommands?: readonly HarnessAvailableCommand[];
+  availableCommands?: readonly LeadAvailableCommand[];
   onAnswerDecision: (
     decisionId: string,
     answer: Record<string, unknown>,
@@ -4005,20 +3923,20 @@ function HarnessConversation({
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   useEffect(() => {
-    if (!harness.diagnostic || harness.status === "running")
+    if (!lead.diagnostic || lead.status === "running")
       setRetryError(null);
-  }, [harness.harnessRunId, harness.diagnostic, harness.status]);
+  }, [lead.leadRunId, lead.diagnostic, lead.status]);
   const latestExecutionId = (() => {
-    const history = latestExecutionEntries(harness);
+    const history = latestExecutionEntries(lead);
     if (history.length) return history.at(-1)!.executionId;
-    return [...harness.executions]
+    return [...lead.executions]
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
       .at(-1)?.executionId ?? null;
   })();
   return (
     <ConversationView
-      key={harness.harnessRunId}
-      harness={harness}
+      key={lead.leadRunId}
+      lead={lead}
       planPendingBar={planPendingBar}
       draft={text}
       onDraft={onText}
@@ -4045,7 +3963,7 @@ function HarnessConversation({
       activity={
         <div className="task-activity-region">
           <TaskActivity
-            task={harness}
+            task={lead}
             visible={visible}
             onPlan={onSelectRevision}
             onExecution={onSelectExecution}
@@ -4053,11 +3971,11 @@ function HarnessConversation({
             onAdjust={onAdjustRevision}
             onTemplate={onTemplate}
           />
-          {interruptedSummaryObligations(harness).map((item) => (
+          {interruptedSummaryObligations(lead).map((item) => (
             <div className="task-summary-notice" key={item.key}>
               <ImpactSummaryNotice
                 summaryKey={item.key}
-                harness={harness}
+                lead={lead}
                 executionId={item.executionId}
                 attempt={item.attempt}
               />
@@ -4066,7 +3984,7 @@ function HarnessConversation({
         </div>
       }
       timelineEvents={[
-        ...harness.workflowRevisions.map((revision) => ({
+        ...lead.workflowRevisions.map((revision) => ({
           key: `revision:${revision.revision}`,
           at: revision.createdAt,
           planUpdate: planUpdateLabel(revision),
@@ -4079,25 +3997,25 @@ function HarnessConversation({
             </p>
           ),
         })),
-        ...(harness.executionHistory?.length
-          ? latestExecutionEntries(harness).flatMap((item) => {
-              const execution = harness.executions.find(
+        ...(lead.executionHistory?.length
+          ? latestExecutionEntries(lead).flatMap((item) => {
+              const execution = lead.executions.find(
                 (execution) => execution.executionId === item.executionId,
               );
               const obligation =
                 item.kind === "finished"
-                  ? harness.impactSummaries?.find(
+                  ? lead.impactSummaries?.find(
                       (summary) =>
                         summary.executionId === item.executionId &&
                         summary.attempt === item.attempt,
                     )
                   : undefined;
               const firstBody = obligation
-                ? summaryBodyStartedAt(harness, obligation.key)
+                ? summaryBodyStartedAt(lead, obligation.key)
                 : null;
               if (obligation && !firstBody) return [];
               const body = obligation
-                ? harness.conversationEntries.find(
+                ? lead.conversationEntries.find(
                     (entry) =>
                       entry.kind === "body" &&
                       entry.text.trim() &&
@@ -4127,10 +4045,10 @@ function HarnessConversation({
                         summary: item.summary,
                       }}
                       featured={item.executionId === latestExecutionId}
-                      revision={harness.workflowRevisions.find(
+                      revision={lead.workflowRevisions.find(
                         (revision) => revision.revision === item.revision,
                       )}
-                      version={executionVersion(harness, item.revision)}
+                      version={executionVersion(lead, item.revision)}
                       onOpen={() =>
                         onSelectExecution(item.executionId, item.attempt)
                       }
@@ -4140,16 +4058,16 @@ function HarnessConversation({
                 },
               ];
             })
-          : harness.executions.map((execution) => ({
+          : lead.executions.map((execution) => ({
               key: `execution:${execution.executionId}`,
               at: execution.createdAt,
               content: (
                 <WorkflowExecutionSummary
                   execution={execution}
-                  revision={harness.workflowRevisions.find(
+                  revision={lead.workflowRevisions.find(
                     (revision) => revision.revision === execution.revision,
                   )}
-                  version={executionVersion(harness, execution.revision)}
+                  version={executionVersion(lead, execution.revision)}
                   featured={execution.executionId === latestExecutionId}
                   onOpen={() => onSelectExecution(execution.executionId)}
                   onOpenResults={() => onSelectResults(execution.executionId)}
@@ -4159,7 +4077,7 @@ function HarnessConversation({
       ]}
     >
       <div className="conversation-actions">
-        {harness.task && harness.diagnostic?.includes("主控启动失败") && (
+        {lead.task && lead.diagnostic?.includes("主控启动失败") && (
           <>
             <button
               disabled={retrying || !!busy}
@@ -4168,8 +4086,8 @@ function HarnessConversation({
                 setRetryError(null);
                 try {
                   const result = await onRetryInitialization();
-                  if (result.harness.diagnostic)
-                    setRetryError(result.harness.diagnostic);
+                  if (result.lead.diagnostic)
+                    setRetryError(result.lead.diagnostic);
                 } catch (error) {
                   setRetryError(
                     error instanceof Error ? error.message : String(error),
@@ -4190,16 +4108,16 @@ function HarnessConversation({
       {retrying && (
         <p role="status">正在检查当前 CLI，成功后继续原任务，不创建新任务。</p>
       )}
-      {retryError && harness.status !== "running" && harness.diagnostic && (
+      {retryError && lead.status !== "running" && lead.diagnostic && (
         <p role="alert">{userFacingText(retryError)}</p>
       )}
-      {harness.decisions
+      {lead.decisions
         .filter(
           (decision) =>
-            decision.answer === null && harness.status === "running",
+            decision.answer === null && lead.status === "running",
         )
         .map((decision) => (
-          <HarnessDecisionCard
+          <LeadDecisionCard
             key={decision.decisionId}
             decision={decision}
             busy={busy === `decision:${decision.decisionId}`}
@@ -4212,17 +4130,17 @@ function HarnessConversation({
   );
 }
 
-function HarnessDecisionCard({
+function LeadDecisionCard({
   decision,
   busy,
   onAnswer,
 }: {
-  decision: HarnessDecision;
+  decision: LeadDecision;
   busy: boolean;
   onAnswer: (answer: Record<string, unknown>) => Promise<void>;
 }) {
   return (
-    <article className="conversation-action harness-decision">
+    <article className="conversation-action lead-decision">
       <span>Wave Flow 需要你的决定</span>
       <p>{decision.question}</p>
       {decision.answerSchema ? (
@@ -4249,7 +4167,7 @@ function ArchiveTaskConfirmation({
   onClose,
   onConfirm,
 }: {
-  task: HarnessSnapshot;
+  task: LeadSnapshot;
   onClose: () => void;
   onConfirm: () => void;
 }) {
@@ -4262,7 +4180,7 @@ function ArchiveTaskConfirmation({
     const previous =
       [
         ...document.querySelectorAll<HTMLButtonElement>("[data-archive-task]"),
-      ].find((item) => item.dataset.archiveTask === task.harnessRunId) ??
+      ].find((item) => item.dataset.archiveTask === task.leadRunId) ??
       (document.activeElement as HTMLElement | null);
     const background = [
       ...document.querySelectorAll<HTMLElement>(
@@ -4418,14 +4336,14 @@ function HistoricalResults({
   currentAttempt,
   selectedAttempt,
   onSelectAttempt,
-  harness,
+  lead,
 }: {
   taskId: string;
   executionId: string;
   currentAttempt: number;
   /** 路由指定的历史尝试，缺省跟随最新。 */ selectedAttempt?: number;
   /** 更新阅读路由，不启动执行。 */ onSelectAttempt: (attempt: number) => void;
-  harness: HarnessSnapshot;
+  lead: LeadSnapshot;
 }) {
   const attempt = readingAttempt(selectedAttempt, currentAttempt);
   const resultIdentity = `${taskId}:${executionId}:${attempt}`;
@@ -4435,7 +4353,7 @@ function HistoricalResults({
   } | null>(null);
   const value = loaded?.identity === resultIdentity ? loaded.value : null;
   const [error, setError] = useState<string | null>(null);
-  const terminalVersion = harness.executions.find(
+  const terminalVersion = lead.executions.find(
     (item) => item.executionId === executionId,
   )?.finishedAt;
   useEffect(() => {
@@ -4508,7 +4426,7 @@ function HistoricalResults({
       {(() => {
         // 总结正文只在主控对话中展示；这里只保留未完成总结的状态与停止/重试操作。
         const pending =
-          harness.impactSummaries?.filter(
+          lead.impactSummaries?.filter(
             (item) =>
               item.executionId === executionId &&
               item.attempt === attempt &&
@@ -4523,7 +4441,7 @@ function HistoricalResults({
               <ImpactSummaryNotice
                 key={item.key}
                 summaryKey={item.key}
-                harness={harness}
+                lead={lead}
                 executionId={executionId}
                 attempt={attempt}
               />
@@ -4546,7 +4464,7 @@ function HistoricalResults({
         current={currentAttempt}
         selected={attempt}
         onSelect={onSelectAttempt}
-        records={(harness.executionHistory ?? [])
+        records={(lead.executionHistory ?? [])
           .filter(
             (item) =>
               item.executionId === executionId && item.kind === "finished",
@@ -4563,17 +4481,17 @@ function HistoricalResults({
 
 /** 总结正文只在主控对话中展示；结果页只保留运行结果。这里仅提示未完成的总结义务并提供停止/重试。 */
 function ImpactSummaryNotice({
-  harness,
+  lead,
   executionId,
   attempt,
   summaryKey,
 }: {
-  harness: HarnessSnapshot;
+  lead: LeadSnapshot;
   executionId: string;
   attempt: number;
   summaryKey: string;
 }) {
-  const obligation = harness.impactSummaries?.find(
+  const obligation = lead.impactSummaries?.find(
     (item) =>
       item.executionId === executionId &&
       item.attempt === attempt &&
@@ -4582,7 +4500,7 @@ function ImpactSummaryNotice({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!obligation || obligation.status === "completed") return null;
-  const label = summaryWorkLabel(harness, executionId);
+  const label = summaryWorkLabel(lead, executionId);
   if (obligation.status === "pending")
     return (
       <div className="summary-compact">
@@ -4603,7 +4521,7 @@ function ImpactSummaryNotice({
           busy ||
           (running
             ? !obligation.turnId
-            : harness.status === "running" || harness.status === "completed")
+            : lead.status === "running" || lead.status === "completed")
         }
         onClick={async () => {
           setBusy(true);
@@ -4611,12 +4529,12 @@ function ImpactSummaryNotice({
           try {
             if (running && obligation.turnId)
               await api.stopImpactSummary(
-                harness.harnessRunId,
+                lead.leadRunId,
                 obligation.key,
                 obligation.turnId,
               );
             else if (!running)
-              await api.retryImpactSummary(harness.harnessRunId, obligation.key);
+              await api.retryImpactSummary(lead.leadRunId, obligation.key);
           } catch (error) {
             setError(String(error));
           } finally {
@@ -4646,7 +4564,7 @@ function ExecutionDetail({
   onSelectAttempt,
   busy,
   dynamicCount,
-  harnessRunId,
+  leadRunId,
   onControl,
   onAnswer,
   onAnswerBlock,
@@ -4660,8 +4578,8 @@ function ExecutionDetail({
   busy: string | null;
   /** 该 revision 静态无法枚举的动态节点数；0 表示无动态节点或不可用。 */
   dynamicCount: number;
-  /** 所属 Harness Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
-  harnessRunId: string;
+  /** 所属 Lead Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
+  leadRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
   onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
@@ -4692,7 +4610,7 @@ function ExecutionDetail({
     // 顺序翻页直到读完全部 attempt 的耐久访问记录（上限防止异常循环）。
     for (let page = 0; page < 10; page += 1) {
       const response = await api.executionPhaseVisits(
-        harnessRunId,
+        leadRunId,
         executionId,
         cursor === null ? {} : { cursor },
       );
@@ -4701,7 +4619,7 @@ function ExecutionDetail({
       if (cursor === null) break;
     }
     return items;
-  }, [harnessRunId, executionId]);
+  }, [leadRunId, executionId]);
   useEffect(() => {
     let active = true;
     setVisitsLoading(true);
@@ -5163,13 +5081,13 @@ function FreeJsonAnswer({
 
 /** MCP 工具尾注组件已迁入 conversation/conversation-view.tsx（legacy 回合回落渲染）。 */
 
-function conversationTitle(harness: HarnessSnapshot): string {
+function conversationTitle(lead: LeadSnapshot): string {
   return (
-    harness.task?.title ||
-    harness.messages
+    lead.task?.title ||
+    lead.messages
       .find((message) => message.role === "user")
       ?.text.slice(0, 28) ||
-    harness.cwd.split("/").filter(Boolean).at(-1) ||
+    lead.cwd.split("/").filter(Boolean).at(-1) ||
     "新任务"
   );
 }
@@ -5178,10 +5096,10 @@ function conversationTitle(harness: HarnessSnapshot): string {
  * 详情面包屑只取短任务名；手动标题过长或缺失时回落到项目文件夹名，
  * 避免把整句用户提示词塞进弹窗头部。
  */
-function detailBreadcrumb(harness: HarnessSnapshot, section: string): string {
-  const title = harness.task?.title?.trim();
+function detailBreadcrumb(lead: LeadSnapshot, section: string): string {
+  const title = lead.task?.title?.trim();
   const project =
-    harness.cwd.split("/").filter(Boolean).at(-1) ?? "任务";
+    lead.cwd.split("/").filter(Boolean).at(-1) ?? "任务";
   const label =
     title && Array.from(title).length <= 24 ? title : project;
   return `${label} / ${section}`;

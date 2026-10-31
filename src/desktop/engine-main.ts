@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   // Tauri 按帧形状分流，迟到旧进程帧由 generation 校验丢弃。
   engine.subscribeEvents((frame) => write(frame));
   write({ type: "ready", protocolVersion: 1 });
-  engine.refreshSelectedHarness();
+  engine.refreshSelectedLead();
   const reader = new TextDecoder();
   let buffered = "";
   const lines = async function* (): AsyncGenerator<string> {
@@ -110,9 +110,9 @@ if (process.argv[2] === "__codex-acp") {
   // 未捕获的顶层 await 拒绝会打印栈噪声，掩盖真正的原因。
   await runWorkerMcpServer(Number.isFinite(budgetOverride) && budgetOverride > 0 ? budgetOverride : undefined)
     .catch((error) => { process.stderr.write(`Wave Flow Worker MCP: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
-} else if (process.argv[2] === "__harness-mcp") {
-  const { runHarnessMcpServer } = await import("../harness/mcp-server");
-  await runHarnessMcpServer();
+} else if (process.argv[2] === "__lead-mcp") {
+  const { runLeadMcpServer } = await import("../lead/mcp-server");
+  await runLeadMcpServer();
 } else if (process.argv[2] === "__mcp-probe") {
   const { runMcpProbeServer } = await import("../runtimes/mcp-probe");
   await runMcpProbeServer();

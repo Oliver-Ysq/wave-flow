@@ -45,7 +45,7 @@ test("工作流阅读导航聚焦标题，返回保留原任务入口且后台�
  const source=await Bun.file('src-tauri/web/src/App.tsx').text();
  expect(source).toContain('workflowPanelOpen && !wasWorkflowOpen.current');
  expect(source).toContain('workflowTitle.current?.focus({ preventScroll: true })');
- expect(source).toContain('if (prior?.taskId === (harness?.harnessRunId ?? null))');
+ expect(source).toContain('if (prior?.taskId === (lead?.leadRunId ?? null))');
  expect(source).toContain('const target = prior.button.isConnected');
  expect(source).toContain('ref={workflowTitle}\n                tabIndex={-1}\n                role="heading"\n                aria-level={1}');
 });
@@ -83,7 +83,7 @@ test("CLI设置默认项只在顶部展示，其他项保留技术详情与二�
  expect(source).toContain('["cli", "执行工具"]');
  expect(source).toContain('<summary>技术信息</summary>');
  expect(source).toContain('confirmSwitchId !== runtime.runtimeId');
- expect(source).toContain('runtime.verifiedAdapter.harnessTools ? (');
+ expect(source).toContain('runtime.verifiedAdapter.leadTools ? (');
  expect(source).toContain('extraRuntimes.map((runtime) => runtimeRow(runtime, true))');
  expect(source).toContain('confirmRemoveId === runtime.runtimeId ? "确认移除？" : "移除"');
 });
@@ -114,7 +114,7 @@ test("Runtime 门禁与项目弹窗都使用连接面板样式，不回退旧浅
 test("桌面端不渲染未耐久思考流，也不依赖第三方会话 runtime", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   const manifest = await Bun.file("package.json").text();
-  expect(source).not.toContain("harness-reasoning");
+  expect(source).not.toContain("lead-reasoning");
   expect(source).not.toContain("reasoning_delta");
   expect(source).not.toContain("ChainOfThoughtPrimitive");
   expect(source).not.toContain("useLocalRuntime");
@@ -134,22 +134,22 @@ test("主控输入框让裸 Enter 留给 IME/换行，仅以 ⌘/Ctrl + Enter �
 
 test("完成会话后回到进行中第一个项目的新建会话页", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
-  const draftStart = source.indexOf("function beginHarnessDraft");
-  const draftEnd = source.indexOf("async function sendHarness", draftStart);
+  const draftStart = source.indexOf("function beginLeadDraft");
+  const draftEnd = source.indexOf("async function sendLead", draftStart);
   const draftSource = source.slice(draftStart, draftEnd);
-  expect(draftSource).toContain('setHarnessView("active")');
-  expect(draftSource).toContain("setHarness(null)");
+  expect(draftSource).toContain('setLeadView("active")');
+  expect(draftSource).toContain("setLead(null)");
   expect(draftSource).toContain("setDraftProjectId(projectId)");
 
-  const completeStart = source.indexOf("api.completeHarness(harness.harnessRunId)");
+  const completeStart = source.indexOf("api.completeLead(lead.leadRunId)");
   const completeEnd = source.indexOf("onOpenWorkflow", completeStart);
   const completeSource = source.slice(completeStart, completeEnd);
   expect(completeSource).toContain("const firstProjectId = projects[0]?.projectId ?? null");
-  expect(completeSource).toContain('setHarnessView("active")');
+  expect(completeSource).toContain('setLeadView("active")');
   expect(completeSource).toContain("setSelectedProjectId(firstProjectId)");
   expect(completeSource).toContain("setDraftProjectId(firstProjectId)");
-  expect(completeSource).toContain("setHarness(null)");
-  expect(completeSource).not.toContain('setHarnessView("completed")');
+  expect(completeSource).toContain("setLead(null)");
+  expect(completeSource).not.toContain('setLeadView("completed")');
 });
 
 test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主控消息", async () => {
@@ -158,7 +158,7 @@ test("桌面端不保留 HTTP/SSE 流，只展示 Engine 已耐久的完整主�
   expect(source).not.toContain("EventSource(");
   expect(source).not.toContain("assistant_delta");
   expect(source).not.toContain("reasoning_delta");
-  expect(source).toContain("harness.messages");
+  expect(source).toContain("lead.messages");
   expect(source).toContain("class WorkflowPanelErrorBoundary");
   expect(source).toContain("无法显示 Workflow 详情");
   expect(source).toContain("<WorkflowPanelErrorBoundary");
@@ -175,7 +175,7 @@ test("工具过程作为 assistant 正文下方的安全尾注恢复，不显示
   const source = await Bun.file("src-tauri/web/src/conversation/conversation-view.tsx").text();
   const types = await Bun.file("src-tauri/web/src/types.ts").text();
   expect(types).toContain("toolActivitiesByMessageId");
-  expect(source).toContain("harness.toolActivitiesByMessageId[turn.assistant.id]");
+  expect(source).toContain("lead.toolActivitiesByMessageId[turn.assistant.id]");
   expect(source).toContain("key={`${turn.assistant!.id}:tool:${index}`}");
   expect(source).toContain("不保存参数、路径、命令或完整输出");
   expect(source).not.toContain("完整结果不会显示或保存");
@@ -230,7 +230,7 @@ test("取消或中断的 Execution 都提供显式恢复入口，中断走产品
 test("Task 执行仅通过 Engine action 刷新，不回退独立 Run 详情或 SSE", async () => {
   const source = await Bun.file("src-tauri/web/src/App.tsx").text();
   expect(source).toContain("window.setInterval(reload, 1_000)");
-  expect(source).toContain(".execution(harness.harnessRunId, selectedExecutionId)");
+  expect(source).toContain(".execution(lead.leadRunId, selectedExecutionId)");
   expect(source).not.toContain("api.currentAttempt(");
   expect(source).not.toContain("EventSource(");
 });

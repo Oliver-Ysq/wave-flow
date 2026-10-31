@@ -11,6 +11,6 @@ test("提示默认隐藏，四种侧栏行共用尺寸与高亮，元信息不�
   expect(html).not.toContain("完整信息");expect(html).toContain("标题");
   const css=await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(css).toContain("--wf-sidebar-row-height:40px");expect(css).toContain("--wf-sidebar-row-highlight:var(--wf-panel-raised)");expect(css).toContain("height:var(--wf-sidebar-row-height)!important");
-  const app=await Bun.file("src-tauri/web/src/App.tsx").text(),row=app.slice(app.indexOf("function HarnessListItem("),app.indexOf("function TaskTreeItem("));
+  const app=await Bun.file("src-tauri/web/src/App.tsx").text(),row=app.slice(app.indexOf("function LeadListItem("),app.indexOf("function TaskTreeItem("));
   expect(row).toContain("hoverContent=");expect(row.slice(row.indexOf('className="sidebar-title-line"'))).not.toContain("<small>");
 });

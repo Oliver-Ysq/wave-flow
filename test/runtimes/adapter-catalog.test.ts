@@ -3,17 +3,17 @@ import { adapterById, adapterForCli, workerAdapterForCli } from "../../src/runti
 import { resolveWorkerLauncher } from "../../src/runtimes/worker-launcher-resolver";
 import type { VerifiedCliRuntime } from "../../src/runtimes/types";
 
-const codexRuntime: VerifiedCliRuntime = { runtimeId: "runtime-codex", cli: "codex", executablePath: "/Users/test/.local/bin/codex", executableIdentity: { device: 1, inode: 2, size: 3, modifiedAtMs: 4 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "codex-cli 1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: "2026-10-12T00:00:00.000Z", status: "verified", diagnostic: null };
-const kimiRuntime: VerifiedCliRuntime = { runtimeId: "runtime-kimi", cli: "kimi", executablePath: "/Users/test/.kimi-code/bin/kimi", executableIdentity: { device: 1, inode: 8, size: 9, modifiedAtMs: 10 }, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: "2026-10-13T00:00:00.000Z", status: "verified", diagnostic: null };
-const claudeRuntime: VerifiedCliRuntime = { runtimeId: "runtime-claude", cli: "claude", executablePath: "/Users/test/.nvm/bin/claude", executableIdentity: { device: 1, inode: 11, size: 12, modifiedAtMs: 13 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "2.0.0 (Claude Code)", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: "2026-10-20T00:00:00.000Z", status: "verified", diagnostic: null };
-const dshRuntime: VerifiedCliRuntime = { runtimeId: "runtime-dsh", cli: "dsh", executablePath: "/Users/test/.nvm/bin/dsh", executableIdentity: { device: 1, inode: 14, size: 15, modifiedAtMs: 16 }, nodeExecutable: { path: "/Users/test/.nvm/node24/bin/node", identity: { device: 4, inode: 17, size: 18, modifiedAtMs: 19 } }, version: "0.2.1-rc.2", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: "2026-10-20T00:00:00.000Z", status: "verified", diagnostic: null };
+const codexRuntime: VerifiedCliRuntime = { runtimeId: "runtime-codex", cli: "codex", executablePath: "/Users/test/.local/bin/codex", executableIdentity: { device: 1, inode: 2, size: 3, modifiedAtMs: 4 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "codex-cli 1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true }, verifiedAt: "2026-10-12T00:00:00.000Z", status: "verified", diagnostic: null };
+const kimiRuntime: VerifiedCliRuntime = { runtimeId: "runtime-kimi", cli: "kimi", executablePath: "/Users/test/.kimi-code/bin/kimi", executableIdentity: { device: 1, inode: 8, size: 9, modifiedAtMs: 10 }, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: "2026-10-13T00:00:00.000Z", status: "verified", diagnostic: null };
+const claudeRuntime: VerifiedCliRuntime = { runtimeId: "runtime-claude", cli: "claude", executablePath: "/Users/test/.nvm/bin/claude", executableIdentity: { device: 1, inode: 11, size: 12, modifiedAtMs: 13 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "2.0.0 (Claude Code)", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, leadTools: false }, verifiedAt: "2026-10-20T00:00:00.000Z", status: "verified", diagnostic: null };
+const dshRuntime: VerifiedCliRuntime = { runtimeId: "runtime-dsh", cli: "dsh", executablePath: "/Users/test/.nvm/bin/dsh", executableIdentity: { device: 1, inode: 14, size: 15, modifiedAtMs: 16 }, nodeExecutable: { path: "/Users/test/.nvm/node24/bin/node", identity: { device: 4, inode: 17, size: 18, modifiedAtMs: 19 } }, version: "0.2.1-rc.2", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: "2026-10-20T00:00:00.000Z", status: "verified", diagnostic: null };
 
 describe("Adapter Catalog", () => {
   test("kimi launcher 直连已验证 realpath，环境不含 CODEX_PATH 或 node", () => {
     const entry = adapterForCli("kimi");
     expect(entry.adapterId).toBe("kimi-acp");
     expect(entry.requiresNodeRuntime).toBe(false);
-    expect(entry.capabilities).toEqual({ harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(kimiRuntime);
     expect(launcher).toMatchObject({ id: "kimi-acp", command: kimiRuntime.executablePath, args: ["acp"] });
     expect(launcher.env?.CODEX_PATH).toBeUndefined();
@@ -26,7 +26,7 @@ describe("Adapter Catalog", () => {
     const entry = adapterForCli("codex");
     expect(entry.adapterId).toBe("codex-acp");
     expect(entry.requiresNodeRuntime).toBe(true);
-    expect(entry.capabilities.harnessTools).toBe(true);
+    expect(entry.capabilities.leadTools).toBe(true);
     expect(entry.adapterVersion).toBe("2.2.2");
     const launcher = resolveWorkerLauncher(codexRuntime);
     expect(launcher.id).toBe("codex-acp");
@@ -42,9 +42,8 @@ describe("Adapter Catalog", () => {
     expect(entry.requiresNodeRuntime).toBe(false);
     expect(entry.probeMcp).toBe(true);
     expect(entry.adapterVersion).toBe("0.94.0");
-    // 主控窄工具经真实隔离 Home + MCP 注入验收后声明。
-    expect(entry.capabilities).toEqual({ harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
-    expect(entry.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+    // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(claudeRuntime);
     expect(launcher.id).toBe("claude-acp");
     expect(launcher.command).toBe(process.execPath);
@@ -64,8 +63,7 @@ describe("Adapter Catalog", () => {
     expect(entry.minNodeVersion).toBe(24);
     expect(entry.probeMcp).toBe(true);
     expect(entry.adapterVersion).toBeNull();
-    expect(entry.capabilities).toEqual({ harnessTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
-    expect(entry.sessionIsolation?.enabledRoles).toEqual(["harness"]);
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(dshRuntime);
     expect(launcher).toMatchObject({ id: "dsh-acp", command: dshRuntime.executablePath, args: ["acp"] });
     // dsh shim 经 env node 解析运行时：PATH 必须前置已验证 node 目录；绝不注入 API key 或 CODEX_PATH 类变量。

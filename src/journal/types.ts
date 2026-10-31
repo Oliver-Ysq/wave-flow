@@ -12,10 +12,10 @@ export const RUNTIME_VERSION = 9;
  */
 export const COMPATIBLE_RUNTIME_VERSIONS = [RUNTIME_VERSION] as const;
 
-/** Harness 原生 Execution 的来源绑定；受信任作者入口创建的 Run 没有此字段。 */
-export type RunHarnessOrigin = {
-  /** 所属 Harness Run id；用户可见任务身份。 */
-  readonly harnessRunId: string;
+/** Lead 原生 Execution 的来源绑定；受信任作者入口创建的 Run 没有此字段。 */
+export type RunLeadOrigin = {
+  /** 所属 Lead Run id；用户可见任务身份。 */
+  readonly leadRunId: string;
   /** 绑定的已接受冻结 revision 序号。 */
   readonly revision: number;
   /** 冻结源码的 SHA-256；必须等于 workflowHash。 */
@@ -40,8 +40,8 @@ export type RunManifest = {
   readonly workflowProjectCwd: string;
   /** 本次 Workflow 的 JSON-safe 输入。 */
   readonly input: JsonObject;
-  /** Harness 原生 Execution 的来源绑定；省略表示受信任作者入口的独立 Run。 */
-  readonly harness?: RunHarnessOrigin;
+  /** Lead 原生 Execution 的来源绑定；省略表示受信任作者入口的独立 Run。 */
+  readonly lead?: RunLeadOrigin;
   /** Run 创建时间。 */
   readonly createdAt: string;
 };

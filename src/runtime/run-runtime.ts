@@ -33,12 +33,12 @@ export type CreateRunOptions = {
   readonly storeRoot?: string;
   /** 本章可控 Agent 执行器；不启动真实 CLI。 */
   readonly executor: AgentNodeExecutor;
-  /** Harness 原生 Execution 的来源绑定；受信任作者入口省略。 */
-  readonly harness?: import("../journal/types").RunHarnessOrigin;
-  /** 固定 Run id；仅 Harness Execution 用来让登记 id 与内嵌 Journal runId 一致，省略时生成随机 UUID。 */
+  /** Lead 原生 Execution 的来源绑定；受信任作者入口省略。 */
+  readonly lead?: import("../journal/types").RunLeadOrigin;
+  /** 固定 Run id；仅 Lead Execution 用来让登记 id 与内嵌 Journal runId 一致，省略时生成随机 UUID。 */
   readonly runId?: string;
   /** 历史 assigned 执行配置；模块 Workflow 省略，节点 cli/model 由作者源码直接决定。 */
-  readonly executionConfig?: import("../harness/types").ExecutionConfigSnapshot;
+  readonly executionConfig?: import("../lead/types").ExecutionConfigSnapshot;
 };
 
 /** RunRuntime.run 的可选执行约束。 */
@@ -65,7 +65,7 @@ export class RunRuntime {
     const workflowPath = await realpath(options.workflowPath);
     const manifest: RunManifest = {
       runId: options.runId ?? crypto.randomUUID(), clientRequestId: options.clientRequestId, runtimeVersion: RUNTIME_VERSION, workflow: options.workflow.meta,
-      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), workflowPath, workflowProjectCwd, input: options.input, harness: options.harness, createdAt: new Date().toISOString(),
+      workflowHash: createHash("sha256").update(options.workflowSource).digest("hex"), workflowPath, workflowProjectCwd, input: options.input, lead: options.lead, createdAt: new Date().toISOString(),
     };
     const journal = await RunJournal.create(manifest, options.storeRoot ?? runsRoot());
     const state = new RunStateMachine(manifest);
@@ -89,7 +89,7 @@ export class RunRuntime {
    * 用户显式 resume 后，从 Workflow 起点重放调用轨迹。Host 以 sequence=0 开始逐项
    * 比对 Journal；只复用连续匹配的 completed 节点。
    */
-  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot(), executionConfig: import("../harness/types").ExecutionConfigSnapshot | null = null, skillsRoot?: string): Promise<RunRuntime> {
+  static async resume(runId: string, executor: AgentNodeExecutor, storeRoot = runsRoot(), executionConfig: import("../lead/types").ExecutionConfigSnapshot | null = null, skillsRoot?: string): Promise<RunRuntime> {
     // 技能库非法时拒绝恢复，避免用残缺技能环境重跑；空库返回 null，维持旧行为。
     const skillsDigest = await readSkillLibraryDigest(skillsRoot ?? join(dirname(storeRoot), "skills"));
     const opened = await RunJournal.open(runId, storeRoot);

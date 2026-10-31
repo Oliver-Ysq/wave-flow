@@ -112,27 +112,27 @@ export type RunResponse = { runId: string; snapshot: RunSnapshot };
 export type CreateRunRequest = { clientRequestId: string; workflowPath: string; cwd: string; input: Record<string, unknown> };
 export type RunListItem = { runId: string; workflow: { name: string; description: string }; status: RunStatus; cwd: string; createdAt: string; endedAt: string | null; diagnostic: string | null; hasBlockedAgent: boolean };
 /** 菜单栏展示的 Desktop Engine 权威摘要；页面不可由此推断或改变 Run 状态。 */
-export type DesktopStatusResponse = { protocolVersion: number; activeRuns: number; blockedRuns: number; activeHarnesses: number; acpWorkersNeedingResume: number };
+export type DesktopStatusResponse = { protocolVersion: number; activeRuns: number; blockedRuns: number; activeLeads: number; acpWorkersNeedingResume: number };
 
 /** 独立主控会话状态；不等同于 Workflow Run 状态。 */
-export type HarnessStatus = "idle" | "running" | "interrupted" | "completed";
+export type LeadStatus = "idle" | "running" | "interrupted" | "completed";
 /** 已耐久的用户或完整主控消息；reasoning 不会出现在这里。 */
-export type HarnessMessageAttachment = { id: string; name: string; mimeType: string; sizeBytes: number; sha256: string; file: string };
-export type HarnessMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string; /** 与消息耐久绑定的附件；发送前经 Adapter 能力验证。 */ attachments?: HarnessMessageAttachment[] };
+export type LeadMessageAttachment = { id: string; name: string; mimeType: string; sizeBytes: number; sha256: string; file: string };
+export type LeadMessage = { /** 自动总结义务来源，缺省普通消息。 */ summaryKey?:string; id: string; role: "user" | "assistant"; text: string; createdAt: string; /** 与消息耐久绑定的附件；发送前经 Adapter 能力验证。 */ attachments?: LeadMessageAttachment[] };
 /** Engine 暂存区的待发送附件描述；选择只创建暂存，不自动发送。 */
 export type StagedAttachment = { stagedId: string; name: string; mimeType: string; sizeBytes: number; sha256: string; previewDataUrl?: string };
 /** 主控忙碌时耐久排队的用户消息；priority 表示“立即发送”等待优先投递。 */
-export type HarnessQueuedMessage = { message: HarnessMessage; priority: boolean; queuedAt: string };
+export type LeadQueuedMessage = { message: LeadMessage; priority: boolean; queuedAt: string };
 /** 绑定完整 assistant 消息的工具安全摘要；不含参数、路径、命令或完整输出。 */
-export type HarnessToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
+export type LeadToolActivity = { label: string; finishedAt: string; outcome: "completed" | "failed" };
 /** 工具动作分类；与来源分开，经 MCP 执行的文件读取仍保留 MCP 徽标。 */
-export type HarnessToolKind = "file-read" | "file-write" | "search" | "command" | "mcp" | "unknown";
+export type LeadToolKind = "file-read" | "file-write" | "search" | "command" | "mcp" | "unknown";
 /** 工具调用来源；engine-mcp 展示 MCP 徽标，acp 为 CLI 原生上报。 */
-export type HarnessToolSource = "engine-mcp" | "acp";
+export type LeadToolSource = "engine-mcp" | "acp";
 /** 对话条目状态；interrupted 表示回合中断时仍未完成。 */
-export type HarnessConversationEntryStatus = "running" | "completed" | "failed" | "interrupted";
+export type LeadConversationEntryStatus = "running" | "completed" | "failed" | "interrupted";
 /** 对话条目公共身份字段。 */
-export type HarnessConversationEntryBase = {
+export type LeadConversationEntryBase = {
   /** 稳定条目 ID；界面 key 与事件关联均使用它。 */
   entryId: string;
   /** 所属回合标识（回合用户消息 ID）。 */
@@ -143,15 +143,15 @@ export type HarnessConversationEntryBase = {
   legacy: boolean;
 };
 /** assistant 正文条目；completed=false 为中断残留，不是完整回答。 */
-export type HarnessBodyEntry = HarnessConversationEntryBase & { kind: "body"; text: string; completed: boolean; truncated: boolean; startedAt: string; finishedAt: string | null };
+export type LeadBodyEntry = LeadConversationEntryBase & { kind: "body"; text: string; completed: boolean; truncated: boolean; startedAt: string; finishedAt: string | null };
 /** 思考条目；耗时只由起止时间计算。 */
-export type HarnessThoughtEntry = HarnessConversationEntryBase & { kind: "thought"; text: string; startedAt: string; finishedAt: string | null; status: "running" | "completed" | "interrupted"; truncated: boolean };
+export type LeadThoughtEntry = LeadConversationEntryBase & { kind: "thought"; text: string; startedAt: string; finishedAt: string | null; status: "running" | "completed" | "interrupted"; truncated: boolean };
 /** 工具调用条目；含目标、起止、状态、参数摘要与限长输出。 */
-export type HarnessToolEntry = HarnessConversationEntryBase & { kind: "tool"; callId: string; source: HarnessToolSource; name: string; toolKind: HarnessToolKind; target: string | null; paramsSummary: string | null; startedAt: string; finishedAt: string | null; status: HarnessConversationEntryStatus; output: string | null; outputTruncated: boolean; exitCode: number | null; hasDetail: boolean };
+export type LeadToolEntry = LeadConversationEntryBase & { kind: "tool"; callId: string; source: LeadToolSource; name: string; toolKind: LeadToolKind; target: string | null; paramsSummary: string | null; startedAt: string; finishedAt: string | null; status: LeadConversationEntryStatus; output: string | null; outputTruncated: boolean; exitCode: number | null; hasDetail: boolean };
 /** 耐久对话条目；实时展示与重开回放同源。 */
-export type HarnessConversationEntry = HarnessBodyEntry | HarnessThoughtEntry | HarnessToolEntry;
+export type LeadConversationEntry = LeadBodyEntry | LeadThoughtEntry | LeadToolEntry;
 /** ACP 主控会话广告的斜杠命令/技能；只来自运行时事件，不进入 Journal。 */
-export type HarnessAvailableCommand = {
+export type LeadAvailableCommand = {
   name: string;
   description: string;
   inputHint: string | null;
@@ -162,18 +162,18 @@ export type HarnessAvailableCommand = {
   groupHint?: "skills";
 };
 /** Engine 事件帧中的会话事件（耐久派生子集）。 */
-export type HarnessStreamEvent = (
+export type LeadStreamEvent = (
   | { /** 最终标题耐久后重读快照。 */ type:"title_changed" }
-  | { /** ACP 命令/技能目录变化；仅内存态，不触发快照重读。 */ type: "commands_changed"; commands: HarnessAvailableCommand[] }
-  | { type: "entry_started"; entry: HarnessConversationEntry }
+  | { /** ACP 命令/技能目录变化；仅内存态，不触发快照重读。 */ type: "commands_changed"; commands: LeadAvailableCommand[] }
+  | { type: "entry_started"; entry: LeadConversationEntry }
   | { type: "entry_appended"; entryId: string; text: string; truncated: boolean }
-  | { type: "entry_finished"; entry: HarnessConversationEntry }
+  | { type: "entry_finished"; entry: LeadConversationEntry }
   | { type: "turn_finished"; messageId: string; text: string }
   | { type: "turn_interrupted"; diagnostic: string }
   | { type: "queue_changed" }
   | { type: "execution_changed"; executionId: string }) & {/** 已耐久档案序号；旧帧缺省。 */snapshotSequence?:number};
 /** Tauri 转发的 Engine 事件包裹；generation 变化表示 Engine 已重启，必须重读快照。 */
-export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "harness"; harnessRunId: string; seq: number; event: HarnessStreamEvent } };
+export type EngineEventEnvelope = { generation: number; frame: { type: "event"; protocolVersion: 1; stream: "lead"; leadRunId: string; seq: number; event: LeadStreamEvent } };
 export type WorkflowRevision = {
   /** 保存时确定的更新原因；缺省为未知旧记录，仅展示，不影响批准或执行。 */
   updateReason?: "save-template" | "save-local" | "generate-plan" | "modify-plan" | "modify-parameters" | "modify-configuration";
@@ -186,13 +186,13 @@ export type WorkflowRevision = {
   /** 保存请求载荷指纹；仅用于幂等冲突检测。 */
   exportPayloadHash?: string;
   /** Engine预检保存的本地来源快照，不能由主控或表单提交源码伪造。 */
-  localOrigin?:import("../../../src/harness/types").WorkflowRevision["localOrigin"];
+  localOrigin?:import("../../../src/lead/types").WorkflowRevision["localOrigin"];
   /** 参数待补齐，不能直接批准运行。 */
   parametersPending?:boolean;
   /** 内置版本来源，保存后不跟随目录升级。 */
-  templateOrigin?: import("../../../src/harness/workflow-templates").TemplateOrigin;
+  templateOrigin?: import("../../../src/lead/workflow-templates").TemplateOrigin;
   /** 主控控制流修改后的原模板来源。 */
-  derivedFrom?: import("../../../src/harness/workflow-templates").TemplateOrigin;
+  derivedFrom?: import("../../../src/lead/workflow-templates").TemplateOrigin;
   /** 已保存并按目录 Schema 校验的业务参数。 */
   input?: Record<string,unknown>;
   /** 稳定候选卡身份；旧档案缺省，仅生成只读导航。 */
@@ -224,14 +224,14 @@ export type WorkflowRevision = {
     previewAgents: ExecutionPlanResponse["previewAgents"];
   };
 };
-/** Harness 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
+/** Lead 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
 export type WorkflowExecution = {
  /** 本次明确确认冻结的前执行现场hash；首次缺省，不构成Replay或权限。 */ sceneEvidenceHash?:string;
  executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
-export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-default"; source: "harness-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: RuntimeAdapterId; adapterVersion: string };
-/** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Harness Execution。 */
+export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-default"; source: "lead-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: RuntimeAdapterId; adapterVersion: string };
+/** 分配卡冻结的不可变执行配置；缺失时 Engine 拒绝创建 Lead Execution。 */
 export type ExecutionWorkspaceConfig = {
  /** 明确接续同Task最近写Execution的共享worktree；缺省首次分配。 */ continuation?:{executionId:string;workspaceId:string;head:string};
  version:3; authorization:{authorizationId:string;approvedAt:string;repository:string;baseCommit:string;excludeExistingDirty:boolean;nodes:Array<{nodeId:string}>;/** 循环写节点的稳定字面量前缀；用户确认时逐前缀披露，实际节点在执行记录中核验。 */dynamicNodes?:Array<{nodeIdPrefix:string}>}; workspaceId:string };
@@ -246,7 +246,7 @@ export type ExecutionPlanResponse = {
   sceneEvidenceHash?:string|null;
   /** 受管写计划：固定写节点逐个枚举；循环写节点只给稳定字面量前缀，实际节点在执行记录中核验。 */
   workspacePlan?:{nodeIds:string[];/** 循环写节点 id 的字面量前缀，随确认载荷冻结并展示。 */dynamicNodePrefixes?:string[];repository:string;baseCommit:string|null;dirtyPaths:string[];diagnostic:string|null}|null;
-  harnessRunId: string;
+  leadRunId: string;
   revision: number;
   /** 已校验的阶段词表，按 meta 声明排序；不代表实际执行顺序。 */
   phaseTitles: string[];
@@ -274,22 +274,22 @@ export type ExecutionPlanResponse = {
   cliChoices?: { available: RuntimeCli[]; suggested: RuntimeCli | null; nodes: Array<{ nodeId: string; label: string | null }>; dynamicCount: number } | null;
   pool: CliRuntime[];
   selectedByCli: Partial<Record<RuntimeCli, string>>;
-  harnessRuntime: CliRuntime | null;
+  leadRuntime: CliRuntime | null;
 };
 /** 主控经窄工具发起的用户决策；回答只唤醒原工具调用。 */
-export type HarnessDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
-/** Desktop Engine 权威 Harness 会话快照。 */
-export type HarnessSnapshot = {
+export type LeadDecision = { decisionId: string; question: string; answerSchema?: Record<string, unknown>; createdAt: string; answer: Record<string, unknown> | null; answeredAt: string | null };
+/** Desktop Engine 权威 Lead 会话快照。 */
+export type LeadSnapshot = {
   /** 创建时冻结的主控 runtime 来源；历史档案可能缺省。 */
   runtime?: { runtimeId: string } | null;
   /** 原终态影响面义务；缺省为旧档案，不补造。 */
-  impactSummaries?: import("../../../src/harness/types").ImpactSummary[];
+  impactSummaries?: import("../../../src/lead/types").ImpactSummary[];
   /** 原执行创建/终态的历史链接；attempt未知不猜测。 */
   executionHistory?:Array<{key:string;at:string;executionId:string;revision:number;attempt?:number;kind:"created"|"finished";status:RunStatus;diagnostic:string|null;summary:Record<string,unknown>|null}>;
   /** 此档案已应用事件数；仅用于迟到响应防倒退。历史兼容缺省。 */
   snapshotSequence?:number;
   /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，缺省表示尚无会话或尚未收到。 */
-  availableCommands?: HarnessAvailableCommand[];
+  availableCommands?: LeadAvailableCommand[];
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
   executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
   task?: {
@@ -299,14 +299,14 @@ export type HarnessSnapshot = {
     namingAttempted?: boolean;
     /** 创建时冻结的模式；旧Task缺省多卡，不能由验收开关推断。 */
     workflowContract?:"single-workflow-v1";
-    clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; harnessRunId: string; projectId: string | null; cwd: string; status: HarnessStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: HarnessMessage[]; messageQueue: HarnessQueuedMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly HarnessToolActivity[]>>; conversationEntries: HarnessConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: HarnessDecision[] };
-export type HarnessRunResponse = { harness: HarnessSnapshot };
-/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Harness 或 Journal。 */
-export type HarnessCommandCatalogResponse = { commands: HarnessAvailableCommand[] };
-export type HarnessRunListResponse = { harnesses: HarnessSnapshot[] };
+    clientRequestId: string; payloadHash: string; title: string; initialGoal: string }; leadRunId: string; projectId: string | null; cwd: string; status: LeadStatus; diagnostic: string | null; completedAt: string | null; createdAt: string; messages: LeadMessage[]; messageQueue: LeadQueuedMessage[]; toolActivitiesByMessageId: Readonly<Record<string, readonly LeadToolActivity[]>>; conversationEntries: LeadConversationEntry[]; workflowRevisions: WorkflowRevision[]; executions: WorkflowExecution[]; decisions: LeadDecision[] };
+export type LeadRunResponse = { lead: LeadSnapshot };
+/** 临时 ACP 会话发现的斜杠命令/技能目录；不创建 Lead 或 Journal。 */
+export type LeadCommandCatalogResponse = { commands: LeadAvailableCommand[] };
+export type LeadRunListResponse = { leads: LeadSnapshot[] };
 /** 设置页展示的用户确认本机 CLI；不包含文件身份或任何环境变量。 */
-export type CliRuntime = { runtimeId: string; cli: RuntimeCli; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: RuntimeAdapterId; adapterVersion: string; acpProtocolVersion: number; harnessTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
-export type CliRuntimeListResponse = { selectedByCli: Partial<Record<RuntimeCli, string>>; harnessRuntimeId: string | null; runtimes: CliRuntime[] };
+export type CliRuntime = { runtimeId: string; cli: RuntimeCli; executablePath: string; version: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir" | "manual"; discoveredShell: string | null; verifiedAdapter: { adapterId: RuntimeAdapterId; adapterVersion: string; acpProtocolVersion: number; leadTools: boolean }; verifiedAt: string; status: "verified" | "needs-revalidation" | "invalid"; diagnostic: string | null };
+export type CliRuntimeListResponse = { selectedByCli: Partial<Record<RuntimeCli, string>>; leadRuntimeId: string | null; runtimes: CliRuntime[] };
 
 /** 可作为技能导入来源的本机 CLI 技能目录种类。 */
 export type SkillSourceCli = "codex" | "claude" | "dsh" | "kimi" | "agents";
@@ -378,9 +378,9 @@ export type SkillLibraryStatus = {
 export type ScanCliRuntimesResponse = { discovered: number; verified: number; failures: Partial<Record<RuntimeCli, "absent" | "timeout" | "exec_failed" | "limit_reached">>; runtimes: CliRuntimeListResponse };
 export type DiscoveredCliCandidate = { cli: RuntimeCli; executablePath: string; discoveredFrom: "shell-path" | "gui-path" | "install-dir"; discoveredShell: string | null; aliases: string[] };
 /** 侧边栏耐久项目；项目提供 cwd，会话不再自行选择路径。 */
-export type HarnessProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
-export type HarnessProjectResponse = { project: HarnessProject };
-export type HarnessProjectListResponse = { projects: HarnessProject[] };
+export type LeadProject = { projectId: string; cwd: string; title: string; createdAt: string; updatedAt: string };
+export type LeadProjectResponse = { project: LeadProject };
+export type LeadProjectListResponse = { projects: LeadProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   /** 工作区现场读取失败；不代表目录不存在或没有改动。 */ workspaceDiagnostic?:string;
@@ -389,4 +389,4 @@ export type ExecutionResponse = {
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };
-export type ExecutionListResponse = { harnessRunId: string; executions: WorkflowExecution[] };
+export type ExecutionListResponse = { leadRunId: string; executions: WorkflowExecution[] };

@@ -70,7 +70,7 @@ export function MentionComposer({
   /** 每次编辑后的纯文本；命令 token 仍保留在文本中，供 Engine 识别。 */
   readonly onChange: (text: string) => void;
   /** 当前可用的斜杠命令；由 App 的 ACP 目录事件构建。 */
-  readonly commands?: readonly import("../types").HarnessAvailableCommand[];
+  readonly commands?: readonly import("../types").LeadAvailableCommand[];
   readonly placeholder?: string;
   readonly ariaLabel: string;
   /** 草稿锁定时关联说明元素；与原生 textarea 行为一致。 */

@@ -192,20 +192,20 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完�
   const selected = await new CliRuntimeRegistry().resolveWorker(cli), registry = new CliRuntimeRegistry(root);
   const saved = await registry.saveVerified(selected); await registry.select(saved.runtimeId);
   const source = `const meta={name:"auto-delivery",description:"自动单条交付",phases:[{title:"write"}]};async function run(args){phase("write");return agent('只修改当前cwd的a.txt为done加换行。不要git commit、push、联网、安装。最终结果{ok:true}。',{id:"writer",cli:"${cli}",sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}`;
-  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), createHarnessSession: async (_id, _cwd, _prior, actions) => ({ isRunning: false, subscribe: () => () => {}, abort: () => {}, close: () => {}, prompt: async text => { if (text.startsWith("请总结")) return "业务已完成；Git交付请以真实证据为准，不代表业务验收。"; await actions.proposeWorkflowRevision(source, "自动交付验收", "只写a.txt"); return "方案已提出"; } }) });
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), createLeadSession: async (_id, _cwd, _prior, actions) => ({ isRunning: false, subscribe: () => () => {}, abort: () => {}, close: () => {}, prompt: async text => { if (text.startsWith("请总结")) return "业务已完成；Git交付请以真实证据为准，不代表业务验收。"; await actions.proposeWorkflowRevision(source, "自动交付验收", "只写a.txt"); return "方案已提出"; } }) });
   try {
-    const project = await engine.handleDesktopAction("projects.create", { cwd }) as import("../../src/desktop/types").HarnessProjectResponse;
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "生成自动交付验收方案" }) as import("../../src/desktop/types").HarnessRunResponse;
-    const taskId = started.harness.harnessRunId;
-    for (let n = 0; n < 1000; n++) { const value = await engine.handleDesktopAction("harnesses.get", { harnessRunId: taskId }) as import("../../src/desktop/types").HarnessRunResponse; if (value.harness.status === "idle" && value.harness.workflowRevisions.length) break; await Bun.sleep(10); }
-    const plan = await engine.handleDesktopAction("executions.plan", { harnessRunId: taskId, revision: 1 }) as import("../../src-tauri/web/src/types").ExecutionPlanResponse;
+    const project = await engine.handleDesktopAction("projects.create", { cwd }) as import("../../src/desktop/types").LeadProjectResponse;
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "生成自动交付验收方案" }) as import("../../src/desktop/types").LeadRunResponse;
+    const taskId = started.lead.leadRunId;
+    for (let n = 0; n < 1000; n++) { const value = await engine.handleDesktopAction("leads.get", { leadRunId: taskId }) as import("../../src/desktop/types").LeadRunResponse; if (value.lead.status === "idle" && value.lead.workflowRevisions.length) break; await Bun.sleep(10); }
+    const plan = await engine.handleDesktopAction("executions.plan", { leadRunId: taskId, revision: 1 }) as import("../../src-tauri/web/src/types").ExecutionPlanResponse;
     const workspaces = { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, workspaceId: crypto.randomUUID() };
     const request = new DesignConfirmationCache().script(`${taskId}:1`, {}, plan, workspaces);
-    const created = await engine.handleDesktopAction("executions.confirm", { harnessRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
+    const created = await engine.handleDesktopAction("executions.confirm", { leadRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
     console.log(JSON.stringify({ root, taskId, executionId: created.execution.executionId, cli }));
     let detail = created;
     const deadline = Date.now() + 150_000;
-    while (detail.execution.finishedAt === null && Date.now() < deadline) { await Bun.sleep(100); detail = await engine.handleDesktopAction("executions.get", { harnessRunId: taskId, executionId: created.execution.executionId }) as import("../../src/desktop/types").ExecutionResponse; }
+    while (detail.execution.finishedAt === null && Date.now() < deadline) { await Bun.sleep(100); detail = await engine.handleDesktopAction("executions.get", { leadRunId: taskId, executionId: created.execution.executionId }) as import("../../src/desktop/types").ExecutionResponse; }
     expect(detail.execution.status, detail.execution.diagnostic ?? "").toBe("completed");
     // 宿主不保存任何成果快照或证据 ref；结果只作为 worktree 未提交文件存在。
     expect(await git("for-each-ref", "--format=%(refname)", "refs/wave-flow")).toBe("");

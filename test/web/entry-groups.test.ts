@@ -6,18 +6,18 @@ import {
   toolGroupTimes,
 } from "../../src-tauri/web/src/conversation/entry-groups";
 import type {
-  HarnessBodyEntry,
-  HarnessThoughtEntry,
-  HarnessToolEntry,
-  HarnessToolKind,
+  LeadBodyEntry,
+  LeadThoughtEntry,
+  LeadToolEntry,
+  LeadToolKind,
 } from "../../src-tauri/web/src/types";
 
 /** 构造最小工具条目。 */
 function tool(
   entryId: string,
-  toolKind: HarnessToolKind,
-  status: HarnessToolEntry["status"] = "completed",
-): HarnessToolEntry {
+  toolKind: LeadToolKind,
+  status: LeadToolEntry["status"] = "completed",
+): LeadToolEntry {
   return {
     kind: "tool",
     entryId,
@@ -41,7 +41,7 @@ function tool(
 }
 
 /** 构造最小正文条目。 */
-function body(entryId: string): HarnessBodyEntry {
+function body(entryId: string): LeadBodyEntry {
   return {
     kind: "body",
     entryId,
@@ -57,7 +57,7 @@ function body(entryId: string): HarnessBodyEntry {
 }
 
 /** 构造最小思考条目。 */
-function thought(entryId: string): HarnessThoughtEntry {
+function thought(entryId: string): LeadThoughtEntry {
   return {
     kind: "thought",
     entryId,

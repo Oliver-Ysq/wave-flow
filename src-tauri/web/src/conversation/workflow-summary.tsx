@@ -1,4 +1,4 @@
-import type { HarnessSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
+import type { LeadSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
 import {PersistedDetails} from "../persisted-details";
 import {AbandonedPlan} from "./abandoned-plan";
 import {useId,useState} from "react";
@@ -14,7 +14,7 @@ export function proposalTitle(revision:WorkflowRevision):string {
 }
 
 /** 原版本的展示状态；只派生耐久证据，不提供启动授权。 */
-export function revisionSummaryState(task: HarnessSnapshot, revision: WorkflowRevision): { status: string; supersededBy?: number } {
+export function revisionSummaryState(task: LeadSnapshot, revision: WorkflowRevision): { status: string; supersededBy?: number } {
   const newer = revision.cardId ? task.workflowRevisions.filter(item => item.cardId === revision.cardId && item.revision > revision.revision).at(-1) : undefined;
   if (revision.abandonedAt) return { status: "已放弃" };
   if (newer) return { status: `已被第 ${visibleVersion(task,newer)} 版替代`, supersededBy: newer.revision };
@@ -26,7 +26,7 @@ export function revisionSummaryState(task: HarnessSnapshot, revision: WorkflowRe
 /** 方案轻量摘要；只打开原版本，不接受、创建执行或读取重型详情。 */
 export function WorkflowProposalSummary({ task, revision, onOpen, onAdjust, onTemplate }: {
   /** 所属任务的耐久投影。 */
-  task: HarnessSnapshot;
+  task: LeadSnapshot;
   /** 事件绑定的原版本，不自动替换为最新版。 */
   revision: WorkflowRevision;
   /** 仅导航到原方案。 */
@@ -56,7 +56,7 @@ export function WorkflowProposalSummary({ task, revision, onOpen, onAdjust, onTe
   return <article className={`wf-chat-summary proposal ${state.supersededBy ? "historical" : ""}`} aria-label={visibleVersion(task,revision)?`工作流方案第 ${visibleVersion(task,revision)} 版`:'工作流方案'}>
     <header><span>{revision.parentRevision ? "方案已更新" : "方案已生成"}</span>{visibleVersion(task,revision)&&<span>第 {visibleVersion(task,revision)} 版</span>}</header>
     <h3>{title}</h3>
-    {state.supersededBy||abandoned ? <PersistedDetails identity={`${task.harnessRunId}:${revision.cardId}:${revision.revision}:${abandoned?"abandoned":"summary"}`}><summary>{abandoned?"展开已放弃方案摘要":"展开历史方案摘要"}</summary>{content}</PersistedDetails> : content}
+    {state.supersededBy||abandoned ? <PersistedDetails identity={`${task.leadRunId}:${revision.cardId}:${revision.revision}:${abandoned?"abandoned":"summary"}`}><summary>{abandoned?"展开已放弃方案摘要":"展开历史方案摘要"}</summary>{content}</PersistedDetails> : content}
     {!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<small>可直接对话调整方案</small>}
     <footer><span>{state.status}</span>{!state.supersededBy&&!revision.abandonedAt&&!revision.localOrigin&&onAdjust&&<button type="button" onClick={onAdjust} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}>通过对话调整</button>}<button onClick={onOpen} className={state.status==="待确认"||state.status==="已接受，尚未运行" ? "button-primary" : undefined} aria-label={visibleVersion(task,revision)?`查看第 ${visibleVersion(task,revision)} 版方案`:'查看方案'}>{state.supersededBy||abandoned ? "查看原方案" : state.status==="待确认"||state.status==="已接受，尚未运行" ? "去确认方案" : "查看方案"}<span aria-hidden="true"> ↗</span></button></footer>
     {abandoned&&latest&&onAdjust&&task.status!=="completed"&&<AbandonedPlan onRedesign={onAdjust} onTemplate={!task.executions.length?onTemplate:undefined} disabled={task.status!=="idle"||task.executions.some(item=>item.finishedAt===null)}/>}
@@ -119,9 +119,9 @@ export function WorkflowExecutionSummary({ execution, revision, onOpen, onOpenRe
   return <p className="task-event">历史记录：{statusLabel} · <button onClick={onOpen}>{title}</button></p>;
 }
 
-export type ExecutionHistoryEntry = NonNullable<HarnessSnapshot["executionHistory"]>[number];
+export type ExecutionHistoryEntry = NonNullable<LeadSnapshot["executionHistory"]>[number];
 /** 同一执行会同时留下 created 与 finished 历史；只保留最新一条，避免“已启动”卡片在结束后残留。 */
-export function latestExecutionEntries(task: HarnessSnapshot): ExecutionHistoryEntry[] {
+export function latestExecutionEntries(task: LeadSnapshot): ExecutionHistoryEntry[] {
   const byExecution = new Map<string, ExecutionHistoryEntry>();
   for (const item of task.executionHistory ?? []) {
     const current = byExecution.get(item.executionId);

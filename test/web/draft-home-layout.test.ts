@@ -44,7 +44,7 @@ test("预置与本地工作流复用居中弹窗，不回退主网格或伪切�
 
 test("主页快捷入口位于输入框外上方，不占用输入框底部", async () => {
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
-  const home = app.slice(app.indexOf("function DraftConversation("), app.indexOf("function HarnessConversation("));
+  const home = app.slice(app.indexOf("function DraftConversation("), app.indexOf("function LeadConversation("));
   const actions = home.indexOf('className="draft-quick-actions"');
   const composer = home.indexOf('className="conversation-composer"');
   expect(actions).toBeGreaterThan(-1);

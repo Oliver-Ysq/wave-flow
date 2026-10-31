@@ -12,7 +12,7 @@ test("本地文件输入与操作同行，空路径仍禁止检查", () => {
 });
 
 test("原路径修订保留操作组但不能换文件", () => {
-  const html = renderToStaticMarkup(<LocalWorkflowPreview projectId="spacing-test" onClose={() => {}} onPrepared={() => {}} revision={{ harnessRunId: "run", baseRevision: 1, path: "workflow.ts", input: {} }} />);
+  const html = renderToStaticMarkup(<LocalWorkflowPreview projectId="spacing-test" onClose={() => {}} onPrepared={() => {}} revision={{ leadRunId: "run", baseRevision: 1, path: "workflow.ts", input: {} }} />);
   expect(html).not.toContain("选择工作流文件</button>");
   expect(html).toMatch(/<div class="local-workflow-file-actions"><button[^>]*>检查文件<\/button><\/div>/);
   expect(html).toContain('value="workflow.ts"');

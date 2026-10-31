@@ -12,13 +12,13 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function record(root: string, name = "codex"): Promise<CliRuntimeRecord> {
   const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho codex\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli: "codex", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "codex", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 async function claudeRecord(root: string, name: string): Promise<CliRuntimeRecord> {
   const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
-  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "claude", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "claude 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 describe("CliRuntimeRegistry", () => {
@@ -49,31 +49,31 @@ describe("CliRuntimeRegistry", () => {
     await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: saved.runtimeId, status: "needs-revalidation" }] });
   });
 
-  test("旧 Codex runtime 记录在读取时补齐 harnessTools 能力", async () => {
+  test("旧 Codex runtime 记录在读取时补齐 leadTools 能力", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-legacy-capability-")); roots.push(root);
-    const legacy = await record(root); const { harnessTools: _removed, ...adapter } = legacy.verifiedAdapter;
+    const legacy = await record(root); const { leadTools: _removed, ...adapter } = legacy.verifiedAdapter;
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { codex: legacy.runtimeId }, runtimes: [{ ...legacy, verifiedAdapter: adapter }] })}\n`);
     await Bun.file(join(root, "runtimes.json")).write(await Bun.file(join(root, "runtimes.json")).text());
     await (await import("node:fs/promises")).chmod(join(root, "runtimes.json"), 0o600);
     await Bun.write(join(root, ".keep"), "");
     const registry = new CliRuntimeRegistry(root);
-    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, verifiedAdapter: { harnessTools: true } });
+    await expect(registry.resolveSelectedLead()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, verifiedAdapter: { leadTools: true } });
   }, 30_000);
 
-  test("旧 Registry 缺失 harnessRuntimeId 时读取回填为原 codex 默认项", async () => {
-    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-harness-backfill-")); roots.push(root);
+  test("旧 Registry 缺失 leadRuntimeId 时读取回填为原 codex 默认项", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-lead-backfill-")); roots.push(root);
     const legacy = await record(root);
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { codex: legacy.runtimeId }, runtimes: [legacy] })}\n`);
     await chmod(join(root, "runtimes.json"), 0o600);
     const registry = new CliRuntimeRegistry(root);
-    await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: legacy.runtimeId });
-    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId });
+    await expect(registry.list()).resolves.toMatchObject({ leadRuntimeId: legacy.runtimeId });
+    await expect(registry.resolveSelectedLead()).resolves.toMatchObject({ runtimeId: legacy.runtimeId });
   }, 30_000);
 
-  test("harnessRuntimeId 引用不存在的记录时拒绝读取 Registry", async () => {
-    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-harness-dangling-")); roots.push(root);
+  test("leadRuntimeId 引用不存在的记录时拒绝读取 Registry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-lead-dangling-")); roots.push(root);
     const legacy = await record(root);
-    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: {}, harnessRuntimeId: crypto.randomUUID(), runtimes: [legacy] })}\n`);
+    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: {}, leadRuntimeId: crypto.randomUUID(), runtimes: [legacy] })}\n`);
     await chmod(join(root, "runtimes.json"), 0o600);
     await expect(new CliRuntimeRegistry(root).list()).rejects.toThrow("Registry 不可读取");
   });
@@ -85,8 +85,8 @@ describe("CliRuntimeRegistry", () => {
     await registry.select(first.runtimeId);
     await expect(registry.select(first.runtimeId)).resolves.toMatchObject({ runtimeId: first.runtimeId });
     await expect(registry.select(second.runtimeId)).resolves.toMatchObject({ runtimeId: second.runtimeId });
-    await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: second.runtimeId });
-    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: second.runtimeId });
+    await expect(registry.list()).resolves.toMatchObject({ leadRuntimeId: second.runtimeId });
+    await expect(registry.resolveSelectedLead()).resolves.toMatchObject({ runtimeId: second.runtimeId });
   }, 30_000);
 
   test("选择时复核安装文件：已删除的 CLI 拒绝设为默认并耐久标 needs-revalidation", async () => {
@@ -95,35 +95,35 @@ describe("CliRuntimeRegistry", () => {
     await rm(saved.executablePath, { force: true });
     await expect(registry.select(saved.runtimeId)).rejects.toThrow("安装文件已被删除或修改");
     const listed = await registry.list();
-    expect(listed.harnessRuntimeId).toBeNull();
+    expect(listed.leadRuntimeId).toBeNull();
     expect(listed.runtimes.find(item => item.runtimeId === saved.runtimeId)?.status).toBe("needs-revalidation");
   });
 
-  test("未声明 harnessTools 的 runtime 不能设为主控", async () => {
-    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-no-harness-tools-")); roots.push(root);
+  test("未声明 leadTools 的 runtime 不能设为主控", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-no-lead-tools-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root,async()=>{throw Error("探针失败");}); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     await expect(registry.select(saved.runtimeId)).rejects.toThrow("主控窄工具");
-    await expect(registry.list()).resolves.toMatchObject({ harnessRuntimeId: null });
+    await expect(registry.list()).resolves.toMatchObject({ leadRuntimeId: null });
   });
 
-  test("remove 同时清理指向该 runtime 的 harnessRuntimeId", async () => {
-    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-remove-harness-")); roots.push(root);
+  test("remove 同时清理指向该 runtime 的 leadRuntimeId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-remove-lead-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await record(root));
     await registry.select(saved.runtimeId);
     await registry.remove(saved.runtimeId);
-    await expect(new CliRuntimeRegistry(root).list()).resolves.toMatchObject({ harnessRuntimeId: null, selectedByCli: {} });
-    await expect(new CliRuntimeRegistry(root).resolveSelectedHarness()).rejects.toThrow("未选择");
+    await expect(new CliRuntimeRegistry(root).list()).resolves.toMatchObject({ leadRuntimeId: null, selectedByCli: {} });
+    await expect(new CliRuntimeRegistry(root).resolveSelectedLead()).rejects.toThrow("未选择");
   });
 
-  test("旧 claude 记录在读取时按 Catalog 回填 harnessTools 能力", async () => {
+  test("旧 claude 记录在读取时按 Catalog 回填 leadTools 能力", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-capability-")); roots.push(root);
-    const legacy = await claudeRecord(root, "kimi"); const { harnessTools: _removed, ...adapter } = legacy.verifiedAdapter;
+    const legacy = await claudeRecord(root, "kimi"); const { leadTools: _removed, ...adapter } = legacy.verifiedAdapter;
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: {}, runtimes: [{ ...legacy, verifiedAdapter: adapter }] })}\n`);
     await chmod(join(root, "runtimes.json"), 0o600);
     const registry = new CliRuntimeRegistry(root);
-    await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: legacy.runtimeId, verifiedAdapter: { harnessTools: true } }] });
+    await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ runtimeId: legacy.runtimeId, verifiedAdapter: { leadTools: true } }] });
     await registry.select(legacy.runtimeId);
-    await expect(registry.resolveSelectedHarness()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, cli: "claude" });
+    await expect(registry.resolveSelectedLead()).resolves.toMatchObject({ runtimeId: legacy.runtimeId, cli: "claude" });
   });
 
   test("旧记录携带的废弃 workerEnabled 字段在读取时剥离", async () => {
@@ -140,9 +140,9 @@ describe("CliRuntimeRegistry", () => {
   test("resolveWorker 的候选为所有已验证 runtime；多候选且无默认项时 fail closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-resolve-worker-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
-    // 主控选择同时是该 cli 的 Worker 偏好；harnessTools 仅约束主控，不影响 Worker 候选。
-    const harnessCapable = { ...(await claudeRecord(root, "kimi")), verifiedAdapter: { adapterId: "claude-acp" as const, adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true } };
-    const first = await registry.saveVerified(harnessCapable);
+    // 主控选择同时是该 cli 的 Worker 偏好；leadTools 仅约束主控，不影响 Worker 候选。
+    const leadCapable = { ...(await claudeRecord(root, "kimi")), verifiedAdapter: { adapterId: "claude-acp" as const, adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: true } };
+    const first = await registry.saveVerified(leadCapable);
     await expect(registry.resolveWorker("claude")).resolves.toMatchObject({ runtimeId: first.runtimeId, cli: "claude" });
     await expect(registry.hasWorkerCandidate()).resolves.toBe(true);
     const second = await registry.saveVerified(await claudeRecord(root, "kimi-second"));
@@ -166,9 +166,9 @@ describe("CliRuntimeRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root); const saved = await registry.saveVerified(await claudeRecord(root, "kimi"));
     const listed = (await new CliRuntimeRegistry(root).list()).runtimes.find(item => item.runtimeId === saved.runtimeId)!;
-    expect(listed).toMatchObject({ cli: "claude", verifiedAdapter: { adapterId: "claude-acp", harnessTools: false } });
+    expect(listed).toMatchObject({ cli: "claude", verifiedAdapter: { adapterId: "claude-acp", leadTools: false } });
     expect(JSON.stringify(listed)).not.toContain("nodeExecutable");
-    await expect(new CliRuntimeRegistry(root).resolveSelectedHarness()).rejects.toThrow("未选择");
+    await expect(new CliRuntimeRegistry(root).resolveSelectedLead()).rejects.toThrow("未选择");
   });
 
   test("resolveWorkerById 按分配快照直接解析已验证 runtime", async () => {
@@ -196,11 +196,11 @@ describe("CliRuntimeRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-dsh-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
     const saved = await registry.saveVerified(await dshRecord(root, "dsh", "v24.22.0"));
-    // dsh 不声明 harnessTools：不能设为主控，但可作为 Worker 候选按 cli 解析。
+    // dsh 不声明 leadTools：不能设为主控，但可作为 Worker 候选按 cli 解析。
     await expect(registry.select(saved.runtimeId)).rejects.toThrow("不能设为主控");
     await expect(registry.resolveWorker("dsh")).resolves.toMatchObject({ runtimeId: saved.runtimeId, cli: "dsh" });
     const listed = await registry.list();
-    expect(listed.runtimes[0]).toMatchObject({ cli: "dsh", verifiedAdapter: { adapterId: "dsh-acp", harnessTools: false } });
+    expect(listed.runtimes[0]).toMatchObject({ cli: "dsh", verifiedAdapter: { adapterId: "dsh-acp", leadTools: false } });
     expect(JSON.stringify(listed)).not.toContain("inode");
     // Registry 文件校验白名单已拓宽：selectedByCli 的 dsh 键合法且必须引用存在的记录。
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { dsh: saved.runtimeId }, runtimes: [saved] })}\n`);
@@ -225,7 +225,7 @@ async function dshRecord(root: string, name: string, nodeVersion: string): Promi
   const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho dsh\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const nodePath = join(root, `${name}-node`); await writeFile(nodePath, `#!/bin/sh\necho '${nodeVersion}'\n`, { mode: 0o700 }); await chmod(nodePath, 0o700);
   const executable = await verifyExecutable(executablePath); const node = await verifyExecutable(nodePath);
-  return { runtimeId: crypto.randomUUID(), cli: "dsh", executablePath: executable.executablePath, executableIdentity: executable.identity, nodeExecutable: { path: node.executablePath, identity: node.identity }, version: "0.2.1-rc.2", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+  return { runtimeId: crypto.randomUUID(), cli: "dsh", executablePath: executable.executablePath, executableIdentity: executable.identity, nodeExecutable: { path: node.executablePath, identity: node.identity }, version: "0.2.1-rc.2", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
 }
 
 /** 回归：Engine 派发与后台复验均为并发后，Registry 读-改-写必须串行，否则并发
@@ -246,15 +246,15 @@ test("并发 saveVerified 不丢更新", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-kimi-hidden-")); roots.push(root);
     const executablePath = join(root, "kimi"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
     const executable = await verifyExecutable(executablePath);
-    const legacy: CliRuntimeRecord = { runtimeId: crypto.randomUUID(), cli: "kimi", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
-    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { kimi: legacy.runtimeId }, harnessRuntimeId: legacy.runtimeId, runtimes: [legacy] })}\n`);
+    const legacy: CliRuntimeRecord = { runtimeId: crypto.randomUUID(), cli: "kimi", executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "kimi-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { kimi: legacy.runtimeId }, leadRuntimeId: legacy.runtimeId, runtimes: [legacy] })}\n`);
     await chmod(join(root, "runtimes.json"), 0o600);
     const registry = new CliRuntimeRegistry(root);
     const listed = await registry.list();
     expect(listed.runtimes).toEqual([]);
-    expect(listed.harnessRuntimeId).toBeNull();
-    await expect(registry.resolveSelectedHarness()).rejects.toThrow("支持已暂时下线");
-    await expect(registry.resolveByIdHarness(legacy.runtimeId)).rejects.toThrow("支持已暂时下线");
+    expect(listed.leadRuntimeId).toBeNull();
+    await expect(registry.resolveSelectedLead()).rejects.toThrow("支持已暂时下线");
+    await expect(registry.resolveByIdLead(legacy.runtimeId)).rejects.toThrow("支持已暂时下线");
     await expect(registry.resolveWorkerById(legacy.runtimeId)).rejects.toThrow("支持已暂时下线");
     expect(await Bun.file(join(root, "runtimes.json")).text()).toContain(legacy.runtimeId);
   });

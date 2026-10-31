@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { HarnessSnapshot } from "../../src-tauri/web/src/types";
+import type { LeadSnapshot } from "../../src-tauri/web/src/types";
 import {
   UnreadTracker,
   parseReadIdentities,
@@ -9,9 +9,9 @@ import {
 } from "../../src-tauri/web/src/workbench-state";
 import { TimelineRecords } from "../../src-tauri/web/src/conversation/plan-updates";
 
-function task(overrides: Partial<HarnessSnapshot> = {}): HarnessSnapshot {
+function task(overrides: Partial<LeadSnapshot> = {}): LeadSnapshot {
   return {
-    harnessRunId: "task-1",
+    leadRunId: "task-1",
     messages: [],
     conversationEntries: [],
     workflowRevisions: [],
@@ -20,11 +20,11 @@ function task(overrides: Partial<HarnessSnapshot> = {}): HarnessSnapshot {
     impactSummaries: [],
     decisions: [],
     ...overrides,
-  } as unknown as HarnessSnapshot;
+  } as unknown as LeadSnapshot;
 }
 
 function revision(n: number) {
-  return { revision: n } as unknown as HarnessSnapshot["workflowRevisions"][number];
+  return { revision: n } as unknown as LeadSnapshot["workflowRevisions"][number];
 }
 
 function historyEvent(executionId: string, key: string, kind: "created" | "finished") {
@@ -38,7 +38,7 @@ function historyEvent(executionId: string, key: string, kind: "created" | "finis
     status: kind === "created" ? "running" : "completed",
     diagnostic: null,
     summary: null,
-  } as HarnessSnapshot["executionHistory"] extends (infer T)[] | undefined ? T : never;
+  } as LeadSnapshot["executionHistory"] extends (infer T)[] | undefined ? T : never;
 }
 
 test("执行历史身份与页面卡片一致，created/finished 合并为一张卡片", () => {
@@ -66,8 +66,8 @@ test("保存本地来源产生的版本不计入未读，避免用户自己的�
   const identities = unreadIdentities(
     task({
       workflowRevisions: [
-        { revision: 1, updateReason: "save-local" } as unknown as HarnessSnapshot["workflowRevisions"][number],
-        { revision: 2 } as unknown as HarnessSnapshot["workflowRevisions"][number],
+        { revision: 1, updateReason: "save-local" } as unknown as LeadSnapshot["workflowRevisions"][number],
+        { revision: 2 } as unknown as LeadSnapshot["workflowRevisions"][number],
       ],
     }),
   );
@@ -79,7 +79,7 @@ test("只有未完成正文时不回退到助手消息，避免产生无法标�
     messages: [
       { id: "m-user", role: "user", text: "目标", createdAt: "2026-10-28T10:00:00.000Z" },
       { id: "m-assistant", role: "assistant", text: "回答", createdAt: "2026-10-28T10:00:01.000Z" },
-    ] as unknown as HarnessSnapshot["messages"],
+    ] as unknown as LeadSnapshot["messages"],
   });
   const streaming = unreadIdentities(
     task({
@@ -95,7 +95,7 @@ test("只有未完成正文时不回退到助手消息，避免产生无法标�
           startedAt: "2026-10-28T10:00:00.500Z",
           text: "半截",
         },
-      ] as unknown as HarnessSnapshot["conversationEntries"],
+      ] as unknown as LeadSnapshot["conversationEntries"],
     }),
   );
   expect(streaming).toEqual([]);

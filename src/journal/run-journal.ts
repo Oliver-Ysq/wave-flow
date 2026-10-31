@@ -168,11 +168,11 @@ export function validateManifest(value: unknown): RunManifest {
   if (!isJsonObject(manifest.input)) throw new Error("Manifest input 必须为 JSON-safe 对象。");
   if (typeof manifest.createdAt !== "string" || Number.isNaN(Date.parse(manifest.createdAt))) throw new Error("Manifest createdAt 无效。");
   if (!isWorkflowMeta(manifest.workflow)) throw new Error("Manifest workflow 无效。");
-  if (manifest.harness !== undefined) {
-    const harness = manifest.harness as Record<string, unknown>;
-    if (!isPlainObject(harness)) throw new Error("Manifest harness 绑定无效。");
-    try { validateRunId(String(harness.harnessRunId)); } catch { throw new Error("Manifest harness.harnessRunId 无效。"); }
-    if (!Number.isInteger(harness.revision) || (harness.revision as number) < 1 || !/^[0-9a-f]{64}$/i.test(String(harness.sourceHash)) || harness.sourceHash !== manifest.workflowHash) throw new Error("Manifest harness 绑定无效。");
+  if (manifest.lead !== undefined) {
+    const lead = manifest.lead as Record<string, unknown>;
+    if (!isPlainObject(lead)) throw new Error("Manifest lead 绑定无效。");
+    try { validateRunId(String(lead.leadRunId)); } catch { throw new Error("Manifest lead.leadRunId 无效。"); }
+    if (!Number.isInteger(lead.revision) || (lead.revision as number) < 1 || !/^[0-9a-f]{64}$/i.test(String(lead.sourceHash)) || lead.sourceHash !== manifest.workflowHash) throw new Error("Manifest lead 绑定无效。");
   }
   return manifest as unknown as RunManifest;
 }

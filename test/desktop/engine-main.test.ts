@@ -10,11 +10,11 @@ import { serveEngineRequests } from "../../src/desktop/engine-dispatch";
 import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import { verifyExecutable } from "../../src/runtimes/identity";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
-import type { HarnessSession } from "../../src/harness/session";
-import { listWorkflowTemplates } from "../../src/harness/workflow-templates";
+import type { LeadSession } from "../../src/lead/session";
+import { listWorkflowTemplates } from "../../src/lead/workflow-templates";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager";
-import { HarnessService } from "../../src/harness/service";
-import { HarnessExecutionService } from "../../src/harness/executions";
+import { LeadService } from "../../src/lead/service";
+import { LeadExecutionService } from "../../src/lead/executions";
 import { mkdir, realpath } from "node:fs/promises";
 
 const roots: string[] = [];
@@ -25,31 +25,31 @@ test("Engine重启不补成果快照、不重跑业务；completed resume 只读
  const cwd=join(root,"repo");await mkdir(cwd);
  const git=async(...args:string[])=>{const p=Bun.spawn(["/usr/bin/git","-c","user.name=Test","-c","user.email=test@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code)throw Error(err);return out.trim();};
  await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","fixture");
- const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),harnessRoot=join(root,"harness-runs");
+ const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),leadRoot=join(root,"lead-runs");
  const manager=await WorkspaceManager.open(join(root,"workspaces"),crypto.randomUUID());
  const authorization={authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]};
  const workspace=await manager.create(workspaceId,authorization);
- const harness=new HarnessService(harnessRoot,async()=>{throw Error("不会运行主控");});const task=await harness.create(cwd);
+ const lead=new LeadService(leadRoot,async()=>{throw Error("不会运行主控");});const task=await lead.create(cwd);
  const source='import { agent, phase } from "wave-flow";\nexport const meta={name:"no-source",description:"无快照",phases:[{title:"write"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("write");return agent("写文件",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
- await harness.proposeWorkflowRevision(task.harnessRunId,source);await harness.acceptWorkflowRevision(task.harnessRunId,1);
+ await lead.proposeWorkflowRevision(task.leadRunId,source);await lead.acceptWorkflowRevision(task.leadRunId,1);
  // 模块 Workflow 只接受脚本模式配置；CLI 由源码字面量决定，这里只冻结 Git 成果授权。
  const config={version:1 as const,assignmentMode:"script" as const,createdAt:new Date().toISOString(),workspaces:{version:3 as const,authorization,workspaceId}};
  let calls=0,runId="";
- const executions=new HarnessExecutionService(harness,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer",{pgid:54321,startedAt:"test-fingerprint"});await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.release(lease,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},harnessRoot,join(root,"runs"),join(root,"workspaces"));
- const {execution}=await executions.createExecution(task.harnessRunId,1,{},config);
- for(let n=0;n<1000;n++){if((await executions.listExecutions(task.harnessRunId))[0].finishedAt!==null)break;await Bun.sleep(10);}
- expect((await executions.listExecutions(task.harnessRunId))[0].status).toBe("completed");expect(calls).toBe(1);harness.close();
- const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot,deterministicForTest:true});
+ const executions=new LeadExecutionService(lead,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer",{pgid:54321,startedAt:"test-fingerprint"});await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.release(lease,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},leadRoot,join(root,"runs"),join(root,"workspaces"));
+ const {execution}=await executions.createExecution(task.leadRunId,1,{},config);
+ for(let n=0;n<1000;n++){if((await executions.listExecutions(task.leadRunId))[0].finishedAt!==null)break;await Bun.sleep(10);}
+ expect((await executions.listExecutions(task.leadRunId))[0].status).toBe("completed");expect(calls).toBe(1);lead.close();
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),leadRoot,deterministicForTest:true});
  try {
   await engine.convergeStaleAcpWorkers();
-  const detail=await engine.handleDesktopAction("executions.get",{harnessRunId:task.harnessRunId,executionId:execution.executionId}) as import("../../src/desktop/types").ExecutionResponse;
+  const detail=await engine.handleDesktopAction("executions.get",{leadRunId:task.leadRunId,executionId:execution.executionId}) as import("../../src/desktop/types").ExecutionResponse;
   expect(detail.workspaceEvidence?.cwd).toBe(workspace.cwd);
   // 宿主不创建任何成果 ref；结果就是 worktree 里的未提交文件。
   expect(await git("for-each-ref","--format=%(refname)","refs/wave-flow")).toBe("");
   expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("final\n");
   expect((await manager.inspect(workspaceId)).leases).toHaveLength(0);
   // completed 的 resume 不再补收尾，也不重跑业务。
-  await engine.handleDesktopAction("executions.resume",{harnessRunId:task.harnessRunId,executionId:execution.executionId});
+  await engine.handleDesktopAction("executions.resume",{leadRunId:task.leadRunId,executionId:execution.executionId});
   expect(calls).toBe(1);
   expect(await git("-C",workspace.cwd,"rev-parse","HEAD")).toBe(base);
   expect(await git("rev-parse",`refs/heads/codex/wf-${workspaceId}`)).toBe(base);
@@ -63,27 +63,27 @@ afterEach(async () => { for (const child of children.splice(0)) child.kill(); aw
 
 test("Engine 停止总结必须携带本次turnId，缺失或非法身份在读档前拒绝",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-stop-summary-"));roots.push(root);
- const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true});
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),leadRoot:join(root,"lead-runs"),deterministicForTest:true});
  try{
   for(const turnId of [undefined,null,""," ",42]){
-   await expect(engine.handleDesktopAction("harnesses.stopImpactSummary",{harnessRunId:crypto.randomUUID(),key:"a".repeat(64),turnId})).rejects.toThrow("turnId");
+   await expect(engine.handleDesktopAction("leads.stopImpactSummary",{leadRunId:crypto.randomUUID(),key:"a".repeat(64),turnId})).rejects.toThrow("turnId");
   }
-  expect(await engine.handleDesktopAction("harnesses.list",{})).toMatchObject({harnesses:[]});
-  expect(await engine.handleDesktopAction("status",{})).toMatchObject({activeRuns:0,activeHarnesses:0});
+  expect(await engine.handleDesktopAction("leads.list",{})).toMatchObject({leads:[]});
+  expect(await engine.handleDesktopAction("status",{})).toMatchObject({activeRuns:0,activeLeads:0});
  }finally{engine.shutdown();}
 });
 
 test("Engine 参数编辑 IPC 缺失或非法基础版本在读取任务前拒绝", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-template-version-")); roots.push(root);
-  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true });
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true });
   const template = listWorkflowTemplates()[0]!;
-  const args = { harnessRunId: crypto.randomUUID(), cardId: crypto.randomUUID(), clientRequestId: crypto.randomUUID(), template: { id: template.id, version: template.version, sourceHash: template.sourceHash, input: {} } };
+  const args = { leadRunId: crypto.randomUUID(), cardId: crypto.randomUUID(), clientRequestId: crypto.randomUUID(), template: { id: template.id, version: template.version, sourceHash: template.sourceHash, input: {} } };
   try {
     for (const baseRevision of [undefined, 0, -1, 1.5, "1", null]) {
       await expect(engine.handleDesktopAction("templates.save", { ...args, baseRevision })).rejects.toThrow("编辑参数必须绑定基础版本");
     }
-    expect(await engine.handleDesktopAction("harnesses.list", {})).toMatchObject({ harnesses: [] });
-    expect(await engine.handleDesktopAction("status", {})).toMatchObject({ activeRuns: 0, activeHarnesses: 0 });
+    expect(await engine.handleDesktopAction("leads.list", {})).toMatchObject({ leads: [] });
+    expect(await engine.handleDesktopAction("status", {})).toMatchObject({ activeRuns: 0, activeLeads: 0 });
   } finally { engine.shutdown(); }
 });
 
@@ -102,9 +102,9 @@ test("Desktop Engine 通过 stdin/stdout JSONL 提供状态并在 shutdown 后�
   };
   expect(await next()).toEqual({ type: "ready", protocolVersion: 1 });
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "status", method: "engine.status" })}\n`));
-  expect(await next()).toMatchObject({ requestId: "status", ok: true, result: { activeRuns: 0, activeHarnesses: 0 } });
+  expect(await next()).toMatchObject({ requestId: "status", ok: true, result: { activeRuns: 0, activeLeads: 0 } });
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "actions-status", method: "engine.action", action: "status", args: {} })}\n`));
-  expect(await next()).toMatchObject({ requestId: "actions-status", ok: true, result: { activeRuns: 0, activeHarnesses: 0 } });
+  expect(await next()).toMatchObject({ requestId: "actions-status", ok: true, result: { activeRuns: 0, activeLeads: 0 } });
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "legacy", method: `engine.${"http"}` })}\n`));
   expect(await next()).toMatchObject({ requestId: "legacy", ok: false, error: "Engine 请求方法无效。 " });
   child.stdin.write(new TextEncoder().encode(`${JSON.stringify({ requestId: "close", method: "engine.shutdown" })}\n`));
@@ -112,8 +112,8 @@ test("Desktop Engine 通过 stdin/stdout JSONL 提供状态并在 shutdown 后�
   expect(await child.exited).toBe(0);
 }, 15_000);
 
-/** 实际 Harness 快照可能远大于 pipe 单个读取块；Engine 必须逐行输出完整 JSON。 */
-test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async () => {
+/** 实际 Lead 快照可能远大于 pipe 单个读取块；Engine 必须逐行输出完整 JSON。 */
+test("Desktop Engine 对大 Lead 列表响应保持完整 JSONL 帧", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-large-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-large-project-")); roots.push(cwd);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
@@ -126,36 +126,36 @@ test("Desktop Engine 对大 Harness 列表响应保持完整 JSONL 帧", async (
   send({ requestId: "project", method: "engine.action", action: "projects.create", args: { cwd } });
   const project = await next() as { result: { project: { projectId: string } } };
   const projectId = project.result.project.projectId;
-  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId, clientRequestId:crypto.randomUUID(), text: "大帧测试".repeat(4_500) } });
+  send({ requestId: "start", method: "engine.action", action: "leads.startConversation", args: { projectId, clientRequestId:crypto.randomUUID(), text: "大帧测试".repeat(4_500) } });
   expect(await next()).toMatchObject({ ok: true });
-  send({ requestId: "list-0", method: "engine.action", action: "harnesses.list", args: {} });
-  const created = await next() as { result: { harnesses: { harnessRunId: string }[] } };
-  const harnessRunId = created.result.harnesses[0].harnessRunId;
+  send({ requestId: "list-0", method: "engine.action", action: "leads.list", args: {} });
+  const created = await next() as { result: { leads: { leadRunId: string }[] } };
+  const leadRunId = created.result.leads[0].leadRunId;
   const waitIdle = async () => {
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      send({ requestId: `idle-${attempt}`, method: "engine.action", action: "harnesses.get", args: { harnessRunId } });
+      send({ requestId: `idle-${attempt}`, method: "engine.action", action: "leads.get", args: { leadRunId } });
       // 事件帧与响应共用通道：等待响应时必须跳过无 requestId 的事件帧。
-      let current = await next() as { type?: string; result?: { harness: { status: string } } };
+      let current = await next() as { type?: string; result?: { lead: { status: string } } };
       while (current.type === "event") current = await next() as typeof current;
-      if (current.result!.harness.status !== "running") return;
+      if (current.result!.lead.status !== "running") return;
       await Bun.sleep(10);
     }
-    throw new Error("Harness 回合未在时限内结束。 ");
+    throw new Error("Lead 回合未在时限内结束。 ");
   };
   await waitIdle();
   for (let index = 0; index < 5; index += 1) {
-    send({ requestId: `message-${index}`, method: "engine.action", action: "harnesses.send", args: { harnessRunId, text: "后续消息".repeat(4_500) } });
+    send({ requestId: `message-${index}`, method: "engine.action", action: "leads.send", args: { leadRunId, text: "后续消息".repeat(4_500) } });
     expect(await next()).toMatchObject({ ok: true });
     await waitIdle();
   }
-  send({ requestId: "harnesses", method: "engine.action", action: "harnesses.list", args: {} });
-  const response = await next() as { requestId: string; ok: boolean; result: { harnesses: unknown[] } };
-  expect(response.requestId).toBe("harnesses");
+  send({ requestId: "leads", method: "engine.action", action: "leads.list", args: {} });
+  const response = await next() as { requestId: string; ok: boolean; result: { leads: unknown[] } };
+  expect(response.requestId).toBe("leads");
   expect(response.ok).toBe(true);
   // 响应体必须真实大于一个读取块，且 JSON 解析后的消息完整无截断。
   expect(JSON.stringify(response).length).toBeGreaterThan(64 * 1024);
-  expect(Array.isArray(response.result.harnesses)).toBe(true);
-  expect((response.result.harnesses as { messages: unknown[] }[])[0].messages.length).toBeGreaterThanOrEqual(12);
+  expect(Array.isArray(response.result.leads)).toBe(true);
+  expect((response.result.leads as { messages: unknown[] }[])[0].messages.length).toBeGreaterThanOrEqual(12);
   send({ requestId: "close", method: "engine.shutdown" });
   await next(); expect(await child.exited).toBe(0);
 }, 15_000);
@@ -239,19 +239,19 @@ test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响�
   expect(await next()).toEqual({ type: "ready", protocolVersion: 1 });
   send({ requestId: "project", method: "engine.action", action: "projects.create", args: { cwd } });
   const project = await next() as { result: { project: { projectId: string } } };
-  const frames: { seq: number; event: { type: string }; harnessRunId: string }[] = [];
-  let harnessRunId = "";
+  const frames: { seq: number; event: { type: string }; leadRunId: string }[] = [];
+  let leadRunId = "";
   // 等待响应的同时收集事件帧：中文正文跨 pipe 读取块时帧也必须完整可解析。
-  send({ requestId: "start", method: "engine.action", action: "harnesses.startConversation", args: { projectId: project.result.project.projectId, clientRequestId:crypto.randomUUID(), text: "观察事件帧".repeat(2_000) } });
+  send({ requestId: "start", method: "engine.action", action: "leads.startConversation", args: { projectId: project.result.project.projectId, clientRequestId:crypto.randomUUID(), text: "观察事件帧".repeat(2_000) } });
   let sawTurnFinished = false;
   for (let attempt = 0; attempt < 400 && !sawTurnFinished; attempt += 1) {
     const frame = await next();
     if (frame.type === "event") {
       expect(frame.protocolVersion).toBe(1);
-      expect(frame.stream).toBe("harness");
-      const eventFrame = frame as unknown as { harnessRunId: string; seq: number; event: { type: string } };
-      if (harnessRunId) expect(eventFrame.harnessRunId).toBe(harnessRunId);
-      harnessRunId = eventFrame.harnessRunId;
+      expect(frame.stream).toBe("lead");
+      const eventFrame = frame as unknown as { leadRunId: string; seq: number; event: { type: string } };
+      if (leadRunId) expect(eventFrame.leadRunId).toBe(leadRunId);
+      leadRunId = eventFrame.leadRunId;
       frames.push(eventFrame);
       if (eventFrame.event.type === "turn_finished") sawTurnFinished = true;
     }
@@ -263,7 +263,7 @@ test("Desktop Engine 事件帧携带协议版本与单调序号，与请求响�
   expect(frames.some((frame) => frame.event.type === "entry_finished")).toBe(true);
   expect(frames.every((frame) => !["reasoning_delta", "assistant_delta", "acp_tool_call", "acp_tool_update"].includes(frame.event.type))).toBe(true);
   // 事件流之后请求响应通道仍然正常工作。
-  send({ requestId: "after", method: "engine.action", action: "harnesses.list", args: {} });
+  send({ requestId: "after", method: "engine.action", action: "leads.list", args: {} });
   const listed = await next() as { requestId: string; ok: boolean };
   expect(listed).toMatchObject({ requestId: "after", ok: true });
   send({ requestId: "close", method: "engine.shutdown" });
@@ -312,43 +312,43 @@ test("Desktop Engine 启动时将无 Agent 的 live Run 收敛为 interrupted", 
   child.kill(); await child.exited;
 }, 15_000);
 
-/** 主控切换的空闲语义在 Engine 层：运行中回合拒绝（409），空闲后允许并耐久 harnessRuntimeId。 */
+/** 主控切换的空闲语义在 Engine 层：运行中回合拒绝（409），空闲后允许并耐久 leadRuntimeId。 */
 test("Engine 有运行中主控回合时拒绝切换主控，空闲后允许", async () => {
-  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-harness-switch-")); roots.push(root);
+  const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-lead-switch-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-switch-project-")); roots.push(cwd);
   const registry = new CliRuntimeRegistry(root);
-  const runtimeRecord = async (name: string, cli: "codex" | "claude", harnessTools: boolean): Promise<CliRuntimeRecord> => {
+  const runtimeRecord = async (name: string, cli: "codex" | "claude", leadTools: boolean): Promise<CliRuntimeRecord> => {
     const executablePath = join(root, name); await writeFile(executablePath, "#!/bin/sh\necho cli\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
     const executable = await verifyExecutable(executablePath);
-    return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${cli} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "claude" ? "claude-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, harnessTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+    return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: `${cli} 1.0`, discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: cli === "claude" ? "claude-acp" : "codex-acp", adapterVersion: "1.0", acpProtocolVersion: 1, leadTools }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
   };
   const first = await registry.saveVerified(await runtimeRecord("codex-a", "codex", true));
   const second = await registry.saveVerified(await runtimeRecord("kimi-b", "claude", true));
   const workerOnly = await registry.saveVerified(await runtimeRecord("kimi-c", "claude", false));
   let release: (() => void) | null = null;
-  const session: HarnessSession = {
+  const session: LeadSession = {
     isRunning: true,
     subscribe: () => () => {},
     abort: () => {},
     prompt: () => new Promise<string>((resolve) => { release = () => resolve("回合完成"); }),
   };
-  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), createHarnessSession: async () => session });
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), createLeadSession: async () => session });
   try {
     await engine.handleDesktopAction("runtimes.select", { runtimeId: first.runtimeId });
-    // 无 harnessTools 的 runtime 即使空闲也不能设为主控。
+    // 无 leadTools 的 runtime 即使空闲也不能设为主控。
     await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: workerOnly.runtimeId })).rejects.toMatchObject({ status: 400 });
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId:crypto.randomUUID(), text: "进行中的回合" });
+    await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId:crypto.randomUUID(), text: "进行中的回合" });
     await expect(engine.handleDesktopAction("runtimes.select", { runtimeId: second.runtimeId })).rejects.toMatchObject({ status: 409 });
     release!();
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      const listed = await engine.handleDesktopAction("harnesses.list", {}) as { harnesses: { status: string }[] };
-      if (listed.harnesses.every((harness) => harness.status !== "running")) break;
+      const listed = await engine.handleDesktopAction("leads.list", {}) as { leads: { status: string }[] };
+      if (listed.leads.every((lead) => lead.status !== "running")) break;
       await Bun.sleep(10);
     }
     await engine.handleDesktopAction("runtimes.select", { runtimeId: second.runtimeId });
-    const listed = await engine.handleDesktopAction("runtimes.list", {}) as { harnessRuntimeId: string | null };
-    expect(listed.harnessRuntimeId).toBe(second.runtimeId);
+    const listed = await engine.handleDesktopAction("runtimes.list", {}) as { leadRuntimeId: string | null };
+    expect(listed.leadRuntimeId).toBe(second.runtimeId);
   } finally { engine.shutdown(); }
 });
 
@@ -359,10 +359,10 @@ test("Engine runtimes.validate 走统一验证器入口", async () => {
   const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push({ cli, executablePath: input.executablePath });
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
@@ -381,10 +381,10 @@ test("Engine runtimes.validate 按文件名识别真实 CLI 种类", async () =>
   const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho kimi\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push(cli);
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "kimi 2.1.1", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "2.1.1", acpProtocolVersion: 1, leadTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
@@ -399,7 +399,7 @@ test("Engine runtimes.validate 翻译上游进程退出错误", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-translate-")); roots.push(root);
   const executablePath = join(root, "custom-cli"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async () => { throw new Error("Codex process has exited with code 1: unknown command 'app-server'. See 'kimi --help'."); },
   });
   try {
@@ -412,7 +412,7 @@ test("Engine runtimes.validate 把 dsh 旧 Node 静默退出翻译为 Node 版�
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-dsh-translate-")); roots.push(root);
   const executablePath = join(root, "dsh"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async () => { throw new Error("无法读取 DeepSeek Harness 版本。 "); },
   });
   try {
@@ -427,11 +427,11 @@ test("Engine runtimes.validate 未识别种类时按 Catalog 全部种类回退"
   const executablePath = join(root, "custom-cli"); await writeFile(executablePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push(cli);
       if (cli !== "dsh") throw new Error("fixture 失败。 ");
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "0.2.1-rc.2", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "0.2.1-rc.2", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "dsh-acp", adapterVersion: "0.0.1", acpProtocolVersion: 1, leadTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
@@ -448,10 +448,10 @@ test("Engine runtimes.validate 按文件名识别 claude 种类", async () => {
   const executablePath = join(root, "claude"); await writeFile(executablePath, "#!/bin/sh\necho claude\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     validateCliRuntime: async (cli, input) => {
       seen.push(cli);
-      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "2.0.0 (Claude Code)", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, harnessTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
+      return { runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "2.0.0 (Claude Code)", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "claude-acp", adapterVersion: "0.94.0", acpProtocolVersion: 1, leadTools: false }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null };
     },
   });
   try {
@@ -469,9 +469,9 @@ test("扫描在探测无结论时仍完整验证首个候选，并清掉失败�
   await writeFile(executablePath, "#!/bin/sh\nexit 1\n", { mode: 0o700 }); await chmod(executablePath, 0o700);
   const executable = await verifyExecutable(executablePath);
   const engine = new DesktopExecutionEngine({
-    storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), deterministicForTest: true,
+    storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), deterministicForTest: true,
     discoverCliRuntimes: async () => [{ cli: "codex", executablePath: executable.executablePath, discoveredFrom: "shell-path", discoveredShell: "/bin/zsh", aliases: [executablePath] }],
-    validateCliRuntime: async (cli, input) => ({ runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null }),
+    validateCliRuntime: async (cli, input) => ({ runtimeId: crypto.randomUUID(), cli, executablePath: executable.executablePath, executableIdentity: executable.identity, version: "codex-cli 1.0", discoveredFrom: input.discoveredFrom, discoveredShell: input.discoveredShell, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true }, verifiedAt: new Date().toISOString(), status: "verified", diagnostic: null }),
   });
   try {
     const result = await engine.handleDesktopAction("runtimes.scan", {}) as { verified: number; failures: Record<string, string> };
@@ -484,13 +484,13 @@ test("扫描在探测无结论时仍完整验证首个候选，并清掉失败�
 
 test("显式partial保存缺授权或跨任务时拒绝，不创建Git工作区", async () => {
   const engine = new DesktopExecutionEngine({ deterministicForTest: true });
-  await expect(engine.handleDesktopAction("executions.savePartial", { harnessRunId: crypto.randomUUID(), executionId: crypto.randomUUID() })).rejects.toThrow("明确授权");
+  await expect(engine.handleDesktopAction("executions.savePartial", { leadRunId: crypto.randomUUID(), executionId: crypto.randomUUID() })).rejects.toThrow("明确授权");
   engine.shutdown();
 });
 
 test("已取消的文件批准动作拒绝且不创建权限Store", async () => {
  const root=await mkdtemp(join(tmpdir(),"wave-flow-no-file-approval-"));roots.push(root);
- const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),harnessRoot:join(root,"harness-runs"),deterministicForTest:true});
+ const engine=new DesktopExecutionEngine({storeRoot:join(root,"runs"),leadRoot:join(root,"lead-runs"),deterministicForTest:true});
  try{
   await expect(engine.handleDesktopAction("executions.decideFilePermission",{approved:true})).rejects.toThrow();
   expect(await Bun.file(join(root,"file-permissions")).exists()).toBe(false);
@@ -502,7 +502,7 @@ test("Desktop 退出逐 Run 隔离失败，不让单个 Journal 错误跳过其�
   expect(source).toContain('for(const runtime of this.#runs.values()) {');
   expect(source).toContain('catch (error) { failure ??= error; }');
   expect(source).toContain('try { await this.#executions.cancelForDesktopExit(this.instanceId); }');
-  expect(source).toContain('try { await this.#harness.interruptForDesktopExit(); }');
+  expect(source).toContain('try { await this.#lead.interruptForDesktopExit(); }');
   expect(source).toContain('if (failure !== undefined) throw failure;');
 });
 
@@ -539,7 +539,7 @@ test("主控 prompt 永久挂起时方案检查仍立即响应，用户停止可
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-wedged-prompt-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-wedged-project-")); roots.push(cwd);
   let closed = false;
-  const session: HarnessSession = {
+  const session: LeadSession = {
     isRunning: true,
     subscribe: () => () => {},
     abort: () => {},
@@ -547,22 +547,22 @@ test("主控 prompt 永久挂起时方案检查仍立即响应，用户停止可
     // 模型/CLI 无应答：promise 永不 settle，等同于档案中零事件的回合。
     prompt: () => new Promise<string>(() => {}),
   };
-  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), createHarnessSession: async () => session });
+  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), createLeadSession: async () => session });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "写一篇小说" }) as { harness: { harnessRunId: string; status: string } };
-    expect(started.harness.status).toBe("running");
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "写一篇小说" }) as { lead: { leadRunId: string; status: string } };
+    expect(started.lead.status).toBe("running");
     // 回合挂死期间：方案检查必须快速给出回答（此处为“主控必须空闲”的确定性拒绝），
     // 而不是排队等待一个永不结束的 prompt。
     const planStartedAt = Date.now();
-    await expect(engine.handleDesktopAction("executions.plan", { harnessRunId: started.harness.harnessRunId, revision: 1 })).rejects.toThrow("主控必须空闲");
+    await expect(engine.handleDesktopAction("executions.plan", { leadRunId: started.lead.leadRunId, revision: 1 })).rejects.toThrow("主控必须空闲");
     expect(Date.now() - planStartedAt).toBeLessThan(2_000);
     // 用户显式停止：耐久事实先落盘，再关闭会话；不依赖 provider 响应 AbortSignal。
-    const aborted = await engine.handleDesktopAction("harnesses.abort", { harnessRunId: started.harness.harnessRunId }) as { harness: { status: string } };
-    expect(aborted.harness.status).toBe("interrupted");
+    const aborted = await engine.handleDesktopAction("leads.abort", { leadRunId: started.lead.leadRunId }) as { lead: { status: string } };
+    expect(aborted.lead.status).toBe("interrupted");
     expect(closed).toBe(true);
     // 中断后可继续发送新消息（Engine 未被挂死回合占用）。
-    await expect(engine.handleDesktopAction("harnesses.send", { harnessRunId: started.harness.harnessRunId, text: "继续" })).resolves.toBeDefined();
+    await expect(engine.handleDesktopAction("leads.send", { leadRunId: started.lead.leadRunId, text: "继续" })).resolves.toBeDefined();
   } finally { engine.shutdown(); }
 });
 
@@ -584,54 +584,14 @@ test("EOF 排空有界：在途 action 不返回时 serve 仍按时结束", asyn
   } finally { delete process.env.WF_ENGINE_DRAIN_BUDGET_MS; }
 });
 
-/** 设置 action 是 Engine 唯一设置入口：默认感知开启、非法值拒绝，更新成功后关闭空闲主控会话。 */
-test("Engine settings action 读写感知模式并在更新后关闭空闲主控会话", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-engine-settings-"))); roots.push(root);
-  const cwd = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-engine-settings-project-"))); roots.push(cwd);
-  let closed = 0, running = false;
-  const session: HarnessSession = {
-    get isRunning() { return running; },
-    subscribe: () => () => {},
-    abort: () => {},
-    close: () => { closed += 1; },
-    prompt: async () => "回合完成",
-  };
-  const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), harnessRoot: join(root, "harness-runs"), settingsRoot: root, createHarnessSession: async () => session });
-  try {
-    // 设置文件缺失时默认感知模式开启；settingsRoot 显式注入，不读写真实用户目录。
-    expect(await engine.handleDesktopAction("settings.get", {})).toEqual({ perceptionMode: true });
-    const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "设置变更前的会话" });
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      const listed = await engine.handleDesktopAction("harnesses.list", {}) as { harnesses: { status: string }[] };
-      if (listed.harnesses.every((harness) => harness.status !== "running")) break;
-      await Bun.sleep(10);
-    }
-    // 会话自报仍有进行中回合时不能关闭，保证进行中的回合保持原模式。
-    running = true;
-    expect(await engine.handleDesktopAction("settings.update", { perceptionMode: false })).toEqual({ perceptionMode: false });
-    expect(closed).toBe(0);
-    // 空闲后更新成功即关闭会话，下一回合由 ensureSession 按新设置重建。
-    running = false;
-    expect(await engine.handleDesktopAction("settings.update", { perceptionMode: true })).toEqual({ perceptionMode: true });
-    expect(closed).toBe(1);
-    expect(JSON.parse(await Bun.file(join(root, "settings.json")).text())).toEqual({ perceptionMode: true });
-    // 非法更新在任何写盘或会话关闭前拒绝。
-    await expect(engine.handleDesktopAction("settings.update", { perceptionMode: "off" })).rejects.toMatchObject({ status: 400 });
-    await expect(engine.handleDesktopAction("settings.update", { unknown: true })).rejects.toMatchObject({ status: 400 });
-    expect(closed).toBe(1);
-    expect(await engine.handleDesktopAction("settings.get", {})).toEqual({ perceptionMode: true });
-  } finally { engine.shutdown(); }
-});
-
 test("Engine action 保存并接管写入项目文件、追加本地来源版本，并支持幂等重试", async () => {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-engine-adopt-")); roots.push(root);
   const cwd = await mkdtemp(join(tmpdir(), "wave-flow-engine-adopt-project-")); roots.push(cwd);
   const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-adopt", description: "Engine 接管", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return {}; }`;
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"),
-    harnessRoot: join(root, "harness-runs"),
-    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+    leadRoot: join(root, "lead-runs"),
+    createLeadSession: async (_id, _cwd, _prior, actions) => ({
       isRunning: false,
       subscribe: () => () => {},
       abort: () => {},
@@ -640,22 +600,22 @@ test("Engine action 保存并接管写入项目文件、追加本地来源版本
   });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备接管" }) as { harness: { harnessRunId: string } };
-    const id = started.harness.harnessRunId;
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备接管" }) as { lead: { leadRunId: string } };
+    const id = started.lead.leadRunId;
     for (let n = 0; n < 200; n++) {
-      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
-      if (current.harness.status === "idle") break;
+      const current = await engine.handleDesktopAction("leads.get", { leadRunId: id }) as { lead: { status: string } };
+      if (current.lead.status === "idle") break;
       await Bun.sleep(10);
     }
-    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    await engine.handleDesktopAction("leads.acceptRevision", { leadRunId: id, revision: 1 });
     const target = join(cwd, ".wave-flow", "workflows", "engine-adopt.ts");
     const requestId = crypto.randomUUID();
-    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { harness: { workflowRevisions: Array<{ localOrigin?: { path: string }; sourceFormat?: string }> } };
-    expect(saved.harness.workflowRevisions).toHaveLength(2);
-    expect(saved.harness.workflowRevisions[1]).toMatchObject({ sourceFormat: "module", localOrigin: { path: await realpath(target) } });
+    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { leadRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { lead: { workflowRevisions: Array<{ localOrigin?: { path: string }; sourceFormat?: string }> } };
+    expect(saved.lead.workflowRevisions).toHaveLength(2);
+    expect(saved.lead.workflowRevisions[1]).toMatchObject({ sourceFormat: "module", localOrigin: { path: await realpath(target) } });
     expect(await Bun.file(target).text()).toBe(source);
-    const retry = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { harness: { workflowRevisions: unknown[] } };
-    expect(retry.harness.workflowRevisions).toHaveLength(2);
+    const retry = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { leadRunId: id, revision: 1, path: target, clientRequestId: requestId }) as { lead: { workflowRevisions: unknown[] } };
+    expect(retry.lead.workflowRevisions).toHaveLength(2);
   } finally { engine.shutdown(); }
 }, 30_000);
 
@@ -665,9 +625,9 @@ test("Engine 确认生成模块时接受用户输入并按冻结 inputSchema 校
   const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-input", description: "输入验证", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"], additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return { note: args.note }; }`;
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"),
-    harnessRoot: join(root, "harness-runs"),
+    leadRoot: join(root, "lead-runs"),
     deterministicForTest: true,
-    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+    createLeadSession: async (_id, _cwd, _prior, actions) => ({
       isRunning: false,
       subscribe: () => () => {},
       abort: () => {},
@@ -676,20 +636,20 @@ test("Engine 确认生成模块时接受用户输入并按冻结 inputSchema 校
   });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备输入" }) as { harness: { harnessRunId: string } };
-    const id = started.harness.harnessRunId;
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备输入" }) as { lead: { leadRunId: string } };
+    const id = started.lead.leadRunId;
     for (let n = 0; n < 200; n++) {
-      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
-      if (current.harness.status === "idle") break;
+      const current = await engine.handleDesktopAction("leads.get", { leadRunId: id }) as { lead: { status: string } };
+      if (current.lead.status === "idle") break;
       await Bun.sleep(10);
     }
-    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    await engine.handleDesktopAction("leads.acceptRevision", { leadRunId: id, revision: 1 });
     // 缺少必填 note 时拒绝，不创建 Execution。
-    await expect(engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, input: {}, clientRequestId: crypto.randomUUID() })).rejects.toThrow("参数无效");
-    const confirmed = await engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, input: { note: "来自用户" }, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string } };
+    await expect(engine.handleDesktopAction("executions.confirm", { leadRunId: id, revision: 1, input: {}, clientRequestId: crypto.randomUUID() })).rejects.toThrow("参数无效");
+    const confirmed = await engine.handleDesktopAction("executions.confirm", { leadRunId: id, revision: 1, input: { note: "来自用户" }, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string } };
     let detail: { status: string; summary: Record<string, unknown> | null } = { status: "running", summary: null };
     for (let n = 0; n < 200; n++) {
-      const response = await engine.handleDesktopAction("executions.get", { harnessRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string; summary: Record<string, unknown> | null } };
+      const response = await engine.handleDesktopAction("executions.get", { leadRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string; summary: Record<string, unknown> | null } };
       detail = response.execution;
       if (detail.status !== "running") break;
       await Bun.sleep(10);
@@ -704,9 +664,9 @@ test("Engine 接受脚本模式写类配置，只把 workspaces 交给执行器"
   const source = `import { agent, phase } from "wave-flow";\nexport const meta = { name: "engine-script-write", description: "脚本写", phases: [{ title: "写" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("写"); return agent("写文件", { id: "writer", cli: "codex", sandbox: "workspace-write" }); }`;
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"),
-    harnessRoot: join(root, "harness-runs"),
+    leadRoot: join(root, "lead-runs"),
     deterministicForTest: true,
-    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+    createLeadSession: async (_id, _cwd, _prior, actions) => ({
       isRunning: false,
       subscribe: () => () => {},
       abort: () => {},
@@ -715,21 +675,21 @@ test("Engine 接受脚本模式写类配置，只把 workspaces 交给执行器"
   });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备写" }) as { harness: { harnessRunId: string } };
-    const id = started.harness.harnessRunId;
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备写" }) as { lead: { leadRunId: string } };
+    const id = started.lead.leadRunId;
     for (let n = 0; n < 200; n++) {
-      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
-      if (current.harness.status === "idle") break;
+      const current = await engine.handleDesktopAction("leads.get", { leadRunId: id }) as { lead: { status: string } };
+      if (current.lead.status === "idle") break;
       await Bun.sleep(10);
     }
-    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    await engine.handleDesktopAction("leads.acceptRevision", { leadRunId: id, revision: 1 });
     const workspaces = { version: 3 as const, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: "a".repeat(40), excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] }, workspaceId: crypto.randomUUID() };
     const config = { version: 1 as const, assignmentMode: "script" as const, createdAt: new Date().toISOString(), workspaces };
-    const confirmed = await engine.handleDesktopAction("executions.confirm", { harnessRunId: id, revision: 1, config, input: {}, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string; config?: { assignmentMode?: string } } };
+    const confirmed = await engine.handleDesktopAction("executions.confirm", { leadRunId: id, revision: 1, config, input: {}, clientRequestId: crypto.randomUUID() }) as { execution: { executionId: string; config?: { assignmentMode?: string } } };
     expect(confirmed.execution.config).toMatchObject({ assignmentMode: "script", workspaces });
     let detail: { status: string } = { status: "running" };
     for (let n = 0; n < 200; n++) {
-      const response = await engine.handleDesktopAction("executions.get", { harnessRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string } };
+      const response = await engine.handleDesktopAction("executions.get", { leadRunId: id, executionId: confirmed.execution.executionId }) as { execution: { status: string } };
       detail = response.execution;
       if (detail.status !== "running") break;
       await Bun.sleep(10);
@@ -744,8 +704,8 @@ test("Engine 保存接管仅在系统面板确认替换时覆盖已有文件", a
   const source = `import { phase } from "wave-flow";\nexport const meta = { name: "engine-replace", description: "替换接管", phases: [{ title: "检查" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };\nexport default async function run(args) { phase("检查"); return {}; }`;
   const engine = new DesktopExecutionEngine({
     storeRoot: join(root, "runs"),
-    harnessRoot: join(root, "harness-runs"),
-    createHarnessSession: async (_id, _cwd, _prior, actions) => ({
+    leadRoot: join(root, "lead-runs"),
+    createLeadSession: async (_id, _cwd, _prior, actions) => ({
       isRunning: false,
       subscribe: () => () => {},
       abort: () => {},
@@ -754,28 +714,28 @@ test("Engine 保存接管仅在系统面板确认替换时覆盖已有文件", a
   });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as { project: { projectId: string } };
-    const started = await engine.handleDesktopAction("harnesses.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备替换接管" }) as { harness: { harnessRunId: string } };
-    const id = started.harness.harnessRunId;
+    const started = await engine.handleDesktopAction("leads.startConversation", { projectId: project.project.projectId, clientRequestId: crypto.randomUUID(), text: "准备替换接管" }) as { lead: { leadRunId: string } };
+    const id = started.lead.leadRunId;
     for (let n = 0; n < 200; n++) {
-      const current = await engine.handleDesktopAction("harnesses.get", { harnessRunId: id }) as { harness: { status: string } };
-      if (current.harness.status === "idle") break;
+      const current = await engine.handleDesktopAction("leads.get", { leadRunId: id }) as { lead: { status: string } };
+      if (current.lead.status === "idle") break;
       await Bun.sleep(10);
     }
-    await engine.handleDesktopAction("harnesses.acceptRevision", { harnessRunId: id, revision: 1 });
+    await engine.handleDesktopAction("leads.acceptRevision", { leadRunId: id, revision: 1 });
     const target = join(cwd, ".wave-flow", "workflows", "engine-replace.ts");
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, "旧内容", "utf8");
-    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID() })).rejects.toThrow("已存在");
-    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: "yes" })).rejects.toThrow("布尔");
-    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { harnessRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: true }) as { harness: { workflowRevisions: Array<{ localOrigin?: { path: string; sourceHash: string } }> } };
-    expect(saved.harness.workflowRevisions).toHaveLength(2);
-    expect(saved.harness.workflowRevisions[1]?.localOrigin?.path).toBe(await realpath(target));
+    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { leadRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID() })).rejects.toThrow("已存在");
+    await expect(engine.handleDesktopAction("workflows.saveAndAdoptRevision", { leadRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: "yes" })).rejects.toThrow("布尔");
+    const saved = await engine.handleDesktopAction("workflows.saveAndAdoptRevision", { leadRunId: id, revision: 1, path: target, clientRequestId: crypto.randomUUID(), replace: true }) as { lead: { workflowRevisions: Array<{ localOrigin?: { path: string; sourceHash: string } }> } };
+    expect(saved.lead.workflowRevisions).toHaveLength(2);
+    expect(saved.lead.workflowRevisions[1]?.localOrigin?.path).toBe(await realpath(target));
     expect(await Bun.file(target).text()).toBe(source);
     // UI 在保存成功后立即用同一文件预检：action 序列必须可用并标记为保存本地来源。
-    const adopted = saved.harness.workflowRevisions[1]!;
-    await expect(engine.handleDesktopAction("workflows.reviseLocalTask", { harnessRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "bogus" })).rejects.toThrow("更新原因");
-    const prepared = await engine.handleDesktopAction("workflows.reviseLocalTask", { harnessRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "save-local" }) as { harness: { workflowRevisions: Array<{ revision: number; parentRevision: number | null; updateReason?: string; acceptedAt: string | null }> } };
-    expect(prepared.harness.workflowRevisions).toHaveLength(3);
-    expect(prepared.harness.workflowRevisions[2]).toMatchObject({ revision: 3, parentRevision: 2, updateReason: "save-local", acceptedAt: null });
+    const adopted = saved.lead.workflowRevisions[1]!;
+    await expect(engine.handleDesktopAction("workflows.reviseLocalTask", { leadRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "bogus" })).rejects.toThrow("更新原因");
+    const prepared = await engine.handleDesktopAction("workflows.reviseLocalTask", { leadRunId: id, baseRevision: 2, sourceHash: adopted.localOrigin!.sourceHash, input: {}, clientRequestId: crypto.randomUUID(), updateReason: "save-local" }) as { lead: { workflowRevisions: Array<{ revision: number; parentRevision: number | null; updateReason?: string; acceptedAt: string | null }> } };
+    expect(prepared.lead.workflowRevisions).toHaveLength(3);
+    expect(prepared.lead.workflowRevisions[2]).toMatchObject({ revision: 3, parentRevision: 2, updateReason: "save-local", acceptedAt: null });
   } finally { engine.shutdown(); }
 }, 30_000);

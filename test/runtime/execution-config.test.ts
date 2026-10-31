@@ -7,7 +7,7 @@ import { RunJournal } from "../../src/journal/run-journal";
 import { RunRuntime } from "../../src/runtime/run-runtime";
 import type { ControlServer } from "../../src/control/control-server";
 import type { AgentNodeExecutor } from "../../src/runtime/run-types";
-import type { ExecutionConfigSnapshot, WorkerAssignment } from "../../src/harness/types";
+import type { ExecutionConfigSnapshot, WorkerAssignment } from "../../src/lead/types";
 import type { RuntimeProvenance } from "../../src/runtimes/types";
 import type { JsonObject } from "../../src/shared/json";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
@@ -30,7 +30,7 @@ const twoNodes: WorkflowModule<JsonObject, unknown> = {
 /** 测试分配快照；默认指派 kimi 的 assigned-runtime，覆盖脚本字面量 codex。 */
 type AssignedConfig = Extract<ExecutionConfigSnapshot, { fallbackRuntimeId: string }>;
 function testConfig(runtimeId = "assigned-runtime", adapterVersion = "1.0"): AssignedConfig {
-  const assignment = (agentId: string): WorkerAssignment => ({ agentId, cli: "kimi", model: "cli-default", source: "harness-cli", runtimeId, adapterId: "kimi-acp", adapterVersion });
+  const assignment = (agentId: string): WorkerAssignment => ({ agentId, cli: "kimi", model: "cli-default", source: "lead-cli", runtimeId, adapterId: "kimi-acp", adapterVersion });
   return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: runtimeId, ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("worker"), assignment("a"), assignment("b")] };
 }
 

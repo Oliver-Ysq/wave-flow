@@ -17,8 +17,8 @@ test("执行总结只在主控对话中提示，结果页不重复展示总结�
 });
 test("归档与旧Execution隐藏成果恢复合入清理，不保留变更面板",async()=>{
  const app=await Bun.file("src-tauri/web/src/App.tsx").text();
- expect(app).toContain('(harness.task?.workflowContract === "single-workflow-v1" &&');
- expect(app).toContain('harness.executions.at(-1)?.executionId !==');
+ expect(app).toContain('(lead.task?.workflowContract === "single-workflow-v1" &&');
+ expect(app).toContain('lead.executions.at(-1)?.executionId !==');
  expect(app).toContain('所选工作流记录暂时不可用');
  expect(app).not.toContain('所选工作流记录已失效');
  expect(app).toContain('(detail.workspaceEvidence?.leases.length ?? 0) > 0');
@@ -65,10 +65,10 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
  expect(source).toContain("参数已保留，请稍后重新检查");
  expect(source).toContain("setCheckAttempt(attempt=>attempt+1)");
  expect(source).toContain("identity,checkAttempt]");
- expect(source).toContain("busy||checking||savingAsLocal||!!planError||!plan||missingCliNodes||!local&&!script&&!plan.harnessRuntime");
+ expect(source).toContain("busy||checking||savingAsLocal||!!planError||!plan||missingCliNodes||!local&&!script&&!plan.leadRuntime");
  expect(source).toContain("const missingCliNodes=cliChoices?(cliChoices.nodes.map(node=>node.nodeId).filter(id=>!nodeClis[id]).length>0");
- expect(source).toContain("if(!editable||busy||checking||planError||!plan||missingCliNodes||!local&&!script&&!plan.harnessRuntime)return");
- expect(source).toContain("setPlanError(local||script||result.harnessRuntime?null:");
+ expect(source).toContain("if(!editable||busy||checking||planError||!plan||missingCliNodes||!local&&!script&&!plan.leadRuntime)return");
+ expect(source).toContain("setPlanError(local||script||result.leadRuntime?null:");
  expect(source).toContain("还没有选择可用的本地执行工具");
  expect(source).toContain('role="status"');
  expect(source).toContain('const confirmations=new DesignConfirmationCache()');
@@ -84,12 +84,12 @@ test("执行配置预检失败提供重检入口，检查期间与失败状态�
 
 test("本地来源替换明确导航到新方案，目标态已有执行不再提示选择无关工作流",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
- expect(source).toContain('openWorkflow(\n                response.harness,\n                response.harness.workflowRevisions.at(-1)!,\n                "plan",\n              )');
+ expect(source).toContain('openWorkflow(\n                response.lead,\n                response.lead.workflowRevisions.at(-1)!,\n                "plan",\n              )');
  expect(source).not.toContain('运行工作流 → 选择工作流');
  expect(source).not.toContain('查看原工作流与修订方案');
  expect(source).not.toContain('继续准备工作流');
  expect(source).toContain('<AbandonedPlan');
- expect(source).toContain('!harness.executions.length\n                                  ? () => setTemplatePicker(true)');
+ expect(source).toContain('!lead.executions.length\n                                  ? () => setTemplatePicker(true)');
 });
 test("详情页页头用方案短名称，完整目标在方案正文而非页头",async()=>{
  const source=await Bun.file("src-tauri/web/src/conversation/revision-card.tsx").text();
@@ -97,7 +97,7 @@ test("详情页页头用方案短名称，完整目标在方案正文而非页�
  expect(source).toContain("hideGoal=false");
  expect(source).toContain('!hideGoal&&<p className="wf-plan-goal">');
  expect(app).toContain("proposalTitle(headerRevision)");
- expect(app).not.toContain("revision={revision} harness={harness} hideGoal");
+ expect(app).not.toContain("revision={revision} lead={lead} hideGoal");
 });
 test("窄窗详情底部为固定导航保留安全空间",async()=>{
  const css=await Bun.file("src-tauri/web/src/workbench.css").text();
@@ -106,8 +106,8 @@ test("窄窗详情底部为固定导航保留安全空间",async()=>{
 
 test("结果页不再展示Git证据限制说明，诚实约束由总结正文承担",async()=>{
  const source=await Bun.file("src-tauri/web/src/App.tsx").text();
- const service=await Bun.file("src/harness/service.ts").text();
- expect(source).not.toContain("const gitLimitation = harness.executions.find(");
+ const service=await Bun.file("src/lead/service.ts").text();
+ expect(source).not.toContain("const gitLimitation = lead.executions.find(");
  expect(source).not.toContain("受管Git证据仅覆盖受管Git文件");
  expect(service).toContain("不要因为结构化校验通过就说结果正确");
 });

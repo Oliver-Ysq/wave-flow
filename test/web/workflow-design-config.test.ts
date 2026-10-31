@@ -1,8 +1,8 @@
 import {expect,test} from "bun:test";
 import {DesignConfirmationCache,WorkspaceConfirmationCache} from "../../src-tauri/web/src/workflow-design-config";
 import type {ExecutionPlanResponse,RuntimeCli} from "../../src-tauri/web/src/types";
-const runtime=(runtimeId:string,cli:RuntimeCli)=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:`${cli}-acp`,adapterVersion:"1",harnessTools:true}});
-const plan={workers:[{id:"reviewer"},{id:"verifier"}],pool:[runtime("c","codex"),runtime("k","kimi")],harnessRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
+const runtime=(runtimeId:string,cli:RuntimeCli)=>({runtimeId,cli,status:"verified",verifiedAdapter:{adapterId:`${cli}-acp`,adapterVersion:"1",leadTools:true}});
+const plan={workers:[{id:"reviewer"},{id:"verifier"}],pool:[runtime("c","codex"),runtime("k","kimi")],leadRuntime:runtime("c","codex")} as unknown as ExecutionPlanResponse;
 
 test("脚本模式只读确认不产生执行配置，相同载荷复用 UUID",()=>{
  const cache=new DesignConfirmationCache();

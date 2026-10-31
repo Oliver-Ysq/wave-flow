@@ -59,9 +59,8 @@ export function managedAcpTransport(options: {
       throw new WorkflowContractError(`受管写隔离依赖系统 ${SYSTEM_SANDBOX_EXEC}（macOS 自带），但本机不可用；请改用只读 Workflow 或修复系统后重试。 `);
     }
     const profile = await macosWriteProfile(options.boundary);
-    // isolated 模式禁止读取用户 git 配置，避免黑盒 CLI 借全局配置扩大行为；感知模式
-    // 刻意保留用户原生 git 环境，因为主控可能用用户自己的 skill/CLI 读取资料。
-    const env: Record<string, string> = { ...launcher.env, TMPDIR: options.boundary.scratch, ...(options.boundary.mode === "perception" ? {} : { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }) };
+    // 主控使用用户原生 CLI 环境；保留用户 git 配置，因为它可能依赖自己的 skill/CLI 读取资料。
+    const env: Record<string, string> = { ...launcher.env, TMPDIR: options.boundary.scratch };
     const transport = await (options.transport ?? bunAcpTransport)({ ...launcher, command: SYSTEM_SANDBOX_EXEC, args: ["-p", profile, launcher.command, ...launcher.args], env }, signal);
     const writer = transport.writerProcess;
     if (!writer) { transport.close(); throw new WorkflowContractError("受管ACP transport没有真实进程组，拒绝启动写Worker。"); }

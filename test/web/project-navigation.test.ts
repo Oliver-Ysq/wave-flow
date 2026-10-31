@@ -20,7 +20,7 @@ test("空项目不进入展开态，展开区隐藏而不留空白", async () =>
   expect(projectExpanded(true, false)).toBe(false);
   expect(projectExpanded(true, true)).toBe(true);
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
-  expect(app).toContain("projectExpanded(harnesses.length > 0, expandedPref)");
+  expect(app).toContain("projectExpanded(leads.length > 0, expandedPref)");
   const css = await Bun.file("src-tauri/web/src/workbench.css").text();
   expect(css).toContain(".agent-workbench .project-conversations[hidden] { display:none; }");
 });
@@ -34,7 +34,7 @@ test("项目两级折叠不导航，创建入口独立且拖入不自动提交",
   const dialog = await Bun.file("src-tauri/web/src/project-create-dialog.tsx").text();
   expect(app).toContain('aria-controls="project-list"');
   expect(app).toContain('aria-label="创建项目"');
-  expect(app).toContain('if (harnesses.length > 0) setExpanded(!expanded);');
+  expect(app).toContain('if (leads.length > 0) setExpanded(!expanded);');
   expect(app).not.toContain('className="project-chevron"');
   expect(app).toContain('aria-controls={`project-tasks-${project.projectId}`}');
   expect(app).toContain('className="project-new-session"');

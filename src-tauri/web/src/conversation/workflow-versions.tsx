@@ -1,18 +1,18 @@
 import {useEffect,useRef} from 'react';
-import type {HarnessSnapshot,WorkflowRevision} from '../types';
+import type {LeadSnapshot,WorkflowRevision} from '../types';
 
 /** 同一工作流的展示版本；缺cardId的旧记录独立处理，不按名称合并。 */
-export function workflowVersions(task:HarnessSnapshot,revision:WorkflowRevision):WorkflowRevision[]{
+export function workflowVersions(task:LeadSnapshot,revision:WorkflowRevision):WorkflowRevision[]{
  return task.workflowRevisions.filter(item=>revision.cardId?item.cardId===revision.cardId:item.revision===revision.revision).sort((a,b)=>a.revision-b.revision);
 }
 /** 用户可见序号，仅多版本显示；内部revision与批准身份保持不变。 */
-export function visibleVersion(task:HarnessSnapshot,revision:WorkflowRevision):number|null{
+export function visibleVersion(task:LeadSnapshot,revision:WorkflowRevision):number|null{
  const versions=workflowVersions(task,revision);
  const index=versions.findIndex(item=>item.revision===revision.revision);
  return versions.length>1&&index>=0?index+1:null;
 }
 /** 当前同工作流最新版与旧版的标签；单版本或不属于快照时不显示。 */
-export function versionLabel(task:HarnessSnapshot,revision:WorkflowRevision):string|null{
+export function versionLabel(task:LeadSnapshot,revision:WorkflowRevision):string|null{
  const number=visibleVersion(task,revision);
  if(number===null)return null;
  const current=workflowVersions(task,revision).at(-1)?.revision===revision.revision;

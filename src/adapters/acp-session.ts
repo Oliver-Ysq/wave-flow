@@ -13,7 +13,7 @@ export type AcpLauncher = {
   readonly env?: Readonly<Record<string, string>>;
 };
 
-/** ACP Agent 请求权限时的客户端决策；Harness 与 Worker 不能共用默认值。 */
+/** ACP Agent 请求权限时的客户端决策；Lead 与 Worker 不能共用默认值。 */
 export type AcpPermissionMode = "deny" | "allow";
 /** Adapter无关的权限决策；未来桌面协调器可耐久等待用户，测试/兼容模式仍用deny/allow。 */
 export type AcpPermissionResolver = (
@@ -311,7 +311,7 @@ export class AcpSessionClient {
     if (this.#closed) return;
     this.#closed = error;
     // ACP transport/子进程退出后必须主动关闭协议连接；只记录 #closed 不会拒绝
-    // 已经发出的 prompt 请求，会让 Harness 回合永久停在“等待新的输出”。
+    // 已经发出的 prompt 请求，会让 Lead 回合永久停在“等待新的输出”。
     logAcpLifecycle({ event: "fail", launcher: this.launcher.id, diagnostic: error.message });
     try { this.#connection?.close(error); } catch { /* 连接可能已关闭 */ }
     try { this.#transport?.close(); } catch { /* 进程可能已退出 */ }

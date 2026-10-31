@@ -11,8 +11,8 @@ export function resolveWorkerLauncher(runtime: VerifiedCliRuntime): AcpLauncher 
   return { id: entry.adapterId, command: launcher.command, args: launcher.args, env: entry.environment(runtime) };
 }
 
-/** 主控 Harness 的 launcher 解析；与 Worker 同为 Adapter Catalog 分发的泛型实现。 */
-export function resolveHarnessLauncher(runtime: VerifiedCliRuntime): AcpLauncher {
+/** 主控 Lead 的 launcher 解析；与 Worker 同为 Adapter Catalog 分发的泛型实现。 */
+export function resolveLeadLauncher(runtime: VerifiedCliRuntime): AcpLauncher {
   return resolveWorkerLauncher(runtime);
 }
 

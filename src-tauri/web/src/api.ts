@@ -11,15 +11,14 @@ import type {
   ExecutionPhaseVisitPageResponse,
   ExecutionPlanResponse,
   ExecutionResponse,
-  HarnessProjectListResponse,
-  HarnessProjectResponse,
-  HarnessRunListResponse,
-  HarnessRunResponse,
+  LeadProjectListResponse,
+  LeadProjectResponse,
+  LeadRunListResponse,
+  LeadRunResponse,
   PhaseVisitPageResponse,
   RuntimeCli,
   ScanCliRuntimesResponse,
 } from "./types";
-import type { AppSettings } from "../../../src/desktop/app-settings";
 import { createEngineClient, type EngineLine } from "./engine-client";
 
 /** Tauri 只原样转发响应行；配对、超时与 generation 过滤在 engine-client。 */
@@ -54,9 +53,9 @@ async function action<T>(
 
 export const api = {
   /** 手动保存1–120字单行标题；归档拒绝，不影响主控或执行。 */
-  renameTitle: (harnessRunId: string, title: string) =>
-    action<HarnessRunResponse>("harnesses.renameTitle", {
-      harnessRunId,
+  renameTitle: (leadRunId: string, title: string) =>
+    action<LeadRunResponse>("leads.renameTitle", {
+      leadRunId,
       title,
     }),
   /** 拖入/选目录后只读验证现有绝对文件夹，返回canonical cwd；不登记或启动任务。 */
@@ -73,7 +72,7 @@ export const api = {
     title: string | undefined,
     stagedAttachmentIds: string[],
   ) =>
-    action<HarnessRunResponse>("harnesses.startConversation", {
+    action<LeadRunResponse>("leads.startConversation", {
       projectId,
       text,
       clientRequestId,
@@ -87,34 +86,34 @@ export const api = {
       { projectId },
     ),
   /** 用户明确请求停止现场Git收尾，不恢复Worker、不把partial变成业务complete。 */
-  savePartial: (harnessRunId: string, executionId: string) =>
+  savePartial: (leadRunId: string, executionId: string) =>
     action<ExecutionResponse>("executions.savePartial", {
-      harnessRunId,
+      leadRunId,
       executionId,
       authorized: true,
     }),
   /** 只重试原义务的主控总结，不能派发或恢复Worker。 */
-  retryImpactSummary: (harnessRunId: string, key: string) =>
-    action<HarnessRunResponse>("harnesses.retryImpactSummary", {
-      harnessRunId,
+  retryImpactSummary: (leadRunId: string, key: string) =>
+    action<LeadRunResponse>("leads.retryImpactSummary", {
+      leadRunId,
       key,
     }),
   /** 仅停止指定总结的本次回合；key与turnId均必填，过期或缺失身份不能停止重试/其他回合。 */
-  stopImpactSummary: (harnessRunId: string, key: string, turnId: string) =>
-    action<HarnessRunResponse>("harnesses.stopImpactSummary", {
-      harnessRunId,
+  stopImpactSummary: (leadRunId: string, key: string, turnId: string) =>
+    action<LeadRunResponse>("leads.stopImpactSummary", {
+      leadRunId,
       key,
       turnId,
     }),
   /** 明确放弃总结且同时封存；归档后不能执行或恢复。 */
-  archiveAbandoningSummaries: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.complete", {
-      harnessRunId,
+  archiveAbandoningSummaries: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.complete", {
+      leadRunId,
       abandonImpactSummaries: true,
     }),
   /** 主控只回idle，不重发prompt、不解除总结门禁。 */
-  recoverController: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.recoverController", { harnessRunId }),
+  recoverController: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.recoverController", { leadRunId }),
   /** 本地来源静态预检；只在专用验收页面调用，不创建Task或执行源码。 */
   preflightLocal: (projectId: string, path: string) =>
     action<
@@ -131,7 +130,7 @@ export const api = {
     input: Record<string, unknown>,
     clientRequestId: string,
   ) =>
-    action<HarnessRunResponse>("workflows.createLocalTask", {
+    action<LeadRunResponse>("workflows.createLocalTask", {
       projectId,
       path,
       sourceHash,
@@ -140,7 +139,7 @@ export const api = {
     }),
   /** 编辑本地文件/参数后追加未批准版本，不能启动修订执行。 */
   reviseLocalTask: (
-    harnessRunId: string,
+    leadRunId: string,
     baseRevision: number,
     sourceHash: string,
     input: Record<string, unknown>,
@@ -148,8 +147,8 @@ export const api = {
     path?: string,
     updateReason?: "save-local" | "modify-plan" | "modify-parameters",
   ) =>
-    action<HarnessRunResponse>("workflows.reviseLocalTask", {
-      harnessRunId,
+    action<LeadRunResponse>("workflows.reviseLocalTask", {
+      leadRunId,
       baseRevision,
       sourceHash,
       input,
@@ -159,15 +158,15 @@ export const api = {
     }),
   /** 用户把当前生成模块保存到项目并接管为本地来源；不创建执行、不派发 Worker。 */
   saveAndAdoptRevision: (
-    harnessRunId: string,
+    leadRunId: string,
     revision: number,
     path: string,
     clientRequestId: string,
     input?: Record<string, unknown>,
     replace?: boolean,
   ) =>
-    action<HarnessRunResponse>("workflows.saveAndAdoptRevision", {
-      harnessRunId,
+    action<LeadRunResponse>("workflows.saveAndAdoptRevision", {
+      leadRunId,
       revision,
       path,
       clientRequestId,
@@ -176,7 +175,7 @@ export const api = {
     }),
   /** 确认冻结源码/输入/CLI及现场版本，重复UUID只返回原执行。 */
   confirmWorkflow: (
-    harnessRunId: string,
+    leadRunId: string,
     revision: number,
     config: ExecutionConfigSnapshot | undefined,
     clientRequestId: string,
@@ -184,7 +183,7 @@ export const api = {
     input?: Record<string, unknown>,
   ) =>
     action<ExecutionResponse>("executions.confirm", {
-      harnessRunId,
+      leadRunId,
       revision,
       ...(config ? { config } : {}),
       clientRequestId,
@@ -194,18 +193,18 @@ export const api = {
   /** 获取内置版本化目录，不创建任何运行对象。 */
   templates: () =>
     action<{
-      templates: import("../../../src/harness/workflow-templates").WorkflowTemplate[];
+      templates: import("../../../src/lead/workflow-templates").WorkflowTemplate[];
     }>("templates.list"),
   /** 保存未批准候选；needsGuidance 才安排主控。编辑必须携带 cardId 和正整数 baseRevision；同请求重试不新增版本或引导回合。 */
   saveTemplate: (
-    harnessRunId: string,
+    leadRunId: string,
     clientRequestId: string,
-    template: import("../../../src/harness/task-contract").TemplateSelection,
+    template: import("../../../src/lead/task-contract").TemplateSelection,
     cardId?: string,
     baseRevision?: number,
   ) =>
-    action<HarnessRunResponse>("templates.save", {
-      harnessRunId,
+    action<LeadRunResponse>("templates.save", {
+      leadRunId,
       clientRequestId,
       template,
       ...(cardId ? { cardId, baseRevision } : {}),
@@ -215,10 +214,10 @@ export const api = {
     projectId: string,
     text: string,
     clientRequestId: string,
-    template: import("../../../src/harness/task-contract").TemplateSelection,
+    template: import("../../../src/lead/task-contract").TemplateSelection,
     title?: string,
   ) =>
-    action<HarnessRunResponse>("harnesses.startConversation", {
+    action<LeadRunResponse>("leads.startConversation", {
       projectId,
       text,
       clientRequestId,
@@ -227,7 +226,7 @@ export const api = {
     }),
   /** 最终确认才耐久批准并派发执行。 */
   confirmTemplate: (
-    harnessRunId: string,
+    leadRunId: string,
     revision: number,
     config: ExecutionConfigSnapshot | undefined,
     clientRequestId: string,
@@ -235,7 +234,7 @@ export const api = {
     sceneEvidenceHash?: string | null,
   ) =>
     action<ExecutionResponse>("templates.confirm", {
-      harnessRunId,
+      leadRunId,
       revision,
       ...(config ? { config } : {}),
       clientRequestId,
@@ -244,7 +243,7 @@ export const api = {
     }),
   /** 特定 attempt 的只读证据；不存在时拒绝，不启动执行。 */
   attemptResults: (
-    harnessRunId: string,
+    leadRunId: string,
     executionId: string,
     attempt: number,
   ) =>
@@ -258,20 +257,15 @@ export const api = {
         label: string;
         result: Record<string, unknown> | null;
       }>;
-    }>("executions.attemptResults", { harnessRunId, executionId, attempt }),
+    }>("executions.attemptResults", { leadRunId, executionId, attempt }),
   /** 显式重新核验现场；变化只追加补充义务，既不恢复也不启动Execution。 */
-  checkExecutionScene: (harnessRunId: string, executionId: string) =>
-    action<{ harness: import("./types").HarnessSnapshot }>(
+  checkExecutionScene: (leadRunId: string, executionId: string) =>
+    action<{ lead: import("./types").LeadSnapshot }>(
       "executions.checkScene",
-      { harnessRunId, executionId },
+      { leadRunId, executionId },
     ),
   desktopStatus: () => action<DesktopStatusResponse>("status"),
-  /** 读取应用级设置（当前仅感知模式）；只读，不改变任何主控会话。 */
-  settings: () => action<AppSettings>("settings.get"),
-  /** 更新感知模式；成功后对新建或空闲重开的主控会话生效，进行中回合保持原模式。 */
-  updateSettings: (patch: { perceptionMode?: boolean }) =>
-    action<AppSettings>("settings.update", patch),
-  listHarnesses: () => action<HarnessRunListResponse>("harnesses.list"),
+  listLeads: () => action<LeadRunListResponse>("leads.list"),
   cliRuntimes: () => action<CliRuntimeListResponse>("runtimes.list"),
   /** 技能库只读状态；缺失目录视为空库，非法 skill 返回可操作错误。 */
   skillsStatus: () => action<import("./types").SkillLibraryStatus>("skills.status"),
@@ -317,47 +311,47 @@ export const api = {
   },
   /** Execution 的 Phase 访问分页；attempt 缺省时跨全部 attempt 聚合，用于补齐 replay 复用的 Phase → Agent 关系。 */
   executionPhaseVisits: (
-    harnessRunId: string,
+    leadRunId: string,
     executionId: string,
     options: { cursor?: number; includeEmpty?: boolean; attempt?: number } = {},
   ) => {
     return action<ExecutionPhaseVisitPageResponse>("executions.phaseVisits", {
-      harnessRunId,
+      leadRunId,
       executionId,
       ...options,
     });
   },
   answer: (blockRequestId: string, answer: Record<string, unknown>) =>
     action("blocks.answer", { blockRequestId, answer }),
-  projects: () => action<HarnessProjectListResponse>("projects.list"),
+  projects: () => action<LeadProjectListResponse>("projects.list"),
   createProject: (cwd: string, title?: string) =>
-    action<HarnessProjectResponse>("projects.create", {
+    action<LeadProjectResponse>("projects.create", {
       cwd,
       ...(title?.trim() ? { title } : {}),
     }),
-  startHarnessConversation: (
+  startLeadConversation: (
     projectId: string,
     text: string,
     clientRequestId: string = crypto.randomUUID(),
     title?: string,
   ) =>
-    action<HarnessRunResponse>("harnesses.startConversation", {
+    action<LeadRunResponse>("leads.startConversation", {
       projectId,
       text,
       clientRequestId,
       ...(title ? { title } : {}),
     }),
-  createHarness: (projectId: string) =>
-    action<HarnessRunResponse>("harnesses.create", { projectId }),
-  harness: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.get", { harnessRunId }),
-  harnessCommandCatalog: (projectId: string) =>
-    action<import("./types").HarnessCommandCatalogResponse>(
-      "harnesses.commandCatalog",
+  createLead: (projectId: string) =>
+    action<LeadRunResponse>("leads.create", { projectId }),
+  lead: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.get", { leadRunId }),
+  leadCommandCatalog: (projectId: string) =>
+    action<import("./types").LeadCommandCatalogResponse>(
+      "leads.commandCatalog",
       { projectId },
     ),
-  sendHarnessMessage: (
-    harnessRunId: string,
+  sendLeadMessage: (
+    leadRunId: string,
     text: string,
     options: {
       clientMessageId?: string;
@@ -365,103 +359,103 @@ export const api = {
       stagedAttachmentIds?: string[];
     } = {},
   ) =>
-    action<HarnessRunResponse>("harnesses.send", {
-      harnessRunId,
+    action<LeadRunResponse>("leads.send", {
+      leadRunId,
       text,
       ...options,
     }),
-  cancelQueuedMessage: (harnessRunId: string, messageId: string) =>
-    action<HarnessRunResponse>("harnesses.cancelQueued", {
-      harnessRunId,
+  cancelQueuedMessage: (leadRunId: string, messageId: string) =>
+    action<LeadRunResponse>("leads.cancelQueued", {
+      leadRunId,
       messageId,
     }),
   stageAttachment: (path: string) =>
-    action<import("./types").StagedAttachment>("harnesses.stageAttachment", {
+    action<import("./types").StagedAttachment>("leads.stageAttachment", {
       path,
     }),
   attachmentData: (
-    harnessRunId: string,
+    leadRunId: string,
     messageId: string,
     attachmentId: string,
   ) =>
-    action<{ dataUrl: string }>("harnesses.attachmentData", {
-      harnessRunId,
+    action<{ dataUrl: string }>("leads.attachmentData", {
+      leadRunId,
       messageId,
       attachmentId,
     }),
-  abortHarness: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.abort", { harnessRunId }),
-  completeHarness: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.complete", { harnessRunId }),
-  retryInitialization: (harnessRunId: string) =>
-    action<HarnessRunResponse>("harnesses.retryInitialization", {
-      harnessRunId,
+  abortLead: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.abort", { leadRunId }),
+  completeLead: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.complete", { leadRunId }),
+  retryInitialization: (leadRunId: string) =>
+    action<LeadRunResponse>("leads.retryInitialization", {
+      leadRunId,
     }),
-  acceptWorkflowRevision: (harnessRunId: string, revision: number) =>
-    action<HarnessRunResponse>("harnesses.acceptRevision", {
-      harnessRunId,
+  acceptWorkflowRevision: (leadRunId: string, revision: number) =>
+    action<LeadRunResponse>("leads.acceptRevision", {
+      leadRunId,
       revision,
     }),
-  rejectWorkflowRevision: (harnessRunId: string, revision: number) =>
-    action<HarnessRunResponse>("harnesses.rejectRevision", {
-      harnessRunId,
+  rejectWorkflowRevision: (leadRunId: string, revision: number) =>
+    action<LeadRunResponse>("leads.rejectRevision", {
+      leadRunId,
       revision,
     }),
   createExecution: (
-    harnessRunId: string,
+    leadRunId: string,
     revision: number,
     config: ExecutionConfigSnapshot,
     input: Record<string, unknown> = {},
   ) =>
     action<ExecutionResponse>("executions.create", {
-      harnessRunId,
+      leadRunId,
       revision,
       input,
       config,
     }),
-  planExecution: (harnessRunId: string, revision: number) =>
+  planExecution: (leadRunId: string, revision: number) =>
     action<ExecutionPlanResponse>("executions.plan", {
-      harnessRunId,
+      leadRunId,
       revision,
     }),
-  executions: (harnessRunId: string) =>
-    action<ExecutionListResponse>("executions.list", { harnessRunId }),
-  execution: (harnessRunId: string, executionId: string) =>
-    action<ExecutionResponse>("executions.get", { harnessRunId, executionId }),
+  executions: (leadRunId: string) =>
+    action<ExecutionListResponse>("executions.list", { leadRunId }),
+  execution: (leadRunId: string, executionId: string) =>
+    action<ExecutionResponse>("executions.get", { leadRunId, executionId }),
   executionControl: (
-    harnessRunId: string,
+    leadRunId: string,
     executionId: string,
     actionName: "pause" | "recover" | "stop",
   ) =>
     action<ExecutionResponse>("executions.control", {
-      harnessRunId,
+      leadRunId,
       executionId,
       action: actionName,
     }),
-  resumeExecution: (harnessRunId: string, executionId: string) =>
+  resumeExecution: (leadRunId: string, executionId: string) =>
     action<ExecutionResponse>("executions.resume", {
-      harnessRunId,
+      leadRunId,
       executionId,
     }),
   answerExecutionGate: (
-    harnessRunId: string,
+    leadRunId: string,
     executionId: string,
     gateId: string,
     answer: Record<string, unknown>,
   ) =>
     action<ExecutionResponse>("executions.answerGate", {
-      harnessRunId,
+      leadRunId,
       executionId,
       gateId,
       answer,
     }),
-  answerHarnessDecision: (
-    harnessRunId: string,
+  answerLeadDecision: (
+    leadRunId: string,
     decisionId: string,
     answer: Record<string, unknown>,
   ) =>
-    action<HarnessRunResponse>("harnesses.answerDecision", {
-      harnessRunId,
+    action<LeadRunResponse>("leads.answerDecision", {
+      leadRunId,
       decisionId,
       answer,
     }),

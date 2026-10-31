@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createClaudeWorkerEnvironment, createDshWorkerEnvironment, createWorkerEnvironment, createKimiWorkerEnvironment } from "../../src/runtimes/worker-environment";
 import type { VerifiedCliRuntime } from "../../src/runtimes/types";
 
-const runtime: VerifiedCliRuntime = { runtimeId: "runtime", cli: "codex", executablePath: "/Users/test/.local/bin/codex", executableIdentity: { device: 1, inode: 2, size: 3, modifiedAtMs: 4 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "codex-cli 1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, harnessTools: true }, verifiedAt: "2026-10-12T00:00:00.000Z", status: "verified", diagnostic: null };
+const runtime: VerifiedCliRuntime = { runtimeId: "runtime", cli: "codex", executablePath: "/Users/test/.local/bin/codex", executableIdentity: { device: 1, inode: 2, size: 3, modifiedAtMs: 4 }, nodeExecutable: { path: "/Users/test/.nvm/bin/node", identity: { device: 4, inode: 5, size: 6, modifiedAtMs: 7 } }, version: "codex-cli 1", discoveredFrom: "manual", discoveredShell: null, verifiedAdapter: { adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true }, verifiedAt: "2026-10-12T00:00:00.000Z", status: "verified", diagnostic: null };
 
 test("Worker 环境是最小白名单，只固定注入 runtime 路径", () => {
   const env = createWorkerEnvironment(runtime, { HOME: "/Users/test", PATH: "/custom/bin", SECRET_TOKEN: "hidden", HTTPS_PROXY: "https://proxy", LC_ALL: "zh_CN" });

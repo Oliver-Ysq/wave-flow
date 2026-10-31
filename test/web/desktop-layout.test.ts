@@ -11,7 +11,7 @@ test('工作台只从所属Task访问执行，不提供独立Run历史或控制�
  expect(api).toContain('"executions.get"');
  expect(api).toContain('"runs.phaseVisits"');
  expect(app).toContain('const workflowPanelOpen = route.kind === "workflow";');
- expect(app).toContain('routeMatchesTask(harness, route)');
+ expect(app).toContain('routeMatchesTask(lead, route)');
  expect(app).toContain('api.resumeExecution(');
  expect(app).toContain('<HistoricalResults');
  expect(app).toContain('<PreviousRecords');
@@ -62,7 +62,7 @@ test('macOS保留原生窗口装饰与安全拖动区，归档独立于任务导
  expect(app).toContain('background.forEach((item) => (item.inert = true))');
  expect(app).toContain('onArchive={(target) => void archiveTask(target)}');
  expect(app).not.toContain('归档这个任务？');
- expect(app).toContain('await taskMutation(id, () => api.completeHarness(id))');
+ expect(app).toContain('await taskMutation(id, () => api.completeLead(id))');
  const css=await Bun.file('src-tauri/web/src/workbench.css').text();
  expect(css).toContain('.desktop-titlebar::before');
  expect(css).toContain('height:100%; font-size:12px;');

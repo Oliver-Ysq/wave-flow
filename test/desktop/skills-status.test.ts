@@ -9,7 +9,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 
 function engineWithSkills(skillsRoot: string, homeDir?: string): DesktopExecutionEngine {
   const root = join(skillsRoot, "..");
-  return new DesktopExecutionEngine({ harnessRoot: join(root, "harness-runs"), storeRoot: join(root, "runs"), skillsRoot, homeDir, deterministicForTest: true });
+  return new DesktopExecutionEngine({ leadRoot: join(root, "lead-runs"), storeRoot: join(root, "runs"), skillsRoot, homeDir, deterministicForTest: true });
 }
 
 async function writeSkill(skillsRoot: string, name: string, frontmatter = `name: ${name}\ndescription: ${name}\n`): Promise<void> {

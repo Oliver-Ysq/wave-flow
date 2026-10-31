@@ -7,23 +7,23 @@ import { RunRuntime } from "../runtime/run-runtime";
 import { isJsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
-import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateHarnessProjectRequest, CreateHarnessRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, HarnessMessageRequest, HarnessProjectListResponse, HarnessProjectResponse, HarnessCommandCatalogResponse, HarnessRunListResponse, HarnessRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartHarnessConversationRequest, ValidateCliRuntimeRequest } from "./types";
+import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateLeadProjectRequest, CreateLeadRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, LeadMessageRequest, LeadProjectListResponse, LeadProjectResponse, LeadCommandCatalogResponse, LeadRunListResponse, LeadRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartLeadConversationRequest, ValidateCliRuntimeRequest } from "./types";
 import { createHash } from "node:crypto";
-import { ImpactSupplementRequiredError } from "../harness/impact-summary";
+import { ImpactSupplementRequiredError } from "../lead/impact-summary";
 import type { ControlServer } from "../control/control-server";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import type { AgentNodeExecutor } from "../runtime/run-types";
-import { harnessRunsRoot, runsRoot, validateRunId } from "../journal/paths";
+import { leadRunsRoot, runsRoot, validateRunId } from "../journal/paths";
 import { RunJournal } from "../journal/run-journal";
 import { RUNTIME_VERSION } from "../journal/types";
 import { AgentStartLimiter, LimitedAgentExecutor } from "../runtime/agent-start-limiter";
-import { HarnessService } from "../harness/service";
-import { assertStartable, type TaskCreation } from "../harness/task-contract";
-import { canonicalJson, isTemplateSelection, listWorkflowTemplates, validateTemplateInput } from "../harness/workflow-templates";
-import { HarnessProjectStore, validateProjectDirectory } from "../harness/projects";
+import { LeadService } from "../lead/service";
+import { assertStartable, type TaskCreation } from "../lead/task-contract";
+import { canonicalJson, isTemplateSelection, listWorkflowTemplates, validateTemplateInput } from "../lead/workflow-templates";
+import { LeadProjectStore, validateProjectDirectory } from "../lead/projects";
 import { readProjectContext } from "./project-context";
-import { HarnessExecutionService } from "../harness/executions";
-import { repairHarnessHomePermissions } from "../harness/journal";
+import { LeadExecutionService } from "../lead/executions";
+import { repairLeadHomePermissions } from "../lead/journal";
 import { CliRuntimeRegistry } from "../runtimes/registry";
 import type { CliRuntimeRecord, DiscoveredCliCandidate, RuntimeCli } from "../runtimes/types";
 import { ShellPathDiscovery } from "../runtimes/shell-path-discovery";
@@ -31,14 +31,14 @@ import { validateCliRuntime } from "../runtimes/cli-runtime-validator";
 import { readCliVersion } from "../runtimes/cli-version";
 import { CLI_PROBE_LIMIT, probeFirstRunnable, type CliProbeStatus } from "../runtimes/cli-probe";
 import { RuntimeAcpWorkerExecutor } from "../runtime/runtime-acp-worker-executor";
-import { AcpHarnessSession } from "../harness/acp-harness";
-import { resolveHarnessLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
-import { DeterministicHarnessSession } from "../harness/deterministic-session";
-import { buildHarnessSystemPrompt } from "../harness/harness-prompt";
+import { AcpLeadSession } from "../lead/acp-lead";
+import { resolveLeadLauncher, runtimeProvenance } from "../runtimes/worker-launcher-resolver";
+import { DeterministicLeadSession } from "../lead/deterministic-session";
+import { buildLeadSystemPrompt } from "../lead/lead-prompt";
 import { WorkerControlChannel } from "../runtime/worker-control-channel";
-import { HarnessControlChannel } from "../harness/harness-control-channel";
-import { createIsolatedHarness } from "../harness/isolated-harness";
-import { generateAcpTaskTitle } from "../harness/acp-task-naming";
+import { LeadControlChannel } from "../lead/lead-control-channel";
+import { createLeadSession } from "../lead/lead-session";
+import { generateAcpTaskTitle } from "../lead/acp-task-naming";
 import { prepareSessionScratch } from "../workspace/session-scratch";
 import { adapterById, adapterForCli, catalogClis } from "../runtimes/adapter-catalog";
 import { extractAgentWorkers } from "../workflow/extract-agents";
@@ -47,7 +47,6 @@ import { hasWorkspaceWriteIntent, readWorkspaceWriteIntent } from "../workspace/
 import { GitRepository } from "../workspace/git-repository";
 import { WorkspaceManager } from "../workspace/workspace-manager";
 import { assertCurrentWorkspaceRecord, validateExecutionWorkspaces } from "../workspace/execution-workspaces";
-import { AppSettingsStore, type AppSettings } from "./app-settings";
 import { cliUnavailableReason, isCliSelectable, isRuntimeCli } from "../shared/cli-availability";
 import { managedWriteBoundaryAvailable } from "../workspace/managed-acp-transport";
 import { readSkillLibrary, skillLibraryRoot } from "../skills/library";
@@ -66,13 +65,13 @@ export type EngineEventFrame = {
   /** 事件帧协议版本；当前固定为 1。 */
   readonly protocolVersion: 1;
   /** 事件流标识；当前只有主控会话流。 */
-  readonly stream: "harness";
-  /** 事件归属的 Harness Run ID。 */
-  readonly harnessRunId: string;
+  readonly stream: "lead";
+  /** 事件归属的 Lead Run ID。 */
+  readonly leadRunId: string;
   /** 该流内单调递增序号；Web 据此去重与检测漏帧，Engine 重启后重新计数并要求重读快照。 */
   readonly seq: number;
   /** 耐久事实派生的会话事件；瞬时 delta 不上帧，保证实时展示与回放同源。 */
-  readonly event: import("../harness/types").HarnessStreamEvent;
+  readonly event: import("../lead/types").LeadStreamEvent;
 };
 
 /** Desktop Execution Engine 的可选构造配置；生产默认使用用户验证的 ACP Worker。 */
@@ -83,13 +82,13 @@ export type DesktopExecutionEngineOptions = {
   readonly deterministicForTest?: boolean;
   /** 用户级 Run Store 根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/runs。 */
   readonly storeRoot?: string;
-  /** Harness 对话档案根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/harness-runs。 */
-  readonly harnessRoot?: string;
+  /** Lead 对话档案根目录；仅测试或受控嵌入环境注入，生产默认 ~/.wave-flow/lead-runs。 */
+  readonly leadRoot?: string;
   /**
-   * 用户级设置根目录；省略时取 `harnessRoot` 的同级目录（生产等于 waveFlowHome()，
-   * 即 ~/.wave-flow）。仅测试或受控嵌入环境注入；设置文件为 `<settingsRoot>/settings.json`。
+   * Engine 状态根目录；省略时取 `leadRoot` 的同级目录（生产等于 waveFlowHome()，
+   * 即 ~/.wave-flow）。仅测试或受控嵌入环境注入；用于保护 Journal/Registry 与技能库。
    */
-  readonly settingsRoot?: string;
+  readonly stateRoot?: string;
   /** 全局同时运行 Run 上限；生产默认保守值，测试可缩小。 */
   readonly maxActiveRuns?: number;
   /** 全局同时启动的真实 ACP Worker 上限。 */
@@ -104,10 +103,10 @@ export type DesktopExecutionEngineOptions = {
    * 生产不得伪造，避免把其他用户的 CLI 技能目录当成来源。
    */
   readonly homeDir?: string;
-  /** 自动测试注入；生产省略时使用 selected ACP CLI Harness。 */
-  readonly createHarnessSession?: (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], actions: import("../harness/action-tools").HarnessActionCallbacks, runtime?:import("../runtimes/types").RuntimeProvenance) => Promise<import("../harness/session").HarnessSession>;
+  /** 自动测试注入；生产省略时使用 selected ACP CLI Lead。 */
+  readonly createLeadSession?: (leadRunId: string, cwd: string, prior: readonly import("../lead/types").LeadMessage[], actions: import("../lead/action-tools").LeadActionCallbacks, runtime?:import("../runtimes/types").RuntimeProvenance) => Promise<import("../lead/session").LeadSession>;
   /** 测试注入独立命名器；生产省略使用所选主控ACP，无业务工具。 */
-  readonly generateTaskTitle?: (context:import("../harness/task-naming").TaskNamingContext,snapshot:import("../harness/types").HarnessSnapshot,signal:AbortSignal)=>Promise<string>;
+  readonly generateTaskTitle?: (context:import("../lead/task-naming").TaskNamingContext,snapshot:import("../lead/types").LeadSnapshot,signal:AbortSignal)=>Promise<string>;
   /** 测试注入的受控 PATH 发现器；生产始终使用 ShellPathDiscovery。 */
   readonly discoverCliRuntimes?: () => Promise<readonly DiscoveredCliCandidate[]>;
   /** 测试注入的完整 CLI 验证器；生产统一走 Catalog 驱动的 validateCliRuntime，执行 realpath、版本与 ACP 握手。 */
@@ -159,23 +158,21 @@ export class DesktopExecutionEngine {
   #runs = new Map<string, RunRuntime>();
   #controls = new Map<string, ControlServer>();
   #runTasks = new Map<string, Promise<unknown>>();
-  #harness: HarnessService;
-  /** 侧边栏耐久项目；Harness 从项目继承 cwd。 */
-  #projects: HarnessProjectStore;
-  /** Harness 生成脚本的 WorkflowExecution 服务；Execution 不进入 Run 列表。 */
-  #executions: HarnessExecutionService;
+  #lead: LeadService;
+  /** 侧边栏耐久项目；Lead 从项目继承 cwd。 */
+  #projects: LeadProjectStore;
+  /** Lead 生成脚本的 WorkflowExecution 服务；Execution 不进入 Run 列表。 */
+  #executions: LeadExecutionService;
   /** 所有 ACP Worker 必须使用用户确认且启动前复核的本机 CLI Runtime。 */
   #cliRuntimes: CliRuntimeRegistry;
-  /** 用户级设置存储；每次创建主控会话时按当前感知模式选择原生/私有 Home 与写边界。 */
-  #settings: AppSettingsStore;
   /** 托管技能库根；主控、Worker 与 Replay 判定共用，生产等于 ~/.wave-flow/skills。 */
   private readonly skillsRoot: string;
   /** 技能导入发现使用的主目录；生产为用户 home，测试可注入。 */
   private readonly homeDirectory: string;
   /** 同一 Engine 内启动扫描单飞，避免并发页面加载重复握手和覆盖 Registry。 */
   #runtimeScan: Promise<ScanCliRuntimesResponse> | null = null;
-  /** 每条 Harness ACP session 的随机私有 MCP 控制 socket；只在 Engine 内存存活。 */
-  #harnessControlPipes = new Map<string, HarnessControlChannel>();
+  /** 每条 Lead ACP session 的随机私有 MCP 控制 socket；只在 Engine 内存存活。 */
+  #leadControlPipes = new Map<string, LeadControlChannel>();
   /** 当前 Engine 内每个真实 Worker 的私有 Control socket；从不发布或持久化。 */
   #workerControlPipes = new Map<string, WorkerControlChannel>();
   /** 当前Engine的受管writer证明对象；终态后保留用于显式partial收尾，不跨进程认领。 */
@@ -191,19 +188,19 @@ export class DesktopExecutionEngine {
   #exitRequested = false;
   /** Engine 事件总线的订阅者；engine-main 注册后把事件帧写入私有 JSONL 通道。 */
   #eventSinks = new Set<(frame: EngineEventFrame) => void>();
-  /** 每个 Harness 流的单调序号；Engine 进程内重新计数，Web 重启后必须重读快照对齐。 */
-  #harnessEventSeq = new Map<string, number>();
+  /** 每个 Lead 流的单调序号；Engine 进程内重新计数，Web 重启后必须重读快照对齐。 */
+  #leadEventSeq = new Map<string, number>();
   readonly instanceId = crypto.randomUUID();
 
   private readonly deterministicForTest: boolean;
   /** 验收入口开关；默认关闭，存量档案仍按自身契约只读/恢复。 */
   private readonly singleWorkflowForAcceptance: boolean;
   private readonly storeRoot: string;
-  private readonly harnessRoot: string;
+  private readonly leadRoot: string;
   private readonly workspaceRoot: string;
   private readonly maxActiveRuns: number;
   private readonly agentStartLimiter: AgentStartLimiter;
-  private readonly hasCustomHarnessSession: boolean;
+  private readonly hasCustomLeadSession: boolean;
   private readonly discoverCliRuntimeCandidates: () => Promise<readonly DiscoveredCliCandidate[]>;
   private readonly validateCliRuntimeCandidate: NonNullable<DesktopExecutionEngineOptions["validateCliRuntime"]>;
 
@@ -217,67 +214,62 @@ export class DesktopExecutionEngine {
     // 新建Task默认启用联合验收后的单链/三来源/修订续作；false仅供存量兼容测试。
     this.singleWorkflowForAcceptance = normalized.singleWorkflowForAcceptance !== false;
     this.storeRoot = normalized.storeRoot ?? runsRoot();
-    const harnessRoot = normalized.harnessRoot ?? harnessRunsRoot();
-    this.harnessRoot = harnessRoot;
+    const leadRoot = normalized.leadRoot ?? leadRunsRoot();
+    this.leadRoot = leadRoot;
     this.workspaceRoot=join(dirname(this.storeRoot),"workspaces");
-    this.#projects = new HarnessProjectStore(dirname(harnessRoot));
-    this.#cliRuntimes = new CliRuntimeRegistry(dirname(harnessRoot));
-    // 生产设置与 Harness 档案同属 waveFlowHome；注入 harnessRoot 时默认取它的同级目录。
-    // 同一 root 也作为感知模式要保护的 Engine 状态目录，保证测试注入与生产语义一致。
-    const stateRoot = normalized.settingsRoot ?? dirname(harnessRoot);
-    this.#settings = new AppSettingsStore(stateRoot);
+    this.#projects = new LeadProjectStore(dirname(leadRoot));
+    this.#cliRuntimes = new CliRuntimeRegistry(dirname(leadRoot));
+    // 生产状态与 Lead 档案同属 waveFlowHome；注入 leadRoot 时默认取它的同级目录。
+    // 同一 root 也是主控写边界要保护的 Engine 状态目录，保证测试注入与生产语义一致。
+    const stateRoot = normalized.stateRoot ?? dirname(leadRoot);
     this.skillsRoot = normalized.skillsRoot ?? skillLibraryRoot(stateRoot);
     this.homeDirectory = normalized.homeDir ?? homedir();
     this.discoverCliRuntimeCandidates = normalized.discoverCliRuntimes ?? (() => new ShellPathDiscovery().discover());
     this.validateCliRuntimeCandidate = normalized.validateCliRuntime ?? ((cli, input) => validateCliRuntime(cli, input));
-    this.hasCustomHarnessSession = normalized.createHarnessSession !== undefined || this.deterministicForTest;
-    const harnessFactory = normalized.createHarnessSession ?? (this.deterministicForTest
-      ? async () => new DeterministicHarnessSession()
-      : async (harnessRunId: string, cwd: string, prior: readonly import("../harness/types").HarnessMessage[], _actions: import("../harness/action-tools").HarnessActionCallbacks, frozenRuntime?: import("../runtimes/types").RuntimeProvenance) => {
-      // 每次创建主控会话都读取当前设置：settings.update 会关闭空闲会话，下一回合因此
-      // 按新设置重建；读取失败（文件损坏）直接拒绝，不静默回退到默认模式。
-      const settings = await this.#settings.get();
-      const mode = settings.perceptionMode ? "perception" as const : "isolated" as const;
-      const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdHarness(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
+    this.hasCustomLeadSession = normalized.createLeadSession !== undefined || this.deterministicForTest;
+    const leadFactory = normalized.createLeadSession ?? (this.deterministicForTest
+      ? async () => new DeterministicLeadSession()
+      : async (leadRunId: string, cwd: string, prior: readonly import("../lead/types").LeadMessage[], _actions: import("../lead/action-tools").LeadActionCallbacks, frozenRuntime?: import("../runtimes/types").RuntimeProvenance) => {
+      const runtime = frozenRuntime ? await this.#cliRuntimes.resolveByIdLead(frozenRuntime.runtimeId) : await this.#cliRuntimes.resolveSelectedLead();
       const compiled = import.meta.dir.startsWith("/$bunfs/");
       const command = process.execPath;
-      const scratch = await prepareSessionScratch(join(dirname(harnessRoot), "harness-scratch"), cwd);
-      const pipe = new HarnessControlChannel(request => this.#harness.mcpTools(harnessRunId, request), scratch);
-      this.#harnessControlPipes.set(harnessRunId, pipe);
-      const args = compiled ? ["__harness-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__harness-mcp"];
-      const mcpServer = { name: "wave-flow-harness", command, args, env: [
-        { name: "WF_HARNESS_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+      const scratch = await prepareSessionScratch(join(dirname(leadRoot), "lead-scratch"), cwd);
+      const pipe = new LeadControlChannel(request => this.#lead.mcpTools(leadRunId, request), scratch);
+      this.#leadControlPipes.set(leadRunId, pipe);
+      const args = compiled ? ["__lead-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__lead-mcp"];
+      const mcpServer = { name: "wave-flow-lead", command, args, env: [
+        { name: "WF_LEAD_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
       ] } as any;
       assertAbsoluteMcpCommand(mcpServer);
-      let session: AcpHarnessSession;
-      try { session = await createIsolatedHarness({ mode, engineHome: stateRoot, launcher: resolveHarnessLauncher(runtime), isolation: adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation, cwd, scratch, prompt: buildHarnessSystemPrompt(mode), prior, mcp: mcpServer, skills: adapterById(runtime.verifiedAdapter.adapterId)?.skills ?? null, skillsRoot: this.skillsRoot }); }
-      catch (error) { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); throw error; }
-      const close = session.close.bind(session); session.close = () => { pipe.close(); this.#harnessControlPipes.delete(harnessRunId); close(); };
+      let session: AcpLeadSession;
+      try { session = await createLeadSession({ engineHome: stateRoot, launcher: resolveLeadLauncher(runtime), cwd, scratch, prompt: buildLeadSystemPrompt(), prior, mcp: mcpServer, skills: adapterById(runtime.verifiedAdapter.adapterId)?.skills ?? null, skillsRoot: this.skillsRoot }); }
+      catch (error) { pipe.close(); this.#leadControlPipes.delete(leadRunId); throw error; }
+      const close = session.close.bind(session); session.close = () => { pipe.close(); this.#leadControlPipes.delete(leadRunId); close(); };
       return session;
     });
-    this.#harness = new HarnessService(harnessRoot, harnessFactory, undefined, async () => {
-      if (this.hasCustomHarnessSession) return { fingerprint: "injected-harness-session" };
-      const runtime = await this.#cliRuntimes.resolveSelectedHarness();
+    this.#lead = new LeadService(leadRoot, leadFactory, undefined, async () => {
+      if (this.hasCustomLeadSession) return { fingerprint: "injected-lead-session" };
+      const runtime = await this.#cliRuntimes.resolveSelectedLead();
       return { fingerprint: createHash("sha256").update(`${runtime.runtimeId}\n${runtime.executablePath}\n${runtime.version}\n${runtime.verifiedAdapter.adapterId}\n${runtime.verifiedAdapter.adapterVersion}`).digest("hex"), runtime: runtimeProvenance(runtime) };
     }, this.singleWorkflowForAcceptance);
-    if(normalized.generateTaskTitle)this.#harness.setNamingGenerator(normalized.generateTaskTitle);
-    else if(!this.hasCustomHarnessSession)this.#harness.setNamingGenerator(async(context,snapshot,signal)=>{
-      const runtime=snapshot.runtime ? await this.#cliRuntimes.resolveByIdHarness(snapshot.runtime.runtimeId) : await this.#cliRuntimes.resolveSelectedHarness();
-      return generateAcpTaskTitle({launcher:resolveHarnessLauncher(runtime),isolation:adapterById(runtime.verifiedAdapter.adapterId)?.sessionIsolation,projectCwd:snapshot.cwd,scratchRoot:join(dirname(harnessRoot),"naming-scratch"),context,signal});
+    if(normalized.generateTaskTitle)this.#lead.setNamingGenerator(normalized.generateTaskTitle);
+    else if(!this.hasCustomLeadSession)this.#lead.setNamingGenerator(async(context,snapshot,signal)=>{
+      const runtime=snapshot.runtime ? await this.#cliRuntimes.resolveByIdLead(snapshot.runtime.runtimeId) : await this.#cliRuntimes.resolveSelectedLead();
+      return generateAcpTaskTitle({launcher:resolveLeadLauncher(runtime),projectCwd:snapshot.cwd,scratchRoot:join(dirname(leadRoot),"naming-scratch"),context,signal});
     });
     // 事件总线：只把耐久事实派生的事件推给订阅者；瞬时 reasoning/assistant delta 不上帧，
     // Web 实时展示与重开回放因此始终同源（Journal → 投影/事件帧）。
-    this.#harness.addEventListener((harnessRunId, event) => this.publishHarnessEvent(harnessRunId, event));
-    this.#executions = new HarnessExecutionService(this.#harness, (config) => this.createExecutionExecutor(config), {
+    this.#lead.addEventListener((leadRunId, event) => this.publishLeadEvent(leadRunId, event));
+    this.#executions = new LeadExecutionService(this.#lead, (config) => this.createExecutionExecutor(config), {
       wireControl: (runtime, wiring) => this.wireExecutionControl(runtime, wiring),
       prepareResume: async (executionId, snapshot) => {
         const original = this.#workspaceExecutors.get(executionId);
         if (!original) return; // 新Engine不认领旧writer，后续现场/退出核验仍fail closed。
         for (const node of snapshot.phases.flatMap(phase => phase.agents)) if (node.status === "completed") await original.finalizeCompleted(node);
       },
-    }, harnessRoot, this.storeRoot,this.workspaceRoot, this.skillsRoot);
-    this.#harness.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
-    this.#harness.setExecutionSceneReader((taskId, executionId) => this.#executions.sceneEvidence(taskId, executionId));
+    }, leadRoot, this.storeRoot,this.workspaceRoot, this.skillsRoot);
+    this.#lead.setExecutionCapsuleReader((taskId, executionId, attempt) => this.#executions.capsuleEvidence(taskId, executionId, attempt));
+    this.#lead.setExecutionSceneReader((taskId, executionId) => this.#executions.sceneEvidence(taskId, executionId));
     this.maxActiveRuns = normalized.maxActiveRuns ?? 20;
     if (!Number.isInteger(this.maxActiveRuns) || this.maxActiveRuns < 1) throw new Error("maxActiveRuns 必须是不小于 1 的整数。");
     this.agentStartLimiter = new AgentStartLimiter(normalized.maxActiveAgents ?? 20);
@@ -285,26 +277,26 @@ export class DesktopExecutionEngine {
 
   /** 释放当前 Desktop Execution Engine 的内存会话；不会删除 Journal 或本地结果文件。 */
   shutdown(): void {
-    this.#harness.close();
-    for (const pipe of this.#harnessControlPipes.values()) pipe.close();
-    this.#harnessControlPipes.clear();
+    this.#lead.close();
+    for (const pipe of this.#leadControlPipes.values()) pipe.close();
+    this.#leadControlPipes.clear();
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
   }
 
   /** 有界后台主控检查；不影响启动ready或自动恢复任务，创建时仍做相同兜底检查。 */
-  refreshSelectedHarness():void { if(!this.deterministicForTest)void this.#cliRuntimes.refreshSelectedHarness().catch(()=>{}); }
+  refreshSelectedLead():void { if(!this.deterministicForTest)void this.#cliRuntimes.refreshSelectedLead().catch(()=>{}); }
 
   /** 订阅 Engine 事件帧；engine-main 在启动时注册，把帧写入私有 JSONL stdout。 */
   subscribeEvents(sink: (frame: EngineEventFrame) => void): () => void { this.#eventSinks.add(sink); return () => this.#eventSinks.delete(sink); }
 
   /** 只发布耐久事实派生的事件；瞬时 delta 与 ACP 原始通知不上帧（已由条目事件承载）。 */
-  private publishHarnessEvent(harnessRunId: string, event: import("../harness/types").HarnessStreamEvent): void {
+  private publishLeadEvent(leadRunId: string, event: import("../lead/types").LeadStreamEvent): void {
     if (this.#eventSinks.size === 0) return;
     if (event.type !== "entry_started" && event.type !== "entry_appended" && event.type !== "entry_finished" && event.type !== "turn_finished" && event.type !== "turn_interrupted" && event.type !== "execution_changed" && event.type !== "title_changed" && event.type !== "commands_changed") return;
-    const seq = (this.#harnessEventSeq.get(harnessRunId) ?? 0) + 1;
-    this.#harnessEventSeq.set(harnessRunId, seq);
-    const frame: EngineEventFrame = { type: "event", protocolVersion: 1, stream: "harness", harnessRunId, seq, event };
+    const seq = (this.#leadEventSeq.get(leadRunId) ?? 0) + 1;
+    this.#leadEventSeq.set(leadRunId, seq);
+    const frame: EngineEventFrame = { type: "event", protocolVersion: 1, stream: "lead", leadRunId, seq, event };
     for (const sink of this.#eventSinks) sink(frame);
   }
 
@@ -312,16 +304,16 @@ export class DesktopExecutionEngine {
   async cancelForDesktopExit(): Promise<void> {
     if (this.#exitRequested) return;
     this.#exitRequested = true;
-    this.#harness.beginExit();
+    this.#lead.beginExit();
     let failure: unknown;
     for(const runtime of this.#runs.values()) {
       try { await runtime.cancelForDesktopExit(this.instanceId); } catch (error) { failure ??= error; }
     }
     try { await this.#executions.cancelForDesktopExit(this.instanceId); } catch (error) { failure ??= error; }
-    try { await this.#harness.interruptForDesktopExit(); } catch (error) { failure ??= error; }
-    this.#harness.close();
-    for (const pipe of this.#harnessControlPipes.values()) pipe.close();
-    this.#harnessControlPipes.clear();
+    try { await this.#lead.interruptForDesktopExit(); } catch (error) { failure ??= error; }
+    this.#lead.close();
+    for (const pipe of this.#leadControlPipes.values()) pipe.close();
+    this.#leadControlPipes.clear();
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
     if (failure !== undefined) throw failure;
@@ -331,7 +323,7 @@ export class DesktopExecutionEngine {
   /** Engine 重启后，所有未终结节点一律 interrupted；恢复只能由用户显式 resume 发起。 */
   async convergeStaleAcpWorkers(): Promise<void> {
     let runIds: readonly string[] = [];
-    // 全局 Run Store 不存在（纯 Harness 使用）不能提前返回：下方 Harness Execution
+    // 全局 Run Store 不存在（纯 Lead 使用）不能提前返回：下方 Lead Execution
     // 与主控回合的收敛与全局 Store 无关，跳过会让失联 Execution 停在"工作中"。
     try { runIds = await readdir(this.storeRoot); } catch { runIds = []; }
     for (const runId of runIds) {
@@ -369,23 +361,23 @@ export class DesktopExecutionEngine {
         // Engine 持有的可控会话）。后续只读查询会从刚更新的 Journal 重开。
       } catch { /* 单一 archive 损坏不能阻断其他旧会话。 */ }
     }
-    // HarnessExecution 的嵌套 Run 不在全局 Run Store，因此上面的扫描覆盖不到。
-    // 必须按 Harness 档案再次收敛，避免重启后 Web 把已失联的 Worker 显示为工作中。
+    // LeadExecution 的嵌套 Run 不在全局 Run Store，因此上面的扫描覆盖不到。
+    // 必须按 Lead 档案再次收敛，避免重启后 Web 把已失联的 Worker 显示为工作中。
     // 先修复旧版本以 0755 创建的状态目录权限：否则读取校验会让档案对收敛不可见，
-    // 失联 Execution 永远停在"工作中"。再按目录项逐个收敛而不是 HarnessService.list()：
+    // 失联 Execution 永远停在"工作中"。再按目录项逐个收敛而不是 LeadService.list()：
     // list() 会静默丢弃读取失败的档案，恰好让最需要收敛的档案逃过收敛。
-    await repairHarnessHomePermissions(this.harnessRoot);
-    let harnessIds: readonly string[] = [];
-    try { harnessIds = await readdir(this.harnessRoot); } catch { harnessIds = []; }
-    for (const harnessRunId of harnessIds) {
+    await repairLeadHomePermissions(this.leadRoot);
+    let leadIds: readonly string[] = [];
+    try { leadIds = await readdir(this.leadRoot); } catch { leadIds = []; }
+    for (const leadRunId of leadIds) {
       try {
-        await this.#executions.convergeStaleExecutions(harnessRunId);
+        await this.#executions.convergeStaleExecutions(leadRunId);
       }
-      catch { /* 单一 Harness 或嵌套档案损坏不能阻断其他会话。 */ }
+      catch { /* 单一 Lead 或嵌套档案损坏不能阻断其他会话。 */ }
     }
-    await this.#harness.convergeStaleTurns();
-    await this.#harness.resumeMessageQueues();
-    await this.#harness.resetAttachmentStaging();
+    await this.#lead.convergeStaleTurns();
+    await this.#lead.resumeMessageQueues();
+    await this.#lead.resetAttachmentStaging();
   }
 
   /** 注册一个真实 Run 的 ControlServer；必须与当前 Engine 中的同一 Run 绑定。 */
@@ -396,8 +388,8 @@ export class DesktopExecutionEngine {
     this.#controls.set(runId, control);
   }
 
-  /** Execution 的底座执行器；Harness 执行只走用户已验证的本机 ACP Worker 或测试确定性执行器。 */
-  private createExecutionExecutor(config: import("../harness/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
+  /** Execution 的底座执行器；Lead 执行只走用户已验证的本机 ACP Worker 或测试确定性执行器。 */
+  private createExecutionExecutor(config: import("../lead/types").ExecutionConfigSnapshot | null): { readonly executor: AgentNodeExecutor; readonly wiring?: unknown } {
     if (this.deterministicForTest) return { executor: new LimitedAgentExecutor(new DeterministicExecutor(), this.agentStartLimiter) };
     const fallbackRuntimeId = config && config.assignmentMode !== "script" ? config.fallbackRuntimeId : null;
     if (config?.workspaces) {
@@ -429,34 +421,34 @@ export class DesktopExecutionEngine {
   }
 
 
-  /** 创建独立 Harness 对话，不创建 Workflow Run、Worker 或 Control。 */
-  private async createHarness(value: unknown): Promise<HarnessRunResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessRunRequest).projectId !== "string") throw new EngineActionError(400, "创建 Harness 请求无效。 ");
+  /** 创建独立 Lead 对话，不创建 Workflow Run、Worker 或 Control。 */
+  private async createLead(value: unknown): Promise<LeadRunResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateLeadRunRequest).projectId !== "string") throw new EngineActionError(400, "创建 Lead 请求无效。 ");
     try {
-      const project = await this.#projects.get((value as CreateHarnessRunRequest).projectId);
-      if (!this.hasCustomHarnessSession) await this.#cliRuntimes.resolveSelectedHarness();
-      const harness = await this.#harness.create(project.cwd, project.projectId);
+      const project = await this.#projects.get((value as CreateLeadRunRequest).projectId);
+      if (!this.hasCustomLeadSession) await this.#cliRuntimes.resolveSelectedLead();
+      const lead = await this.#lead.create(project.cwd, project.projectId);
       await this.#projects.touch(project.projectId);
-      return { harness };
+      return { lead };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
-  /** 首条消息是新 Harness 的持久化边界；UI 草稿从不通过此路径前写入 Engine。 */
-  private async startHarnessConversation(projectId: string, value: unknown): Promise<HarnessRunResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as StartHarnessConversationRequest).projectId !== "string" || (value as StartHarnessConversationRequest).projectId !== projectId || typeof (value as StartHarnessConversationRequest).text !== "string") throw new EngineActionError(400, "新会话首条消息请求无效。 ");
+  /** 首条消息是新 Lead 的持久化边界；UI 草稿从不通过此路径前写入 Engine。 */
+  private async startLeadConversation(projectId: string, value: unknown): Promise<LeadRunResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as StartLeadConversationRequest).projectId !== "string" || (value as StartLeadConversationRequest).projectId !== projectId || typeof (value as StartLeadConversationRequest).text !== "string") throw new EngineActionError(400, "新会话首条消息请求无效。 ");
     try {
       const project = await this.#projects.get(projectId);
       // 唯一新建任务路径：缺失重试身份拒绝，旧档案仍兼容读取。
-      const harness = await this.#harness.startTask(project.cwd, value as TaskCreation);
+      const lead = await this.#lead.startTask(project.cwd, value as TaskCreation);
       await this.#projects.touch(project.projectId);
-      return { harness };
+      return { lead };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
-  private async listProjects(): Promise<HarnessProjectListResponse> { return { projects: await this.#projects.list() }; }
-  /** 只发现当前主控 CLI 的斜杠命令/技能；不创建 Harness、Task 或 Journal。 */
-  private async harnessCommandCatalog(value: unknown): Promise<HarnessCommandCatalogResponse> {
+  private async listProjects(): Promise<LeadProjectListResponse> { return { projects: await this.#projects.list() }; }
+  /** 只发现当前主控 CLI 的斜杠命令/技能；不创建 Lead、Task 或 Journal。 */
+  private async leadCommandCatalog(value: unknown): Promise<LeadCommandCatalogResponse> {
     const project = await this.#projects.get(requiredString(value, "projectId"));
-    const runtime = this.hasCustomHarnessSession ? undefined : await this.#cliRuntimes.resolveSelectedHarness();
-    return { commands: await this.#harness.commandCatalog(project.cwd, runtime?.runtimeId) };
+    const runtime = this.hasCustomLeadSession ? undefined : await this.#cliRuntimes.resolveSelectedLead();
+    return { commands: await this.#lead.commandCatalog(project.cwd, runtime?.runtimeId) };
   }
   /** Worker 专属 MCP 只代理当前节点的 Control；token/capability 不会进入 Web 或 Journal。 */
   private workerControlMcp(identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string; readonly resultSchema?: JsonSchema }, scratch?: string): import("@agentclientprotocol/sdk").McpServer {
@@ -489,9 +481,9 @@ export class DesktopExecutionEngine {
     } as any;
   }
 
-  private async createProject(value: unknown): Promise<HarnessProjectResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateHarnessProjectRequest).cwd !== "string" || ((value as CreateHarnessProjectRequest).title !== undefined && typeof (value as CreateHarnessProjectRequest).title !== "string")) throw new EngineActionError(400, "创建项目请求无效。 ");
-    try { return { project: await this.#projects.create((value as CreateHarnessProjectRequest).cwd, (value as CreateHarnessProjectRequest).title) }; }
+  private async createProject(value: unknown): Promise<LeadProjectResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as CreateLeadProjectRequest).cwd !== "string" || ((value as CreateLeadProjectRequest).title !== undefined && typeof (value as CreateLeadProjectRequest).title !== "string")) throw new EngineActionError(400, "创建项目请求无效。 ");
+    try { return { project: await this.#projects.create((value as CreateLeadProjectRequest).cwd, (value as CreateLeadProjectRequest).title) }; }
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
@@ -535,7 +527,7 @@ export class DesktopExecutionEngine {
     try {
       const imported = await importSkillFromDirectory(path, this.skillsRoot, this.homeDirectory);
       // 让新建或空闲重开的主控会话按新库重新投影；活动会话不回改。
-      this.#harness.closeIdleSessions();
+      this.#lead.closeIdleSessions();
       return { name: imported.name };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
@@ -545,7 +537,7 @@ export class DesktopExecutionEngine {
     const path = requiredString(value, "path");
     try {
       const imported = await importSkillZip(path, this.skillsRoot);
-      this.#harness.closeIdleSessions();
+      this.#lead.closeIdleSessions();
       return { name: imported.name };
     } catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
@@ -686,7 +678,7 @@ export class DesktopExecutionEngine {
   private async selectCliRuntime(runtimeId: string, value: unknown): Promise<SelectCliRuntimeResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "选择 CLI Runtime 不接受请求字段。 ");
     try {
-      if ((await this.#harness.list()).some(harness => harness.status === "running")) throw new EngineActionError(409, "有主控回合进行中，主控空闲后才能切换。 ");
+      if ((await this.#lead.list()).some(lead => lead.status === "running")) throw new EngineActionError(409, "有主控回合进行中，主控空闲后才能切换。 ");
       return { runtime: await this.#cliRuntimes.select(runtimeId) };
     }
     catch (error) { throw error instanceof EngineActionError ? error : new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
@@ -697,34 +689,34 @@ export class DesktopExecutionEngine {
     catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
   }
 
-  private taskPresentation(task:import("../harness/types").HarnessSnapshot):import("../harness/types").HarnessSnapshot { return {...task,executionAttention:Object.fromEntries(task.executions.filter(execution=>execution.finishedAt===null).map(execution=>[execution.executionId,this.#executions.attention(execution.executionId)]))}; }
-  private async harnessSnapshot(harnessRunId: string): Promise<HarnessRunResponse> { const harness=this.taskPresentation(await this.#harness.snapshot(harnessRunId));this.#harness.scheduleImpactSummary(harnessRunId);return {harness}; }
-  private async listHarnesses(): Promise<HarnessRunListResponse> { return { harnesses: (await this.#harness.list()).map(task=>this.taskPresentation(task)) }; }
-  private async sendHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as HarnessMessageRequest).text !== "string") throw new EngineActionError(400, "Harness 消息请求无效。 ");
-    const request = value as HarnessMessageRequest;
+  private taskPresentation(task:import("../lead/types").LeadSnapshot):import("../lead/types").LeadSnapshot { return {...task,executionAttention:Object.fromEntries(task.executions.filter(execution=>execution.finishedAt===null).map(execution=>[execution.executionId,this.#executions.attention(execution.executionId)]))}; }
+  private async leadSnapshot(leadRunId: string): Promise<LeadRunResponse> { const lead=this.taskPresentation(await this.#lead.snapshot(leadRunId));this.#lead.scheduleImpactSummary(leadRunId);return {lead}; }
+  private async listLeads(): Promise<LeadRunListResponse> { return { leads: (await this.#lead.list()).map(task=>this.taskPresentation(task)) }; }
+  private async sendLeadMessage(leadRunId: string, value: unknown): Promise<LeadRunResponse> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as LeadMessageRequest).text !== "string") throw new EngineActionError(400, "Lead 消息请求无效。 ");
+    const request = value as LeadMessageRequest;
     if (request.clientMessageId !== undefined && typeof request.clientMessageId !== "string") throw new EngineActionError(400, "消息标识必须是字符串 UUID。 ");
     if (request.immediate !== undefined && typeof request.immediate !== "boolean") throw new EngineActionError(400, "立即发送标识无效。 ");
     if (request.stagedAttachmentIds !== undefined && (!Array.isArray(request.stagedAttachmentIds) || request.stagedAttachmentIds.some((item) => typeof item !== "string"))) throw new EngineActionError(400, "附件暂存身份列表无效。 ");
-    await this.#harness.submit(harnessRunId, request.text, { ...(request.clientMessageId !== undefined ? { clientMessageId: request.clientMessageId } : {}), ...(request.immediate !== undefined ? { immediate: request.immediate } : {}), ...(request.stagedAttachmentIds?.length ? { stagedAttachmentIds: request.stagedAttachmentIds } : {}) });
-    return { harness: await this.#harness.snapshot(harnessRunId) };
+    await this.#lead.submit(leadRunId, request.text, { ...(request.clientMessageId !== undefined ? { clientMessageId: request.clientMessageId } : {}), ...(request.immediate !== undefined ? { immediate: request.immediate } : {}), ...(request.stagedAttachmentIds?.length ? { stagedAttachmentIds: request.stagedAttachmentIds } : {}) });
+    return { lead: await this.#lead.snapshot(leadRunId) };
   }
-  private async cancelQueuedHarnessMessage(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { return { harness: await this.#harness.cancelQueued(harnessRunId, requiredString(value, "messageId")) }; }
-  private async stageHarnessAttachment(value: unknown): Promise<import("../harness/attachments").StagedAttachment> { return this.#harness.stageAttachment(requiredString(value, "path")); }
-  private async harnessAttachmentData(harnessRunId: string, value: unknown): Promise<{ readonly dataUrl: string }> { return this.#harness.attachmentData(harnessRunId, requiredString(value, "messageId"), requiredString(value, "attachmentId")); }
-  private async abortHarness(harnessRunId: string, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "Harness abort 不接受请求字段。 "); await this.#harness.abort(harnessRunId); return { harness: await this.#harness.snapshot(harnessRunId) }; }
-  private async acceptWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.acceptWorkflowRevision(harnessRunId, revision) }; }
+  private async cancelQueuedLeadMessage(leadRunId: string, value: unknown): Promise<LeadRunResponse> { return { lead: await this.#lead.cancelQueued(leadRunId, requiredString(value, "messageId")) }; }
+  private async stageLeadAttachment(value: unknown): Promise<import("../lead/attachments").StagedAttachment> { return this.#lead.stageAttachment(requiredString(value, "path")); }
+  private async leadAttachmentData(leadRunId: string, value: unknown): Promise<{ readonly dataUrl: string }> { return this.#lead.attachmentData(leadRunId, requiredString(value, "messageId"), requiredString(value, "attachmentId")); }
+  private async abortLead(leadRunId: string, value: unknown): Promise<LeadRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "Lead abort 不接受请求字段。 "); await this.#lead.abort(leadRunId); return { lead: await this.#lead.snapshot(leadRunId) }; }
+  private async acceptWorkflowRevision(leadRunId: string, revision: number, value: unknown): Promise<LeadRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "接受 Workflow 草案不接受请求字段。 "); return { lead: await this.#lead.acceptWorkflowRevision(leadRunId, revision) }; }
   /** 拒绝最新未接受草案；拒绝是不可逆耐久事实。 */
-  private async rejectWorkflowRevision(harnessRunId: string, revision: number, value: unknown): Promise<HarnessRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "拒绝 Workflow 草案不接受请求字段。 "); return { harness: await this.#harness.rejectWorkflowRevision(harnessRunId, revision) }; }
+  private async rejectWorkflowRevision(leadRunId: string, revision: number, value: unknown): Promise<LeadRunResponse> { if (!isEmptyObject(value)) throw new EngineActionError(400, "拒绝 Workflow 草案不接受请求字段。 "); return { lead: await this.#lead.rejectWorkflowRevision(leadRunId, revision) }; }
 
   /** 创建并后台启动 Execution；编译失败在任何耐久事实之前拒绝。 */
-  private async createExecution(harnessRunId: string, value: unknown): Promise<ExecutionResponse> {
+  private async createExecution(leadRunId: string, value: unknown): Promise<ExecutionResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new EngineActionError(400, "创建 Execution 请求无效。 ");
     const { revision, input } = value as CreateExecutionRequest;
     if (!Number.isInteger(revision) || revision < 1) throw new EngineActionError(400, "创建 Execution 必须提供有效 revision 序号。 ");
     if (input !== undefined && !isJsonObject(input)) throw new EngineActionError(400, "Execution input 必须是 JSON-safe 对象。 ");
     try {
-      const selected=(await this.#harness.snapshot(harnessRunId)).workflowRevisions.find(item=>item.revision===revision);
+      const selected=(await this.#lead.snapshot(leadRunId)).workflowRevisions.find(item=>item.revision===revision);
       if(selected?.templateOrigin){
         validateTemplateInput(selected.templateOrigin.inputSchema,input??{});
         if(canonicalJson(input??{})!==canonicalJson(selected.input))throw new Error("输入与已保存批准版本不一致，请保存新版本后确认。");
@@ -744,7 +736,7 @@ export class DesktopExecutionEngine {
       // 逐节点 CLI 是本次执行的事实：解析后写入冻结配置，进入 Journal 生效请求与 Replay 指纹。
       const selection = await this.resolveScriptClis(selected.source, { ...(parsed?.assignmentMode === "script" && parsed.cli !== undefined ? { cli: parsed.cli } : {}), ...(parsed?.assignmentMode === "script" && parsed.nodeClis !== undefined ? { nodeClis: parsed.nodeClis } : {}) });
       const config = this.withCliSelection(parsed, selection);
-      const created = await this.#executions.createExecution(harnessRunId, revision, input ?? {}, config);
+      const created = await this.#executions.createExecution(leadRunId, revision, input ?? {}, config);
       return { ...created, controllable: this.#executions.isControllable(created.execution.executionId) };
     } catch (error) { throw this.executionError(error); }
   }
@@ -755,7 +747,7 @@ export class DesktopExecutionEngine {
    * 只读模块也可以带 CLI 选择：内置预置不再写死 CLI，由用户在确认页逐节点选择。除此之外的
    * 字段一律拒绝，避免配置悄悄扩张成第二套分配机制。
    */
-  private scriptExecutionConfig(raw: unknown, write: boolean): import("../harness/types").ExecutionConfigSnapshot | undefined {
+  private scriptExecutionConfig(raw: unknown, write: boolean): import("../lead/types").ExecutionConfigSnapshot | undefined {
     if (raw === undefined) return undefined;
     const allowed = new Set(["version", "assignmentMode", "createdAt", "cli", "nodeClis", "workspaces"]);
     if (!isJsonObject(raw) || Object.keys(raw).some((key) => !allowed.has(key))) throw new EngineActionError(400, write ? "写类模块 Workflow 只接受 cli/nodeClis 与 workspaces Git 成果授权。" : "只读模块 Workflow 只接受 cli/nodeClis 选择。");
@@ -775,7 +767,7 @@ export class DesktopExecutionEngine {
     if (raw.cli === undefined && Object.keys(nodeClis).length === 0 && !write) throw new EngineActionError(400, "只读模块 Workflow 的执行配置必须包含逐节点 CLI 选择。");
     if (!write && raw.workspaces !== undefined) throw new EngineActionError(400, "只读模块 Workflow 不接受 Git 成果授权。");
     if (write && !isJsonObject(raw.workspaces)) throw new EngineActionError(400, "写类模块 Workflow 必须提供 workspaces Git 成果授权。");
-    const config: import("../harness/types").ExecutionConfigSnapshot = { version: 1, assignmentMode: "script", createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(), ...(raw.cli !== undefined ? { cli: raw.cli } : {}), ...(Object.keys(nodeClis).length > 0 ? { nodeClis } : {}), ...(write ? { workspaces: validateExecutionWorkspaces(raw.workspaces) } : {}) };
+    const config: import("../lead/types").ExecutionConfigSnapshot = { version: 1, assignmentMode: "script", createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(), ...(raw.cli !== undefined ? { cli: raw.cli } : {}), ...(Object.keys(nodeClis).length > 0 ? { nodeClis } : {}), ...(write ? { workspaces: validateExecutionWorkspaces(raw.workspaces) } : {}) };
     if (!write && config.cli === undefined && config.nodeClis === undefined) return undefined;
     return config;
   }
@@ -831,19 +823,19 @@ export class DesktopExecutionEngine {
 
   /** 把解析后的 CLI 选择并入冻结配置；未产生任何选择时保持原配置。 */
   private withCliSelection(
-    parsed: import("../harness/types").ExecutionConfigSnapshot | undefined,
+    parsed: import("../lead/types").ExecutionConfigSnapshot | undefined,
     selection: { readonly cli?: import("../runtimes/types").RuntimeCli; readonly nodeClis?: Readonly<Record<string, import("../runtimes/types").RuntimeCli>> },
-  ): import("../harness/types").ExecutionConfigSnapshot | undefined {
+  ): import("../lead/types").ExecutionConfigSnapshot | undefined {
     if (selection.cli === undefined && selection.nodeClis === undefined) return parsed;
     const script = parsed?.assignmentMode === "script" ? parsed : undefined;
     return { version: 1, assignmentMode: "script", createdAt: script?.createdAt ?? new Date().toISOString(), ...(selection.cli !== undefined ? { cli: selection.cli } : {}), ...(selection.nodeClis !== undefined ? { nodeClis: selection.nodeClis } : {}), ...(script?.workspaces ? { workspaces: script.workspaces } : {}) };
   }
 
   /** executions.plan：编译预检冻结源码并枚举 Worker、已验证池与主控 Runtime，供分配卡渲染。 */
-  private async planExecution(harnessRunId: string, value: unknown): Promise<ExecutionPlanResponse> {
+  private async planExecution(leadRunId: string, value: unknown): Promise<ExecutionPlanResponse> {
     const revisionNumber = requiredInteger(value, "revision");
     try {
-      const snapshot = await this.#harness.snapshot(harnessRunId);
+      const snapshot = await this.#lead.snapshot(leadRunId);
       const revision = snapshot.workflowRevisions.find((item) => item.revision === revisionNumber);
       if (snapshot.task) assertStartable(snapshot, revisionNumber, true);
       if (!revision || !snapshot.task && revision.acceptedAt===null) throw new Error("只能为当前候选或已批准历史方案规划执行分配。 ");
@@ -859,13 +851,13 @@ export class DesktopExecutionEngine {
       this.assertRequiredWorkerClis(extracted.workers, pool);
       // 有节点省略 cli 时，确认页必须逐节点让用户选择；这里只给采集所需事实。
       const missingCliWorkers = extracted.workers.filter((worker) => worker.cli === null);
-      const harnessRuntimeId=snapshot.runtime?.runtimeId??list.harnessRuntimeId;
+      const leadRuntimeId=snapshot.runtime?.runtimeId??list.leadRuntimeId;
       const cliChoices = missingCliWorkers.length > 0 || extracted.dynamicCount > 0
         ? (() => {
             const available = [...new Set(pool.filter((runtime) => isCliSelectable(runtime.cli)).map((runtime) => runtime.cli))];
             // 默认预填主控使用的 CLI：Worker 应优先与主控同源，用户再按需逐节点改。
-            const harnessCli = harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId)?.cli : undefined;
-            const suggested = harnessCli !== undefined && available.includes(harnessCli) ? harnessCli : available.length === 1 ? available[0]! : null;
+            const leadCli = leadRuntimeId ? pool.find((runtime) => runtime.runtimeId === leadRuntimeId)?.cli : undefined;
+            const suggested = leadCli !== undefined && available.includes(leadCli) ? leadCli : available.length === 1 ? available[0]! : null;
             return {
               available,
               suggested,
@@ -882,7 +874,7 @@ export class DesktopExecutionEngine {
         // 受管写还依赖系统沙箱执行器；缺失时在规划阶段就标出，禁止用户确认后才在启动期失败。
         if (workspacePlan && workspacePlan.diagnostic === null && !managedWriteBoundaryAvailable()) workspacePlan = { ...workspacePlan, diagnostic: "受管写隔离依赖系统 /usr/bin/sandbox-exec（macOS 自带），但本机不可用；请先用只读 Workflow 或修复系统。" };
       }
-      const sceneEvidenceHash=snapshot.task?.workflowContract==="single-workflow-v1"?await this.#harness.currentImpactEvidence(harnessRunId):null;
+      const sceneEvidenceHash=snapshot.task?.workflowContract==="single-workflow-v1"?await this.#lead.currentImpactEvidence(leadRunId):null;
       let continuationPlan:ExecutionPlanResponse["continuationPlan"]=null;
       const prior=[...snapshot.executions].reverse().find(item=>item.config?.workspaces);
       if(workspacePlan&&!intent.uncertain&&snapshot.task?.workflowContract==="single-workflow-v1"&&prior?.config?.workspaces){
@@ -895,20 +887,20 @@ export class DesktopExecutionEngine {
         continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaceId:frozen.workspaceId,head:scene.head};
         workspacePlan={...workspacePlan,baseCommit:frozen.authorization.baseCommit,dirtyPaths:[],diagnostic:null};
       }
-      return { continuationPlan,sceneEvidenceHash, workspacePlan, cliChoices, harnessRunId, revision: revisionNumber, phaseTitles: inspected.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, harnessRuntime: harnessRuntimeId ? pool.find((runtime) => runtime.runtimeId === harnessRuntimeId) ?? null : null };
+      return { continuationPlan,sceneEvidenceHash, workspacePlan, cliChoices, leadRunId, revision: revisionNumber, phaseTitles: inspected.meta.phases.map((phase) => phase.title), previewAgents: extracted.previewAgents, workers: extracted.workers, dynamicCount: extracted.dynamicCount, pool, selectedByCli: list.selectedByCli, leadRuntime: leadRuntimeId ? pool.find((runtime) => runtime.runtimeId === leadRuntimeId) ?? null : null };
     } catch (error) { throw this.executionError(error); }
   }
 
-  private async listExecutions(harnessRunId: string): Promise<ExecutionListResponse> {
-    return { harnessRunId, executions: await this.#executions.listExecutions(harnessRunId) };
+  private async listExecutions(leadRunId: string): Promise<ExecutionListResponse> {
+    return { leadRunId, executions: await this.#executions.listExecutions(leadRunId) };
   }
 
   /** Execution 详情：登记事实 + 内嵌 Run 权威快照（含决策门）。 */
-  private async executionSnapshot(harnessRunId: string, executionId: string): Promise<ExecutionResponse> {
-    const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
+  private async executionSnapshot(leadRunId: string, executionId: string): Promise<ExecutionResponse> {
+    const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
     if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
     try {
-      const task=await this.#harness.snapshot(harnessRunId);
+      const task=await this.#lead.snapshot(leadRunId);
       const revision=task.workflowRevisions.find(item=>item.revision===execution.revision);
       let workspaceEvidence:ExecutionResponse["workspaceEvidence"];
       let workspaceDiagnostic:string|undefined;
@@ -920,61 +912,61 @@ export class DesktopExecutionEngine {
         workspaceEvidence={workspaceId:value.workspaceId,cwd:value.cwd,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
         } catch(error) { workspaceDiagnostic=`受管工作区现场不可读取：${error instanceof Error?error.message:String(error)}；不代表目录不存在或没有改动。`; }
       }
-      return { execution, workspaceEvidence, workspaceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(harnessRunId, executionId), controllable: this.#executions.isControllable(executionId) };
+      return { execution, workspaceEvidence, workspaceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(leadRunId, executionId), controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
   /** Execution 的 Phase 访问分页；attempt 缺省时跨全部 attempt 聚合，供 UI 补齐 replay 复用的 Phase → Agent 关系。 */
   private async executionPhaseVisits(value: unknown): Promise<ExecutionPhaseVisitPageResponse> {
-    const harnessRunId = requiredString(value, "harnessRunId");
+    const leadRunId = requiredString(value, "leadRunId");
     const executionId = requiredString(value, "executionId");
     const attempt = optionalInteger(value, "attempt");
     const cursor = optionalInteger(value, "cursor");
     const options = object(value);
     if (options.includeEmpty !== undefined && typeof options.includeEmpty !== "boolean") throw new EngineActionError(400, "includeEmpty 必须为布尔值。 ");
     try {
-      const page = await this.#executions.listExecutionPhaseVisits(harnessRunId, executionId, { attempt, cursor, includeEmpty: options.includeEmpty === true });
+      const page = await this.#executions.listExecutionPhaseVisits(leadRunId, executionId, { attempt, cursor, includeEmpty: options.includeEmpty === true });
       return { executionId, executionAttemptId: attempt ?? null, ...page };
     } catch (error) { throw this.executionError(error); }
   }
 
-  private async controlExecution(harnessRunId: string, executionId: string, kind: "pause" | "recover" | "stop", value: unknown): Promise<ExecutionResponse> {
+  private async controlExecution(leadRunId: string, executionId: string, kind: "pause" | "recover" | "stop", value: unknown): Promise<ExecutionResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, `Execution ${kind} 不接受请求字段。 `);
     try {
-      const snapshot = kind === "pause" ? await this.#executions.pause(harnessRunId, executionId) : kind === "recover" ? await this.#executions.recover(harnessRunId, executionId) : await this.#executions.stop(harnessRunId, executionId);
-      const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
+      const snapshot = kind === "pause" ? await this.#executions.pause(leadRunId, executionId) : kind === "recover" ? await this.#executions.recover(leadRunId, executionId) : await this.#executions.stop(leadRunId, executionId);
+      const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
       return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
   /** 用户显式恢复中断的 Execution；同一冻结 revision 产生新的 executionAttempt。 */
-  private async resumeExecution(harnessRunId: string, executionId: string, value: unknown): Promise<ExecutionResponse> {
+  private async resumeExecution(leadRunId: string, executionId: string, value: unknown): Promise<ExecutionResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || (value as { authorized?: unknown }).authorized !== true) throw new EngineActionError(400, "resume 必须明确携带 authorized: true。 ");
     try {
-      const snapshot = await this.#executions.resume(harnessRunId, executionId);
-      const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
+      const snapshot = await this.#executions.resume(leadRunId, executionId);
+      const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
       return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
   /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后只唤醒等待中的脚本。 */
-  private async answerExecutionGate(harnessRunId: string, executionId: string, gateId: string, value: unknown): Promise<ExecutionResponse> {
+  private async answerExecutionGate(leadRunId: string, executionId: string, gateId: string, value: unknown): Promise<ExecutionResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || !isJsonObject((value as AnswerDecisionRequest).answer)) throw new EngineActionError(400, "决策门答案必须是 JSON 对象。 ");
     try {
-      const snapshot = await this.#executions.answerGate(harnessRunId, executionId, gateId, (value as AnswerDecisionRequest).answer);
-      const execution = (await this.#executions.listExecutions(harnessRunId)).find((item) => item.executionId === executionId);
+      const snapshot = await this.#executions.answerGate(leadRunId, executionId, gateId, (value as AnswerDecisionRequest).answer);
+      const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
       return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
     } catch (error) { throw this.executionError(error); }
   }
 
   /** 用户回答主控 request_user_decision；答案只唤醒原工具调用。 */
-  private async answerHarnessDecision(harnessRunId: string, decisionId: string, value: unknown): Promise<HarnessRunResponse> {
+  private async answerLeadDecision(leadRunId: string, decisionId: string, value: unknown): Promise<LeadRunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || !isJsonObject((value as AnswerDecisionRequest).answer)) throw new EngineActionError(400, "决策答案必须是 JSON 对象。 ");
     try {
-      return { harness: await this.#harness.answerUserDecision(harnessRunId, decisionId, (value as AnswerDecisionRequest).answer) };
+      return { lead: await this.#lead.answerUserDecision(leadRunId, decisionId, (value as AnswerDecisionRequest).answer) };
     } catch (error) { throw this.executionError(error); }
   }
 
@@ -990,26 +982,14 @@ export class DesktopExecutionEngine {
 
   /** 菜单栏只能读取这个摘要，不得维护自己的 Run 状态机。 */
   async status(): Promise<DesktopStatusResponse> {
-    const runs = await this.listRuns(); const harnesses = await this.listHarnesses();
+    const runs = await this.listRuns(); const leads = await this.listLeads();
     return {
       protocolVersion: 1,
       activeRuns: runs.filter(run => isLiveRunStatus(run.status)).length,
       blockedRuns: runs.filter(run => run.hasBlockedAgent).length,
-      activeHarnesses: harnesses.harnesses.filter(harness => harness.status === "running").length,
+      activeLeads: leads.leads.filter(lead => lead.status === "running").length,
       acpWorkersNeedingResume: this.#acpWorkersNeedingResume,
     };
-  }
-
-  /**
-   * 更新用户级设置；只接受已知字段与布尔值，非法输入在写盘前拒绝。
-   * 成功后关闭空闲主控会话，使下一回合按新设置重建；进行中的回合保持原模式。
-   */
-  private async updateSettings(value: unknown): Promise<AppSettings> {
-    let settings: AppSettings;
-    try { settings = await this.#settings.update(value); }
-    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
-    this.#harness.closeIdleSessions();
-    return settings;
   }
 
   /**
@@ -1025,8 +1005,6 @@ export class DesktopExecutionEngine {
     const value = args ?? {};
     switch (action) {
       case "status": return this.status();
-      case "settings.get": return this.#settings.get();
-      case "settings.update": return this.updateSettings(value);
       case "runs.list": return this.listRuns();
       case "runs.create": return this.createRun(value);
       case "runs.inspect": return this.inspect(requiredString(value, "runId"));
@@ -1059,48 +1037,48 @@ export class DesktopExecutionEngine {
         const request=object(value);
         if(!isTemplateSelection(request.template))throw new Error("模板选择字段无效。");
         if(request.cardId!==undefined&&(!Number.isInteger(request.baseRevision)||Number(request.baseRevision)<1))throw new Error("编辑参数必须绑定基础版本。");
-        return {harness:await this.#harness.prepareTemplate(requiredString(value,"harnessRunId"),requiredString(value,"clientRequestId"),request.template,typeof request.cardId==="string"?request.cardId:undefined,request.baseRevision as number|undefined)};
+        return {lead:await this.#lead.prepareTemplate(requiredString(value,"leadRunId"),requiredString(value,"clientRequestId"),request.template,typeof request.cardId==="string"?request.cardId:undefined,request.baseRevision as number|undefined)};
       }
-      case "templates.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value);
-      case "executions.confirm": return this.confirmTemplate(requiredString(value,"harnessRunId"),value,false);
-      case "harnesses.list": return this.listHarnesses();
-      case "harnesses.create": return this.createHarness(value);
-      case "harnesses.startConversation": return this.startHarnessConversation(requiredString(value, "projectId"), value);
-      case "harnesses.get": return this.harnessSnapshot(requiredString(value, "harnessRunId"));
-      case "harnesses.commandCatalog": return this.harnessCommandCatalog(value);
-      case "harnesses.renameTitle": return {harness:await this.#harness.renameTitle(requiredString(value,"harnessRunId"),requiredString(value,"title"))};
-      case "harnesses.send": return this.sendHarnessMessage(requiredString(value, "harnessRunId"), value);
-      case "harnesses.cancelQueued": return this.cancelQueuedHarnessMessage(requiredString(value, "harnessRunId"), value);
-      case "harnesses.stageAttachment": return this.stageHarnessAttachment(value);
-      case "harnesses.attachmentData": return this.harnessAttachmentData(requiredString(value, "harnessRunId"), value);
-      case "harnesses.retryImpactSummary": return {harness:await this.#harness.retryImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"))};
-      case "harnesses.stopImpactSummary": return {harness:await this.#harness.stopImpactSummary(requiredString(value,"harnessRunId"),requiredString(value,"key"),requiredString(value,"turnId"))};
-      case "harnesses.recoverController": return {harness:await this.#harness.recoverController(requiredString(value,"harnessRunId"))};
-      case "executions.capsule": return this.#harness.executionCapsule(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
+      case "templates.confirm": return this.confirmTemplate(requiredString(value,"leadRunId"),value);
+      case "executions.confirm": return this.confirmTemplate(requiredString(value,"leadRunId"),value,false);
+      case "leads.list": return this.listLeads();
+      case "leads.create": return this.createLead(value);
+      case "leads.startConversation": return this.startLeadConversation(requiredString(value, "projectId"), value);
+      case "leads.get": return this.leadSnapshot(requiredString(value, "leadRunId"));
+      case "leads.commandCatalog": return this.leadCommandCatalog(value);
+      case "leads.renameTitle": return {lead:await this.#lead.renameTitle(requiredString(value,"leadRunId"),requiredString(value,"title"))};
+      case "leads.send": return this.sendLeadMessage(requiredString(value, "leadRunId"), value);
+      case "leads.cancelQueued": return this.cancelQueuedLeadMessage(requiredString(value, "leadRunId"), value);
+      case "leads.stageAttachment": return this.stageLeadAttachment(value);
+      case "leads.attachmentData": return this.leadAttachmentData(requiredString(value, "leadRunId"), value);
+      case "leads.retryImpactSummary": return {lead:await this.#lead.retryImpactSummary(requiredString(value,"leadRunId"),requiredString(value,"key"))};
+      case "leads.stopImpactSummary": return {lead:await this.#lead.stopImpactSummary(requiredString(value,"leadRunId"),requiredString(value,"key"),requiredString(value,"turnId"))};
+      case "leads.recoverController": return {lead:await this.#lead.recoverController(requiredString(value,"leadRunId"))};
+      case "executions.capsule": return this.#lead.executionCapsule(requiredString(value,"leadRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
       case "executions.checkScene": {
-        const taskId=requiredString(value,"harnessRunId"), executionId=requiredString(value,"executionId");
-        try { await this.#harness.ensureCurrentImpact(taskId,executionId); }
+        const taskId=requiredString(value,"leadRunId"), executionId=requiredString(value,"executionId");
+        try { await this.#lead.ensureCurrentImpact(taskId,executionId); }
         catch (error) {
           if (!(error instanceof ImpactSupplementRequiredError)) throw error;
           // 变化已耐久建立pending补充，检查动作返回待办，不谎报启动成功。
         }
-        return {harness:await this.#harness.snapshot(taskId)};
+        return {lead:await this.#lead.snapshot(taskId)};
       }
-      case "harnesses.abort": return this.abortHarness(requiredString(value, "harnessRunId"), {});
-      case "harnesses.complete": {const request=value as Record<string,unknown>;if(request.abandonImpactSummaries!==undefined&&typeof request.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return {harness:await this.#harness.complete(requiredString(value,"harnessRunId"),request.abandonImpactSummaries===true)};}
-      case "harnesses.retryInitialization": return { harness: await this.#harness.retryInitialization(requiredString(value, "harnessRunId")) };
-      case "harnesses.abandonCard": return { harness: await this.#harness.abandonWorkflowCard(requiredString(value, "harnessRunId"), requiredString(value, "cardId")) };
-      case "harnesses.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
-      case "harnesses.rejectRevision": return this.rejectWorkflowRevision(requiredString(value, "harnessRunId"), requiredInteger(value, "revision"), {});
-      case "harnesses.answerDecision": return this.answerHarnessDecision(requiredString(value, "harnessRunId"), requiredString(value, "decisionId"), value);
-      case "executions.create": return this.createExecution(requiredString(value, "harnessRunId"), value);
-      case "executions.plan": return this.planExecution(requiredString(value, "harnessRunId"), value);
-      case "executions.list": return this.listExecutions(requiredString(value, "harnessRunId"));
-      case "executions.get": return this.executionSnapshot(requiredString(value, "harnessRunId"), requiredString(value, "executionId"));
+      case "leads.abort": return this.abortLead(requiredString(value, "leadRunId"), {});
+      case "leads.complete": {const request=value as Record<string,unknown>;if(request.abandonImpactSummaries!==undefined&&typeof request.abandonImpactSummaries!=="boolean")throw new Error("归档放弃标识无效。");return {lead:await this.#lead.complete(requiredString(value,"leadRunId"),request.abandonImpactSummaries===true)};}
+      case "leads.retryInitialization": return { lead: await this.#lead.retryInitialization(requiredString(value, "leadRunId")) };
+      case "leads.abandonCard": return { lead: await this.#lead.abandonWorkflowCard(requiredString(value, "leadRunId"), requiredString(value, "cardId")) };
+      case "leads.acceptRevision": return this.acceptWorkflowRevision(requiredString(value, "leadRunId"), requiredInteger(value, "revision"), {});
+      case "leads.rejectRevision": return this.rejectWorkflowRevision(requiredString(value, "leadRunId"), requiredInteger(value, "revision"), {});
+      case "leads.answerDecision": return this.answerLeadDecision(requiredString(value, "leadRunId"), requiredString(value, "decisionId"), value);
+      case "executions.create": return this.createExecution(requiredString(value, "leadRunId"), value);
+      case "executions.plan": return this.planExecution(requiredString(value, "leadRunId"), value);
+      case "executions.list": return this.listExecutions(requiredString(value, "leadRunId"));
+      case "executions.get": return this.executionSnapshot(requiredString(value, "leadRunId"), requiredString(value, "executionId"));
       case "executions.savePartial": {
         if(object(value).authorized!==true)throw new Error("保存停止现场必须由用户明确授权。");
-        const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId");
-        const task=await this.#harness.snapshot(taskId);
+        const taskId=requiredString(value,"leadRunId"),executionId=requiredString(value,"executionId");
+        const task=await this.#lead.snapshot(taskId);
         if(task.status==="completed"||!task.executions.some(item=>item.executionId===executionId))throw new Error("执行不属于当前未归档任务。");
         const detail=await this.executionSnapshot(taskId,executionId);
         if(detail.snapshot.status!=="cancelled"&&detail.snapshot.status!=="interrupted")throw new Error("只有停止/中断后的执行可以显式保存现场。");
@@ -1113,7 +1091,7 @@ export class DesktopExecutionEngine {
       // 宿主不保存成果快照，未提交内容随目录删除，由用户负责。当前没有 Web 入口，只能由 Engine 动作显式触发。
       case "executions.cleanupWorkspaces": {
         if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
-        const taskId=requiredString(value,"harnessRunId"),executionId=requiredString(value,"executionId"),task=await this.#harness.snapshot(taskId);
+        const taskId=requiredString(value,"leadRunId"),executionId=requiredString(value,"executionId"),task=await this.#lead.snapshot(taskId);
         const execution=task.executions.find(item=>item.executionId===executionId);
         if(task.status==="completed"||!execution?.config?.workspaces)throw new Error("只能清理当前未归档任务的受管workspace。");
         if(execution.finishedAt===null)throw new Error("执行尚未终态，禁止清理。");
@@ -1122,10 +1100,10 @@ export class DesktopExecutionEngine {
         await manager.cleanup(execution.config.workspaces.workspaceId,true);
         return this.executionSnapshot(taskId,executionId);
       }
-      case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"harnessRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
+      case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"leadRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
       case "executions.phaseVisits": return this.executionPhaseVisits(value);
-      case "executions.control": return this.controlExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
-      case "executions.resume": return this.resumeExecution(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), { authorized: true });
+      case "executions.control": return this.controlExecution(requiredString(value, "leadRunId"), requiredString(value, "executionId"), requiredExecutionControl(value), {});
+      case "executions.resume": return this.resumeExecution(requiredString(value, "leadRunId"), requiredString(value, "executionId"), { authorized: true });
       case "workflows.preflightLocal": {
         if(!this.singleWorkflowForAcceptance)throw new Error("本地预检仅专用验收构建可用。");
         const project = await this.#projects.get(requiredString(value, "projectId"));
@@ -1139,35 +1117,35 @@ export class DesktopExecutionEngine {
         if(input!==undefined&&!isJsonObject(input))throw new Error("保存并接管的输入必须是 JSON 对象。");
         const replace=object(value).replace;
         if(replace!==undefined&&typeof replace!=="boolean")throw new Error("保存并接管的替换标记必须是布尔值。");
-        return {harness:await this.#harness.saveAndAdoptRevision(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),revision:requiredInteger(value,"revision"),path:requiredString(value,"path"),...(input===undefined?{}:{input}),...(replace===true?{replace:true}:{})})};
+        return {lead:await this.#lead.saveAndAdoptRevision(requiredString(value,"leadRunId"),{clientRequestId:requiredString(value,"clientRequestId"),revision:requiredInteger(value,"revision"),path:requiredString(value,"path"),...(input===undefined?{}:{input}),...(replace===true?{replace:true}:{})})};
       }
       case "workflows.createLocalTask": {
         const project=await this.#projects.get(requiredString(value,"projectId"));
         const input=object(value).input;
         if(!isJsonObject(input))throw new Error("本地参数必须是JSON对象。");
-        return {harness:await this.#harness.startLocalTask(project.cwd,{projectId:project.projectId,clientRequestId:requiredString(value,"clientRequestId"),path:requiredString(value,"path"),sourceHash:requiredString(value,"sourceHash"),input,title:typeof object(value).title==="string"?String(object(value).title):undefined})};
+        return {lead:await this.#lead.startLocalTask(project.cwd,{projectId:project.projectId,clientRequestId:requiredString(value,"clientRequestId"),path:requiredString(value,"path"),sourceHash:requiredString(value,"sourceHash"),input,title:typeof object(value).title==="string"?String(object(value).title):undefined})};
       }
       case "workflows.reviseLocalTask": {
         if(!this.singleWorkflowForAcceptance)throw new Error("本地修订仅专用验收构建可用。");
         const input=object(value).input;if(!isJsonObject(input))throw new Error("本地参数必须是JSON对象。");
         const updateReason=object(value).updateReason;
         if(updateReason!==undefined&&updateReason!=="save-local"&&updateReason!=="modify-plan"&&updateReason!=="modify-parameters")throw new Error("本地修订的更新原因无效。");
-        return {harness:await this.#harness.reviseLocalTask(requiredString(value,"harnessRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")}),...(updateReason===undefined?{}:{updateReason})})};
+        return {lead:await this.#lead.reviseLocalTask(requiredString(value,"leadRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")}),...(updateReason===undefined?{}:{updateReason})})};
       }
-      case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "harnessRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
+      case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "leadRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
       default: throw new Error(`未知 Desktop action：${action}。`);
     }
   }
 
   /** 模板最终确认：同一生命周期短事务复核资格/输入/配置，再批准、登记和派发。 */
   private async confirmTemplate(id:string,value:unknown,templateOnly=true):Promise<ExecutionResponse>{
-    if(Object.keys(object(value)).some(key=>!["harnessRunId","revision","config","clientRequestId","input","sceneEvidenceHash"].includes(key)))throw new Error("模板确认不接受额外字段。");
+    if(Object.keys(object(value)).some(key=>!["leadRunId","revision","config","clientRequestId","input","sceneEvidenceHash"].includes(key)))throw new Error("模板确认不接受额外字段。");
     const confirmedScene=object(value).sceneEvidenceHash;
     if(confirmedScene!==undefined&&confirmedScene!==null&&(typeof confirmedScene!=="string"||! /^[a-f0-9]{64}$/.test(confirmedScene)))throw new Error("确认现场证据版本无效。");
     const requestId=requiredString(value,"clientRequestId");
     if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw new Error("确认请求必须是 UUID。");
-    return this.#harness.lifecycle.run(id,async()=>{
-      const number=requiredInteger(value,"revision"),snapshot=await this.#harness.snapshot(id);
+    return this.#lead.lifecycle.run(id,async()=>{
+      const number=requiredInteger(value,"revision"),snapshot=await this.#lead.snapshot(id);
       const revision=snapshot.workflowRevisions.find(item=>item.revision===number);
       if(!revision||templateOnly&&!revision.templateOrigin)throw new Error("仅当前候选可确认并运行。");
       if(revision.localOrigin)validateLocalInput(revision.localOrigin.inputSchema,object(value).input??revision.input??{});
@@ -1191,7 +1169,7 @@ export class DesktopExecutionEngine {
       }
       if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length&&!this.singleWorkflowForAcceptance)throw new Error("修订现场续作仅专用验收入口可用，尚未正式开放。");
       if(snapshot.task?.workflowContract==="single-workflow-v1"&&snapshot.executions.length){
-        const current=await this.#harness.currentImpactEvidence(id);
+        const current=await this.#lead.currentImpactEvidence(id);
         if(!confirmedScene||confirmedScene!==current)throw new Error("确认时的现场证据已变化，请重新检查并确认；不启动新版工作。");
       }
       // 若上次确认已耐久参数新版本、却在登记执行前失败，同请求只能继续那个
@@ -1204,14 +1182,14 @@ export class DesktopExecutionEngine {
       else validateLocalInput(inspectWorkflowModuleSource(revision.source,"workflow.ts","生成稿").inputSchema,input);
       if(!this.deterministicForTest)await this.requireWorkerCandidate();
       const config=resolvedConfig;
-      if(!receipt)await this.#harness.prepareExecutionConfirmation(id,{requestId,revision:number,payloadHash});
+      if(!receipt)await this.#lead.prepareExecutionConfirmation(id,{requestId,revision:number,payloadHash});
       let selected=preparedRetry?.parentRevision===number?preparedRetry:revision;
       if(revision.templateOrigin&&(revision.parametersPending||canonicalJson(input)!==canonicalJson(revision.input))){
         const origin=revision.templateOrigin;
-        const prepared=await this.#harness.saveTemplate(id,requestId,{id:origin.id,version:origin.version,sourceHash:origin.sourceHash,input},revision.cardId);
+        const prepared=await this.#lead.saveTemplate(id,requestId,{id:origin.id,version:origin.version,sourceHash:origin.sourceHash,input},revision.cardId);
         selected=prepared.workflowRevisions.find(item=>item.saveRequestId===requestId)!;
       }
-      if(selected.acceptedAt===null)await this.#harness.acceptWorkflowRevision(id,selected.revision);
+      if(selected.acceptedAt===null)await this.#lead.acceptWorkflowRevision(id,selected.revision);
       const created=await this.#executions.createExecution(id,selected.revision,input,config,{confirmationRequestId:requestId,confirmationPayloadHash:payloadHash,...(confirmedScene?{sceneEvidenceHash:confirmedScene as string}:{})});
       return {...created,controllable:this.#executions.isControllable(created.execution.executionId)};
     });
@@ -1342,7 +1320,7 @@ export class DesktopExecutionEngine {
   private async resume(runId: string, value: unknown): Promise<RunResponse> {
     if (!value || typeof value !== "object" || Array.isArray(value) || (value as ResumeRunRequest).authorized !== true) throw new EngineActionError(400, "resume 必须明确携带 authorized: true。 ");
     const linked=await RunJournal.open(runId,this.storeRoot);
-    if(linked.journal.manifest.harness)throw new EngineActionError(409,"此Run归属Task，请通过所属工作流恢复，不能使用独立Run入口。");
+    if(linked.journal.manifest.lead)throw new EngineActionError(409,"此Run归属Task，请通过所属工作流恢复，不能使用独立Run入口。");
     const inFlight = this.#resumeRequests.get(runId);
     if (inFlight) return inFlight;
     // 必须在任一 await 前登记：两个 POST 若都先读取到没有 runTask，就会各自启动

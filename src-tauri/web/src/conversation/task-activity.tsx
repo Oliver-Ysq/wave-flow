@@ -1,6 +1,6 @@
 import { useRef,useState } from "react";
 import {HistorySidebar} from "./history-sidebar";
-import type { HarnessSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
+import type { LeadSnapshot, WorkflowExecution, WorkflowRevision } from "../types";
 import { proposalTitle } from "./workflow-summary";
 import { visibleVersion } from "./workflow-versions";
 
@@ -10,7 +10,7 @@ export function executionLabel(execution: WorkflowExecution): string {
 }
 
 /** 未执行方案的状态；实际执行过的方案不会归为废弃。 */
-export function proposalLabel(task: HarnessSnapshot, revision: WorkflowRevision): string {
+export function proposalLabel(task: LeadSnapshot, revision: WorkflowRevision): string {
   if (task.executions.some(item => item.revision === revision.revision)) return "已用于执行";
   if (revision.abandonedAt) return "已放弃 · 未执行";
   if (task.workflowRevisions.at(-1)?.revision !== revision.revision) return "已被取代 · 未执行";
@@ -19,7 +19,7 @@ export function proposalLabel(task: HarnessSnapshot, revision: WorkflowRevision)
 }
 
 /** 只展示该执行最新尝试的总结状态；旧尝试的中断不冒充当前待办。 */
-export function currentExecutionSummaries(task: HarnessSnapshot, executionId: string) {
+export function currentExecutionSummaries(task: LeadSnapshot, executionId: string) {
   const summaries = task.impactSummaries?.filter(item => item.executionId === executionId && !item.supersededBy) ?? [];
   const attempts = [...summaries.map(item => item.attempt), ...(task.executionHistory ?? []).filter(item => item.executionId === executionId).map(item => item.attempt ?? 1)];
   const latestAttempt = Math.max(1, ...attempts);
@@ -27,7 +27,7 @@ export function currentExecutionSummaries(task: HarnessSnapshot, executionId: st
 }
 
 /** 仅未结束执行的回答请求属于当前待办；历史attention保留但不触发提醒。 */
-export function hasActiveExecutionQuestions(task: HarnessSnapshot): boolean {
+export function hasActiveExecutionQuestions(task: LeadSnapshot): boolean {
   return task.executions.some(execution => {
     const attention = task.executionAttention?.[execution.executionId];
     return execution.finishedAt === null && Boolean(attention && attention.workerRequests + attention.scriptGates > 0);
@@ -35,12 +35,12 @@ export function hasActiveExecutionQuestions(task: HarnessSnapshot): boolean {
 }
 
 /** 与后台总结门禁一致，保留所有未被替代的中断义务；归档只读不再提醒重试。 */
-export function interruptedSummaryObligations(task: HarnessSnapshot) {
+export function interruptedSummaryObligations(task: LeadSnapshot) {
   return task.status === "completed" ? [] : task.impactSummaries?.filter(item => !item.supersededBy && item.status === "interrupted") ?? [];
 }
 
 /** 总结提示对应原执行的工作名，不套用当前方案。 */
-export function summaryWorkLabel(task: HarnessSnapshot, executionId: string): string {
+export function summaryWorkLabel(task: LeadSnapshot, executionId: string): string {
   const execution = task.executions.find(item => item.executionId === executionId);
   const revision = execution && task.workflowRevisions.find(item => item.revision === execution.revision);
   return revision ? proposalTitle(revision) : "历史执行";
@@ -49,7 +49,7 @@ export function summaryWorkLabel(task: HarnessSnapshot, executionId: string): st
 /** 当前信息与历史只投影原档案；浏览不批准、恢复或改变执行。 */
 export function TaskActivity({ task, visible=true, onPlan, onExecution, onResults, onAdjust, onTemplate }: {
   /** 对话当前可见性；打开详情时隐藏历史，返回恢复原阅读状态。 */ visible?:boolean;
-  /** 当前任务权威快照；不建立第二套业务状态。 */ task: HarnessSnapshot;
+  /** 当前任务权威快照；不建立第二套业务状态。 */ task: LeadSnapshot;
   /** 打开指定冻结方案，保留原版本身份。 */ onPlan: (revision: WorkflowRevision) => void;
   /** 打开指定执行的过程，不自动恢复。 */ onExecution: (executionId: string) => void;
   /** 打开指定执行的结果与总结，不自动重试。 */ onResults: (executionId: string) => void;

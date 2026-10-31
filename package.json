@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "check": "tsc --noEmit && tsc -p src/harness/templates",
+    "check": "tsc --noEmit && tsc -p src/lead/templates",
     "web:dev": "vite --config src-tauri/web/vite.config.ts",
     "web:build": "vite build --config src-tauri/web/vite.config.ts",
     "web:preview": "vite preview --config src-tauri/web/vite.config.ts",

@@ -1,13 +1,13 @@
 import {useEffect,useRef} from "react";
 import {createPortal} from "react-dom";
 import {ViewCache} from "../workbench-state";
-import type {HarnessSnapshot,WorkflowRevision} from "../types";
+import type {LeadSnapshot,WorkflowRevision} from "../types";
 import {executionLabel} from "./task-activity";
 import {proposalTitle} from "./workflow-summary";
 
 const reading=new ViewCache<{top:number;unrunOpen:boolean;focus?:string}>(64);
 /** 只收纳已被替换或明确放弃且从未执行的旧工作流；当前待确认在头部处理。 */
-export function unusedWorkflows(task:HarnessSnapshot):WorkflowRevision[]{
+export function unusedWorkflows(task:LeadSnapshot):WorkflowRevision[]{
  const latest=task.workflowRevisions.at(-1)?.revision;
  const key=(item:WorkflowRevision)=>item.cardId??`revision:${item.revision}`;
  const executed=new Set(task.executions.map(run=>task.workflowRevisions.find(item=>item.revision===run.revision)).filter((item):item is WorkflowRevision=>!!item).map(key));
@@ -22,13 +22,13 @@ const date=(value:string)=>new Date(value).toLocaleString("zh-CN",{month:"numeri
 
 /** 当前任务的只读历史索引；打开记录只导航，不批准或执行。 */
 export function HistorySidebar({task,onClose,onPlan,onExecution,onResults}:{
- /** 原任务快照，记录身份不得按名称推断。 */task:HarnessSnapshot;
+ /** 原任务快照，记录身份不得按名称推断。 */task:LeadSnapshot;
  /** 收起侧栏并恢复历史入口焦点。 */onClose:()=>void;
  /** 查看原冻结方案。 */onPlan:(revision:WorkflowRevision)=>void;
  /** 查看原执行过程。 */onExecution:(id:string)=>void;
  /** 查看原执行结果。 */onResults:(id:string)=>void;
 }){
- const saved=useRef(reading.get(task.harnessRunId)??{top:0,unrunOpen:false});
+ const saved=useRef(reading.get(task.leadRunId)??{top:0,unrunOpen:false});
  const panel=useRef<HTMLElement>(null),list=useRef<HTMLDivElement>(null),close=useRef<HTMLButtonElement>(null),unused=useRef<HTMLDetailsElement>(null);
  const unrun=unusedWorkflows(task);
  const closeRef=useRef(onClose);closeRef.current=onClose;
@@ -60,9 +60,9 @@ export function HistorySidebar({task,onClose,onPlan,onExecution,onResults}:{
    return()=>{cancelAnimationFrame(focusFrame);document.removeEventListener('keydown',key,true);narrow.removeEventListener('change',isolate);backgrounds.forEach(item=>item.element.inert=item.inert);};
  },[]);
  useEffect(()=>{if(list.current)list.current.scrollTop=saved.current.top;},[]);
- const remember=()=>{saved.current={...saved.current,top:list.current?.scrollTop??0,unrunOpen:unused.current?.open??false};reading.set(task.harnessRunId,saved.current);};
- const open=(focus:string,action:()=>void)=>{remember();saved.current.focus=focus;reading.set(task.harnessRunId,saved.current);action();};
- return createPortal(<div className="history-sidebar-layer" onClickCapture={event=>{const button=(event.target as HTMLElement).closest<HTMLElement>('[data-history-focus]');if(button){saved.current.focus=button.dataset.historyFocus;reading.set(task.harnessRunId,saved.current);}}}><div className="history-sidebar-scrim" onClick={onClose}/><aside ref={panel} className="history-sidebar" aria-label="历史">
+ const remember=()=>{saved.current={...saved.current,top:list.current?.scrollTop??0,unrunOpen:unused.current?.open??false};reading.set(task.leadRunId,saved.current);};
+ const open=(focus:string,action:()=>void)=>{remember();saved.current.focus=focus;reading.set(task.leadRunId,saved.current);action();};
+ return createPortal(<div className="history-sidebar-layer" onClickCapture={event=>{const button=(event.target as HTMLElement).closest<HTMLElement>('[data-history-focus]');if(button){saved.current.focus=button.dataset.historyFocus;reading.set(task.leadRunId,saved.current);}}}><div className="history-sidebar-scrim" onClick={onClose}/><aside ref={panel} className="history-sidebar" aria-label="历史">
    <header><h2>历史</h2><button ref={close} onClick={onClose} aria-label="关闭历史">×</button></header>
    <div ref={list} className="history-record-list" aria-label="运行过的工作" onScroll={remember}>
      {!task.executions.length&&<p className="history-empty">还没有运行过的工作。</p>}{[...task.executions].reverse().map(item=>{

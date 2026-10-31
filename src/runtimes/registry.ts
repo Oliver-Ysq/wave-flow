@@ -17,19 +17,19 @@ export class CliRuntimeRegistry {
     /** 完整复验器；生产使用版本/ACP/MCP探针，测试注入，无业务prompt。 */
     private readonly revalidate: typeof validateCliRuntime = validateCliRuntime) {}
 
-  async list(): Promise<{ readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>; readonly harnessRuntimeId: string | null; readonly runtimes: readonly CliRuntimeView[] }> {
+  async list(): Promise<{ readonly selectedByCli: Readonly<Partial<Record<RuntimeCli, string>>>; readonly leadRuntimeId: string | null; readonly runtimes: readonly CliRuntimeView[] }> {
     const state = await this.read();
     // 暂时下线的 CLI 保留磁盘记录但不出现在产品入口；历史 Journal 仍自带 provenance。
     const visible = state.runtimes.filter(runtime => isCliSelectable(runtime.cli));
     const selectedByCli = Object.fromEntries(Object.entries(state.selectedByCli).filter(([cli]) => isCliSelectable(cli as RuntimeCli))) as Partial<Record<RuntimeCli, string>>;
-    const harnessRuntimeId = state.harnessRuntimeId && visible.some(runtime => runtime.runtimeId === state.harnessRuntimeId) ? state.harnessRuntimeId : null;
-    return { selectedByCli, harnessRuntimeId, runtimes: visible.map(view) };
+    const leadRuntimeId = state.leadRuntimeId && visible.some(runtime => runtime.runtimeId === state.leadRuntimeId) ? state.leadRuntimeId : null;
+    return { selectedByCli, leadRuntimeId, runtimes: visible.map(view) };
   }
 
   /** App启动后后台检查原主控；不创建任务、不投递业务Prompt，也不替换默认选择。失败留给用户动作显示。 */
-  async refreshSelectedHarness():Promise<void> {
+  async refreshSelectedLead():Promise<void> {
     const state=await this.read();
-    if(state.harnessRuntimeId)await this.resolveSelectedHarness();
+    if(state.leadRuntimeId)await this.resolveSelectedLead();
   }
 
   /** 串行化读-改-写临界区；长耗时 ACP 复验在锁外完成，只有最终核对与落盘进入锁。 */
@@ -53,7 +53,7 @@ export class CliRuntimeRegistry {
   }
 
   /**
-   * 用户显式设定主控 runtime；目标必须 verified 且声明 harnessTools，同一 id 幂等。
+   * 用户显式设定主控 runtime；目标必须 verified 且声明 leadTools，同一 id 幂等。
    * 只影响新建主控会话；有回合进行中时的切换由 Engine 空闲检查拒绝，存量会话按
    * 创建时 runtimeId 冻结续聊。同时记录为该 cli 的 Worker 偏好（selectedByCli）。
    */
@@ -64,7 +64,7 @@ export class CliRuntimeRegistry {
       if (!runtime) throw new Error("未知 CLI Runtime。 ");
       if (!isCliSelectable(runtime.cli)) throw new Error(cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。");
       if (runtime.status !== "verified") throw new Error("该 CLI 需要重新验证后才能设为默认。 ");
-      if (!runtime.verifiedAdapter.harnessTools) throw new Error("该 CLI Adapter 不支持 Wave Flow 主控窄工具，不能设为主控。 ");
+      if (!runtime.verifiedAdapter.leadTools) throw new Error("该 CLI Adapter 不支持 Wave Flow 主控窄工具，不能设为主控。 ");
       // 身份快速复核：安装在保存后被删除或替换时，不能先写成默认、再等到新建会话
       // 才暴露“当前主控 CLI 不可用”。失败即耐久标 needs-revalidation 并拒绝。
       try { await verifyExecutableIdentity(runtime.executablePath, runtime.executableIdentity); }
@@ -72,7 +72,7 @@ export class CliRuntimeRegistry {
         await this.write({ ...state, runtimes: state.runtimes.map(item => item.runtimeId === runtime.runtimeId ? { ...item, status: "needs-revalidation" as const, diagnostic: safeDiagnostic(error) } : item) });
         throw new Error("该 CLI 的安装文件已被删除或修改，已标记为需要重新验证；请重新扫描或重新添加。 ");
       }
-      await this.write({ ...state, harnessRuntimeId: runtime.runtimeId, selectedByCli: { ...state.selectedByCli, [runtime.cli]: runtime.runtimeId } });
+      await this.write({ ...state, leadRuntimeId: runtime.runtimeId, selectedByCli: { ...state.selectedByCli, [runtime.cli]: runtime.runtimeId } });
       return view(runtime);
     });
   }
@@ -84,8 +84,8 @@ export class CliRuntimeRegistry {
       if (!state.runtimes.some(item => item.runtimeId === runtimeId)) throw new Error("未知 CLI Runtime。 ");
       const selectedByCli = { ...state.selectedByCli };
       for (const [cli, selected] of Object.entries(selectedByCli)) if (selected === runtimeId) delete selectedByCli[cli as RuntimeCli];
-      const harnessRuntimeId = state.harnessRuntimeId === runtimeId ? undefined : state.harnessRuntimeId;
-      await this.write({ ...state, selectedByCli, harnessRuntimeId, runtimes: state.runtimes.filter(item => item.runtimeId !== runtimeId) });
+      const leadRuntimeId = state.leadRuntimeId === runtimeId ? undefined : state.leadRuntimeId;
+      await this.write({ ...state, selectedByCli, leadRuntimeId, runtimes: state.runtimes.filter(item => item.runtimeId !== runtimeId) });
     });
   }
 
@@ -156,12 +156,12 @@ export class CliRuntimeRegistry {
   }
 
   /**
-   * 新建主控会话的唯一解析入口；只读 harnessRuntimeId（与 Worker 池正交）。
-   * 已有会话续聊不走这里，由 resolveByIdHarness 按创建时 runtimeId 冻结复核。
+   * 新建主控会话的唯一解析入口；只读 leadRuntimeId（与 Worker 池正交）。
+   * 已有会话续聊不走这里，由 resolveByIdLead 按创建时 runtimeId 冻结复核。
    */
-  async resolveSelectedHarness(): Promise<VerifiedCliRuntime> {
+  async resolveSelectedLead(): Promise<VerifiedCliRuntime> {
     const state = await this.read();
-    const runtimeId = state.harnessRuntimeId;
+    const runtimeId = state.leadRuntimeId;
     if (!runtimeId) throw new Error("未选择已验证的主控 CLI。请在“执行底座”中扫描、验证并设为主控。 ");
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
     if (!runtime || runtime.status === "invalid") throw new Error("当前主控 CLI 不可用，请重新验证。 ");
@@ -172,15 +172,15 @@ export class CliRuntimeRegistry {
       await this.markRevalidationFailed(runtime,error);
       throw error;
     }
-    if (!verified.verifiedAdapter.harnessTools) throw new Error("当前主控 CLI Adapter 不支持 Wave Flow 主控窄工具。 ");
+    if (!verified.verifiedAdapter.leadTools) throw new Error("当前主控 CLI Adapter 不支持 Wave Flow 主控窄工具。 ");
     return verified;
   }
 
-  /** 已有 Harness 续聊按创建时 runtimeId 复核，禁止跟随用户后来切换的默认项。 */
-  async resolveByIdHarness(runtimeId: string): Promise<VerifiedCliRuntime> {
+  /** 已有 Lead 续聊按创建时 runtimeId 复核，禁止跟随用户后来切换的默认项。 */
+  async resolveByIdLead(runtimeId: string): Promise<VerifiedCliRuntime> {
     const state = await this.read();
     const runtime = state.runtimes.find(item => item.runtimeId === runtimeId);
-    if (!runtime || runtime.status === "invalid") throw new Error("该 Harness 创建时使用的本机 CLI 已不可用，请重新验证。 ");
+    if (!runtime || runtime.status === "invalid") throw new Error("该 Lead 创建时使用的本机 CLI 已不可用，请重新验证。 ");
     if (!isCliSelectable(runtime.cli)) throw new Error(`${cliUnavailableReason(runtime.cli) ?? "该 CLI 已暂时下线。"}该历史任务不能继续发送新回合，请新建使用其他 CLI 的任务。`);
     let verified: VerifiedCliRuntime;
     try { verified = await this.verifyRuntimeDependencies(runtime); }
@@ -188,7 +188,7 @@ export class CliRuntimeRegistry {
       await this.markRevalidationFailed(runtime,error);
       throw error;
     }
-    if (!verified.verifiedAdapter.harnessTools) throw new Error("该 Harness 创建时使用的 CLI Adapter 不支持主控窄工具。 ");
+    if (!verified.verifiedAdapter.leadTools) throw new Error("该 Lead 创建时使用的 CLI Adapter 不支持主控窄工具。 ");
     return verified;
   }
 
@@ -234,7 +234,7 @@ export class CliRuntimeRegistry {
     if(current.executablePath!==runtime.executablePath)throw new Error("CLI 路径目标已变化，需要用户确认。");
     if(runtime.nodeExecutable){const node=await verifyExecutable(runtime.nodeExecutable.path);if(node.executablePath!==runtime.nodeExecutable.path)throw new Error("Node 路径目标已变化，需要用户确认。");}
     const checked=await this.revalidate(runtime.cli,{executablePath:runtime.executablePath,discoveredFrom:runtime.discoveredFrom,discoveredShell:runtime.discoveredShell,nodeExecutablePath:runtime.nodeExecutable?.path});
-    if(checked.cli!==runtime.cli||checked.executablePath!==runtime.executablePath||checked.verifiedAdapter.adapterId!==runtime.verifiedAdapter.adapterId||runtime.verifiedAdapter.harnessTools&&!checked.verifiedAdapter.harnessTools||runtime.nodeExecutable&&checked.nodeExecutable?.path!==runtime.nodeExecutable.path)throw new Error("CLI 路径、类型或主控能力已变化，需要用户确认。");
+    if(checked.cli!==runtime.cli||checked.executablePath!==runtime.executablePath||checked.verifiedAdapter.adapterId!==runtime.verifiedAdapter.adapterId||runtime.verifiedAdapter.leadTools&&!checked.verifiedAdapter.leadTools||runtime.nodeExecutable&&checked.nodeExecutable?.path!==runtime.nodeExecutable.path)throw new Error("CLI 路径、类型或主控能力已变化，需要用户确认。");
     await verifyExecutableIdentity(checked.executablePath,checked.executableIdentity);
     if(checked.nodeExecutable)await verifyNodeRuntime(checked.nodeExecutable.path,checked.nodeExecutable.identity);
     // 锁内重读核对原记录仍在且未漂移，再落盘复验结果；长耗时握手已在锁外完成。
@@ -285,20 +285,20 @@ function parse(value: unknown): CliRuntimeRegistryFile {
     if (ids.has(record.runtimeId) || paths.has(`${record.cli}\0${record.executablePath}`)) throw new Error("Registry runtime 重复。 "); ids.add(record.runtimeId); paths.add(`${record.cli}\0${record.executablePath}`);
   }
   for (const [cli, id] of Object.entries(file.selectedByCli as Record<string, unknown>)) if ((cli !== "codex" && cli !== "kimi" && cli !== "claude" && cli !== "dsh") || typeof id !== "string" || !ids.has(id)) throw new Error("Registry 默认选择无效。 ");
-  if (file.harnessRuntimeId !== undefined && (typeof file.harnessRuntimeId !== "string" || !ids.has(file.harnessRuntimeId))) throw new Error("Registry 主控选择无效。 ");
+  if (file.leadRuntimeId !== undefined && (typeof file.leadRuntimeId !== "string" || !ids.has(file.leadRuntimeId))) throw new Error("Registry 主控选择无效。 ");
   const selectedByCli = file.selectedByCli as Partial<Record<RuntimeCli, string>>;
-  // 迁移规则：旧文件没有 harnessRuntimeId 时回填用户原 codex 默认项，语义不变。
-  const harnessRuntimeId = (file.harnessRuntimeId as string | undefined) ?? selectedByCli["codex"];
+  // 迁移规则：旧文件没有 leadRuntimeId 时回填用户原 codex 默认项，语义不变。
+  const leadRuntimeId = (file.leadRuntimeId as string | undefined) ?? selectedByCli["codex"];
   return {
     ...(file as unknown as CliRuntimeRegistryFile),
-    harnessRuntimeId,
+    leadRuntimeId,
     runtimes: (file.runtimes as Array<CliRuntimeRecord & { workerEnabled?: boolean }>).map(record => {
       // 迁移规则：旧文件的 workerEnabled 字段已废弃（已验证即 Worker 候选），读取时剥离。
       const { workerEnabled: _dropped, ...rest } = record;
       return {
         ...rest,
         // 能力属于 adapter 而非单个二进制：缺失时按 Adapter Catalog 当前声明回填。
-        verifiedAdapter: { ...record.verifiedAdapter, harnessTools: record.verifiedAdapter.harnessTools ?? adapterById(record.verifiedAdapter.adapterId)?.capabilities.harnessTools ?? false },
+        verifiedAdapter: { ...record.verifiedAdapter, leadTools: record.verifiedAdapter.leadTools ?? adapterById(record.verifiedAdapter.adapterId)?.capabilities.leadTools ?? false },
       };
     }),
   };
@@ -307,7 +307,7 @@ function valid(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false; const r = value as Record<string, unknown>; const i = r.executableIdentity as Record<string, unknown>;
   const node = r.nodeExecutable as Record<string, unknown> | undefined;
   const adapter = r.verifiedAdapter as Record<string, unknown> | undefined;
-  return typeof r.runtimeId === "string" && !!r.runtimeId && (r.cli === "codex" || r.cli === "kimi" || r.cli === "claude" || r.cli === "dsh") && typeof r.executablePath === "string" && r.executablePath.startsWith("/") && !!i && typeof i.device === "number" && typeof i.inode === "number" && typeof i.size === "number" && typeof i.modifiedAtMs === "number" && (node === undefined || (typeof node.path === "string" && node.path.startsWith("/") && !!node.identity && typeof (node.identity as Record<string, unknown>).device === "number" && typeof (node.identity as Record<string, unknown>).inode === "number" && typeof (node.identity as Record<string, unknown>).size === "number" && typeof (node.identity as Record<string, unknown>).modifiedAtMs === "number")) && typeof r.version === "string" && !!r.version && (r.discoveredFrom === "shell-path" || r.discoveredFrom === "gui-path" || r.discoveredFrom === "install-dir" || r.discoveredFrom === "manual") && (r.discoveredShell === null || typeof r.discoveredShell === "string") && !!adapter && typeof adapter === "object" && (adapter.adapterId === "codex-acp" || adapter.adapterId === "kimi-acp" || adapter.adapterId === "claude-acp" || adapter.adapterId === "dsh-acp") && typeof adapter.adapterVersion === "string" && typeof adapter.acpProtocolVersion === "number" && (adapter.harnessTools === undefined || typeof adapter.harnessTools === "boolean") && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt as string)) && (r.status === "verified" || r.status === "needs-revalidation" || r.status === "invalid") && (r.diagnostic === null || typeof r.diagnostic === "string") && (r.workerEnabled === undefined || typeof r.workerEnabled === "boolean");
+  return typeof r.runtimeId === "string" && !!r.runtimeId && (r.cli === "codex" || r.cli === "kimi" || r.cli === "claude" || r.cli === "dsh") && typeof r.executablePath === "string" && r.executablePath.startsWith("/") && !!i && typeof i.device === "number" && typeof i.inode === "number" && typeof i.size === "number" && typeof i.modifiedAtMs === "number" && (node === undefined || (typeof node.path === "string" && node.path.startsWith("/") && !!node.identity && typeof (node.identity as Record<string, unknown>).device === "number" && typeof (node.identity as Record<string, unknown>).inode === "number" && typeof (node.identity as Record<string, unknown>).size === "number" && typeof (node.identity as Record<string, unknown>).modifiedAtMs === "number")) && typeof r.version === "string" && !!r.version && (r.discoveredFrom === "shell-path" || r.discoveredFrom === "gui-path" || r.discoveredFrom === "install-dir" || r.discoveredFrom === "manual") && (r.discoveredShell === null || typeof r.discoveredShell === "string") && !!adapter && typeof adapter === "object" && (adapter.adapterId === "codex-acp" || adapter.adapterId === "kimi-acp" || adapter.adapterId === "claude-acp" || adapter.adapterId === "dsh-acp") && typeof adapter.adapterVersion === "string" && typeof adapter.acpProtocolVersion === "number" && (adapter.leadTools === undefined || typeof adapter.leadTools === "boolean") && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt as string)) && (r.status === "verified" || r.status === "needs-revalidation" || r.status === "invalid") && (r.diagnostic === null || typeof r.diagnostic === "string") && (r.workerEnabled === undefined || typeof r.workerEnabled === "boolean");
 }
 async function assertPrivateDirectory(path: string): Promise<void> { const info = await lstat(path); if (!info.isDirectory() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) throw new Error("CLI Runtime 状态目录不安全。 "); }
 async function assertPrivateFile(path: string): Promise<void> { const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) throw new Error("CLI Runtime 状态文件不安全。 "); }

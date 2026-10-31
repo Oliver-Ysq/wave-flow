@@ -28,7 +28,7 @@ export type VerifiedAdapter = {
   /** 握手确认的 ACP 协议版本。 */
   readonly acpProtocolVersion: number;
   /** 该 adapter 是否已验证支持为主控注入 session-scoped MCP 窄工具。 */
-  readonly harnessTools: boolean;
+  readonly leadTools: boolean;
 };
 
 /** 用户明确确认后写入私有 Registry 的 CLI runtime。 */
@@ -69,7 +69,7 @@ export type CliRuntimeRegistryFile = {
    * 新建主控会话使用的 runtime id；与 Worker 池正交。
    * 旧文件缺省时读取回填为 `selectedByCli["codex"]`（语义不变的用户原默认）；必须引用存在的记录。
    */
-  readonly harnessRuntimeId?: string;
+  readonly leadRuntimeId?: string;
   /** 所有经验证或待重验的 runtime 记录。 */
   readonly runtimes: readonly CliRuntimeRecord[];
 };

@@ -16,5 +16,5 @@ test("动态路径和外部错误不被角色措辞替换",()=>{
 test("记录缺失不暴露 Run/manifest 内部词，并给出下一步",()=>{
   expect(userFacingText("指定 Run 不存在或 manifest 不可读取。")).toContain("记录已不存在或无法读取");
   expect(userFacingText("指定 Run 不存在或 manifest 不可读取。")).not.toContain("manifest");
-  expect(userFacingText("指定 Harness Run 不存在或 manifest 不可读取。 ")).toContain("历史记录已不存在或无法读取");
+  expect(userFacingText("指定 Lead Run 不存在或 manifest 不可读取。 ")).toContain("历史记录已不存在或无法读取");
 });

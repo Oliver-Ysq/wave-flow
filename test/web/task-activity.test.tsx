@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { currentExecutionSummaries, hasActiveExecutionQuestions, interruptedSummaryObligations, proposalLabel, summaryWorkLabel, TaskActivity } from "../../src-tauri/web/src/conversation/task-activity";
-import type { HarnessSnapshot, WorkflowRevision, WorkflowExecution } from "../../src-tauri/web/src/types";
+import type { LeadSnapshot, WorkflowRevision, WorkflowExecution } from "../../src-tauri/web/src/types";
 import {unusedWorkflows} from "../../src-tauri/web/src/conversation/history-sidebar";
 
 const revision = (id:number):WorkflowRevision => ({revision:id,cardId:"same",parentRevision:id-1||null,source:"",sourceHash:"hash",createdAt:"2026-10-18T01:00:00Z",acceptedAt:null,goal:`方案${id}`,abandonedAt:null});
 const execution = {executionId:"A",revision:2,status:"completed",createdAt:"2026-10-18T02:00:00Z",finishedAt:"2026-10-18T03:00:00Z"} as WorkflowExecution;
-const task = {harnessRunId:"task",status:"idle",workflowRevisions:[revision(1),revision(2),{...revision(3),abandonedAt:"saved"},revision(4)],executions:[execution],impactSummaries:[],executionAttention:{}} as unknown as HarnessSnapshot;
+const task = {leadRunId:"task",status:"idle",workflowRevisions:[revision(1),revision(2),{...revision(3),abandonedAt:"saved"},revision(4)],executions:[execution],impactSummaries:[],executionAttention:{}} as unknown as LeadSnapshot;
 
 test("历史使用右侧索引，窄窗覆盖且正文不挤压，返回恢复原分类位置",async()=>{
  const css=await Bun.file('src-tauri/web/src/workbench.css').text();
@@ -14,7 +14,7 @@ test("历史使用右侧索引，窄窗覆盖且正文不挤压，返回恢复�
  expect(css).toContain('.history-sidebar { pointer-events:auto; position:absolute; inset:0 0 0 auto;');
  expect(css).toContain('grid-template-rows:auto minmax(0,1fr)');
  expect(sidebar).not.toContain('role="tablist"');expect(sidebar).not.toContain('方案记录');
- expect(sidebar).toContain('reading.set(task.harnessRunId');
+ expect(sidebar).toContain('reading.set(task.leadRunId');
  expect(sidebar).toContain('查看结果');expect(sidebar).toContain('查看进度');
  expect(sidebar).toContain('open(`work-${item.executionId}`');
  expect(sidebar).toContain('saved.current.focus=focus');
@@ -24,7 +24,7 @@ test("历史使用右侧索引，窄窗覆盖且正文不挤压，返回恢复�
 });
 
 test("未运行折叠区不重复已执行，不包含当前待确认，保留原放弃与替换",()=>{
- const mixed={...task,executions:[execution,{...execution,executionId:'B',revision:4}]} as HarnessSnapshot;
+ const mixed={...task,executions:[execution,{...execution,executionId:'B',revision:4}]} as LeadSnapshot;
  expect(unusedWorkflows(mixed).map(item=>item.revision)).toEqual([]);
  expect(unusedWorkflows(task).map(item=>item.revision)).toEqual([]);
  const latestAbandoned={...task,workflowRevisions:task.workflowRevisions.map(item=>item.revision===4?{...item,abandonedAt:'now'}:item)};
@@ -63,7 +63,7 @@ test("执行过的方案不因后续版本而被标为废弃",()=>{
 test("大量同名混合历史按原版本身份分类，已执行优先于放弃标记",()=>{
  const plans=Array.from({length:80},(_,index)=>({...revision(index+1),goal:'同名工作',abandonedAt:index%4===2?'2026-10-18T03:00:00Z':null}));
  const runs=plans.filter(item=>item.revision%4===2||item.revision%4===0).map(item=>({...execution,executionId:`execution-${item.revision}`,revision:item.revision}));
- const mixed={...task,workflowRevisions:plans,executions:runs} as HarnessSnapshot;
+ const mixed={...task,workflowRevisions:plans,executions:runs} as LeadSnapshot;
  const labels=plans.map(item=>proposalLabel(mixed,item));
  expect(labels.filter(item=>item==='已用于执行')).toHaveLength(40);
  expect(labels.filter(item=>item==='已放弃 · 未执行')).toHaveLength(20);
@@ -85,21 +85,21 @@ test("默认只显示当前方案与历史入口，不铺出旧方案或工程�
 });
 
 test("旧尝试中断总结不冒充最新已完成尝试的待办",()=>{
-  const snapshot={...task,impactSummaries:[{executionId:"A",attempt:1,status:"interrupted",key:"old"},{executionId:"A",attempt:2,status:"completed",key:"new"}]} as HarnessSnapshot;
+  const snapshot={...task,impactSummaries:[{executionId:"A",attempt:1,status:"interrupted",key:"old"},{executionId:"A",attempt:2,status:"completed",key:"new"}]} as LeadSnapshot;
   expect(currentExecutionSummaries(snapshot,"A").map(item=>item.key)).toEqual(["new"]);
-  const restarted={...snapshot,executionHistory:[{executionId:"A",attempt:3}]} as HarnessSnapshot;
+  const restarted={...snapshot,executionHistory:[{executionId:"A",attempt:3}]} as LeadSnapshot;
   expect(currentExecutionSummaries(restarted,"A")).toEqual([]);
 });
 
 test("已结束执行的残留问题不提醒，活跃执行的问题仍提醒",()=>{
-  const snapshot={...task,executionAttention:{A:{workerRequests:1,scriptGates:1}}} as HarnessSnapshot;
+  const snapshot={...task,executionAttention:{A:{workerRequests:1,scriptGates:1}}} as LeadSnapshot;
   expect(hasActiveExecutionQuestions(snapshot)).toBe(false);
   expect(hasActiveExecutionQuestions({...snapshot,executions:[{...execution,status:"running",finishedAt:null}]})).toBe(true);
   expect(hasActiveExecutionQuestions({...snapshot,executionAttention:{}})).toBe(false);
 });
 
 test("总结提醒尊重后台未完成门禁，不隐藏旧义务，但归档不再提示操作",()=>{
-  const snapshot={...task,impactSummaries:[{key:"old",attempt:1,status:"interrupted",executionId:"A"},{key:"obsolete",status:"interrupted",supersededBy:"new"},{key:"new",status:"completed"}]} as HarnessSnapshot;
+  const snapshot={...task,impactSummaries:[{key:"old",attempt:1,status:"interrupted",executionId:"A"},{key:"obsolete",status:"interrupted",supersededBy:"new"},{key:"new",status:"completed"}]} as LeadSnapshot;
   expect(interruptedSummaryObligations(snapshot).map(item=>item.key)).toEqual(["old"]);
   expect(interruptedSummaryObligations({...snapshot,status:"completed"})).toEqual([]);
 });
@@ -110,11 +110,11 @@ test("总结待办使用原工作名而非后续方案名",()=>{
 });
 
 test("待确认方案在顶部工具条用去确认文案并带版本号",()=>{
- const pending={...task,status:"idle",executions:[],workflowRevisions:[revision(1),revision(2)],impactSummaries:[],executionAttention:{}} as HarnessSnapshot;
+ const pending={...task,status:"idle",executions:[],workflowRevisions:[revision(1),revision(2)],impactSummaries:[],executionAttention:{}} as LeadSnapshot;
  const html=renderToStaticMarkup(<TaskActivity task={pending} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
  expect(html).toContain("去确认方案（第 2 版）");
  expect(html).toContain('class="task-state"');
- const single={...task,status:"idle",executions:[],workflowRevisions:[revision(1)]} as HarnessSnapshot;
+ const single={...task,status:"idle",executions:[],workflowRevisions:[revision(1)]} as LeadSnapshot;
  const singleHtml=renderToStaticMarkup(<TaskActivity task={single} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
  expect(singleHtml).toContain("去确认方案");
  expect(singleHtml).not.toContain("（第 1 版）");

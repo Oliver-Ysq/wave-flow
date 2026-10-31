@@ -7,7 +7,7 @@ import { RunJournal } from "../../src/journal/run-journal";
 import { RunRuntime } from "../../src/runtime/run-runtime";
 import type { ControlServer } from "../../src/control/control-server";
 import type { AgentNodeExecutor } from "../../src/runtime/run-types";
-import type { ExecutionConfigSnapshot, WorkerAssignment } from "../../src/harness/types";
+import type { ExecutionConfigSnapshot, WorkerAssignment } from "../../src/lead/types";
 import type { RuntimeProvenance } from "../../src/runtimes/types";
 import type { JsonObject } from "../../src/shared/json";
 import type { WorkflowModule } from "../../src/shared/workflow-types";
@@ -23,7 +23,7 @@ const twoNodes: WorkflowModule<JsonObject, unknown> = {
 };
 
 function testConfig(): ExecutionConfigSnapshot {
-  const assignment = (agentId: string): WorkerAssignment => ({ agentId, cli: "codex", model: "cli-default", source: "harness-cli", runtimeId: "runtime-codex", adapterId: "codex-acp", adapterVersion: "2.2.2" });
+  const assignment = (agentId: string): WorkerAssignment => ({ agentId, cli: "codex", model: "cli-default", source: "lead-cli", runtimeId: "runtime-codex", adapterId: "codex-acp", adapterVersion: "2.2.2" });
   return { version: 1, createdAt: new Date().toISOString(), fallbackRuntimeId: "runtime-codex", ruleText: null, ruleDegraded: false, defaultAssignment: assignment("*"), assignments: [assignment("a"), assignment("b")] };
 }
 

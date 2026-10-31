@@ -10,7 +10,7 @@ export function userFacingText(text: string): string {
     "主控已有运行回合。":"Wave Flow 正在处理。",
     "Desktop Engine 重启后无法跨进程验证原主控会话；回合已中断。 ":"执行环境重启后无法恢复原对话连接；本轮已中断。",
     "指定 Run 不存在或 manifest 不可读取。":"这次执行的记录已不存在或无法读取，可能已被清理。方案仍保留，可返回对话后重新运行。",
-    "指定 Harness Run 不存在或 manifest 不可读取。 ":"这个任务的历史记录已不存在或无法读取，可能已被清理。请返回任务列表重新打开。",
+    "指定 Lead Run 不存在或 manifest 不可读取。 ":"这个任务的历史记录已不存在或无法读取，可能已被清理。请返回任务列表重新打开。",
   };
   if(Object.hasOwn(messages,text))return messages[text]!;
   for(const [prefix,label] of [

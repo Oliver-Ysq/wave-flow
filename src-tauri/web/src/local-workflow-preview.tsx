@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { api } from "./api";
 import type { LocalWorkflowPreflight } from "../../../src/workflow/preflight-local";
 import {CompactParameterForm} from "./forms/compact-parameter-form";
-import type {HarnessRunResponse} from "./types";
+import type {LeadRunResponse} from "./types";
 import {open} from "@tauri-apps/plugin-dialog";
 import {WorkflowSourceDialog} from "./workflow-source-dialog";
 import {userFacingText} from "./user-facing-text";
@@ -42,11 +42,11 @@ export async function runGuarded<T>(guard: LatestRequestGuard, token: number, ta
 
 /** 本地来源预检与参数保存；候选永不自动执行。 */
 export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,revision}:{
- /** 原路径修订；只重新预检该文件，参数使用旧冻结输入初填，不允许换文件。 */revision?:{harnessRunId:string;baseRevision:number;path:string;input:Record<string,unknown>};
- /** 已显式放弃且未执行的目标态Task；有值时同链换来源，不创建第二个Task。 */replacement?:{harnessRunId:string;baseRevision:number};
+ /** 原路径修订；只重新预检该文件，参数使用旧冻结输入初填，不允许换文件。 */revision?:{leadRunId:string;baseRevision:number;path:string;input:Record<string,unknown>};
+ /** 已显式放弃且未执行的目标态Task；有值时同链换来源，不创建第二个Task。 */replacement?:{leadRunId:string;baseRevision:number};
  /** Project Store稳定身份，不能从用户路径推断项目。 */projectId:string;
  /** 返回原草稿，预检不产生可删除运行档案。 */onClose:()=>void;
- /** 明确保存后的Task，父页面只导航到原版本，不自动运行。 */onPrepared:(result:HarnessRunResponse)=>void;
+ /** 明确保存后的Task，父页面只导航到原版本，不自动运行。 */onPrepared:(result:LeadRunResponse)=>void;
 }){
  const [path,setPath]=useState(revision?.path??""),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
  const [result,setResult]=useState<Omit<LocalWorkflowPreflight,"source">|null>(null);
@@ -73,6 +73,6 @@ export function LocalWorkflowPreview({projectId,onClose,onPrepared,replacement,r
    </div>
    {!result&&<p className="source-safety-note local-workflow-safety-note">检查不会运行脚本。</p>}
    {error&&<p role="alert">{error.startsWith("ENOENT:")?"找不到工作流文件，请检查路径，或重新选择文件。":userFacingText(error)}</p>}
-   {result&&<><div className="source-preflight-status" role="status"><strong>{result.meta.description}</strong><small>文件已检查</small></div><details className="source-check-details"><summary>检查详情</summary><p>{result.path}</p><p>阶段：{result.meta.phases.map(phase=>phase.title).join(" / ")}</p><p>仅做静态检查；执行前会再次核对文件和运行条件。</p></details><CompactParameterForm identity={`${projectId}:${result.sourceHash}`} schema={result.inputSchema} initialValue={revision?.input??result.meta.exampleArgs??{}} busy={busy} onSubmit={async input=>{const payload=JSON.stringify({projectId,path:result.path,hash:result.sourceHash,input,replacement,revision});if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};setBusy(true);try{onPrepared(revision?await api.reviseLocalTask(revision.harnessRunId,revision.baseRevision,result.sourceHash,input,saveRequest.current.id):replacement?await api.reviseLocalTask(replacement.harnessRunId,replacement.baseRevision,result.sourceHash,input,saveRequest.current.id,result.path):await api.createLocalTask(projectId,result.path,result.sourceHash,input,saveRequest.current.id));}finally{setBusy(false);}}}/><p className="source-safety-note">保存后不会立即运行。</p></>}
+   {result&&<><div className="source-preflight-status" role="status"><strong>{result.meta.description}</strong><small>文件已检查</small></div><details className="source-check-details"><summary>检查详情</summary><p>{result.path}</p><p>阶段：{result.meta.phases.map(phase=>phase.title).join(" / ")}</p><p>仅做静态检查；执行前会再次核对文件和运行条件。</p></details><CompactParameterForm identity={`${projectId}:${result.sourceHash}`} schema={result.inputSchema} initialValue={revision?.input??result.meta.exampleArgs??{}} busy={busy} onSubmit={async input=>{const payload=JSON.stringify({projectId,path:result.path,hash:result.sourceHash,input,replacement,revision});if(saveRequest.current?.payload!==payload)saveRequest.current={payload,id:crypto.randomUUID()};setBusy(true);try{onPrepared(revision?await api.reviseLocalTask(revision.leadRunId,revision.baseRevision,result.sourceHash,input,saveRequest.current.id):replacement?await api.reviseLocalTask(replacement.leadRunId,replacement.baseRevision,result.sourceHash,input,saveRequest.current.id,result.path):await api.createLocalTask(projectId,result.path,result.sourceHash,input,saveRequest.current.id));}finally{setBusy(false);}}}/><p className="source-safety-note">保存后不会立即运行。</p></>}
  </WorkflowSourceDialog>;
 }

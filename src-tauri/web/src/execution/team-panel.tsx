@@ -289,7 +289,7 @@ function ReusedBlock({
 
 /**
  * 团队面板：单一 Phase 轨迹视图。Phase 按 meta 声明顺序，访问按实际进入事件排序。
- * 数据源优先级：调用方传入的快照内嵌 phaseVisits（Harness Execution 与独立 Run 的
+ * 数据源优先级：调用方传入的快照内嵌 phaseVisits（Lead Execution 与独立 Run 的
  * RunSnapshot 均内嵌当前 attempt 耐久访问，含回访轮次）→ 独立 RunListItem 无内嵌快照时
  * 经 runs.phaseVisits 翻页读取 → API 不可用时回落到快照内嵌批次。
  * 绝不从卡片位置或完成时间推断箭头/DAG。
@@ -306,7 +306,7 @@ export function TeamPanel({
   waitingVisitId,
   readOnly=false,
 }: {
-  /** Run id（独立 Run）或 Execution id（Harness Execution）。 */
+  /** Run id（独立 Run）或 Execution id（Lead Execution）。 */
   runId: string;
   /** 当前执行尝试序号；phaseVisit 只在该 attempt 内取数。 */
   currentExecutionAttemptId: number;
@@ -321,7 +321,7 @@ export function TeamPanel({
   /** Worker block 答题回调。 */
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
   /**
-   * 可选：读取全部 attempt 的耐久 Phase 访问（Harness Execution 专用通道）。
+   * 可选：读取全部 attempt 的耐久 Phase 访问（Lead Execution 专用通道）。
    * 提供时面板为每个 Phase 补齐"历史执行已完成、本次复用原结果"的节点组，
    * 否则只展示当前 attempt 视野（独立 Run 现状）。
    */

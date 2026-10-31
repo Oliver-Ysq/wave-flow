@@ -101,7 +101,7 @@ describe("新架构目录与历史实现边界", () => {
     await expect(access(join(projectRoot, "src-tauri", "web", "mock-api.ts"))).rejects.toThrow();
     const workbench = await Bun.file(join(projectRoot, "src-tauri", "web", "src", "App.tsx")).text();
     expect(workbench).not.toContain("EventSource(");
-    expect(workbench).not.toContain("/harness-runs/");
+    expect(workbench).not.toContain("/lead-runs/");
     const workerMcp = await Bun.file(join(projectRoot, "src", "runtime", "worker-mcp-server.ts")).text();
     expect(workerMcp).not.toContain("WF_WORKER_MCP_BASE_URL");
     expect(workerMcp).toContain("WF_WORKER_CONTROL_SOCKET");
@@ -113,9 +113,9 @@ describe("新架构目录与历史实现边界", () => {
     const workerChannel = await Bun.file(join(projectRoot, "src", "runtime", "worker-control-channel.ts")).text();
     expect(workerChannel).toContain("startControlSocket");
     expect(workerChannel).not.toContain("mkfifo");
-    const harnessMcp = await Bun.file(join(projectRoot, "src", "harness", "mcp-server.ts")).text();
-    expect(harnessMcp).not.toContain("WF_HARNESS_MCP_BASE_URL");
-    expect(harnessMcp).toContain("WF_HARNESS_CONTROL_SOCKET");
+    const leadMcp = await Bun.file(join(projectRoot, "src", "lead", "mcp-server.ts")).text();
+    expect(leadMcp).not.toContain("WF_LEAD_MCP_BASE_URL");
+    expect(leadMcp).toContain("WF_LEAD_CONTROL_SOCKET");
     const acpSession = await Bun.file(join(projectRoot, "src", "adapters", "acp-session.ts")).text();
     expect(acpSession).toContain("detached: true");
     expect(acpSession).toContain('signalGroup("SIGTERM")');

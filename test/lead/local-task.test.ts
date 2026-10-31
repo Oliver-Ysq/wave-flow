@@ -1,0 +1,151 @@
+import { afterEach, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile, readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { LeadService } from "../../src/lead/service";
+import { LeadExecutionService } from "../../src/lead/executions";
+import { preflightLocalWorkflow } from "../../src/workflow/preflight-local";
+import { RunJournal } from "../../src/journal/run-journal";
+import { LeadJournal } from "../../src/lead/journal";
+import { listWorkflowTemplates } from "../../src/lead/workflow-templates";
+import { taskIdForRequest } from "../../src/lead/task-contract";
+import {DeterministicLeadSession} from "../../src/lead/deterministic-session";
+const roots:string[]=[];
+afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
+
+test("关联耐久后派发前进程崩溃：重开零Worker，显式恢复仅一个新attempt",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-crash-"));roots.push(root);
+ await writeFile(join(root,"workflow.ts"),`import {agent,phase} from "wave-flow";export const meta={name:"crash",description:"派发前崩溃",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};export default async function run(args:unknown){phase("检查");return agent("检查",{id:"a",cli:"codex"});}`);
+ const child=Bun.spawn([process.execPath,join(import.meta.dir,"../fixtures/local-execution-crash.ts"),root],{stdout:"pipe",stderr:"pipe"});
+ const diagnostic=await new Response(child.stderr).text();expect(diagnostic).toBe("");expect(await child.exited).toBe(73);
+ const state=join(root,"lead"),store=join(root,"runs"),id=taskIdForRequest("b6b5a241-5881-4ef7-811a-e4dcb89c9432");let calls=0;
+ const lead=new LeadService(state,async()=>new DeterministicLeadSession(),undefined,async()=>({fingerprint:"injected-lead-session"}),true);
+ const executions=new LeadExecutionService(lead,()=>({executor:{execute:async()=>{calls++;return {ok:true};}}}),{},state,store);
+ lead.setExecutionCapsuleReader((task,ex,attempt)=>executions.capsuleEvidence(task,ex,attempt));
+ const before=await lead.snapshot(id);expect(before.executions).toHaveLength(1);
+ const executionId=before.executions[0]!.executionId;
+ expect((await executions.snapshotExecution(id,executionId)).phases.flatMap(p=>p.agents)).toHaveLength(0);
+ const firstCapsule=JSON.parse((await lead.executionCapsule(id,executionId,1)).text);
+ expect(firstCapsule.authorization.confirmationRequestId).toBeNull();
+ expect(firstCapsule.authorization.limitation).toContain("不补造");
+ expect(firstCapsule.authorization.acceptedAt).toBeString();
+ await executions.convergeStaleExecutions(id);expect(calls).toBe(0);expect((await lead.snapshot(id)).executions[0]!.status).toBe("interrupted");
+ await completeSummaries(lead,id);
+ const original=(await lead.snapshot(id)).workflowRevisions[0]!;
+ await writeFile(join(root,"workflow.ts"),original.source.replace('description:"派发前崩溃"','description:"新修订"'));
+ const revised=await preflightLocalWorkflow(join(root,"workflow.ts"),root);
+ await lead.reviseLocalTask(id,{clientRequestId:crypto.randomUUID(),baseRevision:1,sourceHash:revised.sourceHash,input:{}});
+ await lead.rejectWorkflowRevision(id,2);
+ await lead.abandonWorkflowCard(id,original.cardId!);
+ // 新草案被拒绝/放弃，不影响原已批准Execution恢复；原文件甚至可变为不可加载。
+ await writeFile(join(root,"workflow.ts"),"损坏的新源码");
+ await completeSummaries(lead,id);
+ await Promise.all([executions.resume(id,executionId),executions.resume(id,executionId)]);
+ for(let i=0;i<100&&(await lead.snapshot(id)).executions[0]!.finishedAt===null;i++)await Bun.sleep(5);
+ const after=await executions.snapshotExecution(id,executionId);expect(after.status).toBe("completed");expect(after.currentExecutionAttemptId).toBe(2);expect(calls).toBe(1);
+ expect((await lead.snapshot(id)).executions).toHaveLength(1);
+ const resumedCapsule=JSON.parse((await lead.executionCapsule(id,executionId,2)).text);
+ expect(resumedCapsule.authorization).toEqual(firstCapsule.authorization);
+ expect(resumedCapsule.evidence.journalEvidence).toContainEqual(expect.objectContaining({type:"execution-attempt.started",attempt:2,origin:expect.stringContaining("显式resume")}));
+});
+test("本地Task保存不执行，确认在原Run Store运行，旧源编辑后恢复冻结字节",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-task-"));roots.push(root);
+ const file=join(root,"workflow.ts");
+ await writeFile(file,`import {agent,phase} from "wave-flow";export const meta={name:"local",description:"本地",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{x:{type:"number"}},required:["x"],additionalProperties:false}};export default async function run(args:{x:number}){phase("检查");return agent("任务",{id:"a",cli:"codex",input:args});}`);
+ const preflight=await preflightLocalWorkflow(file,root),state=join(root,"lead"),store=join(root,"runs");let calls=0,fail=true;
+ const lead=new LeadService(state,async()=>new DeterministicLeadSession(),undefined,async()=>({fingerprint:"injected-lead-session"}),true);
+ const request={projectId:"p",clientRequestId:crypto.randomUUID(),path:file,sourceHash:preflight.sourceHash,input:{x:42}};
+ const task=await lead.startLocalTask(root,request);expect(task.executions).toHaveLength(0);expect(calls).toBe(0);
+ expect((await lead.startLocalTask(root,request)).leadRunId).toBe(task.leadRunId);
+ await lead.acceptWorkflowRevision(task.leadRunId,1);
+ const executions=new LeadExecutionService(lead,()=>({executor:{execute:async()=>{calls++;if(fail)throw Error("中断");return {x:42};}}}),{},state,store);
+ lead.setExecutionCapsuleReader((task,ex,attempt)=>executions.capsuleEvidence(task,ex,attempt));
+ const assignment=(agentId:string)=>({agentId,cli:"codex" as const,model:"cli-default" as const,source:"lead-cli" as const,runtimeId:"test",adapterId:"codex-acp" as const,adapterVersion:"test"});
+ const config={version:1 as const,createdAt:new Date().toISOString(),fallbackRuntimeId:"test",ruleText:null,ruleDegraded:false,defaultAssignment:assignment("*"),assignments:[assignment("a")]};
+ await expect(executions.createExecution(task.leadRunId,1,{x:42},config)).rejects.toThrow("只接受脚本模式执行配置");
+ const created=await executions.createExecution(task.leadRunId,1,{x:42});
+ expect(created.execution.config).toBeUndefined();
+ for(let i=0;i<100&&(await executions.listExecutions(task.leadRunId))[0]!.finishedAt===null;i++)await Bun.sleep(5);
+ expect(created.execution.kind).toBe("local-run");expect(calls).toBe(1);
+ expect((await RunJournal.open(created.execution.executionId,store)).journal.manifest.workflowHash).toBe(preflight.sourceHash);
+ await writeFile(file,"损坏的新源码");fail=false;
+ await completeSummaries(lead,task.leadRunId);
+ await executions.resume(task.leadRunId,created.execution.executionId);
+ for(let i=0;i<100&&(await executions.listExecutions(task.leadRunId))[0]!.finishedAt===null;i++)await Bun.sleep(5);
+ expect((await executions.snapshotExecution(task.leadRunId,created.execution.executionId)).status).toBe("completed");expect(calls).toBe(2);
+ await completeSummaries(lead,task.leadRunId);
+ await writeFile(file,preflight.source.replace('description:"本地"','description:"本地修订"'));
+ const revised=await preflightLocalWorkflow(file,root);
+ const revisionRequest={clientRequestId:crypto.randomUUID(),baseRevision:1,sourceHash:revised.sourceHash,input:{x:42}};
+ await lead.reviseLocalTask(task.leadRunId,revisionRequest);
+ expect((await lead.reviseLocalTask(task.leadRunId,revisionRequest)).workflowRevisions).toHaveLength(2);
+ await expect(lead.reviseLocalTask(task.leadRunId,{...revisionRequest,input:{x:43}})).rejects.toThrow("冲突");
+ const snapshot=await lead.snapshot(task.leadRunId);
+ expect(snapshot.workflowRevisions[1]!.cardId).toBe(snapshot.workflowRevisions[0]!.cardId);expect(snapshot.workflowRevisions[0]!.acceptedAt).not.toBeNull();
+ await expect(lead.reviseLocalTask(task.leadRunId,{clientRequestId:crypto.randomUUID(),baseRevision:1,sourceHash:revised.sourceHash,input:{x:42}})).rejects.toThrow("当前版本");
+ await expect(executions.snapshotExecution(crypto.randomUUID(),created.execution.executionId)).rejects.toThrow();
+});
+
+async function completeSummaries(lead:LeadService,id:string){
+ for(let n=0;n<200;n++){
+   const snapshot=await lead.snapshot(id),pending=snapshot.impactSummaries?.find(item=>item.status!=="completed");
+   if(!pending&&snapshot.status!=="running")return;
+   if(pending&&snapshot.status!=="running")await lead.retryImpactSummary(id,pending.key).catch(()=>{});
+   await Bun.sleep(5);
+ }
+ throw Error("总结未完成");
+}
+
+test("首次执行前必须先放弃才能重选来源，换文件或预置仍保持唯一card",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-reset-"));roots.push(root);
+ const path=join(root,"one.ts"),other=join(root,"two.ts"),state=join(root,"state");
+ const source=`export const meta={name:"local",description:"重选",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};export default async function run(args:unknown){return {};}`;
+ await writeFile(path,source);await writeFile(other,source.replace('name:"local"','name:"other"'));
+ const checked=await preflightLocalWorkflow(path,root),next=await preflightLocalWorkflow(other,root);
+ const lead=new LeadService(state,async()=>{throw Error("不初始化");},undefined,async()=>({fingerprint:"injected-lead-session"}),true);
+ const task=await lead.startLocalTask(root,{projectId:"p",clientRequestId:crypto.randomUUID(),path,sourceHash:checked.sourceHash,input:{}});
+ const request={clientRequestId:crypto.randomUUID(),baseRevision:1,path:other,sourceHash:next.sourceHash,input:{}};
+ await expect(lead.reviseLocalTask(task.leadRunId,request)).rejects.toThrow("放弃");
+ await lead.abandonWorkflowCard(task.leadRunId,task.workflowRevisions[0]!.cardId!);
+ const revised=await lead.reviseLocalTask(task.leadRunId,request);
+ expect(new Set(revised.workflowRevisions.map(item=>item.cardId)).size).toBe(1);expect(revised.workflowRevisions[1]!.localOrigin?.path).toBe(next.path);
+ await lead.abandonWorkflowCard(task.leadRunId,revised.workflowRevisions[1]!.cardId!);
+ const template=listWorkflowTemplates()[0]!;
+ const saved=await lead.saveTemplate(task.leadRunId,crypto.randomUUID(),{id:template.id,version:template.version,sourceHash:template.sourceHash,input:template.meta.exampleArgs??{}});
+ expect(saved.workflowRevisions[2]!.templateOrigin?.id).toBe(template.id);expect(saved.workflowRevisions[2]!.localOrigin).toBeUndefined();
+ expect(new Set(saved.workflowRevisions.map(item=>item.cardId)).size).toBe(1);expect(saved.executions).toHaveLength(0);
+ await expect(LeadJournal.open(task.leadRunId,state)).resolves.toMatchObject({snapshot:{workflowRevisions:saved.workflowRevisions}});
+});
+
+test("重开拒绝本地来源meta或冻结源码被独立篡改",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-tamper-"));roots.push(root);
+ const path=join(root,"workflow.ts"),state=join(root,"lead");
+ await writeFile(path,`export const meta={name:"local",description:"原版",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};export default async function run(args:unknown){return {};}`);
+ const checked=await preflightLocalWorkflow(path,root);
+ const lead=new LeadService(state,async()=>{throw Error("不初始化");},undefined,async()=>({fingerprint:"injected-lead-session"}),true);
+ const task=await lead.startLocalTask(root,{projectId:"p",clientRequestId:crypto.randomUUID(),path,sourceHash:checked.sourceHash,input:{}});
+ const journalPath=join(state,task.leadRunId,"journal.jsonl"),original=await readFile(journalPath,"utf8");
+ const change=(mutate:(revision:any)=>void)=>original.trimEnd().split("\n").map(line=>{const event=JSON.parse(line);if(event.type==="workflow.revision_proposed")mutate(event.revision);return JSON.stringify(event);}).join("\n")+"\n";
+ await writeFile(journalPath,change(revision=>{revision.localOrigin.meta.description="篡改";}));
+ await expect(LeadJournal.open(task.leadRunId,state)).rejects.toThrow("不一致");
+ await writeFile(journalPath,change(revision=>{revision.source=revision.source.replace("return {};","return {changed:true};");}));
+ await expect(LeadJournal.open(task.leadRunId,state)).rejects.toThrow();
+ await writeFile(journalPath,original);await expect(LeadJournal.open(task.leadRunId,state)).resolves.toMatchObject({snapshot:{workflowRevisions:[{localOrigin:{meta:{description:"原版"}}}]}});
+});
+
+test("本地关联失败不派发Worker，并清理本请求未关联Run",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"wave-flow-local-link-"));roots.push(root);
+ const file=join(root,"workflow.ts");
+ await writeFile(file,`import {agent,phase} from "wave-flow";export const meta={name:"local-link",description:"关联",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};export default async function run(args:unknown){phase("检查");return agent("检查",{id:"a",cli:"codex"});}`);
+ const checked=await preflightLocalWorkflow(file,root),state=join(root,"lead"),store=join(root,"runs");let calls=0;
+ const lead=new LeadService(state,async()=>{throw Error("不得初始化模型");},undefined,async()=>({fingerprint:"injected-lead-session"}),true);
+ const task=await lead.startLocalTask(root,{projectId:"p",clientRequestId:crypto.randomUUID(),path:file,sourceHash:checked.sourceHash,input:{}});
+ await lead.acceptWorkflowRevision(task.leadRunId,1);
+ lead.recordExecutionCreated=async()=>{throw Error("关联失败");};
+ const executions=new LeadExecutionService(lead,()=>({executor:{execute:async()=>{calls++;return {};}}}),{},state,store);
+ await expect(executions.createExecution(task.leadRunId,1,{})).rejects.toThrow("关联失败");
+ expect(calls).toBe(0);expect(await readdir(store)).toEqual([]);expect((await lead.snapshot(task.leadRunId)).executions).toHaveLength(0);
+ const failedPrepare=new LeadExecutionService(lead,()=>{throw Error("执行器初始化失败");},{},state,store);
+ await expect(failedPrepare.createExecution(task.leadRunId,1,{})).rejects.toThrow("初始化失败");
+ expect(calls).toBe(0);expect(await readdir(store)).toEqual([]);
+});
