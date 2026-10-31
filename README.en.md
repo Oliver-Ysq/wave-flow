@@ -47,7 +47,7 @@ Adjust proposals through conversation and retain each revision; discarding a pro
 
 ## Download and installation
 
-Current version: `v0.2.11`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.3.0`, supporting macOS 12+ / Apple Silicon.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -65,7 +65,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.2.11_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.3.0_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install
