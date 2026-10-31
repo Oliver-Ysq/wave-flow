@@ -153,7 +153,7 @@ gate  durable-first：先落盘再等待；用户停止 Execution 时等待中�
 ## 内置预置是现成参照
 
 内置目录里的 `deep-research` 与 `deep-cr` 是两类长任务编排的完整参照（本仓库源码在
-`src/harness/templates/` 下的同名 `.ts`；主控会话的 cwd 是用户项目，通常读不到它们，
+`src/lead/templates/` 下的同名 `.ts`；主控会话的 cwd 是用户项目，通常读不到它们，
 因此这里直接给出骨架要点），起草同类 Workflow 时按同一骨架组织，不要从零发明：
 
 - 深度调研：计划（`decisionGate` 让用户先确认或调整）→ 并行多源调研 → 每条结论由独立

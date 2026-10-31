@@ -274,7 +274,7 @@ bun run desktop:dev</code></pre>
               <tbody>
                 <tr><td><code>codex</code></td><td>使用本机 Codex 登录与配置。</td></tr>
                 <tr><td><code>dsh</code></td><td>DeepSeek Harness。需在 <code>$DSH_HOME</code> 配置 provider key，并要求 Node ≥ 24；Node ≤ 22 会静默退出。</td></tr>
-                <tr><td><code>claude</code></td><td>Claude Code。主控只继承认证与模型环境变量；模型侧由 <code>~/.claude/settings.json</code> 决定。</td></tr>
+                <tr><td><code>claude</code></td><td>Claude Code。主控直接使用用户原生 CLI 配置；模型与认证由 <code>~/.claude/settings.json</code> 决定。</td></tr>
               </tbody>
             </table>
           </div>
@@ -286,7 +286,7 @@ bun run desktop:dev</code></pre>
           <ul>
             <li>一期是本机单用户桌面产品：不做登录、多人协作、云端同步、远程控制或可视化 Workflow 编辑。</li>
             <li>Workflow 只允许本地加载；不支持 URL、自动下载或未知来源。它是受信任扩展模块，不是不可信代码沙箱。</li>
-            <li>主控默认开启感知模式：可读取项目内容与已登录工具，但不会写入当前项目；修改项目仍必须提出 Workflow 并经你确认。感知模式可在设置中关闭。Worker 使用可信原生 CLI 配置与权限，不额外施加 Wave Flow OS 文件隔离。</li>
+            <li>主控使用原生 CLI 配置与工具，可读取项目内容与已登录工具，但不会写入当前项目；修改项目仍必须提出 Workflow 并经你确认。Worker 使用可信原生 CLI 配置与权限，不额外施加 Wave Flow OS 文件隔离。</li>
             <li>写入类任务使用独立 worktree；不自动合并或 push。worktree 不能阻止跨目录写入，Git 记录也不覆盖工作区外影响。</li>
             <li>模型请求仍由所选 CLI 发送给其服务商；本地运行不代表离线推理或数据不出本机。</li>
             <li>完整执行总结、当前现场补充与 writer 安全交接是修订启动的前置条件；Schema 通过不是验收。</li>

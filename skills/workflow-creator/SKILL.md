@@ -22,7 +22,7 @@ export default async function run(args) { /* 编排 */ }
 
 两种入口共用同一格式与校验：
 
-1. **主控生成**：主控（Harness）经 `propose_workflow_revision` 提交；用户审批后执行，或显式保存并接管为项目内本地来源。
+1. **主控生成**：主控（Lead）经 `propose_workflow_revision` 提交；用户审批后执行，或显式保存并接管为项目内本地来源。
 2. **本地文件**：用户选择项目内 `.ts` 文件，预检后通过桌面任务入口确认运行。
 
 不要从零写骨架：以 [assets/workflow.ts](assets/workflow.ts) 为起点，替换阶段、prompt 与输入输出。完整契约见 [references/api.md](references/api.md)。
@@ -70,10 +70,10 @@ meta.description 用简短任务名称式说明（建议20个中文字符以内�
 
 ## 定义 Agent 边界
 
-Wave Flow 新增宿主边界：主控默认感知模式使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；设置关闭后回到私有Home与全量写隔离，四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主不保存任何成果快照、不创建commit、HEAD与真实index不变；结果只保留在该worktree的当前未提交文件里，不写入主工作区；主分支不移动、不push。用户自行查看、修改、提交或清理，清理会删除未提交内容。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
+Wave Flow 新增宿主边界：主控使用原生CLI配置与工具（skill/MCP/CLI可用），Seatbelt只拒绝写当前项目与Engine状态目录；四个窄MCP不变。Worker使用可信原生CLI/Home/权限，不做额外OS文件隔离。read-only/workspace-write表示任务意图，不保证不可越界。一次Execution只创建一个受管worktree，所有写节点共享同一cwd；不再有工作区分组、集成来源或集成节点。并行写直接写同一目录，宿主不做冲突检测或自动合并，后写会覆盖先写，因此必须按模块/文件分区；同一文件或逻辑区域的写入要顺序执行，依赖前序结果的写入放到后续phase。执行完成后宿主不保存任何成果快照、不创建commit、HEAD与真实index不变；结果只保留在该worktree的当前未提交文件里，不写入主工作区；主分支不移动、不push。用户自行查看、修改、提交或清理，清理会删除未提交内容。作者不新增worktree/commit/merge接口，不让Worker自行提交；cwd/prompt/lease不能阻止可信Worker写其他目录，外部影响不由Git证明。
 
 把 `agent()` 当作一次完整的、带工具的编码 Agent 会话（`cli` 当前允许 `codex` / `claude` / `dsh`；
-三者均已完成真实验收，均可设为主控；claude 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
+三者均已完成真实验收，均可设为主控；claude 的主控验收验证 CLI 兼容性，模型侧由用户认证配置决定），而不是一次文本补全：
 
 - 每个 prompt 必须自包含：任务、范围、相关上游结果、约束与期望产出。Agent 不会自动
   继承另一个 Agent 的对话内容。

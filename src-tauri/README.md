@@ -6,7 +6,7 @@ Tauri 是 Engine 的唯一父进程，业务状态、Journal、Control 与 Agent
 ## 目录
 
 - `src/main.rs`：Tauri 宿主。spawn/supervise Engine、私有 JSONL 通道、托盘与菜单、
-  窗口主题与显示时机、退出确认；不实现第二套 Run/Harness 状态。
+  窗口主题与显示时机、退出确认；不实现第二套 Run/Lead 状态。
 - `web/`：React 工作台与 Vite 构建（`web/dist` 为产物，已忽略）。Markdown 渲染器是
   按需加载的独立 chunk。
 - `tauri.conf.json` / `tauri.dev.conf.json`：生产与开发窗口、bundle、externalBin 配置。

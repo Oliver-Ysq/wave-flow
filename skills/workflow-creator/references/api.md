@@ -73,7 +73,7 @@ function agent<T extends JsonObject = JsonObject>(
 ```
 
 执行一次完整的本机 CLI ACP Worker 会话（Codex、Claude Code 或 DeepSeek Harness；
-三者均已完成真实双角色验收，均可设为主控；Claude Code 的主控验收验证 harness 兼容性，模型侧由用户认证配置决定）。直接 `await` 时失败会抛出并把节点标记为
+三者均已完成真实双角色验收，均可设为主控；Claude Code 的主控验收验证 CLI 兼容性，模型侧由用户认证配置决定）。直接 `await` 时失败会抛出并把节点标记为
 interrupted；在 `parallel()` / `pipeline()` 内失败时该任务结果为 `null`。
 
 ```ts
