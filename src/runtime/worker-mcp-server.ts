@@ -34,6 +34,8 @@ export async function runWorkerMcpServer(): Promise<void> {
   // 完成响应先经stdio flush，再退出；否则Engine完成清理可能抢先丢失MCP成功确认。
   const completeResponses = new Set<string | number>();
   const transport = new StdioServerTransport();
+  let clientConnectionClosed = false;
+  transport.onclose = () => { clientConnectionClosed = true; };
   const send = transport.send.bind(transport);
   transport.send = async (message) => {
     await send(message);
@@ -78,8 +80,9 @@ export async function runWorkerMcpServer(): Promise<void> {
         message: args.needHelp,
         requestedSchema: status.answerSchema as ElicitRequestFormParams["requestedSchema"],
         _meta: { waveFlow: { blockRequestId } },
-      }, { timeout: WORKER_ELICIT_TIMEOUT_MS }).catch(async (error: unknown) => {
-        if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+      }, { timeout: WORKER_ELICIT_TIMEOUT_MS, signal: extra.signal }).catch(async (error: unknown) => {
+        // SDK 将业务超时与 tools/call 的显式取消都归为 RequestTimeout；连接死亡不属于可重开关闭。
+        if (!clientConnectionClosed && error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
           await control.request({ action: "close-block", blockRequestId });
           return null;
         }

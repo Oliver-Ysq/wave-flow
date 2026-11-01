@@ -213,6 +213,103 @@ test("ACP cancel 先经 Control 关闭再返回 closed", async () => {
   expect(closed).toBe(1);
 }, 20_000);
 
+for (const answerAtClose of [false, true]) test(`客户端 tools/call 超时取消只关闭原表单且不自动重开，answerAtClose=${answerAtClose}`, async () => {
+  let closed = 0;
+  let continued = 0;
+  let answered = false;
+  let blockCalls = 0;
+  const blockRequestIds: string[] = [];
+  let markHandled!: () => void;
+  const handled = new Promise<void>((resolve) => { markHandled = resolve; });
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) {
+      blockCalls += 1;
+      const request = value as { blockRequestId: string; answerSchema: unknown };
+      blockRequestIds.push(request.blockRequestId);
+      if (blockCalls === 2 && !answerAtClose) markHandled();
+      return { answerSchema: request.answerSchema, answer: answered ? { ok: true } : null, delivery: answered ? "answered" : "pending" };
+    },
+    async continue() { continued += 1; markHandled(); },
+    async closeBlock() { closed += 1; answered = answerAtClose; },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+  const elicitation = await next();
+  const cancellation = { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2, reason: "客户端 MCP 工具超时" } };
+  send(cancellation);
+  send(cancellation);
+  const elicitationCancellation = await next();
+  expect(elicitationCancellation).toMatchObject({ method: "notifications/cancelled", params: { requestId: elicitation.id } });
+  await handled;
+  send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+  expect((await next()).id).toBe(3);
+  expect(closed).toBe(1);
+  expect(blockCalls).toBe(2);
+  expect(blockRequestIds.every(id => id === blockRequestIds[0])).toBe(true);
+  expect(continued).toBe(answerAtClose ? 1 : 0);
+}, 20_000);
+
+test("普通 Elicitation 协议错误保持错误，不伪装成客户端关闭", async () => {
+  let closed = 0;
+  let blockCalls = 0;
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) { blockCalls += 1; return { answerSchema: (value as { answerSchema: unknown }).answerSchema, answer: null, delivery: "pending" }; },
+    async continue() { throw new Error("不应 continue"); },
+    async closeBlock() { closed += 1; },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+  const elicitation = await next();
+  send({ jsonrpc: "2.0", id: elicitation.id, error: { code: -32603, message: "客户端内部协议错误" } });
+  const response = await next();
+  expect(response.id).toBe(2);
+  expect(JSON.stringify(response.error)).toContain("客户端内部协议错误");
+  expect(closed).toBe(0);
+  expect(blockCalls).toBe(1);
+}, 20_000);
+
+test("客户端连接死亡不写 block.closed", async () => {
+  let closed = 0;
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) { return { answerSchema: (value as { answerSchema: unknown }).answerSchema, answer: null, delivery: "pending" }; },
+    async continue() { throw new Error("不应 continue"); },
+    async closeBlock() { closed += 1; },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+  expect((await next()).method).toBe("elicitation/create");
+  await child.stdin.end();
+  expect(await child.exited).toBe(0);
+  expect(closed).toBe(0);
+}, 20_000);
+
 test("答案交付后 continue 失败返回协议错误，不伪装成 closed", async () => {
   let blockCalls = 0;
   const control = {
