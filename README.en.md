@@ -47,7 +47,7 @@ Adjust proposals through conversation and retain each revision; discarding a pro
 
 ## Download and installation
 
-Current version: `v0.4.1`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.4.2`, supporting macOS 12+ / Apple Silicon.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -57,7 +57,7 @@ Prerequisites (Wave Flow neither bundles nor installs these):
 - **Claude Code** model and authentication come from your `~/.claude/settings.json`.
 - Optional: `ripgrep` (`rg`) only affects the controller's read-only full-text search.
 
-Native CLIs still use `~/.codex`, `~/.dsh` and `~/.claude`; model tools can also modify their configuration and credentials.
+Native CLIs still use `~/.codex`, `~/.dsh` and `~/.claude`; model tools can also modify their configuration and credentials. Codex workers use the Elicitation-compatible `agent` mode while retaining the `danger-full-access` sandbox; do not switch them to `agent-full-access`, which immediately rejects non-empty human-input forms.
 
 Install from a terminal:
 
@@ -65,7 +65,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.4.1_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.4.2_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install

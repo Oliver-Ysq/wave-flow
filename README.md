@@ -47,7 +47,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.4.1`，支持 macOS 12+ / Apple Silicon。
+当前版本：`v0.4.2`，支持 macOS 12+ / Apple Silicon。
 
 运行前提（Wave Flow 不内置、也不自动安装这些工具）：
 
@@ -57,7 +57,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 - **Claude Code** 的模型与认证由你的 `~/.claude/settings.json` 决定。
 - 可选：`ripgrep`（`rg`）只影响主控的只读全文搜索。
 
-原生 CLI 仍使用 `~/.codex`、`~/.dsh`、`~/.claude`；其配置与凭据也可能被模型工具修改。
+原生 CLI 仍使用 `~/.codex`、`~/.dsh`、`~/.claude`；其配置与凭据也可能被模型工具修改。Codex Worker 使用支持人工表单的 `agent` 模式，并保留 `danger-full-access` 沙箱配置；不要改成会立即拒绝非空人工表单的 `agent-full-access`。
 
 可在终端一键安装：
 
@@ -65,7 +65,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.4.1_aarch64.dmg`，或从源码构建：
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.4.2_aarch64.dmg`，或从源码构建：
 
 ```sh
 bun install
