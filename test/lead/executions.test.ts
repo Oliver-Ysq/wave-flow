@@ -9,6 +9,7 @@ import { LeadService } from "../../src/lead/service";
 import type { ResolvedLeadModelConfig } from "../../src/lead/config";
 import type { LeadSession } from "../../src/lead/session";
 import { DeterministicExecutor } from "../../src/runtime/deterministic-executor";
+import type { JsonObject } from "../../src/shared/json";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -271,7 +272,7 @@ describe("LeadExecutionService", () => {
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
     // 第一个 Execution 停在决策门上，未达终态。
     await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
-    expect(executions.attention(execution.executionId)).toEqual({workerRequests:0,scriptGates:1});
+    expect(executions.attention(execution.executionId)).toEqual({workerRequests:0,scriptGates:1,finalizationError:null});
     const unrelated=await lead.create(root);
     await expect(executions.answerGate(unrelated.leadRunId,execution.executionId,"confirm",{ok:true})).rejects.toThrow("未知");
     await expect(executions.stop(unrelated.leadRunId,execution.executionId)).rejects.toThrow("不属于");
@@ -300,6 +301,35 @@ describe("LeadExecutionService", () => {
     expect(results.filter((item) => item.status === "rejected")).toHaveLength(1);
     expect(await executions.listExecutions(leadRunId)).toHaveLength(1);
     expect(await readdir(join(root, leadRunId, "executions"))).toHaveLength(1);
+  });
+
+  test("stop 抢占悬挂的 recover 并保持 cancelled，不再返回 409", async () => {
+    const { lead, leadRunId, root } = await fixture();
+    let rejectExecute!: (error: Error) => void;
+    let recoverStarted!: () => void;
+    const started = new Promise<void>(resolve => { recoverStarted = resolve; });
+    const executions = new LeadExecutionService(lead, () => ({ executor: {
+      execute: async () => new Promise<JsonObject>((_, reject) => { rejectExecute = reject; }),
+      pause: async () => {},
+      recover: async (_node, signal) => {
+        recoverStarted();
+        await new Promise<void>((_, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("恢复已取消")));
+        });
+        return {};
+      },
+      stop: async () => { rejectExecute(new Error("已停止")); },
+    } }), {}, root);
+    await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+    await lead.acceptWorkflowRevision(leadRunId, 1);
+    const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents[0]?.status === "running");
+    await executions.pause(leadRunId, execution.executionId);
+    const recovering = executions.recover(leadRunId, execution.executionId).catch(error => error);
+    await started;
+    const stopped = await executions.stop(leadRunId, execution.executionId);
+    expect(stopped.status).toBe("cancelled");
+    expect(await recovering).toBeInstanceOf(Error);
   });
 
   test("stop 是终态并拒绝 pending 决策门；离线 Execution 不可控制", async () => {
@@ -332,6 +362,52 @@ describe("LeadExecutionService", () => {
     expect(reopened.snapshot.executions[0]).toMatchObject({ status: "cancelled" });
   });
 
+  test("终态登记失败保留实例并退避重试，成功后才释放且不重复执行 Worker", async () => {
+    const { lead, leadRunId, root } = await fixture();
+    let workers = 0;
+    const executions = new LeadExecutionService(lead, () => ({ executor: { execute: async () => { workers += 1; return { ok: true }; } } }), {}, root);
+    const original = lead.recordExecutionFinished.bind(lead);
+    let registrations = 0;
+    lead.recordExecutionFinished = async (...args) => {
+      registrations += 1;
+      if (registrations === 1) throw new Error("登记失败（注入）");
+      return original(...args);
+    };
+    await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+    await lead.acceptWorkflowRevision(leadRunId, 1);
+    const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
+    await waitFor(() => registrations >= 1);
+    expect(executions.isControllable(execution.executionId)).toBe(true);
+    expect(workers).toBe(1);
+    await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
+    expect(registrations).toBeGreaterThanOrEqual(2);
+    expect(workers).toBe(1);
+    expect(executions.isControllable(execution.executionId)).toBe(false);
+    const journal = await LeadJournal.open(leadRunId, root);
+    expect(journal.events.filter(event => event.type === "workflow.execution_finished" && event.executionId === execution.executionId)).toHaveLength(1);
+  });
+
+  test("永久登记失败有界重试并展示错误，不无限悬挂或重复执行 Worker", async () => {
+    const { lead, leadRunId, root } = await fixture();
+    let workers = 0;
+    const executions = new LeadExecutionService(lead, () => ({ executor: { execute: async () => { workers += 1; return { ok: true }; } } }), {}, root);
+    const original = lead.recordExecutionFinished.bind(lead);
+    let registrations = 0;
+    lead.recordExecutionFinished = async (...args) => { registrations += 1; throw new Error("永久登记失败（注入）"); };
+    await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+    await lead.acceptWorkflowRevision(leadRunId, 1);
+    const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
+    await waitFor(() => executions.attention(execution.executionId).finalizationError !== null);
+    expect(registrations).toBe(3);
+    expect(workers).toBe(1);
+    expect(executions.isControllable(execution.executionId)).toBe(false);
+    expect(executions.attention(execution.executionId).finalizationError).toContain("永久登记失败");
+    expect((await executions.listExecutions(leadRunId))[0].status).toBe("running");
+    await Bun.sleep(60);
+    expect(registrations).toBe(3);
+    void original;
+  });
+
   test("recordExecutionFinished 对已终态 Execution 幂等，不产生重复事实", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
     await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
@@ -344,6 +420,45 @@ describe("LeadExecutionService", () => {
     expect(finished).toHaveLength(1);
     expect(finished[0]).toMatchObject({ status: "completed" });
     expect(reopened.snapshot.executions[0]).toMatchObject({ status: "completed" });
+  });
+
+  test("活跃 Execution 支持表单重开与节点恢复路由，重复动作不误用其他目标结果", async () => {
+    const { lead, leadRunId, root } = await fixture();
+    let control!: import("../../src/control/control-server").ControlServer;
+    let releaseRecover!: () => void;
+    let recoverStarted!: () => void;
+    const recoverGate = new Promise<void>(resolve => { releaseRecover = resolve; });
+    const recovering = new Promise<void>(resolve => { recoverStarted = resolve; });
+    const capability = "capability-1";
+    const executions = new LeadExecutionService(lead, () => ({ executor: {
+      execute: node => new Promise((resolve, reject) => {
+        control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability, onCompleted: resolve });
+        void (async () => {
+          await control.recordSession({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, delivery: "acp", acp: { launcherId: "test", sessionId: "native", capabilities: {} } });
+          await control.block({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability, blockRequestId: crypto.randomUUID(), needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } });
+        })().catch(reject);
+      }),
+      pause: async () => {},
+      recover: async () => { recoverStarted(); await recoverGate; return {}; },
+      stop: async () => {},
+    } }), { wireControl: runtime => { control = runtime.createControlServer(); } }, root);
+    await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+    await lead.acceptWorkflowRevision(leadRunId, 1);
+    const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents[0]?.block?.delivery === "pending");
+    const blockRequestId = (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]!.agents[0]!.block!.blockRequestId;
+    await control.closeBlock(blockRequestId);
+    const first = executions.reopenBlock(execution.executionId, blockRequestId);
+    await recovering;
+    const duplicate = executions.reopenBlock(execution.executionId, blockRequestId);
+    await expect(executions.recoverNode(execution.executionId, "w1")).rejects.toThrow("正在执行");
+    releaseRecover();
+    await Promise.all([first, duplicate]);
+    expect((await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]!.agents[0]!.block?.delivery).toBe("pending");
+    await control.answer({ blockRequestId, answer: { ok: true } });
+    await control.continue({ runId: execution.executionId, nodeId: "w1", agentSessionId: (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]!.agents[0]!.agentSessionId!, capability, blockRequestId });
+    await control.complete({ runId: execution.executionId, nodeId: "w1", agentSessionId: (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]!.agents[0]!.agentSessionId!, capability, summary: "done", result: { ok: true } });
+    await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
   });
 
   test("blocked Worker 的 Execution 在退出时收敛为 cancelled 且可显式 resume", async () => {
@@ -540,7 +655,7 @@ describe("LeadExecutionService", () => {
           const runId = runtimeRef!.snapshot().id;
           control!.register({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: "cap-1" });
           await control!.recordSession({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
-          void control!.block({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, () => null);
+          void control!.block({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } }).then(() => null, () => null);
           return new Promise<never>(() => {});
         },
       },

@@ -43,11 +43,12 @@ function Identicon({ seed }: { seed: string }) {
   );
 }
 
-/** Worker block 答题：单行 JSON 对象输入，提交载荷与既有裸 JSON 行为一致。 */
+/** Worker block 答题：只渲染统一扁平 Schema，不提供裸 JSON 入口。 */
 function BlockAnswerForm({
   blockRequestId,
   busy,
   onAnswer,
+  onDefer,
   schema,
 }: {
   /** 阻塞请求 id；答案只唤醒原命令。 */
@@ -56,38 +57,15 @@ function BlockAnswerForm({
   busy: boolean;
   /** 交付回调（api.answer）。 */
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  /** 暂不回答：只收起表单，不写答案或改变节点状态。 */
+  onDefer: () => void;
   /** 原Worker答案Schema，不从自然语言猜测。 */
-  schema?:Record<string,unknown>;
+  schema: Record<string,unknown>;
 }) {
-  const [text, setText] = useState("{}");
-  const [error, setError] = useState<string | null>(null);
-  if(schema)return <SchemaForm schema={schema} busy={busy} submitLabel="交付答案" onSubmit={answer=>onAnswer(blockRequestId,answer)} />;
-  async function submit() {
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object")
-        throw new Error("答案必须是 JSON 对象。 ");
-      setError(null);
-      await onAnswer(blockRequestId, parsed as Record<string, unknown>);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-  return (
-    <div className="wf-block-answer">
-      <input
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        spellCheck={false}
-        placeholder='{"key": "value"}'
-        aria-label="答案 JSON"
-      />
-      <button disabled={busy} onClick={() => void submit()}>
-        {busy ? "正在交付…" : "交付答案"}
-      </button>
-      {error && <span className="answer-error">{error}</span>}
-    </div>
-  );
+  return <div className="wf-block-answer">
+    <SchemaForm schema={schema} busy={busy} submitLabel="继续" draftKey={`block:${blockRequestId}`} onSubmit={answer=>onAnswer(blockRequestId,answer)} />
+    <button type="button" className="button-secondary" disabled={busy} onClick={onDefer}>暂不</button>
+  </div>;
 }
 
 /** 截断超长 JSON 文本，避免结构化结果撑爆面板。 */
@@ -118,9 +96,22 @@ function AgentRow({
   onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
 }) {
   const viewKey=`${runId}:${executionAttemptId}:${phaseVisitId??"reused"}:${agent.id}`;
-  const [open, setOpen] = useState(()=>agentExpansion.get(viewKey)??false);
+  const [open, setOpen] = useState(()=>agentExpansion.get(viewKey)??(agent.block?.delivery === "pending"));
+  const [deferred, setDeferred] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const answerAllowed=useContext(AnswerAllowed);
   const paused = ["pausing", "paused", "recovering"].includes(agent.status);
+  const recoveryPaused = paused && agent.pauseCause === "recovery";
+  const displayStatus = recoveryPaused || agent.block?.delivery === "closed" ? "待恢复" : agent.block ? "待回答" : statusLabel(agent.status);
+  async function retryRecovery() {
+    setRecoveryBusy(true); setRecoveryError(null);
+    try {
+      if (agent.block?.delivery === "closed") await api.reopenBlock(agent.block.blockRequestId);
+      else await api.recoverNode(runId, agent.id);
+    } catch (error) { setRecoveryError(error instanceof Error ? error.message : String(error)); }
+    finally { setRecoveryBusy(false); }
+  }
   return (
     <div className={`wf-agent-row ${agent.status}`}>
       <button
@@ -134,7 +125,7 @@ function AgentRow({
         <span className="wf-agent-cli">
           {cliDisplayName(agent.cli)}
         </span>
-        <em className={`wf-agent-status ${agent.status}`}>{statusLabel(agent.status)}</em>
+        <em className={`wf-agent-status ${agent.status}`}>{displayStatus}</em>
       </button>
       {/* 停滞提示只补充可见性：不改变状态徽标、不进入错误态，也不阻断答题。 */}
       {agent.hint && (
@@ -160,16 +151,24 @@ function AgentRow({
             <div className="wf-agent-line">
               <span>需要你的输入</span>
               <p>{agent.block.needHelp}</p>
-              {!answerAllowed ? <p className="wf-agent-note">历史记录只读，不能交付答案。</p> : paused ? (
-                <p className="wf-agent-note">暂停中。恢复后才能交付答案。</p>
+              {!answerAllowed ? <p className="wf-agent-note">历史记录只读。</p> : recoveryPaused || agent.block.delivery === "closed" ? (
+                <div className="wf-block-recovery">
+                  <button type="button" disabled={recoveryBusy} onClick={() => void retryRecovery()}>{recoveryBusy ? "恢复中…" : "重试"}</button>
+                  {recoveryError && <p className="answer-error" role="alert">{recoveryError}</p>}
+                </div>
+              ) : paused ? (
+                <p className="wf-agent-note">已暂停</p>
               ) : agent.block.answered ? (
-                <p className="wf-agent-note">答案已提交，等待继续。</p>
+                <p className="wf-agent-note">已提交</p>
+              ) : deferred ? (
+                <button type="button" className="button-secondary" onClick={() => setDeferred(false)}>重新打开</button>
               ) : (
                 <BlockAnswerForm
                   blockRequestId={agent.block.blockRequestId}
-                  schema={agent.block.answerSchema}
+                  schema={agent.block.answerSchema!}
                   busy={busy === `answer:${agent.block.blockRequestId}`}
                   onAnswer={onAnswer}
+                  onDefer={() => setDeferred(true)}
                 />
               )}
             </div>

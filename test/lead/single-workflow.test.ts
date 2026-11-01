@@ -10,7 +10,7 @@ import { listWorkflowTemplates } from "../../src/lead/workflow-templates";
 const directories:string[]=[];
 afterEach(async()=>{await Promise.all(directories.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
 const source=`import { phase } from "wave-flow";\nexport const meta={name:"single",description:"检查",phases:[{title:"检查"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args:unknown){phase("检查");return {};}`;
-async function idle(service:LeadService,id:string){for(let n=0;n<100;n++){if((await service.snapshot(id)).status!=="running")return;await Bun.sleep(5);}throw Error("回合未结束");}
+async function idle(service:LeadService,id:string){for(let n=0;n<100;n++){if((await service.snapshot(id)).status==="idle"){await new Promise(resolve=>setImmediate(resolve));return;}await Bun.sleep(5);}throw Error("回合未结束");}
 test("验收Task冻结单链身份，执行后仍同卡修订，放弃不删除旧版",async()=>{
  const root=await mkdtemp(join(tmpdir(),"wave-flow-single-"));directories.push(root);
  let proposed=0;

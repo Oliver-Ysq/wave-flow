@@ -3,7 +3,7 @@ import { CLI_KINDS } from "../../src-tauri/web/src/cli-meta";
 
 describe("设置页技能库与 CLI 入口", () => {
   test("暂时下线的 CLI 不进入前端可选种类，但保留展示元信息", async () => {
-    expect(CLI_KINDS).toEqual(["codex", "claude", "dsh"]);
+    expect(CLI_KINDS).toEqual(["codex", "claude"]);
     const meta = await Bun.file("src-tauri/web/src/cli-meta.ts").text();
     expect(meta).toContain('kimi: { displayName: "Kimi CLI", icon: "K" }');
   });

@@ -40,7 +40,11 @@ export type AgentSnapshot = {
     answered:boolean;
     /** 原答案Schema；缺省时使用JSON对象输入。 */
     answerSchema?:Record<string,unknown>;
+    /** 表单交付状态；closed 表示可重开原请求。 */
+    delivery?:"pending"|"answered"|"closed"|"delivered";
   } | null;
+  /** 暂停原因；recovery 表示节点级协议恢复等待。 */
+  pauseCause?:"user"|"recovery"|null;
   /** 生效请求摘要；assignedRuntimeId 仅在受限 Execution 中由分配快照注入。 */
   request?: { assignedRuntimeId?: string; model?: string };
 };
@@ -291,7 +295,7 @@ export type LeadSnapshot = {
   /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，缺省表示尚无会话或尚未收到。 */
   availableCommands?: LeadAvailableCommand[];
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
-  executionAttention?: Record<string,{workerRequests:number;scriptGates:number}>;
+  executionAttention?: Record<string,{workerRequests:number;scriptGates:number;finalizationError:string|null}>;
   task?: {
     /** 人工名称已耐久保存；缺省无人工覆盖，自动命名不得覆盖manual。 */
     titleSource?: "manual";

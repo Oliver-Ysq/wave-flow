@@ -1134,12 +1134,26 @@ ${evidence.text}`, false, undefined, key);
 
   /** 放弃尚未执行候选，保留所有版本与批准证据。 */
   async abandonWorkflowCard(id: string, cardId: string): Promise<LeadSnapshot> {
-    return this.mutate(id, async () => {
-      const entry = await this.entry(id), snapshot = entry.projection.snapshot();
-      if (snapshot.status !== "idle" || entry.turn || candidateRevision(snapshot)?.cardId !== cardId) throw new Error("只能在主控空闲时放弃当前未执行候选。");
-      const event = { type: "workflow.card_abandoned" as const, at: new Date().toISOString(), leadRunId: id, cardId };
-      await entry.journal.append(event); entry.projection.apply(event); return entry.projection.snapshot();
-    });
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const before = await this.entry(id);
+      if (before.projection.snapshot().status === "idle" && !before.turn) {
+        try {
+          return await this.mutate(id, async () => {
+            const entry = await this.entry(id), snapshot = entry.projection.snapshot();
+            if (snapshot.status !== "idle" || entry.turn || candidateRevision(snapshot)?.cardId !== cardId) throw new Error("只能在主控空闲时放弃当前未执行候选。");
+            const event = { type: "workflow.card_abandoned" as const, at: new Date().toISOString(), leadRunId: id, cardId };
+            await entry.journal.append(event); entry.projection.apply(event); return entry.projection.snapshot();
+          });
+        } catch (error) {
+          // 总结回合可能在排队期间插入；只重试这种忙碌竞态，其他错误保持原样。
+          if (!(error instanceof Error) || !error.message.includes("只能在主控空闲时放弃")) throw error;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error("只能在主控空闲时放弃当前未执行候选。");
+      if (before.turn) await Promise.race([before.turn.catch(() => undefined), Bun.sleep(10)]);
+      else await Bun.sleep(1);
+    }
   }
 
   /** 准备版本前耐久绑定最终确认；同UUID不同载荷拒绝，不创建或投递Worker。 */

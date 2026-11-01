@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ViewCache } from "../workbench-state";
 import {
   coerceValue,
   initialValueFor,
@@ -6,6 +7,9 @@ import {
   validateAnswer,
   type SchemaFieldError,
 } from "./schema-support";
+
+/** 按请求身份隔离最近草稿；折叠、SSE 重连与页面切换不清空用户输入，提交成功后删除。 */
+const answerDrafts = new ViewCache<Record<string, unknown>>(256);
 
 /** 单个字段的受控渲染；path 为点分路径，用于错误定位与嵌套取值。 */
 function SchemaField({
@@ -151,6 +155,7 @@ export function SchemaForm({
   busy,
   submitLabel = "提交",
   onSubmit,
+  draftKey,
 }: {
   /** 决策/决策门的 answerSchema（已在调用前确认存在）。 */
   schema: Record<string, unknown>;
@@ -160,21 +165,25 @@ export function SchemaForm({
   submitLabel?: string;
   /** 校验通过后的提交回调；抛错时错误展示在表单底部。 */
   onSubmit: (value: Record<string, unknown>) => Promise<void>;
+  /** 草稿所属的唯一次请求；缺省仅用于兼容独立表单，不能用于并行 Worker。 */
+  draftKey?: string;
 }) {
-  const schemaIdentity=JSON.stringify(schema);
+  const schemaIdentity=draftKey ?? JSON.stringify(schema);
   const support = isSupportedSchema(schema);
   const [value, setValue] = useState<Record<string, unknown>>(() =>
     support.supported && schema.type === "object"
-      ? (initialValueFor(schema) as Record<string, unknown>)
+      ? answerDrafts.get(schemaIdentity) ?? (initialValueFor(schema) as Record<string, unknown>)
       : {},
   );
   const [fieldErrors, setFieldErrors] = useState<SchemaFieldError[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
   useEffect(()=>{
     const next=isSupportedSchema(schema);
-    setValue(next.supported&&schema.type==="object"?(initialValueFor(schema) as Record<string,unknown>):{});
+    const initial = next.supported && schema.type === "object" ? answerDrafts.get(schemaIdentity) ?? initialValueFor(schema) : {};
+    setValue(initial as Record<string, unknown>);
     setFieldErrors([]);setSubmitError(null);
   },[schemaIdentity]);
+  useEffect(()=>{ answerDrafts.set(schemaIdentity,value); },[schemaIdentity,value]);
 
   if (!support.supported || schema.type !== "object") {
     return (
@@ -200,6 +209,7 @@ export function SchemaForm({
     setFieldErrors([]);
     try {
       await onSubmit(coerced);
+      answerDrafts.delete(schemaIdentity);
     } catch (cause) {
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
     }

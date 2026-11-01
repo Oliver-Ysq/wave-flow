@@ -28,9 +28,8 @@ describe("Engine 技能库状态", () => {
         capabilities: [
           { cli: "codex", injection: "verified" },
           { cli: "claude", injection: "verified" },
-          { cli: "dsh", injection: "verified" },
         ],
-        unavailable: [{ cli: "kimi" }],
+        unavailable: [{ cli: "kimi" }, { cli: "dsh" }],
       });
       await writeSkill(skillsRoot, "alpha");
       const status = await engine.handleDesktopAction("skills.status") as SkillLibraryStatus;

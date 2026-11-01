@@ -170,7 +170,7 @@ export type LeadSnapshot = {
   /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，不进入 Journal。缺省表示尚无会话或尚未收到目录。 */
   readonly availableCommands?: readonly LeadAvailableCommand[];
   /** Engine 当前活跃执行待答计数；只作轻量展示，历史缺省，不包含节点内容或授权。 */
-  readonly executionAttention?: Readonly<Record<string,{readonly workerRequests:number;readonly scriptGates:number}>>;
+  readonly executionAttention?: Readonly<Record<string,{readonly workerRequests:number;readonly scriptGates:number;readonly finalizationError:string|null}>>;
   /** 自动编排元数据；历史 Lead 缺省，不补造卡身份。 */
   readonly task?: import("./task-contract").TaskMetadata;
   /** Lead Run UUID。 */

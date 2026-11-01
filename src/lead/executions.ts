@@ -52,8 +52,10 @@ export type LeadExecutionHooks = {
 export class LeadExecutionService {
   /** 当前 Engine 的唯一活跃执行实例；Runtime 与控制资源共同取得/撤销所有权。 */
   #instances = new Map<string, ExecutionInstance>();
+  /** 终态登记永久失败的可见诊断；不伪造 execution_finished，也不无限后台重试。 */
+  #finalizationErrors = new Map<string, string>();
   /** 同一 Execution 的控制操作单飞；与 Engine runControl 同一纪律。 */
-  #controlRequests = new Map<string, { readonly kind: string; readonly promise: Promise<unknown> }>();
+  #controlRequests = new Map<string, { readonly kind: string; readonly target?: string; readonly promise: Promise<unknown> }>();
   /** 同一 Execution 的 resume 单飞；必须在任一 await 前登记。 */
   #resumeRequests = new Map<string, {readonly owner:string;readonly promise:Promise<RunSnapshot>}>();
 
@@ -383,9 +385,9 @@ export class LeadExecutionService {
   }
 
   /** 活跃实例的轻量待答投影；不读取历史节点结果，不作为控制授权。 */
-  attention(executionId:string): { readonly workerRequests:number; readonly scriptGates:number } {
+  attention(executionId:string): { readonly workerRequests:number; readonly scriptGates:number; readonly finalizationError:string|null } {
     const snapshot=this.#instances.get(executionId)?.runtime.snapshot();
-    return {workerRequests:snapshot?.phases.flatMap(phase=>phase.agents).filter(agent=>agent.status==="blocked").length ?? 0,scriptGates:snapshot?.status==="running" ? snapshot.gates.filter(gate=>gate.answer===null).length : 0};
+    return {workerRequests:snapshot?.phases.flatMap(phase=>phase.agents).filter(agent=>agent.status==="blocked").length ?? 0,scriptGates:snapshot?.status==="running" ? snapshot.gates.filter(gate=>gate.answer===null).length : 0,finalizationError:this.#finalizationErrors.get(executionId)??null};
   }
 
   /** 特定 attempt 的只读证据；新格式显式身份，旧格式按事件顺序绑定，不猜时间。 */
@@ -429,8 +431,32 @@ export class LeadExecutionService {
     });
   }
 
-  /** 用户停止是终态；pending 决策门随 Workflow 调用栈一起被拒绝。 */
+  /** 单节点协议恢复；与整 Execution 或其他节点的恢复互斥，同目标重复请求共享结果。 */
+  async recoverNode(executionId: string, nodeId: string): Promise<RunSnapshot> {
+    const runtime = this.#instances.get(executionId)?.runtime;
+    const leadRunId = runtime?.journal.manifest.lead?.leadRunId;
+    if (!runtime || !leadRunId) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
+    return this.control(leadRunId, executionId, "recover", current => current.recoverNodeForRecovery(nodeId), nodeId);
+  }
+
+  /** 用户显式重开关闭的 Worker 表单；不得由 Worker 重接触发。 */
+  async reopenBlock(executionId: string, blockRequestId: string): Promise<RunSnapshot> {
+    const runtime = this.#instances.get(executionId)?.runtime;
+    const leadRunId = runtime?.journal.manifest.lead?.leadRunId;
+    if (!runtime || !leadRunId) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
+    return this.control(leadRunId, executionId, "recover", current => current.reopenBlock(blockRequestId), `block:${blockRequestId}`);
+  }
+
+  /** 用户停止是终态；先抢占悬挂的 pause/recover，再拒绝 pending 决策门。 */
   async stop(leadRunId: string, executionId: string): Promise<RunSnapshot> {
+    const active = this.#controlRequests.get(executionId);
+    if (active && active.kind !== "stop") {
+      const runtime = this.#instances.get(executionId)?.runtime;
+      if (!runtime) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
+      runtime.requestStop();
+      await active.promise.catch(() => undefined);
+      this.#controlRequests.delete(executionId);
+    }
     return this.control(leadRunId, executionId, "stop", (runtime) => runtime.stop());
   }
 
@@ -588,12 +614,12 @@ export class LeadExecutionService {
     return RunRuntime.open(executionId, new DeterministicExecutor(), await this.storeFor(leadRunId,executionId));
   }
 
-  private async control(leadRunId: string, executionId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunSnapshot>): Promise<RunSnapshot> {
+  private async control(leadRunId: string, executionId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunSnapshot>, target?: string): Promise<RunSnapshot> {
     const owner=await this.lead.snapshot(leadRunId);
     if(owner.status==="completed"||!owner.executions.some(execution=>execution.executionId===executionId))throw new Error("Execution 不属于当前可控制任务。");
     const active = this.#controlRequests.get(executionId);
     if (active) {
-      if (active.kind === kind) return active.promise as Promise<RunSnapshot>;
+      if (active.kind === kind && active.target === target) return active.promise as Promise<RunSnapshot>;
       throw new Error(`该 Execution 正在执行 ${active.kind}，不能同时执行 ${kind}。`);
     }
     const task = (async () => {
@@ -602,7 +628,7 @@ export class LeadExecutionService {
       if (!runtime) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
       return operation(runtime);
     })().finally(() => this.#controlRequests.delete(executionId));
-    this.#controlRequests.set(executionId, { kind, promise: task });
+    this.#controlRequests.set(executionId, { kind, target, promise: task });
     const snapshot = await task;
     await this.lead.notifyExecutionChanged(leadRunId, executionId);
     return snapshot;
@@ -611,6 +637,7 @@ export class LeadExecutionService {
   /** 后台执行模块 Workflow；结束后登记终态事实并做展示通知。 */
   private startExecution(leadRunId: string, executionId: string, runtime: RunRuntime, module: Awaited<ReturnType<typeof loadWorkflowSource>>, policy: WorkflowExecutionRecord["policy"], releaseControl: void | (() => void), local = false): void {
     const instance: ExecutionInstance = { runtime, releaseControl };
+    this.#finalizationErrors.delete(executionId);
     this.#instances.set(executionId, instance);
     // run() 的返回值需要进入 summary，经闭包传递；整个 Execution 只调用一次 run()。
     let runtimeResult: unknown = null;
@@ -620,35 +647,50 @@ export class LeadExecutionService {
     void this.lead.lifecycle.outside(()=>runtime.run(module, local ? {} : { policy }))
       .then((result) => { runtimeResult = result; }, (error: unknown) => { runtimeError = error instanceof Error ? error : new Error(String(error)); })
       .then(async () => {
-        // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。
-        // 等待快照收敛到终态再登记，避免把"停止中"误记为 interrupted。
-        const deadline = Date.now() + 10_000;
-        let snapshot = runtime.snapshot();
-        while (snapshot.status !== "completed" && snapshot.status !== "cancelled" && snapshot.status !== "interrupted") {
-          if (Date.now() > deadline) break;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          snapshot = runtime.snapshot();
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。
+            // 等待快照收敛到终态再登记，避免把"停止中"误记为 interrupted。
+            const deadline = Date.now() + 10_000;
+            let snapshot = runtime.snapshot();
+            while (snapshot.status !== "completed" && snapshot.status !== "cancelled" && snapshot.status !== "interrupted") {
+              if (Date.now() > deadline) break;
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              snapshot = runtime.snapshot();
+            }
+            const terminal = snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "interrupted" ? snapshot.status : "interrupted";
+            // run() 返回值只在 completed 时有意义；非对象结果不进入摘要。
+            const summary = terminal === "completed" && isJsonObject(runtimeResult) ? runtimeResult : null;
+            // interrupted 优先采用本次 run() 的真实 rejection；snapshot.diagnostic 可能是
+            // 旧 attempt 遗留的终态诊断（例如 resume 重放在首个节点前被拒，快照从未更新）。
+            // cancelled 的诊断以快照为准（"用户停止"/"退出 Wave Flow" 语义由控制路径耐久）。
+            const diagnostic = terminal === "completed" ? null
+              : terminal === "interrupted" && runtimeError ? runtimeError.message
+              : snapshot.diagnostic;
+            // 终态发布与 resume 共用 Lead 事务锁：身份校验和 append 之间不能换代。
+            await this.withLifecycleLock(leadRunId, async () => {
+              if (this.#instances.get(executionId) !== instance) return;
+              await this.lead.recordExecutionFinished(leadRunId, executionId, terminal, diagnostic, summary,snapshot.currentExecutionAttemptId);
+              // 只有耐久登记成功才释放实例；失败时保留原终态并退避重试，绝不重跑 Worker。
+              this.retireInstance(executionId, instance);
+            });
+            this.#finalizationErrors.delete(executionId);
+            return;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (attempt === 2) {
+              this.#finalizationErrors.set(executionId, `终态登记失败：${message}`);
+              this.retireInstance(executionId, instance);
+              await this.lead.notifyExecutionChanged(leadRunId, executionId).catch(() => undefined);
+              return;
+            }
+            // 失败期间仍按 running 通知，避免界面把未登记终态误报为已完成。
+            await this.lead.notifyExecutionChanged(leadRunId, executionId).catch(() => undefined);
+            await new Promise((resolve) => setTimeout(resolve, Math.min(25 * 2 ** Math.min(attempt, 10), 30_000)));
+          }
         }
-        const terminal = snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "interrupted" ? snapshot.status : "interrupted";
-        // run() 返回值只在 completed 时有意义；非对象结果不进入摘要。
-        const summary = terminal === "completed" && isJsonObject(runtimeResult) ? runtimeResult : null;
-        // interrupted 优先采用本次 run() 的真实 rejection；snapshot.diagnostic 可能是
-        // 旧 attempt 遗留的终态诊断（例如 resume 重放在首个节点前被拒，快照从未更新）。
-        // cancelled 的诊断以快照为准（"用户停止"/"退出 Wave Flow" 语义由控制路径耐久）。
-        const diagnostic = terminal === "completed" ? null
-          : terminal === "interrupted" && runtimeError ? runtimeError.message
-          : snapshot.diagnostic;
-        // 终态发布与 resume 共用 Lead 事务锁：身份校验和 append 之间不能换代。
-        await this.withLifecycleLock(leadRunId, async () => {
-          if (this.#instances.get(executionId) !== instance) return;
-          await this.lead.recordExecutionFinished(leadRunId, executionId, terminal, diagnostic, summary,snapshot.currentExecutionAttemptId);
-          this.retireInstance(executionId, instance);
-        });
       })
-      .catch(() => undefined)
-      .finally(() => {
-        this.retireInstance(executionId, instance);
-      });
+      .catch(() => undefined);
   }
 
   /** 只退役仍归本实例所有的资源；迟到任务不能按稳定业务 id 删除新实例。 */

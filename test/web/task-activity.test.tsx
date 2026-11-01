@@ -98,6 +98,13 @@ test("已结束执行的残留问题不提醒，活跃执行的问题仍提醒",
   expect(hasActiveExecutionQuestions({...snapshot,executionAttention:{}})).toBe(false);
 });
 
+test("终态登记失败在活动区可见，不显示为正常执行中",()=>{
+ const snapshot={...task,executions:[{...execution,status:"running",finishedAt:null}],executionAttention:{A:{workerRequests:0,scriptGates:0,finalizationError:"终态登记失败"}}} as LeadSnapshot;
+ const html=renderToStaticMarkup(<TaskActivity task={snapshot} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
+ expect(html).toContain("登记失败");
+ expect(html).not.toContain("执行中");
+});
+
 test("总结提醒尊重后台未完成门禁，不隐藏旧义务，但归档不再提示操作",()=>{
   const snapshot={...task,impactSummaries:[{key:"old",attempt:1,status:"interrupted",executionId:"A"},{key:"obsolete",status:"interrupted",supersededBy:"new"},{key:"new",status:"completed"}]} as LeadSnapshot;
   expect(interruptedSummaryObligations(snapshot).map(item=>item.key)).toEqual(["old"]);

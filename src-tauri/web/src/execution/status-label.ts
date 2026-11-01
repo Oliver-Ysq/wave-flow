@@ -1,7 +1,7 @@
 const STATUS_LABELS: Readonly<Record<string, string>> = {
   queued: "排队中",
   running: "工作中",
-  blocked: "需要协助",
+  blocked: "待回答",
   pausing: "暂停中",
   paused: "已暂停",
   recovering: "恢复中",

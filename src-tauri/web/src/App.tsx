@@ -3009,14 +3009,13 @@ function RuntimeConnectionPanel({
               ) : (
                 <>
                   <strong>还没有可用的本地执行工具</strong>
-                  <p>Wave Flow 需要本机已登录的 Codex、Claude Code 或 DeepSeek Harness 之一。任务和代码不会被上传。</p>
+                  <p>Wave Flow 需要本机已登录的 Codex 或 Claude Code 之一。任务和代码不会被上传。</p>
                   <details className="runtime-setup-guide">
                     <summary>如何安装并登录？</summary>
                     <p>任选一个工具，在终端安装并完成登录，然后回到这里重新检查。</p>
                     <ul>
                       <li><strong>Codex CLI</strong>：<code>npm install -g @openai/codex</code>，再运行 <code>codex login</code></li>
                       <li><strong>Claude Code</strong>：<code>npm install -g @anthropic-ai/claude-code</code>，再运行 <code>claude</code> 完成登录</li>
-                      <li><strong>DeepSeek Harness</strong>：按团队安装文档安装并配置 provider，再运行 <code>dsh</code></li>
                     </ul>
                     <p>安装后点“重新检查”，不需要手动填路径。</p>
                   </details>
@@ -3113,16 +3112,9 @@ function RuntimeConnectionPanel({
                     // Kimi 二进制留在“Codex CLI”选项上直到验证才失败。
                     const base = value.trim().split("/").pop()?.toLowerCase() ?? "";
                     if (base.includes("claude")) setManualCli("claude");
-                    else if (base.includes("dsh")) setManualCli("dsh");
                     else if (base.includes("codex")) setManualCli("codex");
                   }}
-                  placeholder={
-                    manualCli === "claude"
-                      ? "/Users/you/.npm-global/bin/claude"
-                      : manualCli === "dsh"
-                        ? "/Users/you/.npm-global/bin/dsh"
-                        : "/Users/you/.local/bin/codex"
-                  }
+                  placeholder={manualCli === "claude" ? "/Users/you/.npm-global/bin/claude" : "/Users/you/.local/bin/codex"}
                   spellCheck={false}
                 />
               </label>
@@ -4146,6 +4138,7 @@ function LeadDecisionCard({
       {decision.answerSchema ? (
         <SchemaForm
           schema={decision.answerSchema}
+          draftKey={`decision:${decision.decisionId}`}
           busy={busy}
           submitLabel="提交决定"
           onSubmit={onAnswer}
@@ -5022,6 +5015,7 @@ function GateCard({
       {gate.answerSchema ? (
         <SchemaForm
           schema={gate.answerSchema}
+          draftKey={`gate:${gate.gateId}`}
           busy={busy}
           submitLabel="提交答案"
           onSubmit={onAnswer}

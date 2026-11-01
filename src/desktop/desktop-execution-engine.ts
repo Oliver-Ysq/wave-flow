@@ -183,7 +183,7 @@ export class DesktopExecutionEngine {
   /** 同一 Run 的并发 resume 只允许一个授权重放事务，防止重复新 attempt。 */
   #resumeRequests = new Map<string, Promise<RunResponse>>();
   /** 同一 Run 的用户控制必须串行；不同动作不能误复用彼此的成功结果。 */
-  #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly promise: Promise<RunResponse> }>();
+  #runControlRequests = new Map<string, { readonly kind: "pause" | "recover" | "stop"; readonly target?: string; readonly promise: Promise<RunResponse> }>();
   /** 明确退出一旦开始，禁止再接受会产生或改变业务状态的新 Desktop action。 */
   #exitRequested = false;
   /** Engine 事件总线的订阅者；engine-main 注册后把事件帧写入私有 JSONL 通道。 */
@@ -470,6 +470,7 @@ export class DesktopExecutionEngine {
     const args = compiled ? ["__worker-mcp"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-mcp"];
     const server = { name: "wave-flow-worker-control", command, args, env: [
         { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+        { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability },
         // 本节点声明了结果 Schema 时一并下发：sidecar 把它内联进完成工具的 inputSchema。
         // 工具定义每次请求都会重发，是唯一不随对话历史被压缩折叠的完成条件载体。
         ...(identity.resultSchema ? [{ name: "WF_WORKER_RESULT_SCHEMA", value: JSON.stringify(identity.resultSchema) }] : []),
@@ -1014,9 +1015,12 @@ export class DesktopExecutionEngine {
       case "runs.phaseVisits": return this.desktopPhaseVisits(value);
       case "runs.pause": return this.pause(requiredString(value, "runId"), {});
       case "runs.recover": return this.recover(requiredString(value, "runId"), {});
+      case "runs.recoverNode": return this.recoverNode(requiredString(value, "runId"), requiredString(value, "nodeId"));
       case "runs.stop": return this.stopRun(requiredString(value, "runId"), {});
       case "runs.resume": return this.resume(requiredString(value, "runId"), { authorized: true });
       case "blocks.answer": return this.desktopAnswerBlock(value);
+      case "blocks.close": return this.desktopCloseBlock(value);
+      case "blocks.reopen": return this.desktopReopenBlock(value);
       case "runtimes.list": return this.listCliRuntimes();
       case "runtimes.discover": return this.discoverCliRuntimes({});
       case "runtimes.scan": return this.scanCliRuntimes({});
@@ -1218,6 +1222,23 @@ export class DesktopExecutionEngine {
     return { ok: true };
   }
 
+  private async desktopCloseBlock(value: unknown): Promise<{ readonly ok: true }> {
+    const blockRequestId = requiredString(value, "blockRequestId");
+    const control = [...this.#controls.values()].find(candidate => candidate.hasBlock(blockRequestId));
+    if (!control) throw new EngineActionError(404, "指定 block 不属于当前 Engine。 ");
+    await control.closeBlock(blockRequestId);
+    return { ok: true };
+  }
+
+  private async desktopReopenBlock(value: unknown): Promise<RunResponse> {
+    const blockRequestId = requiredString(value, "blockRequestId");
+    const control = [...this.#controls.values()].find(candidate => candidate.hasBlock(blockRequestId));
+    if (!control) throw new EngineActionError(404, "指定 block 不属于当前 Engine。 ");
+    const runtime = this.#runs.get(control.runId);
+    if (!runtime) return { runId: control.runId, snapshot: await this.#executions.reopenBlock(control.runId, blockRequestId) };
+    return this.runControl(control.runId, "recover", async current => ({ runId: control.runId, snapshot: await current.reopenBlock(blockRequestId) }), `block:${blockRequestId}`);
+  }
+
   private async createRun(value: unknown): Promise<RunResponse> {
     if (!isCreateRunRequest(value)) throw new EngineActionError(400, "创建 Run 请求无效。");
     const inFlight = this.#createRequests.get(value.clientRequestId);
@@ -1310,7 +1331,7 @@ export class DesktopExecutionEngine {
       this.#controls.delete(runId);
       return { runId, snapshot: runtime.snapshot() };
     }
-    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); });
+    const task = runtime.run(workflow).catch(() => undefined).finally(() => { this.#runTasks.delete(runId); this.#controls.delete(runId); this.#runs.delete(runId); });
     this.#runTasks.set(runId, task);
     await runtime.waitForSafeLaunch();
     return { runId: runtime.snapshot().id, snapshot: runtime.snapshot() };
@@ -1350,6 +1371,12 @@ export class DesktopExecutionEngine {
     });
   }
 
+  /** 单节点协议恢复：只重试目标节点，不暂停其他并行 Worker。 */
+  private async recoverNode(runId: string, nodeId: string): Promise<RunResponse> {
+    if (!this.#runs.has(runId)) return { runId, snapshot: await this.#executions.recoverNode(runId, nodeId) };
+    return this.runControl(runId, "recover", async (runtime) => ({ runId, snapshot: await runtime.recoverNodeForRecovery(nodeId) }), nodeId);
+  }
+
   private async stopRun(runId: string, value: unknown): Promise<RunResponse> {
     if (!isEmptyObject(value)) throw new EngineActionError(400, "stop 不接受请求字段。 ");
     const active = this.#runControlRequests.get(runId);
@@ -1364,11 +1391,11 @@ export class DesktopExecutionEngine {
     return this.runControl(runId, "stop", async (runtime) => ({ runId, snapshot: await runtime.stop() }));
   }
 
-  private async runControl(runId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunResponse>): Promise<RunResponse> {
+  private async runControl(runId: string, kind: "pause" | "recover" | "stop", operation: (runtime: RunRuntime) => Promise<RunResponse>, target?: string): Promise<RunResponse> {
     try { validateRunId(runId); } catch { throw new EngineActionError(400, "RunId 无效。 "); }
     const active = this.#runControlRequests.get(runId);
     if (active) {
-      if (active.kind === kind) return active.promise;
+      if (active.kind === kind && active.target === target) return active.promise;
       throw new EngineActionError(409, `该 Run 正在执行 ${active.kind}，不能同时执行 ${kind}。`);
     }
     const task = (async () => {
@@ -1376,7 +1403,7 @@ export class DesktopExecutionEngine {
       if (!runtime || !this.#runTasks.has(runId)) throw new EngineActionError(409, "该 Run 不在当前 Engine 的可控制生命周期内。 ");
       return operation(runtime);
     })().finally(() => this.#runControlRequests.delete(runId));
-    this.#runControlRequests.set(runId, { kind, promise: task });
+    this.#runControlRequests.set(runId, { kind, target, promise: task });
     return task;
   }
 
@@ -1417,7 +1444,7 @@ export class DesktopExecutionEngine {
       // Workflow 后被“已注册”假状态永久拒绝下一次显式 resume。
       this.#runs.delete(runId);
       this.#controls.delete(runId);
-    }).finally(() => this.#runTasks.delete(runId));
+    }).finally(() => { this.#runTasks.delete(runId); this.#controls.delete(runId); this.#runs.delete(runId); });
     this.#runTasks.set(runId, task);
     await Promise.race([runtime.waitForSafeLaunch(), running]);
     return { runId, snapshot: runtime.snapshot() };

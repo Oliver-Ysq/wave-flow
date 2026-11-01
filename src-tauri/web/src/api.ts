@@ -323,6 +323,9 @@ export const api = {
   },
   answer: (blockRequestId: string, answer: Record<string, unknown>) =>
     action("blocks.answer", { blockRequestId, answer }),
+  closeBlock: (blockRequestId: string) => action("blocks.close", { blockRequestId }),
+  reopenBlock: (blockRequestId: string) => action("blocks.reopen", { blockRequestId }),
+  recoverNode: (runId: string, nodeId: string) => action("runs.recoverNode", { runId, nodeId }),
   projects: () => action<LeadProjectListResponse>("projects.list"),
   createProject: (cwd: string, title?: string) =>
     action<LeadProjectResponse>("projects.create", {
