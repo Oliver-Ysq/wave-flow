@@ -108,21 +108,17 @@ test.skipIf(process.env.WF_REAL_MCP_TIMEOUT_ACCEPTANCE !== "1")("真实CLI客户
   }
 }, 240_000);
 
-/** 仅在临时 Adapter 副本注入 10 秒工具超时，记录真实 Codex 自己的超时响应。 */
-test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex 10秒MCP工具超时关闭Elicitation并可在原会话重开", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-codex-timeout-"))), cwd = join(root, "project");
+/** 真实生产配置：保留 Full Access 沙箱，同时首次表单必须能等待并接受。 */
+test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex FullAccess沙箱下首次Elicitation等待并接受", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-codex-elicit-"))), cwd = join(root, "project");
   await mkdir(cwd);
-  await writeFile(join(root, "workflow.ts"), "codex-timeout-acceptance");
-  const proxy = join(root, "mcp-trace-proxy.ts"), trace = join(root, "mcp-frames.jsonl"), adapter = join(root, "codex-acp-10s.js");
+  await writeFile(join(root, "workflow.ts"), "codex-elicitation-acceptance");
+  const proxy = join(root, "mcp-trace-proxy.ts"), trace = join(root, "mcp-frames.jsonl");
   await writeFile(proxy, timeoutProxySource);
-  const adapterSource = await Bun.file(Bun.resolveSync("@agentclientprotocol/codex-acp", import.meta.dir)).text();
-  const marker = '"env": Object.fromEntries(mcpServer.env.map((env) => [env.name, env.value]))';
-  if (!adapterSource.includes(marker)) throw new Error("Codex Adapter MCP 配置锚点已变化。");
-  await writeFile(adapter, adapterSource.replace(marker, `${marker},\n      "tool_timeout_sec": 10`));
   const registry = new CliRuntimeRegistry(); await registry.resolveWorker("codex");
   const pipes: WorkerControlChannel[] = [];
   let runtime!: RunRuntime;
-  const createControlMcp = (identity: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly capability: string }, scratch?: string) => {
+  const executor = new RuntimeAcpWorkerExecutor(registry, (identity, scratch) => {
     const pipe = new WorkerControlChannel(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
     return {
       name: "wave-flow-worker-control", command: process.execPath,
@@ -130,13 +126,12 @@ test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex 1
       env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }, { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability }, { name: "WF_MCP_TRACE", value: trace }],
       close: () => pipe.close(),
     } as acp.McpServer;
-  };
-  const executor = new RuntimeAcpWorkerExecutor(registry, createControlMcp, (launcher, provenance) => new AcpWorkerExecutor({ ...launcher, args: [adapter] }, undefined, provenance, createControlMcp));
+  }, undefined, null, join(root, "scratch"));
   const workflow: WorkflowModule<JsonObject, unknown> = {
-    meta: { name: "codex-timeout-acceptance", description: "Codex 真实 MCP 工具超时验收", phases: [{ title: "ask" }] },
-    default: async () => { phase("ask"); return agent("不要修改文件或联网。必须调用 wave_flow_block，needHelp 写“请确认继续”，answerSchema 只含必填 boolean 字段 ok。若本次等待被关闭，不要新建 block；宿主会用原请求恢复。收到 answered 后调用 wave_flow_complete，结果返回{ok:true}。", { id: "asker", cli: "codex", sandbox: "read-only", schema: { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false } }); },
+    meta: { name: "codex-elicitation-acceptance", description: "Codex 首次人工表单验收", phases: [{ title: "ask" }] },
+    default: async () => { phase("ask"); return agent("不要修改文件或联网。必须调用 wave_flow_block，needHelp 写“请确认继续”，answerSchema 只含必填 boolean 字段 ok。收到 answered 后调用 wave_flow_complete，结果返回{ok:true}。", { id: "asker", cli: "codex", sandbox: "read-only", schema: { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false } }); },
   };
-  runtime = await RunRuntime.create({ workflow, input: {}, workflowSource: "codex-timeout-acceptance", workflowPath: join(root, "workflow.ts"), workflowProjectCwd: cwd, clientRequestId: crypto.randomUUID(), executor, storeRoot: join(root, "runs") });
+  runtime = await RunRuntime.create({ workflow, input: {}, workflowSource: "codex-elicitation-acceptance", workflowPath: join(root, "workflow.ts"), workflowProjectCwd: cwd, clientRequestId: crypto.randomUUID(), executor, storeRoot: join(root, "runs") });
   const control = runtime.createControlServer(); runtime.createControlServer = () => control; executor.bindControl(control);
   console.log(JSON.stringify({ root, runId: runtime.snapshot().id, trace }));
   const running = runtime.run(workflow);
@@ -148,24 +143,27 @@ test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex 1
       if (predicate()) return;
       await Bun.sleep(50);
     }
-    throw new Error(`真实 Codex 超时验收等待${label}超时。`);
+    throw new Error(`真实 Codex 表单验收等待${label}超时。`);
   };
   try {
-    await waitFor(() => runtime.snapshot().phases[0]?.agents[0]?.block?.delivery === "closed", "Codex 自己关闭表单");
-    const frames = (await Bun.file(trace).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { direction: string; method?: string; action?: string });
-    console.log(JSON.stringify({ timeoutFrames: frames.filter(frame => frame.method === "notifications/cancelled" || frame.action !== undefined) }));
-    expect(frames.some(frame => frame.direction === "client->server" && frame.action === "decline")).toBe(true);
+    await waitFor(() => runtime.snapshot().phases[0]?.agents[0]?.block?.delivery === "pending", "首次表单等待");
     const blocked = runtime.snapshot().phases[0]!.agents[0]!;
     const blockRequestId = blocked.block!.blockRequestId, agentSessionId = blocked.agentSessionId;
-    await runtime.reopenBlock(blockRequestId);
-    await waitFor(() => runtime.snapshot().phases[0]?.agents[0]?.block?.delivery === "pending", "原表单重开");
+    await Bun.sleep(2_000);
+    expect(runtime.snapshot().phases[0]!.agents[0]!.block!.delivery).toBe("pending");
     await control.answer({ blockRequestId, answer: { ok: true } });
     expect(await running).toEqual({ ok: true });
+    const frames = (await Bun.file(trace).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { direction: string; action?: string });
+    console.log(JSON.stringify({ elicitationFrames: frames.filter(frame => frame.action !== undefined) }));
+    expect(frames.some(frame => frame.direction === "client->server" && frame.action === "accept")).toBe(true);
     expect(runtime.snapshot().phases[0]!.agents[0]!.agentSessionId).toBe(agentSessionId);
     const events = (await RunJournal.open(runtime.snapshot().id, join(root, "runs"))).events;
     expect(events.filter(event => event.type === "block.created")).toHaveLength(1);
-    expect(events.filter(event => event.type === "block.closed")).toHaveLength(1);
-    expect(events.filter(event => event.type === "block.reopened")).toHaveLength(1);
+    expect(events.filter(event => event.type === "block.closed")).toHaveLength(0);
+    expect(events.filter(event => event.type === "block.reopened")).toHaveLength(0);
+    expect(events.filter(event => event.type === "block.answered")).toHaveLength(1);
+    expect(events.filter(event => event.type === "agent.continued")).toHaveLength(1);
+    expect(events.filter(event => event.type === "agent.session")).toHaveLength(1);
     expect(events.filter(event => event.type === "agent.restarted")).toHaveLength(0);
   } catch (error) {
     console.error(await Bun.file(trace).text().catch(() => "尚无 MCP 帧"));
@@ -220,7 +218,6 @@ test.skipIf(process.env.WF_REAL_CLAUDE_TIMEOUT_ACCEPTANCE !== "1")("真实Claude
     const frames = (await Bun.file(trace).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { direction: string; method?: string; action?: string; error?: unknown });
     console.log(JSON.stringify({ timeoutFrames: frames.filter(frame => frame.method === "notifications/cancelled" || frame.action !== undefined || frame.error !== undefined) }));
     expect(frames.some(frame => frame.direction === "client->server" && frame.action === "cancel")).toBe(true);
-    expect(frames.some(frame => frame.direction === "client->server" && frame.method === "notifications/cancelled")).toBe(true);
     const blocked = runtime.snapshot().phases[0]!.agents[0]!;
     const blockRequestId = blocked.block!.blockRequestId, agentSessionId = blocked.agentSessionId;
     await runtime.reopenBlock(blockRequestId);

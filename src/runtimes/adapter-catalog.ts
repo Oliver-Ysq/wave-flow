@@ -1,6 +1,6 @@
 import { codexAcpAdapterEntry } from "./codex-acp-entry";
 import { claudeAcpAdapterEntry } from "./claude-acp-entry";
-import { createClaudeWorkerEnvironment, createDshWorkerEnvironment, createKimiWorkerEnvironment, createWorkerEnvironment } from "./worker-environment";
+import { createClaudeWorkerEnvironment, createDshWorkerEnvironment, createKimiWorkerEnvironment, createCodexWorkerEnvironment } from "./worker-environment";
 import type { RuntimeCli, VerifiedCliRuntime } from "./types";
 import { claudeSkillInjection, codexSkillInjection, dshSkillInjection } from "../skills/injection";
 import type { SkillInjectionCapability } from "../skills/types";
@@ -70,7 +70,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     capabilities: { leadTools: true, workerControlMcp: true, elicitationForm: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: true,
     launcher: () => codexAcpAdapterEntry(),
-    environment: (runtime) => createWorkerEnvironment(runtime),
+    environment: (runtime) => createCodexWorkerEnvironment(runtime),
     skills: codexSkillInjection,
   },
   {

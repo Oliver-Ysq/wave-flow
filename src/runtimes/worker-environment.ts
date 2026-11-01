@@ -2,13 +2,16 @@ import type { VerifiedCliRuntime } from "./types";
 import { nodeRuntimeDirectory } from "./node-runtime";
 
 /** 为 Codex ACP Worker 构造最小环境；只允许有限的运行时与用户显式配置需求。 */
-export function createWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+export function createCodexWorkerEnvironment(runtime: VerifiedCliRuntime, inherited: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
   const node = runtime.nodeExecutable;
   if (!node) throw new Error("Codex Worker 缺少已验证的 node 依赖，需要重新验证。 ");
   const result = inheritedWorkerEnvironment(inherited);
   result.PATH = normalizedPath(inherited.PATH, nodeRuntimeDirectory({ executablePath: node.path, executableIdentity: node.identity }));
   result.CODEX_PATH = runtime.executablePath;
-  result.INITIAL_AGENT_MODE = "agent-full-access";
+  // Full Access 的模式类别会立即拒绝非空 Elicitation；agent 保留表单能力，
+  // 沙箱仍显式保持 danger-full-access，不缩小可信 Worker 的文件与网络授权。
+  result.INITIAL_AGENT_MODE = "agent";
+  result.CODEX_CONFIG = JSON.stringify({ sandbox_mode: "danger-full-access" });
   result.NO_BROWSER = "1";
   return result;
 }
