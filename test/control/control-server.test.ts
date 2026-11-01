@@ -57,6 +57,28 @@ describe("ControlServer complete", () => {
     expect(reopened.events.at(-1)).toMatchObject({ type: "agent.completed", diagnostic: "done", validationPath: expect.stringContaining("validation.json") });
   });
 
+  test("恢复 prompt 后的快速 complete 等待 recovered/running 落盘再受理", async () => {
+    const value = await fixture();
+    for (const status of ["pausing", "paused", "recovering"] as const) {
+      const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status, pauseCause: "recovery" };
+      await value.journal.append(event);
+      value.state.apply(event);
+    }
+    const completing = value.control.complete({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, summary: "done", result: { ok: true } });
+    let settled = false;
+    void completing.then(() => { settled = true; }, () => { settled = true; });
+    await Bun.sleep(10);
+    expect(settled).toBe(false);
+    const recovered: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, acp: { launcherId: "codex-acp", sessionId: "control" } };
+    await value.journal.append(recovered);
+    value.state.apply(recovered);
+    const running: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status: "running" };
+    await value.journal.append(running);
+    value.state.apply(running);
+    await completing;
+    expect(value.state.agent("node").status).toBe("completed");
+  });
+
   test("非 Codex 的 Adapter 只能通过统一 CompletionSubmission 走 Control 完成", async () => {
     const value = await fixture({ type: "object", required: ["remoteId"], properties: { remoteId: { type: "string" } } });
     const submission: CompletionSubmission = {
@@ -135,23 +157,24 @@ describe("ControlServer block / answer / continue", () => {
   test("显式非对象answerSchema在任何block事实写入前拒绝", async () => {
     const value = await fixture();
     const before = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.length;
-    await expect(value.control.block({ blockRequestId: crypto.randomUUID(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "请输入数字", answerSchema: { type: "integer", const: 6 } })).rejects.toThrow("根类型必须是 object");
+    await expect(value.control.block({ blockRequestId: crypto.randomUUID(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "请输入数字", answerSchema: { type: "integer", const: 6 } })).rejects.toThrow("根 type 必须是 object");
     expect(value.state.agent("node").status).toBe("running");
     expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events).toHaveLength(before);
   });
   test("答案先耐久落盘并只唤醒原 block；continue 才恢复 running", async () => {
     const value = await fixture({ type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } });
     const blockRequestId = crypto.randomUUID();
-    const waiting = value.control.block({
+    const submission = {
       blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability,
       needHelp: "测试数据库不可连接，请人工处理。", answerSchema: { type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } },
-    });
+    };
+    await value.control.block(submission);
     await waitFor(() => value.state.agent("node").status === "blocked");
     expect(value.state.agent("node")).toMatchObject({ status: "blocked", block: { blockRequestId, answered: false } });
     await expect(value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability })).rejects.toThrow("尚未收到");
     await value.control.answer({ blockRequestId, answer: { resolved: true } });
-    const resolution = await waiting;
-    expect(resolution).toEqual({ blockRequestId, answer: { resolved: true } });
+    const resolution = await value.control.block(submission);
+    expect(resolution).toMatchObject({ blockRequestId, answer: { resolved: true } });
     expect(value.state.agent("node")).toMatchObject({ status: "blocked", block: { blockRequestId, answered: true } });
     const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
     expect(events.map((event) => event.type)).toEqual(expect.arrayContaining(["block.created", "block.answered"]));
@@ -159,7 +182,7 @@ describe("ControlServer block / answer / continue", () => {
     expect(value.state.agent("node")).toMatchObject({ status: "running", block: null });
   });
 
-  test("错误答案、错误会话和重复答案都不能交付或恢复 block", async () => {
+  test("错误答案和错误会话拒绝；同答案幂等、冲突答案拒绝覆盖", async () => {
     const value = await fixture({ type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } });
     const blockRequestId = crypto.randomUUID();
     const waiting = value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助", answerSchema: { type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } } } });
@@ -168,14 +191,15 @@ describe("ControlServer block / answer / continue", () => {
     await expect(value.control.answer({ blockRequestId, answer: {} })).rejects.toThrow("answer-schema");
     await expect(value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: "foreign", capability: value.capability })).rejects.toThrow("不匹配");
     await value.control.answer({ blockRequestId, answer: { resolved: true } });
-    await expect(value.control.answer({ blockRequestId, answer: { resolved: true } })).rejects.toThrow("已有答案");
+    await value.control.answer({ blockRequestId, answer: { resolved: true } });
+    await expect(value.control.answer({ blockRequestId, answer: { resolved: false } })).rejects.toThrow("不同答案");
     await waiting;
   });
 
   test("并发 answer 只允许一个耐久答案事实", async () => {
     const value = await fixture();
     const blockRequestId = crypto.randomUUID();
-    const waiting = value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助" });
+    const waiting = value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } });
     await waitFor(() => value.state.agent("node").status === "blocked");
     const first = value.control.answer({ blockRequestId, answer: { ok: true } });
     await expect(value.control.answer({ blockRequestId, answer: { ok: true } })).rejects.toThrow("拒绝并发 answer");
@@ -187,19 +211,21 @@ describe("ControlServer block / answer / continue", () => {
   test("已 blocked 的原会话不能追加第二个 block 事实", async () => {
     const value = await fixture();
     const firstId = crypto.randomUUID();
-    const waiting = value.control.block({ blockRequestId: firstId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "第一次求助" });
+    const waiting = value.control.block({ blockRequestId: firstId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "第一次求助", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } });
     await waitFor(() => value.state.agent("node").status === "blocked");
-    await expect(value.control.block({ blockRequestId: crypto.randomUUID(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "第二次求助" })).rejects.toThrow("只允许当前 running");
+    await expect(value.control.block({ blockRequestId: crypto.randomUUID(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "第二次求助", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } })).rejects.toThrow("只允许当前 running");
     const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
     expect(events.filter((event) => event.type === "block.created")).toHaveLength(1);
     await value.control.answer({ blockRequestId: firstId, answer: {} });
     await waiting;
   });
 
-  test("会话注销会拒绝原 block 等待者并清理 pending", async () => {
+  test("会话注销会拒绝 Elicitation 等待者并清理 pending", async () => {
     const value = await fixture();
     const blockRequestId = crypto.randomUUID();
-    const waiting = value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助" });
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要帮助", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    const waiting = value.control.waitForBlockAnswer(submission, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema });
     await waitFor(() => value.state.agent("node").status === "blocked");
     value.control.unregister(value.runId, "node", value.agentSessionId);
     await expect(waiting).rejects.toThrow("会话已结束");
@@ -210,36 +236,119 @@ describe("ControlServer block / answer / continue", () => {
     const value = await fixture();
     const blockRequestId = crypto.randomUUID();
     const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要整数 x", answerSchema: { type: "object", properties: { x: { type: "integer" } }, required: ["x"] } };
-    const first = value.control.block(submission);
+    await value.control.block(submission);
     await waitFor(() => value.state.agent("node").status === "blocked");
-    // ACP 客户端放弃长时间未返回的工具调用后，原 Agent 以相同内容重连继续等待。
-    const reconnect = value.control.block(submission);
+    await value.control.block(submission);
     const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
     expect(events.filter((event) => event.type === "block.created")).toHaveLength(1);
     await value.control.answer({ blockRequestId, answer: { x: 7 } });
-    await expect(first).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
-    await expect(reconnect).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
-    // 答案已交付后的重连立即返回同一答案，用于答案与预算到期竞争的边界。
-    await expect(value.control.block(submission)).resolves.toEqual({ blockRequestId, answer: { x: 7 } });
+    await expect(value.control.block(submission)).resolves.toMatchObject({ blockRequestId, answer: { x: 7 } });
+    await expect(value.control.block(submission)).resolves.toMatchObject({ blockRequestId, answer: { x: 7 } });
+    // 答案已交付后的重接立即返回同一答案，用于答案与表单关闭竞争的边界。
+    await expect(value.control.block(submission)).resolves.toMatchObject({ blockRequestId, answer: { x: 7 } });
     expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.filter((event) => event.type === "block.created")).toHaveLength(1);
     await value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
     expect(value.state.agent("node").status).toBe("running");
   });
 
-  test("重连 block 的内容、身份或当前等待关系不一致时拒绝", async () => {
+  test("重接 block 的内容或身份不一致拒绝；continue 后原答案仍可幂等读取", async () => {
     const value = await fixture();
     const blockRequestId = crypto.randomUUID();
-    const base = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要整数 x" };
-    const waiting = value.control.block(base);
+    const base = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要整数 x", answerSchema: { type: "object", properties: { x: { type: "integer" } } } };
+    await value.control.block(base);
     await waitFor(() => value.state.agent("node").status === "blocked");
     await expect(value.control.block({ ...base, needHelp: "换一个问题" })).rejects.toThrow("不一致");
-    await expect(value.control.block({ ...base, answerSchema: { type: "object" } })).rejects.toThrow("不一致");
+    await expect(value.control.block({ ...base, answerSchema: { type: "object", properties: { y: { type: "integer" } } } })).rejects.toThrow("不一致");
     await expect(value.control.block({ ...base, agentSessionId: "foreign" })).rejects.toThrow("不匹配");
-    // 节点 running 时不存在可重连的 block，旧 id 已被 finishContinue 清理后按新 block 处理。
-    await value.control.answer({ blockRequestId, answer: {} });
-    await waiting;
+    await value.control.answer({ blockRequestId, answer: { x: 9 } });
     await value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
-    expect(value.control.hasBlock(blockRequestId)).toBe(false);
+    expect(value.control.hasBlock(blockRequestId)).toBe(true);
+    await expect(value.control.block(base)).resolves.toMatchObject({ blockRequestId, answer: { x: 9 } });
+    await value.control.continue({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability });
+    await expect(value.control.answer({ blockRequestId, answer: { x: 9 } })).resolves.toBeUndefined();
+    await expect(value.control.answer({ blockRequestId, answer: { x: 10 } })).rejects.toThrow("不同答案");
+    const events = await RunJournal.open(value.runId, runsRoot(value.cwd));
+    expect(events.events.filter(event => event.type === "block.created")).toHaveLength(1);
+    expect(events.events.filter(event => event.type === "block.answered")).toHaveLength(1);
+    expect(events.events.filter(event => event.type === "agent.continued")).toHaveLength(1);
+  });
+  test("关闭 elicitation 后 Worker 重接不能撤销关闭或接受迟到答案", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    const controller = new AbortController();
+    const waiting = value.control.waitForBlockAnswer(submission, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema }, controller.signal);
+    controller.abort();
+    expect(await waiting).toEqual({ action: "cancel" });
+    expect(value.state.agent("node").block?.delivery).toBe("closed");
+    await expect(value.control.block(submission)).resolves.toMatchObject({ delivery: "closed", answer: null });
+    expect(value.state.agent("node").block?.delivery).toBe("closed");
+    await expect(value.control.answer({ blockRequestId, answer: { ok: true } })).rejects.toThrow("已关闭");
+    const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
+    expect(events.filter(event => event.type === "block.closed")).toHaveLength(1);
+    expect(events.filter(event => event.type === "block.reopened")).toHaveLength(0);
+    expect(events.filter(event => event.type === "block.created")).toHaveLength(1);
+  });
+
+  test("Worker close-block 复核原会话，跨节点关闭在 Journal 写入前拒绝", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    await expect(value.control.closeBlock(blockRequestId, { ...submission, agentSessionId: "foreign" })).rejects.toThrow("身份不匹配");
+    expect(value.state.agent("node").block?.delivery).toBe("pending");
+    await value.control.closeBlock(blockRequestId, submission);
+    expect(value.state.agent("node").block?.delivery).toBe("closed");
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.closed")).toHaveLength(1);
+  });
+
+  test("暂停/恢复期间答案可耐久，恢复后 continue；暂停关闭立即释放等待者", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    const waiting = value.control.waitForBlockAnswer(submission, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema });
+    for (const status of ["pausing", "paused", "recovering"] as const) {
+      const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status };
+      await value.journal.append(event);
+      value.state.apply(event);
+    }
+    await value.control.answer({ blockRequestId, answer: { ok: true } });
+    expect(await waiting).toEqual({ action: "accept", content: { ok: true } });
+    const recovered: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, acp: { launcherId: "codex-acp", sessionId: "control" } };
+    await value.journal.append(recovered);
+    value.state.apply(recovered);
+    const blocked: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status: "blocked" };
+    await value.journal.append(blocked);
+    value.state.apply(blocked);
+    await value.control.continue(submission);
+    expect(value.state.agent("node").status).toBe("running");
+  });
+
+  test("暂停中 closeBlock 取消等待者但不伪造 closed 事件", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    const waiting = value.control.waitForBlockAnswer(submission, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema });
+    const pausing: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status: "pausing" };
+    await value.journal.append(pausing);
+    value.state.apply(pausing);
+    await value.control.closeBlock(blockRequestId);
+    expect(await waiting).toEqual({ action: "cancel" });
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.closed")).toHaveLength(0);
+  });
+
+  test("关闭先于 Elicitation 注册时立即 cancel，不留下 24 小时等待者", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+    await value.control.block(submission);
+    await value.control.closeBlock(blockRequestId);
+    const waiting = value.control.waitForBlockAnswer(submission, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema });
+    expect(await Promise.race([waiting, Bun.sleep(50).then(() => "timeout")])).toEqual({ action: "cancel" });
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.closed")).toHaveLength(1);
   });
 });
 

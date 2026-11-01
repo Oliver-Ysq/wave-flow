@@ -30,6 +30,8 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #replayPhaseTitle: string | null = null;
   /** 同一 Run 所有耐久事实的互斥尾链：核验、Journal 追加与内存 apply 原子完成。 */
   #mutationTail: Promise<unknown> = Promise.resolve();
+  /** 同一节点的用户暂停与协议恢复暂停共享真实 Executor.pause，避免双取消与状态覆盖。 */
+  #pauseOperations = new Map<string, Promise<void>>();
   /** 等待用户答案的决策门；stop 时必须拒绝，避免 Workflow 永远悬挂。 */
   #gateWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
 
@@ -58,6 +60,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       this.#phaseVisitSequence = Math.max(this.#phaseVisitSequence, visit.phaseVisitId);
       this.#phaseOccurrences.set(visit.title, Math.max(this.#phaseOccurrences.get(visit.title) ?? 0, visit.occurrence));
     }
+    this.executor.bindRecoveryHold?.(async (nodeId) => this.pauseNodeForRecovery(nodeId));
   }
 
   /** 返回当前 Run 的耐久存储、状态机与互斥区，供真实执行器注册 ControlServer；不对 Workflow 作者公开。 */
@@ -86,8 +89,40 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
 
   /** Runtime 的运行控制只经此窄边界调用执行器，不能直接接触 Adapter 内部。 */
   pauseNode(node: import("./run-types").AgentNodeSnapshot, signal: AbortSignal): Promise<void> {
-    if (!this.executor.pause) throw new Error(`节点 ${node.id} 的执行器不支持 pause。`);
-    return this.executor.pause(node, signal);
+    const active = this.#pauseOperations.get(node.id);
+    if (active) return active;
+    const operation = (async () => {
+      if (!this.executor.pause) throw new Error(`节点 ${node.id} 的执行器不支持 pause。`);
+      await this.executor.pause(node, signal);
+    })();
+    const tracked = operation.finally(() => { if (this.#pauseOperations.get(node.id) === tracked) this.#pauseOperations.delete(node.id); });
+    this.#pauseOperations.set(node.id, tracked);
+    return tracked;
+  }
+
+  /** 节点级恢复暂停：只改变目标节点，Run 与其他并行节点继续。 */
+  async pauseNodeForRecovery(nodeId: string): Promise<void> {
+    let starting = false;
+    await this.mutationExclusive(async () => {
+      const current = this.state.agent(nodeId);
+      if (current.status !== "running" && current.status !== "blocked") return;
+      const event = this.event({ type: "agent.status", nodeId, status: "pausing", agentSessionId: current.agentSessionId, diagnostic: "协议自动恢复未完成，保留当前会话等待用户决策。", pauseCause: "recovery" });
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+      starting = true;
+    });
+    // 用户暂停已先到时共享其恢复闸口，不能重复 cancel 或把用户动作改成失败。
+    if (!starting) return;
+    await this.pauseNode(this.state.agent(nodeId), AbortSignal.timeout(15_000));
+    await this.mutationExclusive(async () => {
+      const current = this.state.agent(nodeId);
+      if (current.status !== "pausing") return;
+      const event = this.event({ type: "agent.status", nodeId, status: "paused", agentSessionId: current.agentSessionId, diagnostic: "协议恢复等待：可同会话重试或停止。", pauseCause: "recovery" });
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+    });
   }
 
   /** 在原节点会话中恢复；Executor 必须负责取得新的投递确认。 */
@@ -169,7 +204,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
     let existing: import("./run-types").AgentNodeSnapshot | null = null;
     try { existing = this.state.agent(nodeId); } catch {}
     if (existing) {
-      if (!this.replay || this.state.logicalSequence(nodeId) !== logicalSequence || existing.phase !== (effectiveRequest.phase ?? null) || fingerprint(existing.request) !== fingerprint(effectiveRequest)) throw new WorkflowContractError(`resume 的第 ${logicalSequence} 个 agent() 调用与 Journal 节点不匹配：${nodeId}；旧=${fingerprint(existing.request)}；新=${fingerprint(effectiveRequest)}`);
+      if (!this.replay || this.state.logicalSequence(nodeId) !== logicalSequence || existing.phase !== (effectiveRequest.phase ?? null) || fingerprint(existing.request) !== fingerprint(effectiveRequest)) throw new WorkflowContractError(`resume 的第 ${logicalSequence} 个 agent() 调用与 Journal 节点不匹配：${nodeId}；请求指纹已变化，未输出 prompt/input 原文。`);
       // replay 复用除请求指纹外还要复核 provenance：旧 attempt 实际落过的 Runtime
       // （含启动前回退）与当前分配快照不一致时，旧结果不可复用，从该节点开始新 attempt。
       const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
@@ -254,6 +289,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
           this.state.apply(event);
         });
       } catch { /* Journal 已 fail closed；不吞掉下方的首个失败。 */ }
+      if (this.state.agent(nodeId).status === "interrupted") this.executor.discard?.(node);
       throw error;
     }
   }
@@ -272,6 +308,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       if (node.sandbox === "read-only" || !message.includes("ACP Worker 启动超时") || this.#stopping.has(nodeId) || this.state.hasNodeSession(nodeId, current.agentSessionId)) throw error;
       await this.durableApply(this.event({ type: "log.written", nodeId, agentSessionId: current.agentSessionId, diagnostic: null, message: "本地执行环境正在自动恢复，请稍候…" }));
       try {
+        await this.acquireStartSlot(nodeId);
         return await this.executor.execute(this.state.agent(nodeId));
       } catch (retryError) {
         const after = this.state.agent(nodeId);

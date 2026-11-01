@@ -75,7 +75,7 @@ test.skipIf(process.env.WF_REAL_CONTEXT_ACCEPTANCE !== "1")("真实CLI：广告�
     const pipe = new WorkerControlChannel(host.createControlServer(), identity, undefined, scratch);
     pipes.push(pipe);
     return { name: "wave-flow-worker-control", command: process.execPath, args: [tapEntry, sidecarEntry, envLog, framesLog], env: [
-      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }, { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability },
       ...(identity.resultSchema ? [{ name: "WF_WORKER_RESULT_SCHEMA", value: JSON.stringify(identity.resultSchema) }] : []),
     ], close: () => pipe.close() } as acp.McpServer;
   };
@@ -171,7 +171,7 @@ test.skipIf(process.env.WF_REAL_COMPACTION_ACCEPTANCE !== "1")("真实CLI：压�
     const pipe = new WorkerControlChannel(host.createControlServer(), identity, undefined, scratch);
     pipes.push(pipe);
     return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [
-      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }, { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability },
       ...(identity.resultSchema ? [{ name: "WF_WORKER_RESULT_SCHEMA", value: JSON.stringify(identity.resultSchema) }] : []),
     ], close: () => pipe.close() } as acp.McpServer;
   };
@@ -237,7 +237,7 @@ test.skipIf(process.env.WF_REAL_MULTI_NODE_ACCEPTANCE !== "1")("真实CLI：同�
     // 每个节点一个 sidecar 进程、一份独立日志：据此逐节点核对工具声明。
     const stem = `${identity.nodeId.replace(/[^A-Za-z0-9._-]/g, "_")}-${identity.nodeId.length}`;
     return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../support/mcp-env-tap.ts"), join(import.meta.dir, "../../src/desktop/engine-main.ts"), join(logs, `${stem}.env.json`), join(logs, `${stem}.frames.ndjson`)], env: [
-      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath },
+      { name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }, { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability },
       ...(identity.resultSchema ? [{ name: "WF_WORKER_RESULT_SCHEMA", value: JSON.stringify(identity.resultSchema) }] : []),
     ], close: () => pipe.close() } as acp.McpServer;
   };

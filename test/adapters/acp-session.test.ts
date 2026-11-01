@@ -69,6 +69,38 @@ test("initialize 只在显式要求时广告压缩能力", async () => {
   worker.close();
 });
 
+test("仅注册 handler 的 Worker 广告并处理 Elicitation，Lead 不广告", async () => {
+  const advertised: unknown[] = [];
+  const factory: AcpTransportFactory = async () => {
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const app = acp.agent({ name: "elicitation-acp" })
+      .onRequest(acp.methods.agent.initialize, (context) => { advertised.push(context.params.clientCapabilities); return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }; })
+      .onRequest(acp.methods.agent.session.new, () => ({ sessionId: "s" }))
+      .onRequest(acp.methods.agent.session.prompt, async (context) => {
+        const response = await context.client.request(acp.methods.client.elicitation.create, {
+          sessionId: "s", mode: "form", message: "继续吗？",
+          requestedSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+        });
+        expect(response).toEqual({ action: "accept", content: { ok: true } });
+        return { stopReason: "end_turn" };
+      });
+    const connection = app.connect(acp.ndJsonStream(agentToClient.writable, clientToAgent.readable));
+    return { stream: acp.ndJsonStream(clientToAgent.writable, agentToClient.readable), exited: new Promise<number>(() => {}), close: () => connection.close() };
+  };
+  const lead = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, factory);
+  await lead.initialize(new AbortController().signal);
+  expect(advertised[0]).not.toHaveProperty("elicitation");
+  lead.close();
+  const worker = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, factory);
+  worker.setElicitationResolver(async () => ({ action: "accept", content: { ok: true } }));
+  await worker.initialize(new AbortController().signal);
+  expect(advertised[1]).toMatchObject({ elicitation: { form: {} } });
+  await worker.createSession("/workspace", new AbortController().signal);
+  expect((await worker.prompt("ask", new AbortController().signal)).stopReason).toBe("end_turn");
+  worker.close();
+});
+
 test("携带私有 MCP 的 session/new 会等待 MCP startup 后才返回", async () => {
   const hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown> } = { cancelled: 0, loaded: [] };
   const client = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, fakeTransport([], hooks));

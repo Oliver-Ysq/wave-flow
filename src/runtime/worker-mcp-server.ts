@@ -1,18 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, ErrorCode, McpError, type ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
 import { connectControlSocket } from "./control-socket";
 import type { JsonObject } from "../shared/json";
 
-/**
- * 单次 wave_flow_block 调用的最长等待时间。
- *
- * Codex code-mode（exec JS REPL）在脚本运行约 31 秒后不返回工具结果，而是把脚本
- * 转为后台 cell，是否取回结果完全取决于模型行为——已实证 81 秒答案投递后模型
- * 空转到回合中止。因此 block 必须在远低于该阈值的窗口内返回；未答时返回
- * waiting，由模型携带同一 blockRequestId 重连继续等待。
- */
-export const WORKER_BLOCK_WAIT_BUDGET_MS = 25_000;
+/** 单次人工请求的最长业务等待；超时只关闭本次 Elicitation，可恢复重开。 */
+const WORKER_ELICIT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
  * 为单个受管 Coding Worker 提供的完成协议 MCP sidecar。
@@ -21,12 +15,12 @@ export const WORKER_BLOCK_WAIT_BUDGET_MS = 25_000;
  * 以及可选的本节点 resultSchema。身份与 capability 由 Engine 在 socket 服务端绑定，
  * Control 仍复核节点状态与 Schema；sidecar 不读写 Journal、Runtime、业务工作区或任意 shell。
  */
-export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAIT_BUDGET_MS): Promise<void> {
+export async function runWorkerMcpServer(): Promise<void> {
   const socketPath = required("WF_WORKER_CONTROL_SOCKET");
   // resultSchema 内联进完成工具的 inputSchema：工具定义每次请求都会重发，
   // 因此它是唯一不随对话历史被压缩折叠的完成条件载体。
   const resultSchema = readResultSchema();
-  const control = await connectControlSocket({ socketPath, idPrefix: "worker" });
+  const control = await connectControlSocket({ socketPath, idPrefix: "worker", capability: required("WF_WORKER_CONTROL_CAPABILITY") });
   const server = new Server({ name: "wave-flow-worker-control", version: "1" }, { capabilities: { tools: {} } });
   let closing = false;
   const close = async () => {
@@ -56,8 +50,7 @@ export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAI
   process.stdin.once("end", () => { void close(); });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
     { name: "wave_flow_complete", description: resultSchema ? "完成当前受管节点。传入最终 JSON 对象与简短摘要；result 必须符合本节点 resultSchema（已内联在 inputSchema 的 result 属性中），Control 会再次校验并耐久写入结果。成功后才可以结束 ACP turn。" : "完成当前受管节点。传入最终 JSON 对象与简短摘要；Control 会校验节点 Schema 并耐久写入结果。成功后才可以结束 ACP turn。", inputSchema: { type: "object", required: ["summary", "result"], properties: { summary: { type: "string" }, result: resultSchema ?? { type: "object" } }, additionalProperties: false } },
-    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时阻塞当前节点。answerSchema约束的答案必须是JSON对象，根type只能为object；需要单个数字或字符串时也请放入命名字段。单次调用最多等待约25秒：返回答案时为 { status: \"answered\", blockRequestId, answer }；尚未收到答案时返回 { status: \"waiting\", blockRequestId }，此时必须立即以相同的 blockRequestId、needHelp 与 answerSchema 再次调用本工具继续等待，直到 answered；不要结束回合、不要改参数、不要新建 block。收到答案并确认问题解决后调用 wave_flow_continue。", inputSchema: { type: "object", required: ["needHelp"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object", description: "人类答案的JSON Schema；根type只能为object，答案始终是JSON对象。" }, blockRequestId: { type: "string", description: "重连等待时必传：第一次调用返回的 blockRequestId；首次调用不要传。" } }, additionalProperties: false } },
-    { name: "wave_flow_continue", description: "在 wave_flow_block 已返回答案且你确认可继续后恢复当前节点。", inputSchema: { type: "object", required: ["blockRequestId"], properties: { blockRequestId: { type: "string" } }, additionalProperties: false } },
+    { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时请求人工协助。必须提供扁平 answerSchema：根 type 为 object 且至少一个字段；字段只允许 string/number/integer/boolean 或字符串单选 enum，禁止嵌套、数组多选、动态字段、条件约束和自由正则。answered 表示答案已交付并自动继续；closed 表示表单关闭，宿主可在同一会话恢复，不要新建 block 或改参数。blockRequestId 只用于宿主恢复时重接同一请求，首次调用不要传。", inputSchema: { type: "object", required: ["needHelp", "answerSchema"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object", description: "扁平人类答案 JSON Schema；禁止嵌套、数组多选、动态字段和条件约束。" }, blockRequestId: { type: "string", description: "仅宿主恢复时重接原请求使用；首次调用不要传。" } }, additionalProperties: false } },
   ] }));
   let inFlight = 0;
   server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
@@ -71,20 +64,48 @@ export async function runWorkerMcpServer(waitBudgetMs: number = WORKER_BLOCK_WAI
       return text({ ok: true });
     }
     if (params.name === "wave_flow_block") {
-      if (typeof args.needHelp !== "string" || !args.needHelp.trim() || (args.answerSchema !== undefined && !isObject(args.answerSchema))) throw new Error("wave_flow_block 参数无效。 ");
+      if (typeof args.needHelp !== "string" || !args.needHelp.trim() || !isObject(args.answerSchema)) throw new Error("wave_flow_block 需要 needHelp 和扁平 answerSchema。 ");
       if (args.blockRequestId !== undefined && (typeof args.blockRequestId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.blockRequestId))) throw new Error("wave_flow_block 的 blockRequestId 必须是首次调用返回的 UUID。 ");
       const blockRequestId = typeof args.blockRequestId === "string" && args.blockRequestId.trim() ? args.blockRequestId : crypto.randomUUID();
-      const waiting = control.request({ action: "block", blockRequestId, needHelp: args.needHelp, ...(args.answerSchema ? { answerSchema: args.answerSchema } : {}) });
-      // 有界等待：预算到期不改变任何状态，原 socket 请求仍在等待；答案到达时旧
-      // 请求一并 resolve（无人读取，无害），重连的新调用会立即拿到同一答案。
-      const resolution = await Promise.race([waiting, Bun.sleep(waitBudgetMs).then(() => null)]);
-      if (!resolution) return text({ status: "waiting", blockRequestId });
-      return text({ status: "answered", ...(resolution as { blockRequestId: string; answer: JsonObject }) });
-    }
-    if (params.name === "wave_flow_continue") {
-      if (typeof args.blockRequestId !== "string" || !args.blockRequestId.trim()) throw new Error("wave_flow_continue 需要 blockRequestId。 ");
-      await control.request({ action: "continue", blockRequestId: args.blockRequestId });
-      return text({ ok: true });
+      const status = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as { readonly answerSchema: JsonObject; readonly answer: JsonObject | null; readonly delivery: "pending" | "answered" | "closed" | "delivered" };
+      if (status.answer) {
+        await control.request({ action: "continue", blockRequestId });
+        return text({ status: "answered", blockRequestId, answer: status.answer });
+      }
+      if (status.delivery === "closed") return text({ status: "closed", blockRequestId });
+      const resolution = await server.elicitInput({
+        mode: "form",
+        message: args.needHelp,
+        requestedSchema: status.answerSchema as ElicitRequestFormParams["requestedSchema"],
+        _meta: { waveFlow: { blockRequestId } },
+      }, { timeout: WORKER_ELICIT_TIMEOUT_MS }).catch(async (error: unknown) => {
+        if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+          await control.request({ action: "close-block", blockRequestId });
+          return null;
+        }
+        throw error;
+      });
+      if (resolution === null) {
+        const current = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as typeof status;
+        if (current.answer) {
+          await control.request({ action: "continue", blockRequestId });
+          return text({ status: "answered", blockRequestId, answer: current.answer });
+        }
+        return text({ status: "closed", blockRequestId });
+      }
+      if (resolution.action === "accept" && isObject(resolution.content)) {
+        const durable = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as typeof status;
+        if (!durable.answer || !isDeepStrictEqual(durable.answer, resolution.content)) throw new Error("ACP 返回答案与 Journal 中的人工答案不一致，拒绝 continue。 ");
+        await control.request({ action: "continue", blockRequestId });
+        return text({ status: "answered", blockRequestId, answer: durable.answer });
+      }
+      await control.request({ action: "close-block", blockRequestId });
+      const current = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as typeof status;
+      if (current.answer) {
+        await control.request({ action: "continue", blockRequestId });
+        return text({ status: "answered", blockRequestId, answer: current.answer });
+      }
+      return text({ status: "closed", blockRequestId });
     }
     throw new Error(`未知 Worker Control 工具：${params.name}`);
     } finally { inFlight -= 1; }

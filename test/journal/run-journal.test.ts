@@ -82,8 +82,9 @@ describe("RunJournal", () => {
     await journal.append(event("first"));
     journal.failNextAppendForTest("磁盘写入失败（注入）");
     // 失败本身按原样抛出，后续 append 与 flush 携带同一个首个错误拒绝。
-    await expect(journal.append(event("second"))).rejects.toThrow("磁盘写入失败（注入）");
-    await expect(journal.append(event("third"))).rejects.toThrow("磁盘写入失败（注入）");
+    const second = expect(journal.append(event("second"))).rejects.toThrow("磁盘写入失败（注入）");
+    const third = expect(journal.append(event("third"))).rejects.toThrow("磁盘写入失败（注入）");
+    await Promise.all([second, third]);
     await expect(journal.flush()).rejects.toThrow("磁盘写入失败（注入）");
     // 磁盘上没有自愈续写造成的空洞：只有 run.created 与 first 两条耐久事实。
     const text = await readFile(join(journal.directory, "journal.jsonl"), "utf8");
@@ -94,6 +95,18 @@ describe("RunJournal", () => {
     await opened.journal.append(event("after-reopen"));
     const reopened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
     expect(reopened.events).toHaveLength(3);
+  });
+
+  test("journal.jsonl 被替换为软链接时拒绝追加且不写目标文件", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const outside = join(cwd, "outside.jsonl");
+    await writeFile(outside, "unchanged\n", "utf8");
+    await rm(join(journal.directory, "journal.jsonl"));
+    await symlink(outside, join(journal.directory, "journal.jsonl"));
+    const event: JournalEvent = { type: "log.written", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message: "forbidden" };
+    await expect(journal.append(event)).rejects.toThrow();
+    expect(await readFile(outside, "utf8")).toBe("unchanged\n");
   });
 
   test("真实写入失败（目录被移除）同样 poison 后续 append", async () => {
@@ -125,7 +138,12 @@ describe("RunJournal", () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
     await appendFile(join(journal.directory, "journal.jsonl"), "{\"type\":", "utf8");
-    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).resolves.toMatchObject({ events: [{ type: "run.created" }] });
+    const before = await readFile(join(journal.directory, "journal.jsonl"), "utf8");
+    const opened = await RunJournal.open(journal.manifest.runId, runsRoot(cwd));
+    expect(opened.events).toMatchObject([{ type: "run.created" }]);
+    await expect(opened.journal.append({ type: "log.written", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, message: "forbidden" })).rejects.toThrow("截断尾行");
+    await expect(opened.journal.flush()).rejects.toThrow("截断尾行");
+    expect(await readFile(join(journal.directory, "journal.jsonl"), "utf8")).toBe(before);
     await appendFile(join(journal.directory, "journal.jsonl"), "\nnot-json\n{}\n", "utf8");
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("第 2 行损坏");
   });
@@ -185,6 +203,20 @@ describe("RunJournal", () => {
     await journal.append({ type: "block.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: "需要确认", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object", required: ["approved"], properties: { approved: { type: "boolean" } } } });
     await journal.append({ type: "block.answered", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, blockRequestId, answer: { approved: "yes" } });
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("answer-schema");
+  });
+
+  test("重开时拒绝 closed 之后的 block.answered", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    const request = { id: "scan-auth", cli: "codex" as const, sandbox: "read-only" as const, cwd, prompt: "scan", phase: "scan" };
+    const sessionId = "session";
+    const blockRequestId = "33333333-3333-4333-8333-333333333333";
+    await journal.append({ type: "agent.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: null, diagnostic: null, sequence: 1, phase: "scan", request });
+    await journal.append({ type: "agent.status", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, status: "running" });
+    await journal.append({ type: "block.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: "需要确认", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object", properties: { approved: { type: "boolean" } } } });
+    await journal.append({ type: "block.closed", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, blockRequestId });
+    await journal.append({ type: "block.answered", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: "scan-auth", agentSessionId: sessionId, diagnostic: null, blockRequestId, answer: { approved: true } });
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("pending block");
   });
 
   test("重开时拒绝非 ACP 投递的 agent.session 事实", async () => {

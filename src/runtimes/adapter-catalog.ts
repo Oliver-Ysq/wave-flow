@@ -17,6 +17,8 @@ export type AdapterCapabilities = {
   readonly leadTools: boolean;
   /** 是否支持 Worker session 私有的完成协议 MCP；已由 ACP 探针验证。 */
   readonly workerControlMcp: boolean;
+  /** 是否已验证 MCP→ACP 表单 Elicitation 与答案回传；未验证的 CLI 不得开启该路径。 */
+  readonly elicitationForm: boolean;
   /** 是否支持 Workflow 请求模型覆盖；本期未实现。 */
   readonly modelOverride: boolean;
   /** 是否支持向用户暴露模型目录；本期未实现。 */
@@ -65,7 +67,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     probeMcp: true,
     adapterVersion: CODEX_ACP_ADAPTER.version,
     acpProtocolVersion: CODEX_ACP_ADAPTER.protocolVersion,
-    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, elicitationForm: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: true,
     launcher: () => codexAcpAdapterEntry(),
     environment: (runtime) => createWorkerEnvironment(runtime),
@@ -78,7 +80,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     probeMcp: true,
     adapterVersion: null,
     acpProtocolVersion: 1,
-    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, elicitationForm: false, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: false,
     // Kimi CLI 自身即 ACP server；命令直接是用户已验证的 realpath。
     launcher: (runtime) => ({ command: runtime.executablePath, args: ["acp"] }),
@@ -94,7 +96,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
     // Claude Code 2.x 的 CLI 是原生二进制（claude.exe）；adapter 进程由 Engine 自带运行时启动，
     // 不要求用户安装 node。旧版 JS 入口由用户环境自行提供 node。
-    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, elicitationForm: true, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: false,
     launcher: () => claudeAcpAdapterEntry(),
     environment: (runtime) => createClaudeWorkerEnvironment(runtime),
@@ -109,7 +111,7 @@ const entries: readonly AdapterCatalogEntry[] = [
     adapterVersion: null,
     acpProtocolVersion: 1,
     // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
-    capabilities: { leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false },
+    capabilities: { leadTools: true, workerControlMcp: true, elicitationForm: false, modelOverride: false, modelCatalog: false },
     requiresNodeRuntime: true,
     // dsh 入口使用 import.meta.main；Node ≤22 下静默退出 0 且零输出，必须 Node ≥ 24。
     minNodeVersion: 24,

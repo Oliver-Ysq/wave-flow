@@ -1,5 +1,5 @@
 import * as acp from "@agentclientprotocol/sdk";
-import { logAcpLifecycle } from "./acp-lifecycle-log";
+import { acpLifecycleLogPath, logAcpLifecycle } from "./acp-lifecycle-log";
 
 /** ACP Agent 的受控启动配置；argv 只能由 Engine 的已验证配置提供。 */
 export type AcpLauncher = {
@@ -21,6 +21,11 @@ export type AcpPermissionResolver = (
   /** 连接/回合取消时中止等待；迟到决定不得返回allow。 */ signal: AbortSignal,
 ) => Promise<acp.RequestPermissionResponse> | acp.RequestPermissionResponse;
 
+/** Worker 私有表单请求处理；Lead 不注册此能力。 */
+export type AcpElicitationResolver = (
+  /** 原 ACP 表单请求；调用方负责绑定既有 block。 */ request: acp.CreateElicitationRequest,
+  /** 表单关闭或连接取消信号；不得据此伪造答案。 */ signal: AbortSignal,
+) => Promise<acp.CreateElicitationResponse>;
 
 /** ACP transport 的可关闭资源。 */
 export type AcpTransport = {
@@ -119,6 +124,7 @@ export class AcpSessionClient {
   #permissionAbort = new AbortController();
   #permissionTurn: AbortController | null = null;
   #permissionSignal: AbortSignal | null = null;
+  #elicitationResolver: AcpElicitationResolver | null = null;
 
   constructor(
     private readonly launcher: AcpLauncher,
@@ -134,6 +140,12 @@ export class AcpSessionClient {
      */
     private readonly sessionCapabilities: AcpClientSessionCapabilities = {},
   ) {}
+
+  /** 仅 Worker 在 initialize 前注册表单处理；Lead 与无 handler 会话不广告该能力。 */
+  setElicitationResolver(resolver: AcpElicitationResolver): void {
+    if (this.#connection) throw new Error("ACP initialize 后不能改变 elicitation 能力。 ");
+    this.#elicitationResolver = resolver;
+  }
 
   /** 当前已确认 binding；尚未 new/load 时为 null。 */
   get binding(): AcpSessionBinding | null { return this.#binding; }
@@ -153,7 +165,11 @@ export class AcpSessionClient {
     const transport = await this.createTransport(this.launcher, signal);
     const app = acp.client({ name: "wave-flow" })
       .onNotification(acp.methods.client.session.update, (context) => this.onSessionUpdate(context.params))
-      .onRequest(acp.methods.client.session.requestPermission, async (context) => this.resolvePermission(context.params));
+      .onRequest(acp.methods.client.session.requestPermission, async (context) => this.resolvePermission(context.params))
+      .onRequest(acp.methods.client.elicitation.create, async (context) => {
+        if (!this.#elicitationResolver) return { action: "decline" as const };
+        return this.#elicitationResolver(context.params, context.signal);
+      });
     const connection = app.connect(transport.stream);
     this.#transport = transport;
     this.#connection = connection;
@@ -165,6 +181,8 @@ export class AcpSessionClient {
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
+          // 只有真实处理 Worker 表单的会话才广告 Elicitation；Lead 不获得该能力。
+          ...(this.#elicitationResolver ? { elicitation: { form: {} } } : {}),
           // 只有真正消费压缩事实的会话才广告压缩契约（见 AcpClientSessionCapabilities）。
           ...(this.sessionCapabilities.compaction === true ? { session: { compaction: {} } } : {}),
         },
@@ -366,7 +384,7 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
     if (code !== 0) {
       // 仅异常退出时给 stderr 一个很短的有界汇合窗口；正常退出立即 resolve。
       await Promise.race([stderrDone, Bun.sleep(250)]);
-      throw new Error(`ACP Agent stderr：${stderrTail.slice(0, 2_000)}`);
+      throw new Error(`ACP Agent 进程异常退出（code=${code}），诊断日志：${acpLifecycleLogPath()}`);
     }
     return code;
   });

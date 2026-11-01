@@ -28,6 +28,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
    */
   #startupStops = new Set<string>();
   #control: ControlServer | null = null;
+  #recoveryHold: ((nodeId: string) => Promise<void>) | null = null;
   constructor(
     private readonly manager: WorkspaceManager,
     /** 原Run身份，必须与Runtime manifest一致，由Engine提供。 */
@@ -48,6 +49,13 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
     this.#control = control;
     const candidate = this.readOnly as AgentNodeExecutor & { bindControl?: (value: ControlServer) => void };
     candidate.bindControl?.(control);
+  }
+
+  bindRecoveryHold(handler: (nodeId: string) => Promise<void>): void {
+    if (this.#recoveryHold) throw new WorkflowContractError("WorkspaceExecutor已绑定恢复暂停。");
+    this.#recoveryHold = handler;
+    this.readOnly.bindRecoveryHold?.(handler);
+    for (const active of this.#active.values()) active.writer.bindRecoveryHold?.(handler);
   }
 
   async execute(node: AgentNodeSnapshot): Promise<JsonObject | null> {
@@ -75,6 +83,7 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
       writer = await this.createWriter(node, { cwd: workspace.cwd, scratch, commonDirectory: workspace.commonDirectory, gitDirectory: workspace.gitDirectory, lease, bindWriter, beginSpawn, cancelSpawn });
       if (!this.#control) throw new WorkflowContractError("WorkspaceExecutor尚未绑定ControlServer。");
       writer.bindControl(this.#control);
+      if (this.#recoveryHold) writer.bindRecoveryHold?.(this.#recoveryHold);
     }
     catch (error) {
       // 启动意图已耐久但身份未绑定时撤回会被拒绝（spawn 后崩溃窗口语义）：保留租约与现场，由显式 resume fail closed 核验。
@@ -158,6 +167,13 @@ export class WorkspaceExecutor implements AgentNodeExecutor {
       await this.manager.release(lease, active?.writer.verifyExited ?? this.verifyRecoveredWriter);
       this.#active.delete(node.id);
     } catch (error) { throw new WorkflowContractError(`停止现场交接失败，租约与现场保留：${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  /** interrupted 节点清理 writer 退出核验引用；租约释放与进程退出核验仍由 finalize 负责。 */
+  discard(node: AgentNodeSnapshot): void {
+    if (node.sandbox !== "workspace-write") { this.readOnly.discard?.(node); return; }
+    const active = this.#active.get(node.id);
+    active?.writer.discard?.(node);
   }
 
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> { const delegate = this.delegate(node); if (!delegate.pause) throw new WorkflowContractError("执行器不支持pause。"); await delegate.pause(node, signal); }

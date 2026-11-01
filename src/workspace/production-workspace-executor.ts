@@ -22,6 +22,7 @@ import { logWorkerLifecycle } from "../runtime/worker-lifecycle-log";
 export class ProductionWorkspaceExecutor {
   #delegate: WorkspaceExecutor | null = null;
   #runtime: RunRuntime | null = null;
+  #recoveryHold: ((nodeId: string) => Promise<void>) | null = null;
   readonly #groups = new WriterProcessGroups();
   readonly config: ExecutionWorkspaceConfig;
   constructor(
@@ -35,6 +36,12 @@ export class ProductionWorkspaceExecutor {
     /** 技能库根目录；缺省 `waveFlowHome()/skills`，测试与隔离运行可注入。 */
     private readonly skillsRoot?: string,
   ) { this.config = validateExecutionWorkspaces(config); }
+
+  bindRecoveryHold(handler: (nodeId: string) => Promise<void>): void {
+    if (this.#recoveryHold) throw new WorkflowContractError("受管Workspace执行器已绑定恢复暂停。");
+    this.#recoveryHold = handler;
+    this.#delegate?.bindRecoveryHold(handler);
+  }
 
   /** wireControl阶段先创建/复核受管worktree，完成后才允许Run后台执行。 */
   async bindRuntime(runtime: RunRuntime, control: ControlServer): Promise<void> {
@@ -65,6 +72,7 @@ export class ProductionWorkspaceExecutor {
         bindWriter: binding.bindWriter,
         verifyExited: async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)),
         bindControl: value => worker.bindControl(value),
+        bindRecoveryHold: handler => worker.bindRecoveryHold(handler),
         execute: actual => worker.execute(actual),
         finalizeCompleted: actual => worker.finalizeCompleted(actual),
         finalizePartial: actual => worker.finalizeCompleted(actual),
@@ -73,8 +81,11 @@ export class ProductionWorkspaceExecutor {
         stop: actual => worker.stop(actual),
       };
     }, async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)));
+    if (this.#recoveryHold) delegate.bindRecoveryHold(this.#recoveryHold);
     delegate.bindControl(control); this.#delegate = delegate;
   }
+
+  discard(node: AgentNodeSnapshot): void { this.#delegate?.discard(node); }
 
   execute(node: AgentNodeSnapshot) { return this.require().execute(node); }
   finalizeCompleted(node: AgentNodeSnapshot) { return this.require().finalizeCompleted(node); }

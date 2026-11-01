@@ -336,9 +336,9 @@ describe("RunRuntime ACP-neutral core", () => {
       apply(event);
       if (event.type === "block.created") notifyBlocked();
     });
-    const blockFailure = control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, (error: unknown) => error);
+    const blockFailure = control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } }).then(() => null, (error: unknown) => error);
     try { await blocked; } finally { applied.mockRestore(); }
-    expect(await Promise.race([blockFailure, Promise.resolve("pending")])).toBe("pending");
+    expect(await blockFailure).toBeNull();
     expect(runtime.snapshot().phases[0].agents[0].status).toBe("blocked");
     const snapshot = await runtime.cancelForDesktopExit("test-engine");
     expect(snapshot).toMatchObject({ status: "cancelled", phases: [{ agents: [{ id: "worker", status: "cancelled" }] }] });
@@ -397,9 +397,13 @@ describe("RunRuntime ACP-neutral core", () => {
   test("显式 resume 拒绝调用指纹不匹配的 Workflow，且不写入任何新事实", async () => {
     const initial = await create({ execute: async () => null });
     await initial.run(workflow).catch(() => undefined);
-    const changed: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return agent("改动后的任务", { id: "worker", cli: "codex" }); } };
+    const changed: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return agent("改动后的秘密任务", { id: "worker", cli: "codex" }); } };
     const resumed = await RunRuntime.resume(initial.snapshot().id, { execute: async () => ({ resumed: true }) }, join(initial.journal.directory, ".."));
-    await expect(resumed.run(changed)).rejects.toThrow("与 Journal 节点不匹配");
+    const error = await resumed.run(changed).catch(reason => reason);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("与 Journal 节点不匹配");
+    expect(message).not.toContain("改动后的秘密任务");
     expect(resumed.snapshot().status).toBe("interrupted");
     const reopened = await RunJournal.open(initial.snapshot().id, join(initial.journal.directory, ".."));
     expect(reopened.events.some((event) => event.type === "agent.restarted")).toBe(false);
@@ -421,6 +425,19 @@ describe("RunRuntime ACP-neutral core", () => {
     // 当前尝试视图只含本轮重跑节点；前缀节点 "a" 的结果直接来自 Journal 复用。
     expect(resumed.snapshot()).toMatchObject({ status: "completed", currentExecutionAttemptId: 2, phases: [{ agents: [{ id: "b", result: { ok: "b" } }] }] });
   });
+  test("Workflow 在已投递 Worker 后抛错会停止在途会话并释放启动名额", async () => {
+    let stopCalls = 0;
+    let rejectExecute!: (error: Error) => void;
+    const failing: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); void agent("长任务", { id: "worker", cli: "codex" }); await Bun.sleep(10); throw new Error("脚本失败"); } };
+    const runtime = await create({
+      execute: async () => new Promise<JsonObject>((_, reject) => { rejectExecute = reject; }),
+      stop: async () => { stopCalls += 1; rejectExecute(new Error("已停止")); },
+    });
+    await expect(runtime.run(failing)).rejects.toThrow("脚本失败");
+    expect(stopCalls).toBe(1);
+    expect(runtime.snapshot()).toMatchObject({ status: "interrupted", phases: [{ agents: [{ id: "worker", status: "interrupted" }] }] });
+  });
+
   test("Worker 在 blocked 等待期间死亡：执行器失败必须收敛节点与 Run，不留非终态残留", async () => {
     let entered!: () => void;
     let fail!: (error: Error) => void;
@@ -434,7 +451,7 @@ describe("RunRuntime ACP-neutral core", () => {
     control.register({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1" });
     await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "s", capabilities: {} } });
     // Worker 请求人工确认后未调用 continue/complete 就以 end_turn 结束回合。
-    void control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认" }).then(() => null, () => null);
+    void control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId: crypto.randomUUID(), needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } }).then(() => null, () => null);
     // 按状态等待 block 落库，不用墙钟预算。
     for (let n = 0; n < 20_000 && runtime.snapshot().phases[0].agents[0].status !== "blocked"; n++) await Bun.sleep(2);
     expect(runtime.snapshot().phases[0].agents[0].status).toBe("blocked");
@@ -492,6 +509,103 @@ describe("RunRuntime ACP-neutral core", () => {
     expect(reopened.events).toContainEqual(expect.objectContaining({ type: "agent.completed", nodeId: "worker" }));
     expect(reopened.events.some((event) => event.type === "agent.status" && event.nodeId === "worker" && event.status === "cancelled")).toBe(false);
     expect(reopened.events).toContainEqual(expect.objectContaining({ type: "run.status", status: "cancelled" }));
+  });
+  test("节点级 recovery hold 不暂停 Run，单节点 recover 后继续", async () => {
+    let hold!: (nodeId: string) => Promise<void>;
+    const runtime = await create({
+      execute: async () => new Promise<JsonObject>(() => {}),
+      bindRecoveryHold(handler) { hold = handler; },
+      pause: async () => {},
+      recover: async () => ({}),
+      stop: async () => { throw new Error("停止现场"); },
+    });
+    const running = runtime.run(workflow).catch(error => error);
+    for (let index = 0; index < 100 && runtime.snapshot().phases[0].agents[0]?.status !== "running"; index++) await Bun.sleep(2);
+    await hold("worker");
+    expect(runtime.snapshot().status).toBe("running");
+    expect(runtime.snapshot().phases[0].agents[0]).toMatchObject({ status: "paused", pauseCause: "recovery" });
+    await runtime.recoverNodeForRecovery("worker");
+    expect(runtime.snapshot().status).toBe("running");
+    expect(runtime.snapshot().phases[0].agents[0]).toMatchObject({ status: "running", pauseCause: null });
+    await expect(runtime.stop()).rejects.toThrow("停止现场");
+    void running;
+  });
+  test("节点级 recover 投递失败时不残留 recovering", async () => {
+    let hold!: (nodeId: string) => Promise<void>;
+    const runtime = await create({
+      execute: async () => new Promise<JsonObject>(() => {}),
+      bindRecoveryHold(handler) { hold = handler; },
+      pause: async () => {},
+      recover: async () => { throw new Error("投递失败"); },
+      stop: async () => {},
+    });
+    const running = runtime.run(workflow).catch(error => error);
+    for (let index = 0; index < 100 && runtime.snapshot().phases[0].agents[0]?.status !== "running"; index++) await Bun.sleep(2);
+    await hold("worker");
+    await expect(runtime.recoverNodeForRecovery("worker")).rejects.toThrow("投递失败");
+    expect(runtime.snapshot().status).toBe("interrupted");
+    expect(runtime.snapshot().phases[0].agents[0].status).toBe("interrupted");
+    await runtime.stop().catch(() => undefined);
+    void running;
+  });
+  test("用户 pause 与 recovery hold 共享同一次节点暂停，不互相升级失败", async () => {
+    let hold!: (nodeId: string) => Promise<void>;
+    let releasePause!: () => void;
+    let pauseCalls = 0;
+    let rejectExecute!: (error: Error) => void;
+    const gate = new Promise<void>(resolve => { releasePause = resolve; });
+    const runtime = await create({
+      execute: async () => new Promise<JsonObject>((_, reject) => { rejectExecute = reject; }),
+      bindRecoveryHold(handler) { hold = handler; },
+      pause: async () => { pauseCalls += 1; await gate; },
+      recover: async () => ({}),
+      stop: async () => { rejectExecute(new Error("已停止")); },
+    });
+    const running = runtime.run(workflow).catch(() => undefined);
+    for (let index = 0; index < 100 && runtime.snapshot().phases[0].agents[0]?.status !== "running"; index++) await Bun.sleep(2);
+    const recovery = hold("worker");
+    const user = runtime.pause();
+    await Bun.sleep(10);
+    expect(pauseCalls).toBe(1);
+    releasePause();
+    await Promise.all([recovery, user]);
+    expect(runtime.snapshot()).toMatchObject({ status: "paused", phases: [{ agents: [{ status: "paused" }] }] });
+    await runtime.stop();
+    await running;
+  });
+
+  test("reopenBlock 只恢复关闭的人工请求并保留 Run running", async () => {
+    const runtime = await create({ execute: async () => new Promise<JsonObject>(() => {}), pause: async () => {}, recover: async () => ({}), stop: async () => {} });
+    const running = runtime.run(workflow).catch(error => error);
+    for (let index = 0; index < 100 && runtime.snapshot().phases[0].agents[0]?.status !== "running"; index++) await Bun.sleep(2);
+    const agentSessionId = runtime.snapshot().phases[0].agents[0].agentSessionId!;
+    const control = runtime.createControlServer();
+    control.register({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1" });
+    await control.recordSession({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, delivery: "acp", acp: { launcherId: "test", sessionId: "native", capabilities: {} } });
+    const blockRequestId = crypto.randomUUID();
+    await control.block({ runId: runtime.snapshot().id, nodeId: "worker", agentSessionId, capability: "cap-1", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } });
+    await control.closeBlock(blockRequestId);
+    expect(runtime.snapshot().phases[0].agents[0].block?.delivery).toBe("closed");
+    await Promise.all([runtime.reopenBlock(blockRequestId), runtime.reopenBlock(blockRequestId)]);
+    expect(runtime.snapshot().status).toBe("running");
+    expect(runtime.snapshot().phases[0].agents[0].block?.delivery).toBe("pending");
+    await control.closeBlock(blockRequestId);
+    const [, stopped] = await Promise.allSettled([runtime.reopenBlock(blockRequestId), runtime.stop()]);
+    expect(stopped.status).toBe("fulfilled");
+    expect(runtime.snapshot().status).toBe("cancelled");
+    void running;
+  });
+  test("pause 跳过快照后已 completed 的节点，不让并发完成升级成整批中断", async () => {
+    const concurrent: WorkflowModule<JsonObject, unknown> = { meta: workflow.meta, default: async () => { phase("run"); return Promise.all([agent("a", { id: "a", cli: "codex" }), agent("b", { id: "b", cli: "codex" })]); } };
+    const runtime = await create({ execute: async node => node.id === "a" ? { ok: true } : new Promise<JsonObject>(() => {}), pause: async () => {}, stop: async () => {} });
+    const running = runtime.run(concurrent).catch(error => error);
+    for (let index = 0; index < 100 && runtime.snapshot().phases[0].agents.find(node => node.id === "a")?.status !== "completed"; index++) await Bun.sleep(2);
+    await runtime.pause();
+    expect(runtime.snapshot().status).toBe("paused");
+    expect(runtime.snapshot().phases[0].agents.find(node => node.id === "a")?.status).toBe("completed");
+    expect(runtime.snapshot().phases[0].agents.find(node => node.id === "b")?.status).toBe("paused");
+    await runtime.stop();
+    void running;
   });
   test("Desktop 退出已收敛后，迟到的 complete 被拒绝且 Journal 零污染", async () => {
     let entered!: () => void;

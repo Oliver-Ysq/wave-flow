@@ -209,8 +209,10 @@ test("等待原block答案跨越停滞窗口不重发、不制造中断", async 
     async prompt() {
       prompts++;
       const identity = { runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability };
-      const answer = await value.control.block({ ...identity, blockRequestId, needHelp: "等待确认" });
-      expect(answer.answer).toEqual({ ok: true });
+      const answerSchema = { type: "object" as const, properties: { ok: { type: "boolean" as const } } };
+      await value.control.block({ ...identity, blockRequestId, needHelp: "等待确认", answerSchema });
+      const answer = await value.control.waitForBlockAnswer(identity, { mode: "form", message: "等待确认", requestedSchema: answerSchema });
+      expect(answer).toEqual({ action: "accept", content: { ok: true } });
       await value.control.continue({ ...identity, blockRequestId });
       await value.control.complete({ ...identity, summary: "done", result: {} });
       return { stopReason: "end_turn" };
@@ -250,7 +252,9 @@ for (const operation of ["block", "complete"] as const) test(`Control ${operatio
     async prompt() {
       const identity = { runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability };
       if (operation === "block") {
-        await value.control.block({ ...identity, blockRequestId, needHelp: "确认" });
+        const answerSchema = { type: "object" as const, properties: { ok: { type: "boolean" as const } } };
+        await value.control.block({ ...identity, blockRequestId, needHelp: "确认", answerSchema });
+        await value.control.waitForBlockAnswer(identity, { mode: "form", message: "确认", requestedSchema: answerSchema });
         await value.control.continue({ ...identity, blockRequestId });
       }
       await value.control.complete({ ...identity, summary: "done", result: {} });
@@ -397,6 +401,20 @@ test("受管写ACP complete后先close，再由成果阶段核验退出；核验
   await executor.finalizeCompleted(value.state.agent("node")); expect(verifies).toBe(2);
 });
 
+test("interrupted 节点 discard 清理退出核验句柄，不累计旧会话", async () => {
+  const value = await fixture();
+  const session: AcpWorkerSession = { binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; }, async prompt() { throw new Error("transport failed"); }, async cancel() {}, close() {} };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }), undefined, true);
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).rejects.toThrow("transport failed");
+  await expect(executor.finalizeCompleted(value.state.agent("node"))).rejects.toThrow("没有可核验退出句柄");
+  const interrupted: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, diagnostic: "transport failed", status: "interrupted" };
+  await value.journal.append(interrupted);
+  value.state.apply(interrupted);
+  executor.discard(value.node);
+  await expect(executor.finalizeCompleted(value.state.agent("node"))).resolves.toBeUndefined();
+});
+
 for(const answered of [false,true])test(`收尾从Control补回原block，answered=${answered}，不新建请求或代替continue`,async()=>{
  const value=await fixture();let identity:any;const blockRequestId=crypto.randomUUID();const prompts:string[]=[];
  const needHelp="请选择数字",answerSchema={type:"object",properties:{x:{type:"integer"}},required:["x"],additionalProperties:false};
@@ -518,7 +536,7 @@ for(const failure of ["end_turn","transport","abort","cancel_error","pending_can
  await expect(executor.recover(value.node)).rejects.toThrow("没有可控制");
 });
 
-test("两个CLI使用相同通用完成协议，第二次end_turn仍漏报只拒绝、不重跑或代报",async()=>{
+test("两个CLI使用相同通用完成协议，第三次end_turn仍漏报只拒绝、不重跑或代报",async()=>{
  const guides:string[]=[];
  for(const cli of ["codex","kimi"] as const){
   const value=await fixture(),prompts:string[]=[];
@@ -526,7 +544,7 @@ test("两个CLI使用相同通用完成协议，第二次end_turn仍漏报只拒
   const executor=new AcpWorkerExecutor({id:`${cli}-acp`,command:"fake",args:[]},()=>session,undefined,()=>({name:"wave-flow-worker-control",command:"fake",args:[],env:[]}));
   executor.bindControl(value.control);
   await expect(executor.execute({...value.node,cli,request:{...value.node.request,cli}})).rejects.toThrow("未收到 wave-flow complete");
-  expect(prompts).toHaveLength(2);
+  expect(prompts).toHaveLength(3);
   expect(prompts[1]).toContain("不要重做业务任务");
   for(const text of prompts){
    expect(text).toContain("server：wave-flow-worker-control");
@@ -578,6 +596,120 @@ test("回合间隙 pause 本地挂起不中断，recover 后同一 session 只�
   expect(prompts).toHaveLength(2);
   expect(prompts[1]).toContain("检查当前工作目录");
   expect(prompts[1]).not.toContain("不要重做业务任务");
+});
+
+test("两次协议恢复后进入节点级 hold，用户同会话重试仍不创建新 attempt", async () => {
+  const value = await fixture(); let capability = ""; const prompts: string[] = []; let holds = 0; let sessions = 0;
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }, async initialize() {}, async createSession() { sessions++; return this.binding!; },
+    async prompt(text) { prompts.push(text); return { stopReason: "end_turn" }; }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  executor.bindRecoveryHold(async () => { holds++; await executor.pause(value.node); });
+  const running = executor.execute(value.node);
+  for (let index = 0; index < 100 && holds < 1; index++) await Bun.sleep(5);
+  expect(holds).toBe(1);
+  expect(prompts).toHaveLength(3);
+  await executor.recover(value.node);
+  for (let index = 0; index < 100 && holds < 2; index++) await Bun.sleep(5);
+  expect(holds).toBe(2);
+  expect(prompts).toHaveLength(4);
+  expect(sessions).toBe(1);
+  await executor.stop(value.node);
+  await expect(running).rejects.toThrow("用户停止");
+});
+
+test("closed 表单在 end_turn 后等待显式重开，不自动重问或消耗恢复次数", async () => {
+  const value = await fixture();
+  const blockRequestId = crypto.randomUUID();
+  let capability = "";
+  const prompts: string[] = [];
+  const submission = () => ({ blockRequestId, runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, needHelp: "需要确认", answerSchema: { type: "object" as const, properties: { ok: { type: "boolean" as const } }, required: ["ok"] } });
+  const session: AcpWorkerSession = {
+    binding: { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }, async initialize() {}, async createSession() { return this.binding!; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) {
+        await value.control.block(submission());
+        await value.control.closeBlock(blockRequestId);
+        return { stopReason: "end_turn" };
+      }
+      await value.control.block(submission());
+      await value.control.answer({ blockRequestId, answer: { ok: true } });
+      await value.control.continue(submission());
+      await value.control.complete({ ...submission(), summary: "done", result: { ok: true } });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  const running = executor.execute(value.node);
+  for (let index = 0; index < 100 && value.state.agent("node").block?.delivery !== "closed"; index++) await Bun.sleep(2);
+  await Bun.sleep(20);
+  expect(prompts).toHaveLength(1);
+  expect(value.state.agent("node")).toMatchObject({ status: "blocked", block: { delivery: "closed" } });
+  const reopened: JournalEvent = { type: "block.reopened", at: new Date().toISOString(), runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, diagnostic: null, blockRequestId };
+  await value.journal.append(reopened);
+  value.state.apply(reopened);
+  await executor.pause(value.node);
+  await executor.recover(value.node);
+  await expect(running).resolves.toEqual({ ok: true });
+  expect(prompts).toHaveLength(2);
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  expect(events.filter(event => event.type === "block.created")).toHaveLength(1);
+  expect(events.filter(event => event.type === "block.reopened")).toHaveLength(1);
+});
+
+test("closed 表单等待重开期间停止会释放原会话且不补发回合", async () => {
+  const value = await fixture();
+  const blockRequestId = crypto.randomUUID();
+  let capability = "";
+  let prompts = 0;
+  let closed = 0;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
+    async prompt() {
+      prompts += 1;
+      await value.control.block({ blockRequestId, runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } });
+      await value.control.closeBlock(blockRequestId);
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {}, close() { closed += 1; },
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  const running = executor.execute(value.node);
+  for (let index = 0; index < 100 && value.state.agent("node").block?.delivery !== "closed"; index++) await Bun.sleep(2);
+  await Bun.sleep(20);
+  await executor.stop(value.node);
+  await expect(running).rejects.toThrow("用户停止");
+  expect(prompts).toBe(1);
+  expect(closed).toBe(1);
+});
+
+test("答案交付后 turn cancelled 先在同 session 恢复，不直接 interrupted", async () => {
+  const value = await fixture(); let capability = ""; const prompts: string[] = [];
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {}, async createSession() { return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
+    async prompt(text) {
+      prompts.push(text);
+      if (prompts.length === 1) {
+        const blockRequestId = crypto.randomUUID();
+        await value.control.block({ blockRequestId, runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } });
+        await value.control.answer({ blockRequestId, answer: { ok: true } });
+        await value.control.continue({ blockRequestId, runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability });
+        return { stopReason: "cancelled" };
+      }
+      await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } });
+      return { stopReason: "end_turn" };
+    }, async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+  expect(prompts).toHaveLength(2);
 });
 
 test("首个 end_turn 遗漏 complete 时仅补发同 session 的完成提醒", async () => {
@@ -706,7 +838,7 @@ test("blocked 节点收尾漏报诊断区分等待被放弃，且不重发 block
     await Bun.sleep(10);
   }
   expect(events.some(event => event.type === "agent.session")).toBe(true);
-  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认" }).catch(() => undefined);
+  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } }).catch(() => undefined);
   // 确定性屏障：轮询 Journal 直到 block.created 耐久落盘，不用固定 sleep 竞猜时序。
   let created: JournalEvent[] = [];
   for (let i = 0; i < 500 && created.length === 0; i++) {
@@ -722,7 +854,7 @@ test("blocked 节点收尾漏报诊断区分等待被放弃，且不重发 block
   expect(message).toContain(`blockRequestId=${blockRequestId}`);
   expect(message).toContain("未收到 wave-flow complete");
   expect(message).toContain("end_turn");
-  expect(prompts).toHaveLength(2);
+  expect(prompts).toHaveLength(3);
   expect((await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "block.created")).toHaveLength(1);
 });
 
@@ -750,7 +882,7 @@ test("blocked 节点已收到人工答案但原 Worker 未继续时诊断区分�
     }
     await Bun.sleep(10);
   }
-  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认" }).catch(() => undefined);
+  void value.control.block({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, blockRequestId, needHelp: "需要人工确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } }).catch(() => undefined);
   let created: JournalEvent[] = [];
   for (let i = 0; i < 500 && created.length === 0; i++) {
     await Bun.sleep(10);
@@ -767,7 +899,7 @@ test("blocked 节点已收到人工答案但原 Worker 未继续时诊断区分�
   expect(message).toContain(`blockRequestId=${blockRequestId}`);
   expect(message).not.toContain("等待被放弃");
   expect(message).toContain("未收到 wave-flow complete");
-  expect(prompts).toHaveLength(2);
+  expect(prompts).toHaveLength(3);
 });
 
 test("无 block 时收尾漏报文案逐字保持旧诊断", async () => {
@@ -799,7 +931,7 @@ test("收尾诊断读取失败降级为旧文案，不改变失败语义", async
   const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, () => ({ name: "private", command: "fake", args: [], env: [] }));
   executor.bindControl(value.control);
   const error = await executor.execute(value.node).catch((reason: unknown) => reason);
-  expect(reads).toBe(2);
+  expect(reads).toBe(3);
   expect((error as Error).toString()).toBe("Error: ACP Worker turn 已结束（end_turn），但未收到 wave-flow complete。");
 });
 

@@ -1,13 +1,15 @@
 import Ajv from "ajv";
+import { isDeepStrictEqual } from "node:util";
+import { normalizeHitlAnswerSchema } from "../shared/hitl-schema";
 import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
 import type { RuntimeProvenance } from "../runtimes/types";
 import type { RunStateMachine } from "../runtime/run-state-machine";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
-import { BlockBroker, type BlockAnswerSubmission, type BlockResolution, type BlockSubmission, type ContinueSubmission } from "./block-broker";
+import { BlockBroker, type BlockAnswerSubmission, type BlockResolution, type BlockStatus, type BlockSubmission, type ContinueSubmission } from "./block-broker";
 
-export type { BlockAnswerSubmission, BlockResolution, BlockSubmission, ContinueSubmission } from "./block-broker";
+export type { BlockAnswerSubmission, BlockResolution, BlockStatus, BlockSubmission, ContinueSubmission } from "./block-broker";
 
 /** 注册后仅在当前 Engine 生命周期有效的节点 capability。 */
 export type RegisteredControlNode = {
@@ -74,7 +76,21 @@ export type WorkerTurnContext = {
     readonly answerSchema:JsonSchema|null;
     /** 原耐久答案副本；未交付null，存在也不自动continue。 */
     readonly answer:JsonObject|null;
+    /** 当前表单交付状态；closed 时禁止 Executor 自动重问，必须等待用户显式重开。 */
+    readonly delivery:"pending"|"answered"|"closed"|"delivered";
   } | null;
+};
+
+/** ACP Adapter 转发给当前 Worker 的表单请求；只用于复核并等待既有 block。 */
+export type WorkerElicitationRequest = {
+  /** 请求模式；当前只接受 form。 */
+  readonly mode: string;
+  /** 必须与原 needHelp 完全一致的问题正文。 */
+  readonly message: string;
+  /** 必须与原 answerSchema 规范化后一致的表单约束。 */
+  readonly requestedSchema: JsonObject;
+  /** Codex 可选透传的请求身份；仅用于一致性复核，不是授权依据。 */
+  readonly blockRequestId?: string;
 };
 
 /** Control Server 的最小 complete 协议。 */
@@ -166,13 +182,14 @@ export class ControlServer {
 
   /** 原执行器按注册身份读取当前协议事实；互斥区核验会话/Journal/状态，返回副本且零写入。 */
   async workerTurnContext(identity: Pick<RegisteredControlNode,"runId"|"nodeId"|"agentSessionId"|"capability">):Promise<WorkerTurnContext> {
+    await this.awaitRecoveryAccepted(identity.nodeId, identity.agentSessionId);
     return this.exclusive(async()=>{
       const key=controlKey(identity.runId,identity.nodeId);
       this.requireCurrentNode(key,identity);
       if(!this.#recordedSessions.has(key))throw new Error("收尾缺少耐久ACP会话绑定。");
       const node=this.state.agent(identity.nodeId);
       if(node.agentSessionId!==identity.agentSessionId||!["running","blocked"].includes(node.status))throw new Error("原节点已终结或会话已变化，拒绝收尾。");
-      const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId})}:null;
+      const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId}),delivery:node.block.delivery??(node.block.answered?"answered":"pending")}:null;
       return structuredClone({status:node.status as "running"|"blocked",resultSchema:node.request.schema??null,block});
     });
   }
@@ -196,6 +213,7 @@ export class ControlServer {
 
   /** 校验 capability、Schema 与 durable 写入后，唯一地完成 running 节点。 */
   async complete(request: CompletionSubmission): Promise<void> {
+    await this.awaitRecoveryAccepted(request.nodeId, request.agentSessionId);
     const key = controlKey(request.runId, request.nodeId);
     const node = this.#nodes.get(key);
     if (!node || node.agentSessionId !== request.agentSessionId || node.capability !== request.capability) throw new Error("Control capability、Run、节点或会话身份不匹配。");
@@ -218,6 +236,8 @@ export class ControlServer {
     await this.journal.append(event);
     this.state.apply(event);
     this.#nodes.delete(key);
+    this.#recordedSessions.delete(key);
+    this.#blocks.cancelForSession(request.runId, request.nodeId, request.agentSessionId, "节点已完成，原人工请求仅保留 Journal 历史。");
     try { node.onCompleted?.(request.result); } catch {}
     });
     } finally {
@@ -226,100 +246,165 @@ export class ControlServer {
   }
 
   /**
-   * 让原 Agent 调用等待人类答案；状态先 durable 变为 blocked，答案不会直接恢复节点。
-   *
-   * ACP 客户端可能中途放弃一次长时间未返回的工具调用（Codex code-mode 约 31s 后
-   * 把脚本转为后台 cell，模型未必取回结果）。因此 block 是有界等待：原 Agent 携带
-   * 同一 blockRequestId 与完全相同的请求内容重连时，不创建第二个 block、不写新
-   * Journal 事实，只重新挂载等待者；节点此时必须已是 blocked。
+   * 耐久 block.created 后立即返回交付状态；答案等待由 Worker 的 Elicitation 承担。
+   * 同一 block 重接只读取原事实，continue 后也允许取回原答案，绝不创建第二个 block。
    */
-  async block(request: BlockSubmission): Promise<BlockResolution> {
+  async block(request: BlockSubmission): Promise<BlockStatus> {
+    await this.awaitRecoveryAccepted(request.nodeId, request.agentSessionId);
     const key = controlKey(request.runId, request.nodeId);
-    // 互斥区内完成身份/状态核验与 block.created 落盘；等待答案在互斥区外。
-    const pending = await this.exclusive(async () => {
-    this.requireCurrentNode(key, request);
-    if (!this.#recordedSessions.has(key)) throw new Error("首条任务投递的会话坐标尚未耐久记录，拒绝 block。");
-    if (!request.needHelp.trim()) throw new Error("block --need-help 必须非空。");
-    const snapshot = this.state.agent(request.nodeId);
-    if (this.#blocks.has(request.blockRequestId)) {
-      if (snapshot.status !== "blocked") throw new Error(`重连 block 只允许当前 blocked 节点，实际为 ${snapshot.status}。`);
-      if (snapshot.block?.blockRequestId !== request.blockRequestId) throw new Error("重连 block 不是该节点当前等待的 block。");
-      return this.#blocks.assertSameSubmission(request);
-    }
-    if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
-    const created = this.#blocks.create(request);
-    this.#blocking.add(key);
-    try {
-      const event: JournalEvent = {
-        type: "block.created", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
-        agentSessionId: request.agentSessionId, diagnostic: request.needHelp, blockRequestId: created.blockRequestId,
-        needHelp: request.needHelp, ...(request.answerSchema ? { answerSchema: request.answerSchema } : {}),
-      };
-      this.state.assertApplicable(event);
-      await this.journal.append(event);
-      this.state.apply(event);
-    } catch (error) {
-      this.#blocks.discard(created.blockRequestId);
-      throw error;
-    } finally {
-      this.#blocking.delete(key);
-    }
-    return created;
+    return this.exclusive(async () => {
+      this.requireCurrentNode(key, request);
+      if (!this.#recordedSessions.has(key)) throw new Error("首条任务投递的会话坐标尚未耐久记录，拒绝 block。");
+      if (!request.needHelp.trim()) throw new Error("block --need-help 必须非空。");
+      const snapshot = this.state.agent(request.nodeId);
+      if (this.#blocks.has(request.blockRequestId)) {
+        if (snapshot.status !== "blocked" && snapshot.status !== "running") throw new Error(`重接 block 只允许当前 blocked/running 节点，实际为 ${snapshot.status}。`);
+        if (snapshot.status === "blocked" && snapshot.block?.blockRequestId !== request.blockRequestId) throw new Error("重接 block 不是该节点当前等待的 block。");
+        this.#blocks.assertSameSubmission(request);
+        return this.#blocks.status(request, snapshot.block?.delivery);
+      }
+      if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
+      const created = this.#blocks.create(request);
+      this.#blocking.add(key);
+      try {
+        const event: JournalEvent = {
+          type: "block.created", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
+          agentSessionId: request.agentSessionId, diagnostic: request.needHelp, blockRequestId: created.blockRequestId,
+          needHelp: request.needHelp, answerSchema: created.answerSchema,
+        };
+        this.state.assertApplicable(event);
+        await this.journal.append(event);
+        this.state.apply(event);
+      } catch (error) {
+        this.#blocks.discard(created.blockRequestId);
+        throw error;
+      } finally {
+        this.#blocking.delete(key);
+      }
+      return this.#blocks.status(created);
     });
-    // 只有 Journal 已经证明节点 blocked 后，原 Agent 才可开始等待答案。
-    return this.#blocks.wait(pending.blockRequestId);
   }
 
-  /** 人类答案先写 Journal，再精确唤醒创建该 block 的原调用；状态仍保持 blocked。 */
+  /** 人类答案先写 Journal，再唤醒等待同一 block 的 Elicitation；状态仍保持 blocked。 */
   async answer(submission: BlockAnswerSubmission): Promise<void> {
     if (this.#answering.has(submission.blockRequestId)) throw new Error("该 block 正在处理答案，拒绝并发 answer。");
     this.#answering.add(submission.blockRequestId);
     try {
-    await this.exclusive(async () => {
-    const snapshot = this.state.agentForBlock(submission.blockRequestId);
-    if (snapshot?.status === "paused" || snapshot?.status === "pausing" || snapshot?.status === "recovering") throw new Error("Agent 当前处于暂停中；请先 wave-flow recover 后再交付答案。 ");
-    if (snapshot?.status !== "blocked") throw new Error("block 所属节点当前不在等待答案状态，拒绝交付。 ");
-    const pending = this.#blocks.validateAnswer(submission);
-    const event: JournalEvent = {
-      type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,
-      agentSessionId: pending.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId, answer: submission.answer,
-    };
-    this.state.assertApplicable(event);
-    await this.journal.append(event);
-    this.state.apply(event);
-    // durable-first：只有答案已成为 Journal 事实后，才允许原 Agent 收到它。
-    this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer);
-    });
+      await this.exclusive(async () => {
+        const pending = this.#blocks.validateAnswer(submission);
+        this.requireCurrentNode(controlKey(pending.runId, pending.nodeId), pending);
+        // continue 后仍允许同会话同值重试幂等成功；首次交付才要求 blocked。
+        if (pending.answer) return;
+        const snapshot = this.state.agentForBlock(submission.blockRequestId);
+        if (snapshot?.status !== "blocked" && snapshot?.status !== "pausing" && snapshot?.status !== "paused" && snapshot?.status !== "recovering") throw new Error("block 所属节点当前不在等待答案状态，拒绝交付。 ");
+        if (snapshot.block?.delivery === "closed") throw new Error("block 表单已关闭；请先由用户显式重开再交付答案。 ");
+        const event: JournalEvent = {
+          type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,
+          agentSessionId: pending.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId, answer: submission.answer,
+        };
+        this.state.assertApplicable(event);
+        await this.journal.append(event);
+        this.state.apply(event);
+        // durable-first：只有答案已成为 Journal 事实后，才允许原 Agent 收到它。
+        this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer);
+      });
     } finally {
       this.#answering.delete(submission.blockRequestId);
+    }
+  }
+
+  /** 关闭当前表单并唤醒等待者；Worker 私有调用必须同时证明原节点身份，Desktop 按 block 路由。 */
+  async closeBlock(blockRequestId: string, identity?: Pick<RegisteredControlNode, "runId" | "nodeId" | "agentSessionId" | "capability">): Promise<void> {
+    await this.exclusive(async () => {
+      const snapshot = this.state.agentForBlock(blockRequestId);
+      if (identity) {
+        this.requireCurrentNode(controlKey(identity.runId, identity.nodeId), identity);
+        if (!snapshot || snapshot.id !== identity.nodeId || snapshot.agentSessionId !== identity.agentSessionId || this.runId !== identity.runId) throw new Error("close-block 不属于创建该 block 的原 Agent 会话。 ");
+      }
+      if (snapshot?.status === "blocked" && snapshot.block?.delivery === "pending") {
+        const event: JournalEvent = { type: "block.closed", at: new Date().toISOString(), runId: this.runId, nodeId: snapshot.id, agentSessionId: snapshot.agentSessionId, diagnostic: null, blockRequestId };
+        this.state.assertApplicable(event);
+        await this.journal.append(event);
+        this.state.apply(event);
+      }
+      // 暂停/恢复中不写新的 closed 事实，但必须取消原等待者，不能依赖 CLI 一定转发 abort。
+      if (snapshot?.block?.delivery === "pending") this.#blocks.close(blockRequestId);
+    });
+  }
+
+  /** 复核 ACP 表单属于当前 Worker 的原 block，并等待既有答案；关闭只返回 cancel。 */
+  async waitForBlockAnswer(
+    identity: Pick<RegisteredControlNode, "runId" | "nodeId" | "agentSessionId" | "capability">,
+    request: WorkerElicitationRequest,
+    signal?: AbortSignal,
+  ): Promise<{ readonly action: "accept"; readonly content: JsonObject } | { readonly action: "cancel" }> {
+    const registration = await this.exclusive(async () => {
+      const key = controlKey(identity.runId, identity.nodeId);
+      this.requireCurrentNode(key, identity);
+      const snapshot = this.state.agent(identity.nodeId);
+      if (request.mode !== "form") throw new Error("Wave Flow 只接受 form elicitation。");
+      if (snapshot.status !== "blocked" || !snapshot.block) throw new Error("当前节点没有可交付的人工请求。 ");
+      const block = snapshot.block;
+      const pending = this.#blocks.assertSameSubmission({ ...identity, blockRequestId: block.blockRequestId, needHelp: block.needHelp, answerSchema: block.answerSchema! });
+      if (request.message !== pending.needHelp) throw new Error("elicitation 问题与原 block 不一致。 ");
+      if (request.blockRequestId !== undefined && request.blockRequestId !== pending.blockRequestId) throw new Error("elicitation 的 blockRequestId 与原 block 不一致。 ");
+      const requestedSchema = normalizeHitlAnswerSchema(request.requestedSchema);
+      if (!isDeepStrictEqual(requestedSchema, pending.answerSchema)) throw new Error("elicitation Schema 与原 block 不一致。 ");
+      if (block.delivery === "closed") return null;
+      // 等待注册与 close/answer 共用互斥区，消除“先关闭、后注册”的永久等待窗口。
+      return { blockRequestId: pending.blockRequestId, waiting: this.#blocks.wait(pending.blockRequestId, signal) };
+    });
+    if (!registration) return { action: "cancel" };
+    try {
+      const resolution = await registration.waiting;
+      return { action: "accept", content: resolution.answer };
+    } catch (error) {
+      // closeBlock 已经拒绝了原等待者；迟到 catch 不得再关闭用户已重开的新表单。
+      if (error instanceof Error && error.message.includes("已关闭")) return { action: "cancel" };
+      if (signal?.aborted) {
+        try { await this.closeBlock(registration.blockRequestId); } catch { /* 会话已注销时保留取消语义。 */ }
+        return { action: "cancel" };
+      }
+      throw error;
     }
   }
 
   /** Engine 用于按全局 blockRequestId 路由用户侧 answer；不暴露 pending 内容。 */
   hasBlock(blockRequestId: string): boolean { return this.#blocks.has(blockRequestId); }
 
-  /** 只有原 Agent 在收到答案并自行判断可继续后，才推进 blocked → running。 */
+  /** 答案交付后释放 block；同会话同 ID 重试只返回成功，不重复写 Journal。 */
   async continue(request: ContinueSubmission): Promise<void> {
+    await this.awaitRecoveryAccepted(request.nodeId, request.agentSessionId);
     if (this.#continuing.has(request.blockRequestId)) throw new Error("该 block 正在处理 continue，拒绝并发请求。");
     this.#continuing.add(request.blockRequestId);
     try {
-    await this.exclusive(async () => {
-    const key = controlKey(request.runId, request.nodeId);
-    this.requireCurrentNode(key, request);
-    const snapshot = this.state.agent(request.nodeId);
-    if (snapshot.status !== "blocked") throw new Error(`continue 只允许当前 blocked 节点，实际为 ${snapshot.status}。`);
-    const pending = this.#blocks.assertCanContinue(request);
-    const event: JournalEvent = {
-      type: "agent.continued", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
-      agentSessionId: request.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId,
-    };
-    this.state.assertApplicable(event);
-    await this.journal.append(event);
-    this.state.apply(event);
-    this.#blocks.finishContinue(pending.blockRequestId);
-    });
+      await this.exclusive(async () => {
+        const key = controlKey(request.runId, request.nodeId);
+        this.requireCurrentNode(key, request);
+        const pending = this.#blocks.assertCanContinue(request);
+        if (pending.continued) return;
+        const snapshot = this.state.agent(request.nodeId);
+        if (snapshot.status !== "blocked") throw new Error(`continue 只允许当前 blocked 节点，实际为 ${snapshot.status}。`);
+        const event: JournalEvent = {
+          type: "agent.continued", at: new Date().toISOString(), runId: request.runId, nodeId: request.nodeId,
+          agentSessionId: request.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId,
+        };
+        this.state.assertApplicable(event);
+        await this.journal.append(event);
+        this.state.apply(event);
+        this.#blocks.finishContinue(pending.blockRequestId);
+      });
     } finally {
       this.#continuing.delete(request.blockRequestId);
+    }
+  }
+
+  /** 恢复 prompt 可以先于 recovered/running 耐久事实到达 Worker；只在该窗口有界等待，其他状态仍按原规则拒绝。 */
+  private async awaitRecoveryAccepted(nodeId: string, agentSessionId: string): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (this.state.agent(nodeId).status === "recovering" && this.state.agent(nodeId).agentSessionId === agentSessionId) {
+      if (Date.now() >= deadline) throw new Error("恢复状态尚未确认，拒绝受理 Worker 协议请求。 ");
+      await Bun.sleep(1);
     }
   }
 

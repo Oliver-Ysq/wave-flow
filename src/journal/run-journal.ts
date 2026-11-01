@@ -1,4 +1,5 @@
-import { appendFile, chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isJsonObject, type JsonObject } from "../shared/json";
@@ -11,13 +12,13 @@ export class RunJournal {
   #appendQueue: Promise<void> = Promise.resolve();
   /** 首个 append 失败的原始错误；fail closed 后所有后续 append 与 flush 都携带它拒绝。 */
   #appendFailure: Error | null = null;
+  #nextAppendFailure: Error | null = null;
 
   private constructor(readonly manifest: RunManifest, readonly directory: string) {}
 
-  /** 仅供故障注入测试使用：下一次追加操作失败，验证 Runtime 不会把失败吞掉。 */
+  /** 仅供故障注入测试使用：下一次实际追加操作失败，验证 Runtime 不会把失败吞掉。 */
   failNextAppendForTest(message = "Injected Journal append failure"): void {
-    this.#appendQueue = Promise.reject(new Error(message));
-    void this.#appendQueue.catch(() => undefined);
+    this.#nextAppendFailure = new Error(message);
   }
 
   /** 创建空 Journal，并先耐久写入 Manifest 与 run.created 事实。 */
@@ -53,6 +54,7 @@ export class RunJournal {
     try { text = await readFile(join(directory, "journal.jsonl"), "utf8"); } catch { throw new Error("指定 Run 的 Journal 不可读取。"); }
     const lines = text.split("\n");
     const events: JournalEvent[] = [];
+    let truncatedTail: Error | null = null;
     const state = new RunStateMachine(manifest);
     for (let index = 0; index < lines.length; index += 1) {
       if (!lines[index].trim()) continue;
@@ -62,6 +64,7 @@ export class RunJournal {
       } catch (error) {
         const hasLaterLine = lines.slice(index + 1).some((line) => line.trim());
         if (hasLaterLine || !isTruncatedJsonTail(lines[index])) throw new Error(`Journal 第 ${index + 1} 行损坏：${error instanceof Error ? error.message : String(error)}`);
+        truncatedTail = new Error(`Journal 第 ${index + 1} 行是截断尾行；允许只读打开，但拒绝继续追加。`);
         continue;
       }
       try {
@@ -76,7 +79,9 @@ export class RunJournal {
         throw new Error(`Journal 第 ${index + 1} 行损坏：${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return { journal: new RunJournal(manifest, directory), events };
+    const journal = new RunJournal(manifest, directory);
+    journal.#appendFailure = truncatedTail;
+    return { journal, events };
   }
 
   /**
@@ -88,7 +93,16 @@ export class RunJournal {
   async append(event: JournalEvent): Promise<void> {
     validateEvent(event, this.manifest.runId);
     if (this.#appendFailure) throw this.#appendFailure;
-    const operation = this.#appendQueue.then(() => appendFile(join(this.directory, "journal.jsonl"), `${JSON.stringify(event)}\n`, "utf8"));
+    const operation = this.#appendQueue.then(() => {
+      // 入队后、实际写入前再次复核：前一条失败必须同时 poison 已排队的后续事实。
+      if (this.#appendFailure) throw this.#appendFailure;
+      if (this.#nextAppendFailure) {
+        const failure = this.#nextAppendFailure;
+        this.#nextAppendFailure = null;
+        throw failure;
+      }
+      return appendPrivateJournalLine(join(this.directory, "journal.jsonl"), `${JSON.stringify(event)}\n`);
+    });
     this.#appendQueue = operation.catch((error: unknown) => { this.#appendFailure = error instanceof Error ? error : new Error(String(error)); });
     return operation;
   }
@@ -131,12 +145,25 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   await writePrivateFile(temporaryPath, content);
   await rename(temporaryPath, filePath);
-  await chmod(filePath, 0o600);
+  const parent = await open(dirname(filePath), "r");
+  try { await parent.sync(); } finally { await parent.close(); }
 }
 
 async function writePrivateFile(path: string, content: string): Promise<void> {
-  await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  try { await handle.writeFile(content, "utf8"); await handle.sync(); } finally { await handle.close(); }
   await chmod(path, 0o600);
+}
+
+/** 以 O_NOFOLLOW 打开并在同一 fd 上复核身份后追加，写入与 fsync 都完成后才算耐久。 */
+async function appendPrivateJournalLine(path: string, text: string): Promise<void> {
+  const handle = await open(path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || typeof process.getuid === "function" && info.uid !== process.getuid() || (info.mode & 0o077) !== 0) throw new Error("Run Journal 文件权限或类型不安全。 ");
+    await handle.writeFile(text, "utf8");
+    await handle.sync();
+  } finally { await handle.close(); }
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
@@ -211,7 +238,7 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || typeof event.newAgentSessionId !== "string" || !event.newAgentSessionId.trim() || typeof event.invalidatedByPriorRestart !== "boolean" || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.restarted payload 无效。");
       break;
     case "agent.status":
-      if (typeof event.nodeId !== "string" || !isAgentStatus(event.status)) throw new Error("agent.status payload 无效。");
+      if (typeof event.nodeId !== "string" || !isAgentStatus(event.status) || (event.pauseCause !== undefined && event.pauseCause !== "user" && event.pauseCause !== "recovery")) throw new Error("agent.status payload 无效。");
       break;
     case "agent.session":
       if (typeof event.nodeId !== "string" || event.delivery !== "acp" || !isAcpBinding(event.acp)) throw new Error("agent.session 必须是有效 ACP binding。");
@@ -227,6 +254,10 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       break;
     case "block.answered":
       if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim() || !isJsonObject(event.answer)) throw new Error("block.answered payload 无效。");
+      break;
+    case "block.closed":
+    case "block.reopened":
+      if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim()) throw new Error(`${event.type} payload 无效。`);
       break;
     case "agent.continued":
       if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim()) throw new Error("agent.continued payload 无效。");

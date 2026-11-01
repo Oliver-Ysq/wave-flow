@@ -4,7 +4,7 @@ import type { AgentNodeStatus, RunStatus } from "../runtime/run-types";
 import type { RuntimeProvenance } from "../runtimes/types";
 
 /** 当前耐久目录格式对应的 Runtime 版本；变更时 Resume 必须显式兼容。 */
-export const RUNTIME_VERSION = 9;
+export const RUNTIME_VERSION = 10;
 /**
  * 当前实现可安全读取的耐久格式。ACP-only 切换后不再读取任何历史版本：
  * 旧 archive 的 tmux/App Server 事实无法在新格式下验证，只能整体视为不可读，
@@ -127,6 +127,8 @@ export type JournalEvent = JournalBase & ({
 } | {
   readonly type: "agent.status";
   readonly status: AgentNodeStatus;
+  /** 暂停原因；仅 pausing/paused/recovering 可携带，缺省表示用户主动暂停。 */
+  readonly pauseCause?: "user" | "recovery";
 } | {
   /** 已确认首条任务投递的真实会话坐标；必须早于该节点的 complete。 */
   readonly type: "agent.session";
@@ -161,6 +163,14 @@ export type JournalEvent = JournalBase & ({
   readonly blockRequestId: string;
   /** 已校验为 JSON 对象的人类答案。 */
   readonly answer: JsonObject;
+} | {
+  /** 本次 elicitation 已关闭且没有答案；节点仍 blocked，可重开原请求。 */
+  readonly type: "block.closed";
+  readonly blockRequestId: string;
+} | {
+  /** 用户或恢复流程重新打开原 block；不创建第二个 block.created。 */
+  readonly type: "block.reopened";
+  readonly blockRequestId: string;
 } | {
   /** 原 Agent 确认已可继续，唯一合法的 blocked → running 迁移。 */
   readonly type: "agent.continued";

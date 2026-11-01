@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import { startControlSocket, type ControlSocketServer } from "./control-socket";
 import type { ControlServer, CompletionSubmission } from "../control/control-server";
@@ -8,10 +9,12 @@ import type { JsonObject } from "../shared/json";
 export type WorkerControlIdentity = Pick<CompletionSubmission, "runId" | "nodeId" | "agentSessionId" | "capability">;
 
 /** Worker MCP 发给本次 Engine 的私有 JSONL 请求。 */
-type ControlRequest =
+type ControlRequest = (
   | { readonly requestId: string; readonly action: "complete"; readonly summary: string; readonly result: JsonObject }
   | { readonly requestId: string; readonly action: "block"; readonly blockRequestId: string; readonly needHelp: string; readonly answerSchema?: JsonObject }
-  | { readonly requestId: string; readonly action: "continue"; readonly blockRequestId: string };
+  | { readonly requestId: string; readonly action: "continue"; readonly blockRequestId: string }
+  | { readonly requestId: string; readonly action: "close-block"; readonly blockRequestId: string }
+) & { readonly capability?: string };
 type ControlResponse = { readonly requestId: string; readonly ok: true; readonly result: unknown } | { readonly requestId: string; readonly ok: false; readonly error: string };
 
 /** 注入 MCP 子进程的私有控制端点；目录仅在当前 Engine 生命周期内存在。 */
@@ -72,6 +75,7 @@ export class WorkerControlChannel {
     let requestId = requestIdFromLine(line);
     try {
       const request = parseRequest(line); requestId = request.requestId;
+      assertCapability(request.capability, this.identity.capability);
       if (request.action === "complete") {
         await this.control.complete({ ...this.identity, summary: request.summary, result: request.result });
         return { requestId, ok: true, result: { ok: true } };
@@ -79,6 +83,10 @@ export class WorkerControlChannel {
       if (request.action === "block") {
         const resolution = await this.control.block({ ...this.identity, blockRequestId: request.blockRequestId, needHelp: request.needHelp, ...(request.answerSchema ? { answerSchema: request.answerSchema } : {}) } as BlockSubmission);
         return { requestId, ok: true, result: resolution };
+      }
+      if (request.action === "close-block") {
+        await this.control.closeBlock(request.blockRequestId, this.identity);
+        return { requestId, ok: true, result: { ok: true } };
       }
       await this.control.continue({ ...this.identity, blockRequestId: request.blockRequestId } as ContinueSubmission);
       return { requestId, ok: true, result: { ok: true } };
@@ -103,9 +111,18 @@ function parseRequest(line: string): ControlRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Worker 私有控制请求必须是对象。");
   const request = value as Record<string, unknown>;
   if (typeof request.requestId !== "string" || !request.requestId.trim()) throw new Error("Worker 私有控制请求缺少 requestId。");
-  if (request.action === "complete" && typeof request.summary === "string" && isObject(request.result)) return { requestId: request.requestId, action: "complete", summary: request.summary, result: request.result };
-  if (request.action === "block" && typeof request.blockRequestId === "string" && typeof request.needHelp === "string" && (request.answerSchema === undefined || isObject(request.answerSchema))) return { requestId: request.requestId, action: "block", blockRequestId: request.blockRequestId, needHelp: request.needHelp, ...(isObject(request.answerSchema) ? { answerSchema: request.answerSchema } : {}) };
-  if (request.action === "continue" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "continue", blockRequestId: request.blockRequestId };
+  const capability = typeof request.capability === "string" ? request.capability : undefined;
+  if (request.action === "complete" && typeof request.summary === "string" && isObject(request.result)) return { requestId: request.requestId, action: "complete", summary: request.summary, result: request.result, capability };
+  if (request.action === "block" && typeof request.blockRequestId === "string" && typeof request.needHelp === "string" && (request.answerSchema === undefined || isObject(request.answerSchema))) return { requestId: request.requestId, action: "block", blockRequestId: request.blockRequestId, needHelp: request.needHelp, ...(isObject(request.answerSchema) ? { answerSchema: request.answerSchema } : {}), capability };
+  if (request.action === "continue" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "continue", blockRequestId: request.blockRequestId, capability };
+  if (request.action === "close-block" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "close-block", blockRequestId: request.blockRequestId, capability };
   throw new Error("Worker 私有控制请求无效。");
 }
+function assertCapability(actual: string | undefined, expected: string): void {
+  if (typeof actual !== "string") throw new Error("Worker 私有控制请求缺少 capability。 ");
+  const left = Buffer.from(actual, "utf8");
+  const right = Buffer.from(expected, "utf8");
+  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new Error("Worker 私有控制 capability 不匹配。 ");
+}
+
 function isObject(value: unknown): value is JsonObject { return !!value && typeof value === "object" && !Array.isArray(value); }

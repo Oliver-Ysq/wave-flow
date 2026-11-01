@@ -27,7 +27,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写Worker�
   let runtime!:RunRuntime;const pipes:WorkerControlChannel[]=[];
   const executor=new ProductionWorkspaceExecutor({version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId},join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
     const pipe=new WorkerControlChannel(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-    return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
+    return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath},{name:"WF_WORKER_CONTROL_CAPABILITY",value:identity.capability}],close:()=>pipe.close()} as acp.McpServer;
   },null);
   const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"result-recovery",description:"成果交接恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('只将当前cwd的a.txt改成done加换行；不要commit/push、联网或安装。最终结果{ok:true}。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
   await writeFile(join(root,"workflow.ts"),"result-recovery");
@@ -64,7 +64,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
  const pipes:WorkerControlChannel[]=[];
  const makeExecutor=(getRuntime:()=>RunRuntime)=>new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
    const pipe=new WorkerControlChannel(getRuntime().createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
+   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath},{name:"WF_WORKER_CONTROL_CAPABILITY",value:identity.capability}],close:()=>pipe.close()} as acp.McpServer;
  },null);
  let runtime!:RunRuntime;const executor=makeExecutor(()=>runtime);
  const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"partial-resume",description:"停止现场恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('先检查当前cwd的a.txt；仅当内容不是partial加换行时将其改成partial加换行。保留已有partial，不重复写；验证内容后返回{ok:true}。不要commit/push、联网、安装或修改其他文件。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
@@ -157,7 +157,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   let runtime!:RunRuntime;
   const executor=new ProductionWorkspaceExecutor(config,join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
    const pipe=new WorkerControlChannel(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath}],close:()=>pipe.close()} as acp.McpServer;
+   return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath},{name:"WF_WORKER_CONTROL_CAPABILITY",value:identity.capability}],close:()=>pipe.close()} as acp.McpServer;
   },null);executors.push(executor);
   const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"revision-check",description:"现场修订",phases:[{title:"write"}]},default:async()=>{phase("write");return agent(prompt,{id,cli,sandbox:"workspace-write",schema});}};
   const path=join(root,`${id}.ts`);await writeFile(path,id);

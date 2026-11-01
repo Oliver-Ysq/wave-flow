@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectControlSocket } from "../../src/runtime/control-socket";
@@ -15,9 +15,22 @@ test("Worker 私有 Control 通道 将 complete 直接交给 ControlServer", asy
   const received: unknown[] = [];
   const control = { async complete(value: unknown) { received.push(value); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test", capability: "capability" });
   expect(await client.request({ action: "complete", summary: "done", result: { ok: true } })).toEqual({ ok: true });
   expect(received).toEqual([{ runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", summary: "done", result: { ok: true } }]);
+  client.close();
+});
+
+test("同 UID 攻击者仅知道 socket 路径时不能冒用其他 Worker", async () => {
+  const received: unknown[] = [];
+  const control = { async complete(value: unknown) { received.push(value); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "attacker" });
+  await expect(client.request({ action: "complete", summary: "forged", result: { ok: true } })).rejects.toThrow();
+  const wrong = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "attacker-wrong", capability: "wrong" });
+  await expect(wrong.request({ action: "complete", summary: "forged", result: { ok: true } })).rejects.toThrow("capability 不匹配");
+  expect(received).toHaveLength(0);
+  wrong.close();
   client.close();
 });
 
@@ -27,7 +40,7 @@ test("Worker MCP 的 complete 工具通过私有 socket 交给 ControlServer", a
   const control = { async complete(value: unknown) { received.push(value); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
@@ -52,7 +65,7 @@ test("Worker MCP 把节点 resultSchema 内联进完成工具的 inputSchema", a
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
   const schema = { type: "object", properties: { ok: { type: "boolean" }, note: { type: "string" } }, required: ["ok"], additionalProperties: false };
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_RESULT_SCHEMA: JSON.stringify(schema) } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability", WF_WORKER_RESULT_SCHEMA: JSON.stringify(schema) } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
@@ -72,7 +85,7 @@ test("Worker MCP 在没有节点 Schema 时只通告对象形状", async () => {
   const control = { async complete() {}, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
@@ -89,16 +102,16 @@ test("Worker MCP 在没有节点 Schema 时只通告对象形状", async () => {
 for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP自行退出，不依赖ACP关闭stdin，pendingBlock=${pending}`, async () => {
   let entered!: () => void;
   const blocked = new Promise<void>((resolve) => { entered = resolve; });
-  const control = { async complete() {}, async block() { entered(); return new Promise(() => {}); }, async continue() {} };
+  const control = { async complete() {}, async block() { entered(); return { answerSchema: { type: "object", properties: { ok: { type: "boolean" } } }, answer: null }; }, async continue() {} };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
   const reader = child.stdout.getReader();
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } })}\n`);
   expect((await reader.read()).done).toBe(false);
   if (pending) {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "测试等待" } } })}\n`);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "测试等待", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } } } })}\n`);
     await blocked;
   }
   pipe.close();
@@ -108,15 +121,17 @@ for (const pending of [false, true]) test(`Engine关闭私有管道时Worker MCP
 /** block/continue 是 HITL 的另两个入口，必须与 complete 一样经私有 socket 且携带绑定身份。 */
 test("Worker 私有 Control 通道 将 block 与 continue 原样交给 ControlServer", async () => {
   const received: unknown[] = [];
-  const control = { async complete() { throw new Error("不应调用 complete"); }, async block(value: unknown) { received.push(["block", value]); return { blockRequestId: (value as { blockRequestId: string }).blockRequestId, answer: { ok: true } }; }, async continue(value: unknown) { received.push(["continue", value]); return { ok: true }; } };
+  const control = { async complete() { throw new Error("不应调用 complete"); }, async block(value: unknown) { received.push(["block", value]); return { blockRequestId: (value as { blockRequestId: string }).blockRequestId, answer: { ok: true } }; }, async continue(value: unknown) { received.push(["continue", value]); return { ok: true }; }, async closeBlock(value: unknown) { received.push(["close-block", value]); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test", capability: "capability" });
   const blockRequestId = crypto.randomUUID();
   expect(await client.request({ action: "block", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object" } })).toEqual({ blockRequestId, answer: { ok: true } });
   expect(await client.request({ action: "continue", blockRequestId })).toEqual({ ok: true });
+  expect(await client.request({ action: "close-block", blockRequestId })).toEqual({ ok: true });
   expect(received).toEqual([
     ["block", { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", blockRequestId, needHelp: "需要确认", answerSchema: { type: "object" } }],
     ["continue", { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability", blockRequestId }],
+    ["close-block", blockRequestId],
   ]);
   client.close();
 });
@@ -125,54 +140,139 @@ test("Worker 私有 Control 通道 将 block 与 continue 原样交给 ControlSe
 test("Worker 私有 Control 通道 对畸形帧和 Control 错误回传 ok:false", async () => {
   const control = { async complete() { throw new Error("Control 拒绝完成"); }, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
-  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test" });
+  const client = await connectControlSocket({ socketPath: pipe.endpoints.socketPath, idPrefix: "test", capability: "capability" });
   await expect(client.request({ action: "unknown" })).rejects.toThrow("请求无效");
   await expect(client.request({ action: "complete", summary: "done", result: { ok: true } })).rejects.toThrow("Control 拒绝完成");
   client.close();
 });
 
-/**
- * Codex code-mode 约 31 秒后不再同步返回长工具调用结果（转为后台 cell，模型未必取回），
- * 因此 wave_flow_block 必须有界等待：预算内未答返回 waiting，重连同 id 才返回 answered。
- */
-test("wave_flow_block 有界等待：未答返回 waiting，同一 blockRequestId 重连后拿到答案", async () => {
+/** block 先建立事实，再由宿主 Elicitation 作答并自动 continue。 */
+test("wave_flow_block 经 Elicitation 返回答案并自动 continue", async () => {
   const requests: unknown[] = [];
-  let releaseAnswer!: (value: unknown) => void;
+  let blockCalls = 0;
   const control = {
     async complete() { throw new Error("不应调用 complete"); },
     async block(value: unknown) {
       requests.push(value);
-      // 第一次调用等到预算到期仍无答案；第二次（重连）调用由测试交付答案。
-      if (requests.length === 1) return new Promise(() => {});
-      return new Promise((resolve) => { releaseAnswer = resolve; });
+      blockCalls += 1;
+      const request = value as { answerSchema: unknown };
+      return { answerSchema: request.answerSchema, answer: blockCalls === 1 ? null : { x: 7 }, delivery: blockCalls === 1 ? "pending" : "answered" };
     },
-    async continue() { throw new Error("不应调用 continue"); },
+    async continue(value: unknown) { requests.push(value); return { ok: true }; },
   };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_BLOCK_WAIT_BUDGET_MS: "150" } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
   const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
   const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
   const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
-  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
   expect((await next()).id).toBe(1);
   send({ jsonrpc: "2.0", method: "notifications/initialized" });
   const needHelp = "需要整数 x";
   const answerSchema = { type: "object", properties: { x: { type: "integer" } }, required: ["x"] };
   send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp, answerSchema } } });
-  const waiting = await next();
-  const waitingPayload = JSON.parse((waiting.result as { content: { text: string }[] }).content[0].text);
-  expect(waitingPayload.status).toBe("waiting");
-  expect(typeof waitingPayload.blockRequestId).toBe("string");
-  send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp, answerSchema, blockRequestId: waitingPayload.blockRequestId } } });
-  for (let i = 0; i < 100 && requests.length < 2; i++) await Bun.sleep(20);
-  expect(requests).toHaveLength(2);
-  releaseAnswer({ blockRequestId: waitingPayload.blockRequestId, answer: { x: 7 } });
+  const elicitation = await next();
+  expect(elicitation.method).toBe("elicitation/create");
+  const params = elicitation.params as { mode: string; message: string; requestedSchema: unknown; _meta: { waveFlow: { blockRequestId: string } } };
+  expect(params.mode).toBe("form");
+  expect(params.message).toBe(needHelp);
+  expect(params.requestedSchema).toEqual(answerSchema);
+  const blockRequestId = params._meta.waveFlow.blockRequestId;
+  expect(blockRequestId).toMatch(/^[0-9a-f-]{36}$/);
+  send({ jsonrpc: "2.0", id: elicitation.id, result: { action: "accept", content: { x: 7 } } });
   const answered = await next();
   const answeredPayload = JSON.parse((answered.result as { content: { text: string }[] }).content[0].text);
-  expect(answeredPayload).toEqual({ status: "answered", blockRequestId: waitingPayload.blockRequestId, answer: { x: 7 } });
-  // 两次调用都把同一 blockRequestId 交给 Control；是否新建 block 由 Control 仲裁。
-  expect((requests as { blockRequestId: string }[]).map((request) => request.blockRequestId)).toEqual([waitingPayload.blockRequestId, waitingPayload.blockRequestId]);
+  expect(answeredPayload).toEqual({ status: "answered", blockRequestId, answer: { x: 7 } });
+  expect(requests.map(request => (request as { blockRequestId: string }).blockRequestId)).toEqual([blockRequestId, blockRequestId, blockRequestId]);
+}, 20_000);
+
+test("ACP cancel 先经 Control 关闭再返回 closed", async () => {
+  let closed = 0;
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) { return { answerSchema: (value as { answerSchema: unknown }).answerSchema, answer: null, delivery: "pending" }; },
+    async continue() { throw new Error("不应 continue"); },
+    async closeBlock() { closed += 1; },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+  const elicitation = await next();
+  send({ jsonrpc: "2.0", id: elicitation.id, result: { action: "cancel" } });
+  const response = await next();
+  const payload = JSON.parse((response.result as { content: { text: string }[] }).content[0].text) as { status: string; blockRequestId: string };
+  expect(payload.status).toBe("closed");
+  expect(closed).toBe(1);
+}, 20_000);
+
+test("答案交付后 continue 失败返回协议错误，不伪装成 closed", async () => {
+  let blockCalls = 0;
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) { blockCalls += 1; return { answerSchema: (value as { answerSchema: unknown }).answerSchema, answer: blockCalls === 1 ? null : { ok: true }, delivery: blockCalls === 1 ? "pending" : "answered" }; },
+    async continue() { throw new Error("continue 未确认"); },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+  const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+  const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+  const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+  expect((await next()).id).toBe(1);
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+  const elicitation = await next();
+  send({ jsonrpc: "2.0", id: elicitation.id, result: { action: "accept", content: { ok: true } } });
+  const response = await next();
+  expect(response.error).toBeDefined();
+  expect(JSON.stringify(response.error)).toContain("continue 未确认");
+  expect(JSON.stringify(response)).not.toContain('"status":"closed"');
+}, 20_000);
+
+test("业务超时通过真实 MCP 路径耐久关闭表单并返回 closed", async () => {
+  let closed = 0;
+  const control = {
+    async complete() { throw new Error("不应调用 complete"); },
+    async block(value: unknown) { return { answerSchema: (value as { answerSchema: unknown }).answerSchema, answer: null, delivery: "pending" }; },
+    async continue() { throw new Error("不应 continue"); },
+    async closeBlock() { closed += 1; },
+  };
+  const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
+  const directory = mkdtempSync(join(tmpdir(), "wf-elicit-timeout-"));
+  try {
+    const sourcePath = new URL("../../src/runtime/worker-mcp-server.ts", import.meta.url).pathname;
+    const source = await Bun.file(sourcePath).text();
+    const instrumented = source.replace("24 * 60 * 60 * 1000", "100")
+      .replaceAll('"../', `"${join(process.cwd(), "src")}/`)
+      .replaceAll('"./', `"${join(process.cwd(), "src/runtime")}/`)
+      + "\nawait runWorkerMcpServer();\n";
+    if (instrumented === source) throw new Error("超时探针没有生效");
+    const entry = join(directory, "worker-mcp-timeout.ts");
+    await writeFile(entry, instrumented, "utf8");
+    const child = Bun.spawn([process.execPath, entry], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability" } }); children.push(child);
+    const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let buffered = "";
+    const next = async (): Promise<Record<string, unknown>> => { while (true) { const index = buffered.indexOf("\n"); if (index >= 0) { const line = buffered.slice(0, index); buffered = buffered.slice(index + 1); return JSON.parse(line); } const value = await reader.read(); if (value.done) throw new Error("Worker MCP 在响应前关闭。 "); buffered += decoder.decode(value.value, { stream: true }); } };
+    const send = (value: unknown) => child.stdin.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "test", version: "1" } } });
+    expect((await next()).id).toBe(1);
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "wave_flow_block", arguments: { needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } } } });
+    expect((await next()).method).toBe("elicitation/create");
+    let response: Record<string, unknown>;
+    do { response = await next(); } while (response.id !== 2);
+    const payload = JSON.parse((response.result as { content: { text: string }[] }).content[0].text) as { status: string };
+    expect(payload.status).toBe("closed");
+    expect(closed).toBe(1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 }, 20_000);
 
 /**
@@ -207,7 +307,7 @@ test("Worker MCP 在 resultSchema 非法时启动即失败并给出可读原因"
   const control = { async complete() {}, async block() { throw new Error("不应调用 block"); }, async continue() { throw new Error("不应调用 continue"); } };
   const pipe = new WorkerControlChannel(control as never, { runId: "run", nodeId: "node", agentSessionId: "session", capability: "capability" }); pipes.push(pipe);
   const entry = new URL("../../src/desktop/engine-main.ts", import.meta.url).pathname;
-  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_RESULT_SCHEMA: "not-json" } }); children.push(child);
+  const child = Bun.spawn([process.execPath, entry, "__worker-mcp"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, WF_WORKER_CONTROL_SOCKET: pipe.endpoints.socketPath, WF_WORKER_CONTROL_CAPABILITY: "capability", WF_WORKER_RESULT_SCHEMA: "not-json" } }); children.push(child);
   const stderr = await new Response(child.stderr).text();
   expect(await child.exited).not.toBe(0);
   expect(stderr).toContain("WF_WORKER_RESULT_SCHEMA");

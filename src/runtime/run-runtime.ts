@@ -53,6 +53,8 @@ export class RunRuntime {
   #controlAbort: AbortController | null = null;
   #controlSettled: Promise<void> | null = null;
   #resolveControlSettled: (() => void) | null = null;
+  /** 同一 block 的用户重开单飞；并发双击共享结果，不得把重复请求升级为 Run interrupted。 */
+  #reopeningBlocks = new Map<string, Promise<RunSnapshot>>();
   private constructor(
     readonly journal: RunJournal,
     readonly state: RunStateMachine,
@@ -130,7 +132,12 @@ export class RunRuntime {
       // interrupted 节点"的损坏投影，下一次 resume 与启动收敛都会被误导。
       // Journal fail closed 时封存写入必然失败；绝不因此吞掉上方的首个失败。
       if (!this.#stopping && this.state.snapshot().status === "running") {
-        try { await this.transitionRun("interrupted", diagnostic); } catch { /* Journal 已 fail closed，保留原始错误。 */ }
+        this.host.abortQueuedStarts();
+        this.host.rejectPendingGates("Workflow 异常终止，停止等待中的决策与节点。 ");
+        try {
+          await this.interruptControlWorkers(diagnostic, true);
+          await this.transitionRun("interrupted", diagnostic);
+        } catch { /* Journal 已 fail closed，保留原始错误。 */ }
       }
       throw error;
     }
@@ -177,9 +184,13 @@ export class RunRuntime {
     const targets = this.state.snapshot().phases.flatMap((phase) => phase.agents).filter((node) => node.status === "running" || node.status === "blocked");
     try {
       for (const node of targets) {
-        await this.applyAgentStatus(node.id, "pausing", node.agentSessionId, "正在停止当前 Agent 回合与受管工具。 ");
+        const current = this.state.agent(node.id);
+        // complete 可能在快照后先行落盘；已终结节点不得再写过期的 pausing。
+        if (current.status !== "running" && current.status !== "blocked") continue;
+        if (!await this.applyAgentStatusIfLive(node.id, "pausing", node.agentSessionId, "正在停止当前 Agent 回合与受管工具。 ") && this.state.agent(node.id).status !== "pausing") continue;
+        // recovery 已先写 pausing 时也要等待共享的真实暂停完成，不能提前宣布 Run paused。
         await this.host.pauseNode(this.state.agent(node.id), control.signal);
-        await this.applyAgentStatus(node.id, "paused", node.agentSessionId, "当前回合和受管背景终端已停止。 ");
+        await this.applyAgentStatusIfLive(node.id, "paused", node.agentSessionId, "当前回合和受管背景终端已停止。 ");
       }
       await this.transitionRun("paused", "用户暂停完成。 ");
       return this.snapshot();
@@ -201,7 +212,7 @@ export class RunRuntime {
     try {
       for (const node of targets) {
         await this.applyAgentStatus(node.id, "recovering", node.agentSessionId, "正在同一会话创建继续回合。 ");
-        const recovery = await this.host.recoverNode(this.state.agent(node.id), control.signal);
+        const recovery = await this.host.recoverNode(this.state.agent(node.id), AbortSignal.any([control.signal, AbortSignal.timeout(15_000)]));
         if (recovery.acp) {
           const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: "同一 ACP session 的恢复回合已启动。", acp: recovery.acp };
           await this.host.commitEvent(event);
@@ -220,14 +231,76 @@ export class RunRuntime {
     } finally { this.endControl(control); }
   }
 
+  /** 单节点协议恢复：Run 保持 running，只有目标节点在原 session 发起恢复回合。 */
+  async recoverNodeForRecovery(nodeId: string): Promise<RunSnapshot> {
+    const control = this.beginControl();
+    try { return await this.performRecoverNodeForRecovery(nodeId, control); }
+    finally { this.endControl(control); }
+  }
+
+  private async performRecoverNodeForRecovery(nodeId: string, control: AbortController): Promise<RunSnapshot> {
+    if (this.state.snapshot().status !== "running") throw new Error("只有 running 的 Run 可以执行节点级恢复；请先恢复整个 Run。 ");
+    const node = this.state.agent(nodeId);
+    if (node.status !== "paused" || node.pauseCause !== "recovery") throw new Error("只有协议恢复暂停的节点可以同会话重试。 ");
+    await this.applyAgentStatus(nodeId, "recovering", node.agentSessionId, "正在原会话重试协议恢复。 ", "recovery");
+    try {
+      const recovery = await this.host.recoverNode(this.state.agent(nodeId), AbortSignal.any([control.signal, AbortSignal.timeout(15_000)]));
+      if (recovery.acp) {
+        const event: JournalEvent = { type: "agent.recovered", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId: node.agentSessionId, diagnostic: "同一 ACP session 的协议恢复回合已启动。", acp: recovery.acp };
+        await this.host.commitEvent(event);
+      }
+      await this.applyAgentStatus(nodeId, node.block ? "blocked" : "running", node.agentSessionId, node.block ? "恢复原人工请求。" : "协议恢复已继续。 ", "recovery");
+      return this.snapshot();
+    } catch (error) {
+      if (this.#stopping && control.signal.aborted) throw error;
+      const diagnostic = `恢复未确认：${error instanceof Error ? error.message : String(error)}`;
+      await this.interruptControlWorkers(diagnostic);
+      await this.transitionRunIfLive("interrupted", diagnostic);
+      throw error;
+    }
+  }
+
+  /** 重新打开已关闭的人工请求；只恢复目标节点，不创建新 block 或 attempt。 */
+  async reopenBlock(blockRequestId: string): Promise<RunSnapshot> {
+    const active = this.#reopeningBlocks.get(blockRequestId);
+    if (active) return active;
+    const operation = this.performReopenBlock(blockRequestId);
+    this.#reopeningBlocks.set(blockRequestId, operation);
+    try { return await operation; }
+    finally { if (this.#reopeningBlocks.get(blockRequestId) === operation) this.#reopeningBlocks.delete(blockRequestId); }
+  }
+
+  private async performReopenBlock(blockRequestId: string): Promise<RunSnapshot> {
+    const control = this.beginControl();
+    try {
+      if (this.state.snapshot().status !== "running") throw new Error("只有 running 的 Run 可以重开人工请求。 ");
+      const node = this.state.agentForBlock(blockRequestId);
+      if (!node || node.status !== "blocked" || node.block?.delivery !== "closed") throw new Error("只有已关闭的人工请求可以重新打开。 ");
+      try {
+        await this.host.commitEvent({ type: "block.reopened", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId: node.id, agentSessionId: node.agentSessionId, diagnostic: null, blockRequestId });
+        await this.host.pauseNodeForRecovery(node.id);
+      } catch (error) {
+        if (this.#stopping && control.signal.aborted) throw error;
+        const diagnostic = `重开人工请求未确认：${error instanceof Error ? error.message : String(error)}`;
+        await this.interruptControlWorkers(diagnostic);
+        await this.transitionRunIfLive("interrupted", diagnostic);
+        throw error;
+      }
+      return await this.performRecoverNodeForRecovery(node.id, control);
+    } finally { this.endControl(control); }
+  }
+
   /** 控制部分失败使整个Run无法继续；先耐久收敛全部活跃节点，再尽力释放原会话。 */
-  private async interruptControlWorkers(diagnostic: string): Promise<void> {
+  private async interruptControlWorkers(diagnostic: string, waitForStop = false): Promise<void> {
     this.host.pauseScheduling();
+    const stopping: Promise<void>[] = [];
     for (const node of this.state.snapshot().phases.flatMap(phase => phase.agents)) {
       if (!await this.applyAgentStatusIfLive(node.id, "interrupted", node.agentSessionId, diagnostic)) continue;
-      // 已成功暂停/恢复的其他会话也须释放；底层清理不响应不能阻塞本地终态落盘。
-      void this.host.stopNode(node).catch(() => undefined);
+      // 已成功暂停/恢复的其他会话也须释放；清理错误不覆盖首个业务/控制失败。
+      stopping.push(this.host.stopNode(node).catch(() => undefined));
     }
+    if (waitForStop) await Promise.race([Promise.all(stopping), Bun.sleep(15_000)]);
+    else void Promise.all(stopping);
   }
 
   /** 用户停止是终态；不允许后续 recover 或隐式重跑。 */
@@ -349,8 +422,8 @@ export class RunRuntime {
     }
   }
 
-  private async applyAgentStatus(nodeId: string, status: import("./run-types").AgentNodeStatus, agentSessionId: string | null, diagnostic: string): Promise<void> {
-    const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic, status };
+  private async applyAgentStatus(nodeId: string, status: import("./run-types").AgentNodeStatus, agentSessionId: string | null, diagnostic: string, pauseCause: "user" | "recovery" = "user"): Promise<void> {
+    const event: JournalEvent = { type: "agent.status", at: new Date().toISOString(), runId: this.journal.manifest.runId, nodeId, agentSessionId, diagnostic, status, pauseCause };
     await this.host.commitEvent(event);
   }
 

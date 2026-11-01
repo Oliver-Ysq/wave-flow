@@ -7,7 +7,7 @@ import type { RuntimeCli } from "../runtimes/types";
  * 默认主控、Worker 分配与启动复核都拒绝这些 CLI。恢复时只需从这里移除并重新
  * 验收；Web 与 Engine 共用本清单，禁止在界面维护第二份名单。
  */
-export const TEMPORARILY_UNAVAILABLE_CLIS: ReadonlySet<RuntimeCli> = new Set<RuntimeCli>(["kimi"]);
+export const TEMPORARILY_UNAVAILABLE_CLIS: ReadonlySet<RuntimeCli> = new Set<RuntimeCli>(["kimi", "dsh"]);
 
 /** 面向用户的 CLI 名称；只用于错误文案，不参与任何能力判定。 */
 const CLI_LABELS: Readonly<Record<RuntimeCli, string>> = {

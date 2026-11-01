@@ -40,6 +40,20 @@ describe("RuntimeAcpWorkerExecutor 按节点 cli 解析 Worker", () => {
     expect(provenance).toMatchObject({ cli: "claude", adapterId: "claude-acp", runtimeId: saved.runtimeId });
   });
 
+  test("生产 Worker 创建后继承节点级恢复暂停钩子", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-recovery-")); roots.push(root);
+    const registry = new CliRuntimeRegistry(root);
+    await registry.saveVerified(await claudeRecord(root));
+    const bound: { current: ((nodeId: string) => Promise<void>) | null } = { current: null };
+    const stub = { bindControl() {}, bindRecoveryHold(handler: (nodeId: string) => Promise<void>) { bound.current = handler; }, execute: async () => ({ ok: true }), pause: async () => {}, recover: async () => ({}), stop: async () => {} };
+    const executor = new RuntimeAcpWorkerExecutor(registry, () => ({ name: "private", command: "/mcp", args: [], env: [] }) as never, () => stub as unknown as AcpWorkerExecutor);
+    executor.bindControl({} as ControlServer);
+    const handler = async () => {};
+    executor.bindRecoveryHold(handler);
+    await executor.execute(node("claude"));
+    expect(bound.current).toBe(handler);
+  });
+
   test("无已验证候选时 fail closed，未验证 cli 拒绝", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-worker-closed-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);

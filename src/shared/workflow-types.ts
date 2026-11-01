@@ -34,7 +34,7 @@ export type AgentOptions = {
   /** Run 内唯一且稳定的节点身份；最长 120 字符，参与后续会话和 replay 绑定。 */
   readonly id: string;
   /**
-   * 要启动的正常交互式 CLI Adapter；当前可选 codex、claude、dsh，kimi 支持已暂时下线。
+   * 要启动的正常交互式 CLI Adapter；当前可选 codex、claude，dsh 与 kimi 支持已暂时下线。
    *
    * 省略表示"由本次执行在启动前选择"：内置预置与可移植模块不绑定具体 CLI，用户在确认页选一个
    * 本机已验证的 CLI，本次执行的所有省略节点都用它。显式字面量优先，且不接受执行级覆盖。

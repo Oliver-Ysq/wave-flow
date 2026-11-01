@@ -185,6 +185,8 @@ export async function connectControlSocket(options: {
   readonly socketPath: string;
   /** 请求 id 前缀，便于日志中区分来源。 */
   readonly idPrefix: string;
+  /** 当前 Worker 私有 capability；Worker 通道必须提供，其他控制通道按各自协议决定。 */
+  readonly capability?: string;
 }): Promise<ControlSocketClient> {
   let next = 1;
   let closed = false;
@@ -226,7 +228,7 @@ export async function connectControlSocket(options: {
       const requestId = `${options.idPrefix}-${process.pid}-${next++}`;
       const response = new Promise<unknown>((resolve, reject) => { pending.set(requestId, { resolve, reject }); });
       void response.catch(() => undefined);
-      try { writeFrame(socket, JSON.stringify({ requestId, ...payload })); }
+      try { writeFrame(socket, JSON.stringify({ requestId, ...payload, capability: options.capability })); }
       catch (error) { pending.delete(requestId); throw error; }
       return response;
     },

@@ -131,6 +131,29 @@ describe("queued 节点的启动许可复核", () => {
     expect(runtime.snapshot().status).toBe("cancelled");
   });
 
+  test("写 Worker 启动重试重新占名额，不与排队节点并发", async () => {
+    let active = 0;
+    let maximum = 0;
+    let aCalls = 0;
+    const executor = new LimitedAgentExecutor({
+      execute: async node => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        try {
+          if (node.id === "a" && aCalls++ === 0) throw new Error("ACP Worker 启动超时：session/new");
+          if (node.id === "a") await Bun.sleep(20);
+          return { ok: node.id };
+        } finally { active -= 1; }
+      },
+      stop: async () => {},
+    }, new AgentStartLimiter(1));
+    const writeWorkflow: WorkflowModule<JsonObject, unknown> = { meta: parallel.meta, default: async () => { phase("run"); return Promise.all([agent("甲", { id: "a", cli: "codex", sandbox: "workspace-write" }), agent("乙", { id: "b", cli: "codex", sandbox: "workspace-write" })]); } };
+    const runtime = await create(executor);
+    await expect(runtime.run(writeWorkflow)).resolves.toEqual([{ ok: "a" }, { ok: "b" }]);
+    expect(aCalls).toBe(2);
+    expect(maximum).toBe(1);
+  });
+
   test("queued 节点落盘失败后仍停止其他真实 Worker", async () => {
     const stopped: string[] = [];
     const failures = new Map<string, (error: Error) => void>();

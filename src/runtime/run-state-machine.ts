@@ -1,4 +1,5 @@
 import Ajv from "ajv";
+import { normalizeHitlAnswerSchema } from "../shared/hitl-schema";
 import type { JournalEvent, RunManifest } from "../journal/types";
 import type { AgentNodeSnapshot, AgentNodeStatus, CurrentAttemptSummary, DecisionGateSnapshot, ExecutionBatchSnapshot, PhaseSnapshot, PhaseSummary, PhaseVisitSnapshot, RunSnapshot, RunStatus } from "./run-types";
 import type { JsonSchema } from "../shared/workflow-types";
@@ -83,7 +84,7 @@ export class RunStateMachine {
         this.#applyAgentRestarted(event);
         return;
       case "agent.status":
-        this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic, null, event.agentSessionId);
+        this.#applyAgentStatus(event.nodeId, event.status, event.at, event.diagnostic, null, event.agentSessionId, event.pauseCause ?? null);
         return;
       case "agent.session":
         this.#applyAgentSession(event);
@@ -103,6 +104,12 @@ export class RunStateMachine {
         return;
       case "block.answered":
         this.#applyBlockAnswered(event);
+        return;
+      case "block.closed":
+        this.#applyBlockClosed(event);
+        return;
+      case "block.reopened":
+        this.#applyBlockReopened(event);
         return;
       case "agent.continued":
         this.#applyBlockContinued(event);
@@ -324,7 +331,7 @@ export class RunStateMachine {
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
     if (executionAttemptId !== agent.executionAttemptId) this.#historicalAgents.set(`${agent.executionAttemptId}:${agent.id}`, cloneAgent(agent));
-    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", hint: null, startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null });
+    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", hint: null, startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null, pauseCause: null });
   }
 
   #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
@@ -348,7 +355,7 @@ export class RunStateMachine {
     if (!binding || !event.acp || binding.launcherId !== event.acp.launcherId || binding.sessionId !== event.acp.sessionId) throw new Error("agent.recovered 不得替换 ACP session。 ");
   }
 
-  #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null, agentSessionId: string | null = null): void {
+  #applyAgentStatus(nodeId: string | null, status: AgentNodeStatus, at: string, diagnostic: string | null, result: AgentNodeSnapshot["result"] = null, agentSessionId: string | null = null, pauseCause: "user" | "recovery" | null = null): void {
     if (!nodeId) throw new Error("Agent 状态事件缺少 nodeId。");
     // 终态 Run 不再接受业务 running/completed：queued 节点等名额期间用户 stop 后，
     // 迟到的启动事实不得绕过 cancelled/interrupted/completed 封存；收敛类写入不受影响。
@@ -368,6 +375,7 @@ export class RunStateMachine {
       startedAt: status === "running" && agent.startedAt === null ? at : agent.startedAt,
       endedAt: terminalAgentStatuses.has(status) ? at : agent.endedAt,
       agentSessionId: agent.agentSessionId ?? agentSessionId,
+      pauseCause: status === "pausing" || status === "paused" || status === "recovering" ? pauseCause ?? agent.pauseCause ?? "user" : null,
       // block 摘要只在 blocked 节点有意义。被取消、中断或完成后不得继续向
       // CLI/Web 暴露已经失效的人工协助请求。
       block: status === "blocked" || status === "pausing" || status === "paused" || status === "recovering" ? agent.block : null,
@@ -380,17 +388,32 @@ export class RunStateMachine {
     const agent = this.#agents.get(event.nodeId);
     if (!agent || agent.status !== "running" || agent.agentSessionId !== event.agentSessionId) throw new Error("block.created 必须属于当前 running 的原 Agent 会话。");
     if (agent.block) throw new Error("同一 Agent 不能同时创建多个 block。");
+    const answerSchema = normalizeHitlAnswerSchema(event.answerSchema);
     this.#applyAgentStatus(event.nodeId, "blocked", event.at, event.diagnostic, null, event.agentSessionId);
-    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false, ...(event.answerSchema?{answerSchema:event.answerSchema}:{}) } });
-    this.#blockSchemas.set(event.blockRequestId, event.answerSchema);
+    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false, answerSchema, delivery: "pending" } });
+    this.#blockSchemas.set(event.blockRequestId, answerSchema);
   }
 
   #applyBlockAnswered(event: Extract<JournalEvent, { type: "block.answered" }>): void {
     if (!event.nodeId || !event.agentSessionId) throw new Error("block.answered 缺少节点或会话身份。");
     const agent = this.#agents.get(event.nodeId);
-    if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId) throw new Error("block.answered 不属于当前 pending block。");
+    if (!agent || !["blocked", "pausing", "paused", "recovering"].includes(agent.status) || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || agent.block.delivery !== "pending") throw new Error("block.answered 不属于当前 pending block。");
     validateBlockAnswer(this.#blockSchemas.get(event.blockRequestId), event.answer);
-    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, answered: true } });
+    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, answered: true, delivery: "answered" } });
+  }
+
+  #applyBlockClosed(event: Extract<JournalEvent, { type: "block.closed" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("block.closed 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || agent.block.answered) throw new Error("block.closed 不属于未回答的当前 block。");
+    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, delivery: "closed" } });
+  }
+
+  #applyBlockReopened(event: Extract<JournalEvent, { type: "block.reopened" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("block.reopened 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || agent.block.delivery !== "closed") throw new Error("block.reopened 不属于已关闭的当前 block。");
+    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, delivery: "pending" } });
   }
 
   #applyBlockContinued(event: Extract<JournalEvent, { type: "agent.continued" }>): void {

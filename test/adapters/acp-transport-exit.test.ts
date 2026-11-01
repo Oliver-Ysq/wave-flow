@@ -23,3 +23,18 @@ test("adapter 退出立即 resolve，不被后代继承的 stderr 管道拖住",
     transport.close();
   }
 });
+
+test("异常退出错误不包含 stderr 秘密，仅保留退出码", async () => {
+  process.env.WAVE_FLOW_HOME = "/tmp/wf-acp-exit-probe";
+  const transport = await bunAcpTransport({ id: "exit-secret", command: "/bin/sh", args: ["-c", "echo secret-token >&2; exit 7"] }, new AbortController().signal);
+  try {
+    const error = await transport.exited.catch(reason => reason);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("code=7");
+    expect(message).toContain("acp-lifecycle.log");
+    expect(message).not.toContain("secret-token");
+  } finally {
+    transport.close();
+  }
+});

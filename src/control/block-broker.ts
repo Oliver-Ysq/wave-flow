@@ -2,6 +2,7 @@ import Ajv from "ajv";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
+import { normalizeHitlAnswerSchema } from "../shared/hitl-schema";
 
 /** Block 创建提交；只允许当前受管 Agent 请求人工协助。 */
 export type BlockSubmission = {
@@ -17,8 +18,20 @@ export type BlockSubmission = {
   readonly capability: string;
   /** Agent 为何无法安全继续、希望人如何帮助的完整说明。 */
   readonly needHelp: string;
-  /** 可选的人类答案 JSON Schema。 */
-  readonly answerSchema?: JsonSchema;
+  /** ACP 与 Desktop 共同支持的扁平人类答案 Schema。 */
+  readonly answerSchema: JsonSchema;
+};
+
+/** block.created 已耐久后的即时状态；答案尚未到达时为 null。 */
+export type BlockStatus = {
+  /** 稳定 block 请求 id。 */
+  readonly blockRequestId: string;
+  /** 规范化后的答案 Schema，供 MCP Elicitation 原样使用。 */
+  readonly answerSchema: JsonSchema;
+  /** 已耐久的答案；未回答时为 null。 */
+  readonly answer: JsonObject | null;
+  /** 当前交付状态；closed 只能由用户显式重开，Worker 重接不得撤销。 */
+  readonly delivery: "pending" | "answered" | "closed" | "delivered";
 };
 
 /** 人类向一个 pending block 提交的 JSON 对象答案。 */
@@ -59,61 +72,82 @@ export class BlockBroker {
   create(submission: BlockSubmission): PendingBlock {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已在等待中。");
-    validateAnswerSchema(submission.answerSchema);
-    const pending: PendingBlock = { ...submission, answer: null, waiters: [] };
+    const answerSchema = normalizeHitlAnswerSchema(submission.answerSchema);
+    const pending: PendingBlock = { ...submission, answerSchema, answer: null, continued: false, waiters: [] };
     this.#pending.set(submission.blockRequestId, pending);
     return pending;
   }
 
-  /**
-   * 从 Journal 重建一个已经 durable 的 block；不得再次写 block.created。
-   * 仅 Engine 重启后的 Control 恢复路径使用，恢复后仍必须由原会话携带
-   * Engine 仍会在恢复前核验真实会话，重连者才能取得答案或调用 continue。
-   */
+  /** 从 Journal 重建一个已经 durable 的 block；不得再次写 block.created。 */
   restore(submission: BlockSubmission, answer: JsonObject | null): void {
     if (!/^[0-9a-f-]{36}$/i.test(submission.blockRequestId)) throw new Error("blockRequestId 必须是 UUID。");
     if (this.#pending.has(submission.blockRequestId)) throw new Error("同一 blockRequestId 已恢复。");
-    validateAnswerSchema(submission.answerSchema);
-    if (answer) validateAnswer(submission.answerSchema, answer);
-    this.#pending.set(submission.blockRequestId, { ...submission, answer, waiters: [] });
+    const answerSchema = normalizeHitlAnswerSchema(submission.answerSchema);
+    if (answer) validateAnswer(answerSchema, answer);
+    this.#pending.set(submission.blockRequestId, { ...submission, answerSchema, answer, continued: false, waiters: [] });
   }
 
-  /** 验证重连请求恰好对应 Journal 中的同一个 block，而非创建第二个 block。 */
+  /** 验证重接请求恰好对应 Journal 中的同一个 block，而非创建第二个 block。 */
   assertSameSubmission(submission: BlockSubmission): PendingBlock {
     const pending = this.require(submission.blockRequestId);
+    const answerSchema = normalizeHitlAnswerSchema(submission.answerSchema);
     // JSON对象键序不是请求内容；模型/CLI序列化重排键不应变成另一个请求，数组顺序与值仍严格一致。
-    if (pending.runId !== submission.runId || pending.nodeId !== submission.nodeId || pending.agentSessionId !== submission.agentSessionId || pending.capability !== submission.capability || pending.needHelp !== submission.needHelp || !isDeepStrictEqual(pending.answerSchema ?? null, submission.answerSchema ?? null)) throw new Error("重连 block 与 Journal 中原请求不一致。");
+    if (pending.runId !== submission.runId || pending.nodeId !== submission.nodeId || pending.agentSessionId !== submission.agentSessionId || pending.capability !== submission.capability || pending.needHelp !== submission.needHelp || !isDeepStrictEqual(pending.answerSchema, answerSchema)) throw new Error("重接 block 与 Journal 中原请求不一致。");
     return pending;
   }
 
-  /**
-   * 原 Agent 调用等待人类答案；答案先到时立即返回。
-   * 同一 block 允许多个等待者：ACP 客户端（如 Codex code-mode）会中途放弃长时间
-   * 未返回的工具调用，原 Agent 随后以同一 blockRequestId 重连等待；旧等待者只是
-   * 不再有人读取的孤儿，答案到达时一并 resolve，绝不能因此拒绝重连。
-   */
-  wait(blockRequestId: string): Promise<BlockResolution> {
-    const pending = this.require(blockRequestId);
-    if (pending.answer) return Promise.resolve({ blockRequestId, answer: pending.answer });
-    return new Promise((resolve, reject) => { pending.waiters.push({ resolve, reject }); });
+  /** 当前 block 的即时交付状态；continue 后仍允许读取原答案。 */
+  status(submission: BlockSubmission, delivery?: BlockStatus["delivery"]): BlockStatus {
+    const pending = this.assertSameSubmission(submission);
+    return { blockRequestId: pending.blockRequestId, answerSchema: pending.answerSchema, answer: pending.answer ? structuredClone(pending.answer) : null, delivery: delivery ?? (pending.continued ? "delivered" : pending.answer ? "answered" : "pending") };
   }
 
-  /** 校验答案，但尚不交付；调用方必须先将答案耐久写入 Journal。 */
+  /** 等待人类答案；信号关闭只取消当前等待者，不改变 block 或答案事实。 */
+  wait(blockRequestId: string, signal?: AbortSignal): Promise<BlockResolution> {
+    const pending = this.require(blockRequestId);
+    if (pending.answer) return Promise.resolve({ blockRequestId, answer: pending.answer });
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        pending.waiters = pending.waiters.filter(candidate => candidate !== waiter);
+        waiter.reject(new Error("elicitation 等待已取消。"));
+      };
+      const waiter = {
+        resolve: (resolution: BlockResolution) => { signal?.removeEventListener("abort", onAbort); resolve(resolution); },
+        reject: (error: Error) => { signal?.removeEventListener("abort", onAbort); reject(error); },
+      };
+      if (signal?.aborted) { onAbort(); return; }
+      pending.waiters.push(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /** 校验答案；同 ID 同答案幂等，冲突答案拒绝。 */
   validateAnswer(submission: BlockAnswerSubmission): PendingBlock {
     const pending = this.require(submission.blockRequestId);
-    if (pending.answer) throw new Error("该 block 已有答案，拒绝覆盖。");
+    if (pending.answer) {
+      if (isDeepStrictEqual(pending.answer, submission.answer)) return pending;
+      throw new Error("该 block 已有不同答案，拒绝覆盖。");
+    }
     validateAnswer(pending.answerSchema, submission.answer);
     return pending;
   }
 
-  /** Journal 已落盘后才向原等待者交付答案；不改变 blocked 状态。 */
-  deliverAnswer(blockRequestId: string, answer: JsonObject): PendingBlock {
-    const pending = this.require(blockRequestId);
+  /** Journal 已落盘后才向原等待者交付答案；会话已注销时耐久事实优先，清理不得反推失败。 */
+  deliverAnswer(blockRequestId: string, answer: JsonObject): void {
+    const pending = this.#pending.get(blockRequestId);
+    if (!pending) return;
     if (pending.answer) throw new Error("该 block 已有答案，拒绝覆盖。");
     pending.answer = answer;
     const waiters = pending.waiters.splice(0);
     for (const waiter of waiters) waiter.resolve({ blockRequestId, answer });
-    return pending;
+  }
+
+  /** 关闭当前等待者但不删除 block；会话已注销时耐久关闭事实同样优先。 */
+  close(blockRequestId: string): void {
+    const pending = this.#pending.get(blockRequestId);
+    if (!pending) return;
+    const waiters = pending.waiters.splice(0);
+    for (const waiter of waiters) waiter.reject(new Error("elicitation 已关闭，可重新打开原 block。"));
   }
 
   /** continue 只允许原会话在已回答的 pending block 上调用。 */
@@ -124,8 +158,11 @@ export class BlockBroker {
     return pending;
   }
 
-  /** continue 事实已落盘后删除 pending，防止 Journal 失败丢失待处理 block。 */
-  finishContinue(blockRequestId: string): void { this.#pending.delete(blockRequestId); }
+  /** continue 后保留耐久历史，允许同会话按原 ID 重读答案且永不创建第二个 block。 */
+  finishContinue(blockRequestId: string): void {
+    const pending = this.require(blockRequestId);
+    pending.continued = true;
+  }
 
   /** 会话不可继续验证时拒绝原等待者，避免 block HTTP 永久悬挂。 */
   cancelForSession(runId: string, nodeId: string, agentSessionId: string, reason: string): void {
@@ -156,6 +193,8 @@ export class BlockBroker {
 type PendingBlock = BlockSubmission & {
   readonly blockRequestId: string;
   answer: JsonObject | null;
+  /** 答案已交付并释放后仍保留历史，供同会话幂等重读。 */
+  continued: boolean;
   waiters: { resolve: (resolution: BlockResolution) => void; reject: (error: Error) => void }[];
 };
 
@@ -163,11 +202,4 @@ function validateAnswer(schema: JsonSchema | undefined, answer: JsonObject): voi
   if (!schema) return;
   const validator = new Ajv({ allErrors: true, strict: false }).compile(schema);
   if (!validator(answer)) throw new Error(`block 答案不符合 answer-schema：${new Ajv({ allErrors: true, strict: false }).errorsText(validator.errors)}`);
-}
-
-/** 用户答案通道只传JSON对象；明确声明其他根类型会形成UI永远无法提交的block。 */
-function validateAnswerSchema(schema: JsonSchema | undefined): void {
-  if (!schema) return;
-  if (schema.type !== undefined && schema.type !== "object") throw new Error("block answerSchema 根类型必须是 object。");
-  new Ajv({ allErrors: true, strict: false }).compile(schema);
 }

@@ -90,6 +90,16 @@ export class LimitedAgentExecutor implements AgentNodeExecutor {
     if (!this.delegate.stop) throw new Error(`节点 ${node.id} 的执行器不支持 stop。`);
     return this.delegate.stop(node);
   }
+
+  discard(node: AgentNodeSnapshot): void { this.delegate.discard?.(node); }
+
+  bindRecoveryHold(handler: (nodeId: string) => Promise<void>): void {
+    if (!this.delegate.bindRecoveryHold) {
+      if ("bindControl" in this.delegate) throw new Error("底层 ACP 执行器缺少节点级恢复暂停接线。 ");
+      return;
+    }
+    this.delegate.bindRecoveryHold(handler);
+  }
 }
 
 // 每个 Run 都创建独立 LimitedAgentExecutor，且节点 id 在 Run 内唯一；不能把

@@ -13,7 +13,7 @@ describe("Adapter Catalog", () => {
     const entry = adapterForCli("kimi");
     expect(entry.adapterId).toBe("kimi-acp");
     expect(entry.requiresNodeRuntime).toBe(false);
-    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, elicitationForm: false, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(kimiRuntime);
     expect(launcher).toMatchObject({ id: "kimi-acp", command: kimiRuntime.executablePath, args: ["acp"] });
     expect(launcher.env?.CODEX_PATH).toBeUndefined();
@@ -43,7 +43,7 @@ describe("Adapter Catalog", () => {
     expect(entry.probeMcp).toBe(true);
     expect(entry.adapterVersion).toBe("0.94.0");
     // 主控窄工具经真实原生配置与 MCP 注入验收后声明。
-    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, elicitationForm: true, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(claudeRuntime);
     expect(launcher.id).toBe("claude-acp");
     expect(launcher.command).toBe(process.execPath);
@@ -63,7 +63,7 @@ describe("Adapter Catalog", () => {
     expect(entry.minNodeVersion).toBe(24);
     expect(entry.probeMcp).toBe(true);
     expect(entry.adapterVersion).toBeNull();
-    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, modelOverride: false, modelCatalog: false });
+    expect(entry.capabilities).toEqual({ leadTools: true, workerControlMcp: true, elicitationForm: false, modelOverride: false, modelCatalog: false });
     const launcher = resolveWorkerLauncher(dshRuntime);
     expect(launcher).toMatchObject({ id: "dsh-acp", command: dshRuntime.executablePath, args: ["acp"] });
     // dsh shim 经 env node 解析运行时：PATH 必须前置已验证 node 目录；绝不注入 API key 或 CODEX_PATH 类变量。

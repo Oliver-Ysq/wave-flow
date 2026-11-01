@@ -192,31 +192,29 @@ describe("CliRuntimeRegistry", () => {
     await expect(registry.resolveWorkerById(saved.runtimeId)).rejects.toThrow("自动检查失败");
   });
 
-  test("dsh runtime 记录解析往返：selectedByCli 接受 dsh 键，node 24 复核通过", async () => {
+  test("dsh 记录保留但检测、分配和 Worker 启动入口均拒绝", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-dsh-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root);
     const saved = await registry.saveVerified(await dshRecord(root, "dsh", "v24.22.0"));
-    // dsh 不声明 leadTools：不能设为主控，但可作为 Worker 候选按 cli 解析。
-    await expect(registry.select(saved.runtimeId)).rejects.toThrow("不能设为主控");
-    await expect(registry.resolveWorker("dsh")).resolves.toMatchObject({ runtimeId: saved.runtimeId, cli: "dsh" });
+    await expect(registry.select(saved.runtimeId)).rejects.toThrow("暂时下线");
+    await expect(registry.resolveWorker("dsh")).rejects.toThrow("暂时下线");
     const listed = await registry.list();
-    expect(listed.runtimes[0]).toMatchObject({ cli: "dsh", verifiedAdapter: { adapterId: "dsh-acp", leadTools: false } });
+    expect(listed.runtimes).toEqual([]);
     expect(JSON.stringify(listed)).not.toContain("inode");
-    // Registry 文件校验白名单已拓宽：selectedByCli 的 dsh 键合法且必须引用存在的记录。
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { dsh: saved.runtimeId }, runtimes: [saved] })}\n`);
     await (await import("node:fs/promises")).chmod(join(root, "runtimes.json"), 0o600);
-    expect((await new CliRuntimeRegistry(root).list()).selectedByCli.dsh).toBe(saved.runtimeId);
+    expect((await new CliRuntimeRegistry(root).list()).selectedByCli.dsh).toBeUndefined();
     await Bun.write(join(root, "runtimes.json"), `${JSON.stringify({ version: 1, selectedByCli: { traex: saved.runtimeId }, runtimes: [saved] })}\n`);
     await (await import("node:fs/promises")).chmod(join(root, "runtimes.json"), 0o600);
     await expect(new CliRuntimeRegistry(root).list()).rejects.toThrow("默认选择无效");
   });
 
-  test("dsh 启动前复核发现 node 主版本低于 24 时触发受控复验并 fail closed", async () => {
+  test("dsh 下线时不再触发启动前复验，保留原验证记录", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-runtime-dsh-old-node-")); roots.push(root);
     const registry = new CliRuntimeRegistry(root, async () => { throw Error("探针失败"); });
     await registry.saveVerified(await dshRecord(root, "dsh", "v22.17.1"));
-    await expect(registry.resolveWorker("dsh")).rejects.toThrow("自动检查失败");
-    await expect(registry.list()).resolves.toMatchObject({ runtimes: [{ status: "needs-revalidation" }] });
+    await expect(registry.resolveWorker("dsh")).rejects.toThrow("暂时下线");
+    await expect(registry.list()).resolves.toMatchObject({ runtimes: [] });
   });
 });
 

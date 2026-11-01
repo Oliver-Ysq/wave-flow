@@ -36,6 +36,14 @@ describe("AgentStartLimiter", () => {
     secondRelease(); await third;
   });
 
+  test("恢复暂停钩子透传到底层执行器", () => {
+    const bound: { current: ((nodeId: string) => Promise<void>) | null } = { current: null };
+    const executor = new LimitedAgentExecutor({ execute: async current => ({ id: current.id }), bindRecoveryHold: handler => { bound.current = handler; } }, new AgentStartLimiter(1));
+    const handler = async () => {};
+    executor.bindRecoveryHold(handler);
+    expect(bound.current).toBe(handler);
+  });
+
   test("排队时没有 session id、执行时已有 id 仍能释放同一名额", async () => {
     const executor = new LimitedAgentExecutor({ execute: async (current) => ({ id: current.id }) }, new AgentStartLimiter(1));
     await executor.waitForStart(node("first", null));

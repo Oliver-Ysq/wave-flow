@@ -28,6 +28,10 @@ export type AgentNodeExecutor = {
   recover?(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<AgentRecovery>;
   /** 终止当前节点，不保留 recover 能力。 */
   stop?(node: AgentNodeSnapshot): Promise<void>;
+  /** 协议自动恢复耗尽时请求宿主做节点级耐久暂停；不创建新 attempt、不暂停整个 Run。 */
+  bindRecoveryHold?(handler: (nodeId: string) => Promise<void>): void;
+  /** 节点已 interrupted 后丢弃退出核验句柄与旧会话引用；不得影响 completed/cancelled 的正常收尾。 */
+  discard?(node: AgentNodeSnapshot): void;
 };
 
 /** recover 成功后可耐久记录的同一 ACP session 事实。 */
@@ -78,6 +82,8 @@ export type AgentNodeSnapshot = {
   readonly agentSessionId: string | null;
   /** 当前业务型人工协助请求；非 blocked 节点固定为 null。 */
   readonly block: BlockSnapshot | null;
+  /** 暂停原因；仅暂停/恢复相关状态可携带，recovery 表示节点级协议恢复等待。 */
+  readonly pauseCause?: "user" | "recovery" | null;
   /** 原始规范化请求，供 Journal / Replay 之后计算指纹。 */
   readonly request: NormalizedAgentRequest;
 };
@@ -134,6 +140,8 @@ export type BlockSnapshot = {
   readonly needHelp: string;
   /** 人类答案是否已经耐久交付给原 Agent；不会自动恢复节点。 */
   readonly answered: boolean;
+  /** 表单交付状态；缺省按 answered 的既有事实解释，closed 可重开原 block。 */
+  readonly delivery?: "pending" | "answered" | "closed" | "delivered";
 };
 
 /** 作者模块声明的业务决策门的查询视图；不属于任何 Agent 节点。 */

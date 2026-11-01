@@ -7,4 +7,7 @@ export class DeterministicExecutor implements AgentNodeExecutor {
   async execute(node: AgentNodeSnapshot): Promise<JsonObject> {
     return { nodeId: node.id, summary: `开发验证节点已完成：${node.label}` };
   }
+
+  /** 确定性节点没有 ACP 协议恢复；显式声明该能力为空，避免包装层静默丢失真实 Worker 钩子。 */
+  bindRecoveryHold(): void {}
 }

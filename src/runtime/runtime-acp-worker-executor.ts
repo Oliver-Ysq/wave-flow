@@ -29,6 +29,7 @@ import { logWorkerLifecycle } from "./worker-lifecycle-log";
  */
 export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   #control: ControlServer | null = null;
+  #recoveryHold: ((nodeId: string) => Promise<void>) | null = null;
   #workers = new Map<string, AcpWorkerExecutor>();
   /** 只保留退出未核验的本实例句柄，供宿主收尾重试；不跨Engine认领旧PID。 */
   #closing = new Map<string, AcpWorkerExecutor>();
@@ -49,6 +50,12 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
   bindControl(control: ControlServer): void {
     if (this.#control) throw new Error("Runtime ACP Worker 已绑定 ControlServer。 ");
     this.#control = control;
+  }
+
+  bindRecoveryHold(handler: (nodeId: string) => Promise<void>): void {
+    if (this.#recoveryHold) throw new Error("Runtime ACP Worker 已绑定恢复暂停。 ");
+    this.#recoveryHold = handler;
+    for (const worker of this.#workers.values()) worker.bindRecoveryHold(handler);
   }
 
   async execute(node: AgentNodeSnapshot) {
@@ -120,6 +127,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
       owned = true;
     } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);
+    if (this.#recoveryHold) worker.bindRecoveryHold(this.#recoveryHold);
     const key = keyOf(node);
     this.#workers.set(key, worker);
     stage("worker_bound");
@@ -139,6 +147,9 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
       throw error;
     } finally { this.#workers.delete(key); }
   }
+
+  /** interrupted 节点清理本实例退出核验句柄，不重新启动或结束其他 Worker。 */
+  discard(node: AgentNodeSnapshot): void { this.#closing.delete(keyOf(node)); }
 
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> { return this.require(node).pause(node, signal); }
   /** 正常或completed重放只核验本Engine留下的句柄；无句柄不重新启动CLI。
