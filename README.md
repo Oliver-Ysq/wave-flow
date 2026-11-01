@@ -2,7 +2,7 @@
 
 **让任务有章可循，让不同 Agent 发挥所长。**
 
-Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / DeepSeek Harness / Claude Code Agent 分阶段执行（Kimi CLI 支持已暂时下线，历史记录仍可查看）。你可以随时查看进度、回答问题或停止任务。
+Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描述目标，让主控提出方案；确认后，由真实的 Codex / Claude Code Agent 分阶段执行（DeepSeek Harness 与 Kimi CLI 支持已暂时下线，历史记录仍可查看）。你可以随时查看进度、回答问题或停止任务。
 
 把任务交给可控的流程，把不同工作交给合适的 Agent。不必让一段越来越长的对话，承担从规划到交付的所有事情。
 
@@ -18,7 +18,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 1. **先看方案，再决定执行。** 通过对话生成和调整工作流，也可从内置预置开始：只读代码审查、深度调研、深度代码审查。
 2. **按阶段掌握进度。** 阶段 → 执行者层级展示协作分工，查看每个 Agent 的状态、流式正文和工具活动。
-3. **需要你时，再接手。** Agent 显式请求人工协助；你提交答案后，由原 Agent 确认继续。也可主动暂停或停止。
+3. **需要你时，再接手。** Agent 显式请求人工协助；你提交答案后，宿主确认答案已交付，原 Agent 再继续。也可主动暂停或停止。
 4. **结束之后，有据可查。** 查看结构化交付与历史执行尝试；中断后显式恢复，不悄悄重跑。
 
 写入类工作流在独立的受管 Git worktree 中执行，结果保留为未提交改动。宿主不会自动 commit、不会写回主工作区，由你决定如何查看、修改、提交或清理。并行写需按模块或文件分区，宿主不做冲突检测与合并。
@@ -33,7 +33,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ### 不押注一个 Agent，让不同 CLI 各展所长
 
-把 Codex、DeepSeek Harness、Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。每个 Worker 绑定独立真实 ACP 会话，使用你选择的本机 CLI 及其默认模型；多 CLI 协作降低单一路径的盲区。
+把 Codex 和 Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。每个 Worker 绑定独立真实 ACP 会话，使用你选择的本机 CLI 及其默认模型；多 CLI 协作降低单一路径的盲区。
 
 ### 一份技能库，执行时注入所有会话
 
@@ -47,14 +47,14 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.3.0`，支持 macOS 12+ / Apple Silicon。
+当前版本：`v0.4.0`，支持 macOS 12+ / Apple Silicon。
 
 运行前提（Wave Flow 不内置、也不自动安装这些工具）：
 
-- **至少一个受支持的本机 CLI**：Codex、Claude Code 或 DeepSeek Harness，已自行安装并用你的账号登录。设置页只扫描与验证本机已有安装；模型请求由所选 CLI 发送给其服务商。
+- **至少一个受支持的本机 CLI**：Codex 或 Claude Code，已自行安装并用你的账号登录。设置页只扫描与验证本机已有安装；模型请求由所选 CLI 发送给其服务商。DeepSeek Harness 支持已暂时下线。
 - **系统 Git**：受管写执行、现场核验与 worktree 交接依赖它。macOS 上由 Xcode Command Line Tools 提供。
 - **系统 `unzip`**：仅用于导入单个 `skill.zip`，macOS 自带。
-- **DeepSeek Harness** 需在 `$DSH_HOME` 配置 provider key，并要求 Node ≥ 24；**Claude Code** 的模型与认证由你的 `~/.claude/settings.json` 决定。
+- **Claude Code** 的模型与认证由你的 `~/.claude/settings.json` 决定。
 - 可选：`ripgrep`（`rg`）只影响主控的只读全文搜索。
 
 原生 CLI 仍使用 `~/.codex`、`~/.dsh`、`~/.claude`；其配置与凭据也可能被模型工具修改。

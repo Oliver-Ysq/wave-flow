@@ -87,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.3.0</span>
+          <span>适用于 v0.4.0</span>
           <span>macOS 12+</span>
           <span>更新于 2026-10</span>
         </div>
@@ -96,7 +96,7 @@
       <article class="prose">
         <section id="intro">
           <h2>介绍</h2>
-          <p>Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。你用对话描述目标，主控提出工作流方案；确认后，由真实的 Codex、DeepSeek Harness 或 Claude Code 会话按阶段执行。</p>
+          <p>Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。你用对话描述目标，主控提出工作流方案；确认后，由真实的 Codex 或 Claude Code 会话按阶段执行（DeepSeek Harness 与 Kimi 支持已暂时下线，历史记录仍可查看）。</p>
           <p>它不是把多个聊天窗口拼在一起。阶段、依赖、并行与完成条件写在 Workflow 里；每个 Agent 节点绑定一条独立的 ACP 会话，下游不会隐式继承上游聊天历史。</p>
           <div class="arch" aria-label="运行时分层">
             <span>桌面工作台</span><i>→</i>
@@ -109,12 +109,12 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.3.0 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.4.0 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
             <li>Rust 工具链与 Xcode Command Line Tools</li>
-            <li>至少一个已登录的本机 CLI：Codex、DeepSeek Harness 或 Claude Code</li>
+            <li>至少一个已登录的本机 CLI：Codex 或 Claude Code</li>
           </ul>
           <p>克隆仓库并以开发模式启动桌面应用：</p>
           <div class="code">
@@ -146,7 +146,7 @@ bun run desktop:dev</code></pre>
             <li><strong>先看方案。</strong>主控会把目标整理成 Workflow 提案；你可以继续对话，调整阶段、Prompt 或 CLI 分配。</li>
             <li><strong>确认后启动。</strong>在方案页确认输入参数、每个节点的 CLI，以及写入任务需要的 Git 授权。</li>
             <li><strong>按阶段查看。</strong>执行页按 Phase → Agent 展示状态、流式正文和工具活动；点击节点可以看到当前动作。</li>
-            <li><strong>结束并复核。</strong>执行结束后查看结构化交付与执行总结。需要你输入时，Agent 会显式 <code>block</code>，答案只会唤醒原命令，是否继续仍由原 Agent 决定。</li>
+            <li><strong>结束并复核。</strong>执行结束后查看结构化交付与执行总结。需要你输入时，Agent 会显式 <code>block</code>；答案先耐久落盘，再由宿主自动 continue，不要求模型重连。</li>
           </ol>
           <div class="callout">
             <p><strong>不要把“跑完”当成“验收”。</strong>Schema 校验通过只证明结果结构合法，不证明答案正确。写入类任务应在流程末尾安排可验证的检查或人工复核。</p>
@@ -250,9 +250,9 @@ bun run desktop:dev</code></pre>
 
         <section id="states">
           <h2>状态与完成</h2>
-          <p>业务状态只由受管会话中的 <code>wave-flow complete</code>、<code>block</code>、<code>continue</code> 改变；<code>wave-flow answer</code> 只交付信息，不能直接改变节点状态。不能从终端 ANSI、自然语言“完成”或空闲提示推断状态。</p>
+          <p>业务状态只由受管会话中的 <code>wave-flow complete</code>、<code>block</code>、<code>continue</code> 改变；<code>wave-flow answer</code> 只交付信息，不能直接改变节点状态。答案交付后由宿主 sidecar 自动 continue，不要求模型主动重连。不能从终端 ANSI、自然语言“完成”或空闲提示推断状态。</p>
           <p><code>complete</code> 只有在 JSON 结果、Schema 校验记录与 Journal 都耐久落盘后才生效。用户停止记为 <code>cancelled</code>；未知进程或会话异常记为 <code>interrupted</code>，不存在 Agent 主动上报的业务失败状态。</p>
-          <p>Agent 上报会携带 Run、节点、会话标识与当前 Engine 颁发的 capability。稳定三元组只用于定位候选会话；Engine 还会验证 Journal、ACP session binding 与节点状态。</p>
+          <p>Agent 上报会携带 Run、节点、会话标识与当前 Engine 颁发的 capability。私有控制通道在每个请求前常量时间比较 capability，防止仅凭 socket 路径冒用；Engine 还会验证 Journal、ACP session binding 与节点状态。</p>
         </section>
 
         <section id="resume">
@@ -265,7 +265,7 @@ bun run desktop:dev</code></pre>
 
         <section id="cli">
           <h2>支持的 CLI</h2>
-          <p>三个 CLI 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。源码写了 <code>cli</code> 的节点按源码执行；没写的节点在方案页逐节点选择，默认预填主控所用 CLI，也可以让不同节点跑在不同 CLI 上。不提供自动模型路由。</p>
+          <p>Codex 与 Claude Code 均已完成主控与 Worker 双角色真实验收，可以在设置页设为主控。DeepSeek Harness 与 Kimi 支持已暂时下线，历史记录仍可查看。源码写了 <code>cli</code> 的节点按源码执行；没写的节点在方案页逐节点选择，默认预填主控所用 CLI，也可以让不同节点跑在不同 CLI 上。不提供自动模型路由。</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -273,7 +273,6 @@ bun run desktop:dev</code></pre>
               </thead>
               <tbody>
                 <tr><td><code>codex</code></td><td>使用本机 Codex 登录与配置。</td></tr>
-                <tr><td><code>dsh</code></td><td>DeepSeek Harness。需在 <code>$DSH_HOME</code> 配置 provider key，并要求 Node ≥ 24；Node ≤ 22 会静默退出。</td></tr>
                 <tr><td><code>claude</code></td><td>Claude Code。主控直接使用用户原生 CLI 配置；模型与认证由 <code>~/.claude/settings.json</code> 决定。</td></tr>
               </tbody>
             </table>
