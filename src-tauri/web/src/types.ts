@@ -388,8 +388,8 @@ export type LeadProjectListResponse = { projects: LeadProject[] };
 /** Execution 详情响应：登记事实 + 权威快照 + 是否处于当前 Engine 可控制生命周期（false 时只能显式 resume）。 */
 export type ExecutionResponse = {
   /** 工作区现场读取失败；不代表目录不存在或没有改动。 */ workspaceDiagnostic?:string;
-  /** 共享worktree与租约投影；closedWriters 为恢复前终止或确认退出的旧writer数。 */
-  workspaceEvidence?:{workspaceId:string;cwd:string;branch:string;head:string|null;leases:Array<{nodeId:string;attempt:number}>;closedWriters:number;cleaned:boolean};
+  /** 共享worktree只读投影；写者证据只在 Run Journal，前端不展示写者计数。 */
+  workspaceEvidence?:{workspaceId:string;cwd:string;branch:string;head:string|null;cleaned:boolean;/** 最近一次交接该worktree的Execution；旧执行只能查看历史。 */latestExecutionId:string};
   /** 原冻结源码静态无法枚举的调用数；只用于未知分母提示。 */
   dynamicCount?:number;
   execution: WorkflowExecution; snapshot: RunSnapshot; controllable: boolean };

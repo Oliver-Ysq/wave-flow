@@ -4734,7 +4734,10 @@ function ExecutionDetail({
           )}
           <div className="execution-actions">
             {!readOnly &&
-              (detail.workspaceEvidence?.leases.length ?? 0) > 0 &&
+              !!detail.workspaceEvidence &&
+              !detail.workspaceEvidence.cleaned &&
+              detail.workspaceEvidence.latestExecutionId ===
+                detail.execution.executionId &&
               ["cancelled", "interrupted"].includes(
                 detail.snapshot.status,
               ) && (
@@ -4924,16 +4927,6 @@ function ExecutionDetail({
                       ? `HEAD ${detail.workspaceEvidence.head.slice(0, 12)}`
                       : "HEAD 不可读取"}
                 </span>
-                {detail.workspaceEvidence.leases.map((lease) => (
-                  <span key={`${lease.nodeId}:${lease.attempt}`} role="status">
-                    writer 锁 · {lease.nodeId} · attempt #{lease.attempt}
-                  </span>
-                ))}
-                {detail.workspaceEvidence.closedWriters > 0 && (
-                  <small>
-                    {detail.workspaceEvidence.closedWriters} 个旧 attempt 的 writer 已在恢复前完成核验（终止 / 已退出 / 从未启动）；该受管 worktree 累计，含其他接续 Execution；现场改动保留
-                  </small>
-                )}
               </article>}
               <p>
                 所有写节点共享同一 worktree；宿主不保存成果快照，目录当前内容就是唯一结果，可能已被用户或后续执行修改。
