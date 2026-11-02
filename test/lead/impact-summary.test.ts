@@ -2,7 +2,7 @@ import {afterEach,expect,spyOn,test} from "bun:test";
 import {mkdtemp,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {LeadService} from "../../src/lead/service";
+import {LeadService,LeadTurnBusyError} from "../../src/lead/service";
 import {LeadJournal} from "../../src/lead/journal";
 import {assertImpactSummariesComplete,boundedEvidence} from "../../src/lead/impact-summary";
 import type {LeadSession} from "../../src/lead/session";
@@ -15,7 +15,7 @@ afterEach(async()=>{for(const service of services.splice(0))service.close();awai
 const source=`const meta={name:"impact",description:"影响面",phases:[{title:"检查"}]};async function run(args:unknown){return {};}`;
 async function settled(service:LeadService,id:string){for(let n=0;n<200;n++){if((await service.snapshot(id)).status!=="running")return;await Bun.sleep(5);}throw Error("回合未结束");}
 async function summaryStarted(service:LeadService,id:string){for(let n=0;n<400;n++){if((await service.snapshot(id)).impactSummaries![0].status!=="pending")return;await Bun.sleep(5);}throw Error("总结未开始");}
-async function fixture(prompt:()=>Promise<string>, singleWorkflow=true){
+async function fixture(prompt:()=>Promise<string>, singleWorkflow=true, beforeFinish?:(service:LeadService)=>void){
  const root=await mkdtemp(join(tmpdir(),"wave-flow-impact-"));roots.push(root);
  const factory=async():Promise<LeadSession>=>({isRunning:true,prompt,subscribe:()=>()=>{},abort:()=>{},close:()=>{}});
  const service=new LeadService(root,factory,undefined,async()=>({fingerprint:"injected-lead-session"}),true);services.push(service);
@@ -31,6 +31,7 @@ async function fixture(prompt:()=>Promise<string>, singleWorkflow=true){
  service.close();
  const reopened=new LeadService(root,factory,undefined,async()=>({fingerprint:"injected-lead-session"}),true);services.push(reopened);
  reopened.setExecutionCapsuleReader(async(_task,ex,attempt)=>({executionId:ex,attempt,status:"cancelled",input:{token:"secret-value"},nodes:[],validation:"未覆盖"}));
+ beforeFinish?.(reopened);
  await reopened.recordExecutionFinished(task.leadRunId,executionId,"cancelled","用户停止",null,1);
  return {service:reopened,id:task.leadRunId,executionId,root};
 }
@@ -228,7 +229,29 @@ test("总结准备期间用户先发消息，保留pending且用户回合结束�
  for(let n=0;n<10_000&&(await service.snapshot(id)).impactSummaries![0].status!=="pending";n++)await Bun.sleep(2);
  expect((await service.snapshot(id)).impactSummaries![0].status).toBe("pending");expect(calls).toBe(1);
  finishUser("反馈已接收");await summaryStarted(service,id);await settled(service,id);
- expect((await service.snapshot(id)).impactSummaries![0].status).toBe("completed");expect(calls).toBe(2);
+ // 失败时带上诊断：区分“总结真的失败”与“慢执行下的调度竞态”，不靠重跑猜。
+ {const summary=(await service.snapshot(id)).impactSummaries![0];
+  expect({status:summary.status,diagnostic:summary.diagnostic??null}).toEqual({status:"completed",diagnostic:null});}
+ expect(calls).toBe(2);
+});
+
+test("总结回合撞上主控忙时保留pending并重新排队，不记为中断",async()=>{
+ // 复现真实竞态：用户回合刚结束、状态尚未收敛时，总结 send 被拒；旧实现会把这次
+ // 时序抖动耐久成 lead.summary_interrupted。这里用一次性忙碌注入把它变成确定用例。
+ let injected=false,calls=0;
+ const {service,id,root}=await fixture(async()=>{calls++;return "执行已取消，没有已验证交付；下一步先检查现场。";},true,reopened=>{
+  const original=reopened.send.bind(reopened);
+  reopened.send=(async(...args:Parameters<LeadService["send"]>)=>{
+   if(!injected&&args[4]){injected=true;throw new LeadTurnBusyError("Lead 当前回合仍在运行。 ");}
+   return original(...args);
+  }) as LeadService["send"];
+ });
+ for(let n=0;n<400&&!["completed","interrupted"].includes((await service.snapshot(id)).impactSummaries![0].status);n++)await Bun.sleep(5);
+ const summary=(await service.snapshot(id)).impactSummaries![0];
+ expect({status:summary.status,diagnostic:summary.diagnostic??null}).toEqual({status:"completed",diagnostic:null});
+ expect(injected).toBe(true);expect(calls).toBe(1);
+ const opened=await LeadJournal.open(id,root);
+ expect(opened.events.filter(event=>event.type==="lead.summary_interrupted")).toHaveLength(0);
 });
 
 test("总结准备期间归档，迟到准备失败不追加到已归档Journal",async()=>{
