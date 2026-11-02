@@ -88,12 +88,15 @@ export type AcpSessionEvent = {
  * 模型流静默”时空心跳会续命，“无实质进展”提示永远不出现。
  */
 export function acpProgressIsMeaningful(update: acp.SessionUpdate): boolean {
-  return update.sessionUpdate === "agent_message_chunk"
-    || update.sessionUpdate === "tool_call"
-    || update.sessionUpdate === "tool_call_update"
-    || update.sessionUpdate === "plan"
-    || update.sessionUpdate === "plan_update"
-    || update.sessionUpdate === "plan_removed";
+  // `plan_update` / `plan_removed` 属于 ACP 未稳定事件，不在稳定 SessionUpdate 联合类型里；
+  // 这里只读判别字段，按名字比较，避免为了计数进展而依赖未稳定类型。
+  const name: string = update.sessionUpdate;
+  return name === "agent_message_chunk"
+    || name === "tool_call"
+    || name === "tool_call_update"
+    || name === "plan"
+    || name === "plan_update"
+    || name === "plan_removed";
 }
 
 /** Wave Flow 需要持久化的 ACP 会话绑定；能力快照仅用于 Policy，不是授权凭证。 */

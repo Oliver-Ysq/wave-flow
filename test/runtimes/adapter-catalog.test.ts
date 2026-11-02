@@ -27,7 +27,7 @@ describe("Adapter Catalog", () => {
     expect(entry.adapterId).toBe("codex-acp");
     expect(entry.requiresNodeRuntime).toBe(true);
     expect(entry.capabilities.leadTools).toBe(true);
-    expect(entry.adapterVersion).toBe("2.2.2");
+    expect(entry.adapterVersion).toBe("2.5.0");
     const launcher = resolveWorkerLauncher(codexRuntime);
     expect(launcher.id).toBe("codex-acp");
     expect(launcher.command).toBe(process.execPath);

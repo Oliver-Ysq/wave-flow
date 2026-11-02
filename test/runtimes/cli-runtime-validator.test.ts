@@ -70,7 +70,7 @@ describe("validateCliRuntime / codex", () => {
     const record = await validateCliRuntime("codex", { executablePath: await fakeCli(root, "codex", "codex-cli 1.0"), discoveredFrom: "manual", discoveredShell: null, createTransport: fakeTransport(hooks) });
     expect(record).toMatchObject({ cli: "codex", status: "verified", version: "codex-cli 1.0", diagnostic: null });
     // adapterVersion 锁定，绝不跟随握手 agentInfo.version。
-    expect(record.verifiedAdapter).toEqual({ adapterId: "codex-acp", adapterVersion: "2.2.2", acpProtocolVersion: 1, leadTools: true });
+    expect(record.verifiedAdapter).toEqual({ adapterId: "codex-acp", adapterVersion: "2.5.0", acpProtocolVersion: 1, leadTools: true });
     expect(typeof record.nodeExecutable?.path).toBe("string");
     expect(hooks.sessionNewParams?.mcpServers).toEqual([expect.objectContaining({ name: "wave-flow-mcp-probe" })]);
   }, 20_000);

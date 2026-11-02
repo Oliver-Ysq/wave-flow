@@ -76,8 +76,9 @@ test("停滞计时只认可正文、工具与计划类ACP进展", () => {
   expect(acpProgressIsMeaningful({ sessionUpdate: "tool_call", toolCallId: "t", title: "x", status: "pending" })).toBe(true);
   expect(acpProgressIsMeaningful({ sessionUpdate: "tool_call_update", toolCallId: "t" })).toBe(true);
   expect(acpProgressIsMeaningful({ sessionUpdate: "plan", entries: [] })).toBe(true);
-  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_update", plan: { type: "items", planId: "p", entries: [] } })).toBe(true);
-  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_removed", planId: "p" })).toBe(true);
+  // plan_update / plan_removed 属于未稳定事件，不在稳定 SessionUpdate 联合类型里；形状按协议保留。
+  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_update", plan: { type: "items", planId: "p", entries: [] } } as unknown as acp.SessionUpdate)).toBe(true);
+  expect(acpProgressIsMeaningful({ sessionUpdate: "plan_removed", planId: "p" } as unknown as acp.SessionUpdate)).toBe(true);
   expect(acpProgressIsMeaningful({ sessionUpdate: "agent_thought_chunk", content: text })).toBe(false);
   expect(acpProgressIsMeaningful({ sessionUpdate: "user_message_chunk", content: text })).toBe(false);
   expect(acpProgressIsMeaningful({ sessionUpdate: "available_commands_update", availableCommands: [] })).toBe(false);

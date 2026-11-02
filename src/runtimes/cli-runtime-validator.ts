@@ -44,13 +44,31 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
     const launched = entry.launcher(runtime as VerifiedCliRuntime);
     const launcher: AcpLauncher = { id: entry.adapterId, command: launched.command, args: launched.args, env: entry.environment(runtime as VerifiedCliRuntime) };
     const client = new AcpSessionClient(launcher, input.createTransport);
-    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15_000);
     try {
-      const initialized = await client.initialize(controller.signal);
+      // 分阶段预算：适配器自身握手通常数秒；session/new 还要等真实 CLI 的模型列表与
+      // stdio MCP 启动，实测 Codex 适配器 2.5.0 约 20–30 秒。合并成一个 15s 预算会把
+      // 正常验证误判成连接失败，错误只剩一句“ACP connection closed”。
+      let initialized: Awaited<ReturnType<AcpSessionClient["initialize"]>>;
+      let abortPhase: "initialize" | "session/new" | null = null;
+      const initController = new AbortController();
+      const initTimer = setTimeout(() => { abortPhase = "initialize"; initController.abort(); }, 20_000);
+      try {
+        initialized = await client.initialize(initController.signal);
+      } catch (error) {
+        if (abortPhase === "initialize") throw new Error(`${entry.displayName} ACP initialize 超过 20 秒未响应。 `);
+        throw error;
+      } finally { clearTimeout(initTimer); }
       if (initialized.protocolVersion !== entry.acpProtocolVersion) throw new Error("ACP 协议版本不兼容。 ");
-      // 探针 server 必须随 session/new 真实交付；10s 内未完成 stdio MCP 启动视为不支持。
-      const binding = await client.createSession(root, controller.signal, entry.probeMcp ? [mcpProbeServer()] : [], entry.probeMcp ? 10_000 : undefined);
-      clearTimeout(timer);
+      const sessionController = new AbortController();
+      const sessionTimer = setTimeout(() => { abortPhase = "session/new"; sessionController.abort(); }, 60_000);
+      let binding: Awaited<ReturnType<AcpSessionClient["createSession"]>>;
+      try {
+        // 探针 server 必须随 session/new 真实交付；10s 内未完成 stdio MCP 启动视为不支持。
+        binding = await client.createSession(root, sessionController.signal, entry.probeMcp ? [mcpProbeServer()] : [], entry.probeMcp ? 10_000 : undefined);
+      } catch (error) {
+        if (abortPhase === "session/new") throw new Error(`${entry.displayName} ACP session/new 超过 60 秒未完成（含探针 MCP 启动）。 `);
+        throw error;
+      } finally { clearTimeout(sessionTimer); }
       if (!binding.sessionId.trim()) throw new Error(`${entry.displayName} ACP session/new 返回空 sessionId。 `);
       if (entry.adapterVersion === null) {
         const negotiated = initialized.agentInfo?.version;
@@ -59,6 +77,6 @@ export async function validateCliRuntime(cli: RuntimeCli, input: { readonly exec
         }
       }
       return runtime;
-    } finally { clearTimeout(timer);client.close(); }
+    } finally { client.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 }

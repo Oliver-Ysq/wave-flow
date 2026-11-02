@@ -6,7 +6,7 @@ import { claudeSkillInjection, codexSkillInjection, dshSkillInjection } from "..
 import type { SkillInjectionCapability } from "../skills/types";
 
 /** 当前锁定的 Codex ACP adapter 来源；用户 runtime 不得决定 adapter argv。 */
-export const CODEX_ACP_ADAPTER = { id: "codex-acp" as const, version: "2.2.2", protocolVersion: 1 };
+export const CODEX_ACP_ADAPTER = { id: "codex-acp" as const, version: "2.5.0", protocolVersion: 1 };
 
 /** 当前锁定的 Claude Code ACP adapter 来源；与 Codex 同构，真实 CLI 由 CLAUDE_CODE_EXECUTABLE 指向。 */
 export const CLAUDE_ACP_ADAPTER = { id: "claude-acp" as const, version: "0.94.0", protocolVersion: 1 };

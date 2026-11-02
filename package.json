@@ -30,8 +30,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.94.0",
-    "@agentclientprotocol/codex-acp": "2.2.2",
-    "@agentclientprotocol/sdk": "1.8.0",
+    "@agentclientprotocol/codex-acp": "2.5.0",
+    "@agentclientprotocol/sdk": "2.2.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@tauri-apps/api": "^2.12.3",
     "@tauri-apps/plugin-dialog": "^2.8.3",
