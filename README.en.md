@@ -19,9 +19,9 @@ With Wave Flow, you can:
 1. **Review before you run.** Generate and refine workflows through conversation, or start from a built-in preset: read-only code review, deep research, or deep code review.
 2. **Follow work by stage.** A phase → executor view shows the division of work, each agent's state, streamed text, and tool activity.
 3. **Step in when needed.** Agents explicitly request human assistance; your answer is durably recorded and delivered by the host, then the original agent continues. You can also pause or stop execution.
-4. **Inspect what happened.** Browse structured deliverables and historical attempts; recover interrupted work explicitly, never through a silent rerun.
+4. **Inspect what happened.** Browse structured deliverables and historical attempts. Interrupted work can be resumed per node: within the same Engine the original ACP session is continued; after an Engine restart, Wave Flow first confirms the old process is gone, then continues that session and re-runs only the nodes that were actually interrupted, reusing the completed prefix by evidence.
 
-Write workflows run in a separate managed Git worktree, and results stay there as uncommitted changes. The host does not commit, write back to your main working tree, or move branches; you decide how to inspect, modify, commit, or clean up. Parallel writes must be partitioned by module or file, since the host neither detects nor merges conflicts.
+Write workflows run in a separate managed Git worktree, and results stay there as uncommitted changes. The host does not commit, write back to your main working tree, or move branches; you decide how to inspect, modify, commit, or clean up. Parallel writes must be partitioned by module or file, since the host neither detects nor merges conflicts. If the Engine dies unexpectedly, its Worker processes are terminated by an independent supervisor, and recovery verifies that old writers are gone before continuing.
 
 ## Why Wave Flow?
 
@@ -43,11 +43,11 @@ Keep your own skills under `~/.wave-flow/skills/<name>/SKILL.md`. Wave Flow proj
 
 Adjust proposals through conversation and retain each revision; discarding a proposal does not discard the task or conversation. The controller proposes, and your confirmation authorizes execution. The controller reads information using your native CLI configuration but cannot modify project files directly; project changes still require a Workflow and your confirmation. Follow progress, provide human assistance, pause or stop, and explicitly recover interrupted work.
 
-> Each new Task owns one evolving workflow chain. Revise source, input or CLI configuration after feedback, then confirm a new Execution on the handed-over worktree. Original-version recovery stays within the same Execution; arbitrary node rollback is not provided.
+> Each new Task owns one evolving workflow chain. Revise source, input or CLI configuration after feedback, then confirm a new Execution on the handed-over worktree. Original-version recovery stays within the same Execution; arbitrary node rollback is not provided. Recovery is per node: one interrupted node in a Run does not force the whole workflow to rerun.
 
 ## Download and installation
 
-Current version: `v0.4.2`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.4.3`, supporting macOS 12+ / Apple Silicon.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -65,7 +65,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.4.2_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.4.3_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install

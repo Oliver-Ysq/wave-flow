@@ -87,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.4.2</span>
+          <span>适用于 v0.4.3</span>
           <span>macOS 12+</span>
           <span>更新于 2026-11</span>
         </div>
@@ -109,7 +109,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.4.2 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.4.3 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -257,10 +257,11 @@ bun run desktop:dev</code></pre>
 
         <section id="resume">
           <h2>暂停与恢复</h2>
-          <p>关闭窗口不会停止 Engine 或 Agent。Engine 重启后不会跨进程认领 ACP 会话：旧的 active 节点一律收敛为 <code>interrupted</code>，只有你在执行页显式恢复才会创建新 attempt。</p>
+          <p>关闭窗口不会停止 Engine 或 Agent。Engine 重启后，旧的 active 节点一律收敛为 <code>interrupted</code>；只有你在执行页显式恢复才会创建新 attempt。恢复会先按 Journal 中的写者证据确认旧进程已经退出，再续用原 ACP 会话，只实际执行真正中断的节点。</p>
           <p>恢复只复用同一 Execution 内严格匹配的已完成前缀。匹配项包括 Workflow hash、cwd、Runtime 版本、id、调用顺序、CLI、输入、sandbox、model 与 Schema 指纹；第一个重启节点之后的下游节点不会复用旧结果。</p>
+          <p>如果只是某个 Worker 的 CLI 进程退出而 Engine 仍在运行，恢复以节点为单位：续用原会话后节点回到 <code>running</code>，其他并行节点继续执行；续用失败时该节点落 <code>paused/recovery</code>，Run 不会被拖停。</p>
           <p>Journal 是执行证据，不是虚拟机快照：恢复不会回滚文件，也不会撤销外部副作用。Worker 原生会话持续五分钟无实质进展（正文/工具/计划事件）时，执行器只记录一条停滞诊断提示，不自动中断、不重发任务，唯一出口是你显式停止。</p>
-          <p>停止与退出会撤销排队及初始化中的启动许可；Journal 写入失败会 fail closed，停止流程仍尽力通知真实 Worker。writer 在 spawn 前记录启动意图，崩溃后无法核验时拒绝直接恢复，避免双写。大批量路径采用流式收集并分页读取；执行详情只在上一请求结束后继续轮询，避免大响应使页面持续加载。</p>
+          <p>停止与退出会撤销排队及初始化中的启动许可；Journal 写入失败会 fail closed，停止流程仍尽力通知真实 Worker。Worker 由独立 supervisor 托管，Engine 意外退出时 supervisor 终止其进程组；恢复前再按 Journal 中的写者证据围栏，无法核验时拒绝直接恢复，避免双写。大批量路径采用流式收集并分页读取；执行详情只在上一请求结束后继续轮询，避免大响应使页面持续加载。</p>
         </section>
 
         <section id="cli">
@@ -289,7 +290,7 @@ bun run desktop:dev</code></pre>
             <li>写入类任务使用独立 worktree；不自动合并或 push。worktree 不能阻止跨目录写入，Git 记录也不覆盖工作区外影响。</li>
             <li>模型请求仍由所选 CLI 发送给其服务商；本地运行不代表离线推理或数据不出本机。</li>
             <li>完整执行总结、当前现场补充与 writer 安全交接是修订启动的前置条件；Schema 通过不是验收。</li>
-            <li>中断恢复只复用同一执行内严格匹配的已完成前缀；不会回滚文件或撤销外部副作用。</li>
+            <li>中断恢复以节点为单位：只重跑真正中断的节点，复用同一执行内严格匹配的已完成前缀；不会回滚文件或撤销外部副作用。</li>
           </ul>
         </section>
       </article>
