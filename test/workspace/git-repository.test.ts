@@ -126,7 +126,8 @@ test("submodule配置不能隐藏gitlink变化，配置删除后仍拒绝清理�
   await rm(join(worker.cwd, ".gitmodules")); await git(worker.cwd, "add", "--", ".gitmodules"); await git(worker.cwd, "commit", "-m", "remove submodule config");
   await expect(reopened.removeWorktree(worker.cwd, await worker.inspect())).rejects.toThrow("submodule");
   expect(await git(vendor, "rev-parse", "HEAD")).toBe(localCommit);
-}, 20_000);
+  // submodule 用例要真实 init/update/commit 多层仓库，并发下 20s 会被正常操作撑爆。
+}, 60_000);
 
 test("本地 hooks/filters/include 不再阻断打开，Wave Flow 不执行 hooks", async () => {
   const { cwd } = await fixture();

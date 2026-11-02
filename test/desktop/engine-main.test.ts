@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,6 +16,9 @@ import { WorkspaceManager } from "../../src/workspace/workspace-manager";
 import { LeadService } from "../../src/lead/service";
 import { LeadExecutionService } from "../../src/lead/executions";
 import { mkdir, realpath } from "node:fs/promises";
+
+// 真实 Engine/子进程/Git 集成用例；并发下单例可接近 5s 默认上限，统一使用集成预算。
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];

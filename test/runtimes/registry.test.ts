@@ -1,10 +1,14 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CliRuntimeRegistry } from "../../src/runtimes/registry";
 import type { CliRuntimeRecord } from "../../src/runtimes/types";
 import { verifyExecutable } from "../../src/runtimes/identity";
+
+// 每个用例都真实走 Registry 读写与可执行文件身份复验，单次 3–6 秒；并发下 5s 默认
+// 预算会把正常用例判成超时，因此整个文件用集成测试预算。
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });

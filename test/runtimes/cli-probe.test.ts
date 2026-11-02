@@ -1,8 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI_PROBE_LIMIT, describeProbeStatus, probeFirstRunnable } from "../../src/runtimes/cli-probe";
+
+// 这些用例真实 spawn 候选可执行文件并读取版本；并发下可能超过 Bun 的 5s 默认预算。
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });

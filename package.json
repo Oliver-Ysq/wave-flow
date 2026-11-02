@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "check": "tsc --noEmit && tsc -p src/lead/templates",
     "web:dev": "vite --config src-tauri/web/vite.config.ts",
     "web:build": "vite build --config src-tauri/web/vite.config.ts",

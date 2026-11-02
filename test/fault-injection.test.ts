@@ -37,4 +37,4 @@ test("故障注入：无响应 I/O、spawn 断电窗口与网络副作用恢复"
     afterExplicitResume: 2,
     noAutomaticRetry: true,
   });
-}, 15_000);
+}, 30_000);
