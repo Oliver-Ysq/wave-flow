@@ -47,6 +47,23 @@ export type AcpTransport = {
 };
 
 /**
+ * 会话级客户端系统提示（ACP client-system-prompt，当前为未稳定能力）。
+ *
+ * 只允许 `append` 与纯文本：宿主仅发送自己编写的静态说明，禁止把任务正文、
+ * Workflow 源码、模型输出或任何用户内容拼进来——系统层的指令权重更高，
+ * 混入不可信文本会扩大提示注入面。
+ */
+export type AcpClientSystemPrompt = {
+  /** 投递模式；本期只支持在 Agent 自身指令之后追加。 */
+  readonly mode: "append";
+  /** 纯文本内容；空白或超过上限时拒绝发送。 */
+  readonly text: string;
+};
+
+/** 客户端系统提示的体积上限；超过即拒绝，不做截断。 */
+const MAX_CLIENT_SYSTEM_PROMPT_BYTES = 16 * 1024;
+
+/**
  * ACP session/new 的附加参数；只由已验证的宿主能力产生，不是 Workflow 作者输入。
  * 未使用的能力必须保持省略，不能发送空数组/空对象改变既有协议行为。
  */
@@ -55,6 +72,11 @@ export type AcpSessionOptions = {
   readonly additionalDirectories?: readonly string[];
   /** ACP `_meta` 透传对象；必须由宿主构造，禁止透传模型或用户自由文本。 */
   readonly meta?: Readonly<Record<string, unknown>>;
+  /**
+   * 会话级系统提示；只有 Agent 在 initialize 声明 `sessionCapabilities.systemPrompt`
+   * 时才允许发送，否则直接拒绝，不能静默降级为用户消息。
+   */
+  readonly systemPrompt?: AcpClientSystemPrompt;
 };
 
 /** 允许替换 transport，确保协议测试不依赖真实模型或本地登录。 */
@@ -165,6 +187,34 @@ export class AcpSessionClient {
   /** 当前已确认 binding；尚未 new/load 时为 null。 */
   get binding(): AcpSessionBinding | null { return this.#binding; }
 
+  /**
+   * Agent 是否声明支持客户端系统提示。
+   *
+   * 能力来自 initialize 响应的 `agentCapabilities.sessionCapabilities.systemPrompt`；
+   * 该字段当前属于 ACP 未稳定能力，因此按结构化读取，不依赖 SDK 的稳定类型。
+   * 未声明时宿主 MUST NOT 发送 systemPrompt。
+   */
+  supportsClientSystemPrompt(): boolean {
+    const capabilities = this.#capabilities as { readonly sessionCapabilities?: Readonly<Record<string, unknown>> } | null;
+    return capabilities?.sessionCapabilities?.systemPrompt != null;
+  }
+
+  /**
+   * 把宿主系统提示转成线上字段；未声明能力、内容为空或超限一律拒绝。
+   *
+   * 不能静默丢弃：协议说明若发不出去，就只剩会被上下文压缩折叠的用户消息，
+   * 等于回到原来的缺陷，因此这里按契约失败而不是降级。
+   */
+  #clientSystemPrompt(prompt: AcpClientSystemPrompt | undefined): { readonly mode: "append"; readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }> } | undefined {
+    if (!prompt) return undefined;
+    if (prompt.mode !== "append") throw new Error("ACP 客户端系统提示本期只支持 append 模式。 ");
+    const text = prompt.text.trim();
+    if (!text) throw new Error("ACP 客户端系统提示不能为空。 ");
+    if (Buffer.byteLength(text, "utf8") > MAX_CLIENT_SYSTEM_PROMPT_BYTES) throw new Error("ACP 客户端系统提示超过 16KiB，拒绝发送。 ");
+    if (!this.supportsClientSystemPrompt()) throw new Error("该 CLI 未声明 ACP sessionCapabilities.systemPrompt，拒绝发送客户端系统提示。 ");
+    return { mode: "append", content: [{ type: "text", text }] };
+  }
+
   /** 订阅标准化展示事件；订阅者不能影响 ACP 协议循环。 */
   subscribe(listener: (event: AcpSessionEvent) => void): () => void {
     this.#subscribers.add(listener);
@@ -219,12 +269,15 @@ export class AcpSessionClient {
     // Codex ACP 默认异步启动 stdio MCP。受管 Worker 的首轮 Prompt 不能在
     // 私有完成工具尚未可调用时发出，否则模型会诚实地 end_turn 而无法上报。
     if (mcpServers.length > 0 && mcpStartupAwaitMs !== undefined) meta.mcpStartupAwaitTimeoutMs = mcpStartupAwaitMs;
-    const created = await connection.agent.request(acp.methods.agent.session.new, {
+    const systemPrompt = this.#clientSystemPrompt(options.systemPrompt);
+    const params = {
       cwd,
       mcpServers,
       ...(options.additionalDirectories && options.additionalDirectories.length > 0 ? { additionalDirectories: [...options.additionalDirectories] } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
       ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-    }, { cancellationSignal: signal });
+    };
+    const created = await connection.agent.request(acp.methods.agent.session.new, params, { cancellationSignal: signal });
     if (!created.sessionId.trim()) throw new Error("ACP session/new 返回空 sessionId。 ");
     const capabilities = await this.requireCapabilities(signal);
     const writer = await this.captureWriterEvidence();
@@ -246,6 +299,8 @@ export class AcpSessionClient {
     const connection = this.requireConnection();
     const meta: Record<string, unknown> = { ...(options.meta ?? {}) };
     if (mcpServers.length > 0 && mcpStartupAwaitMs !== undefined) meta.mcpStartupAwaitTimeoutMs = mcpStartupAwaitMs;
+    // 协议要求客户端在 load 时重发同一份系统提示；省略会让 Agent 回到自己的默认指令。
+    const systemPrompt = this.#clientSystemPrompt(options.systemPrompt);
     // load 会把整段历史当作 session/update 重放；从请求发出到首个新 prompt 之前全部丢弃，
     // 不能依赖 binding 发布时序——adapter 可能在响应之后继续补发重放事件。
     this.#suppressReplay = true;
@@ -255,6 +310,7 @@ export class AcpSessionClient {
         cwd,
         mcpServers,
         ...(options.additionalDirectories && options.additionalDirectories.length > 0 ? { additionalDirectories: [...options.additionalDirectories] } : {}),
+        ...(systemPrompt ? { systemPrompt } : {}),
         ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
       }, { cancellationSignal: signal });
     } catch (error) {

@@ -21,6 +21,11 @@ export interface AcpWorkerSession {
   createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number, options?: AcpSessionOptions): Promise<AcpSessionBinding>;
   /** 重新附着一条已有 ACP 会话；缺省表示该测试夹具不支持续用，执行器必须回退新会话。 */
   loadSession?(sessionId: string, cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number, options?: AcpSessionOptions): Promise<AcpSessionBinding>;
+  /**
+   * Agent 是否声明支持客户端系统提示（ACP `sessionCapabilities.systemPrompt`）。
+   * 缺省视为未声明：完成协议继续内联在用户消息里，行为与旧版一致。
+   */
+  supportsClientSystemPrompt?(): boolean;
   /** 仅真实 Worker 在 initialize 前注册私有 Elicitation；测试夹具与 Lead 可省略。 */
   setElicitationResolver?(resolver: AcpElicitationResolver): void;
   prompt(text: string, signal: AbortSignal): Promise<{ readonly stopReason: string }>;
@@ -190,12 +195,19 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       );
       stage("initialize_end");
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝投递任务。");
+      // 完成协议优先放进会话系统提示：该层不参与上下文压缩，模型在压缩后仍能看到上报义务。
+      // 只有 Agent 声明 sessionCapabilities.systemPrompt 时才这样发；未声明时保持内联旧行为。
+      const protocolInSystemPrompt = session.supportsClientSystemPrompt?.() === true;
+      const baseSessionOptions = this.sessionOptions ?? {};
+      const workerSessionOptions: AcpSessionOptions = protocolInSystemPrompt
+        ? { ...baseSessionOptions, systemPrompt: { mode: "append", text: workerCompletionProtocol() } }
+        : baseSessionOptions;
       // resultSchema 随 MCP 配置下发：sidecar 把它内联进完成工具的 inputSchema，
       // 让"必须交什么形状的结果"成为每轮重发的工具签名，而不是提示词里的一句话。
       mcpServers = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, ...(node.request.schema ? { resultSchema: node.request.schema } : {}) })] : [];
       void hint("ACP Worker 启动中：正在创建或续用 ACP 会话（含 MCP 与托管技能注入）。");
       const createFreshSession = (): Promise<AcpSessionBinding> => withStartupTimeout(
-        Promise.race([session.createSession(node.cwd, signal.signal, mcpServers, 10_000, this.sessionOptions), completion.then(() => { throw new Error("ACP Worker 启动已终止。"); })]),
+        Promise.race([session.createSession(node.cwd, signal.signal, mcpServers, 10_000, workerSessionOptions), completion.then(() => { throw new Error("ACP Worker 启动已终止。"); })]),
         this.startupTimeoutMs,
         "session/new",
         () => {
@@ -340,7 +352,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         }
       };
       active.rebuild = recoverInPlace;
-      let turn = this.runTurn(active, continued ? acpContinuationPrompt() : managedPrompt(node), signal.signal);
+      let turn = this.runTurn(active, continued ? acpContinuationPrompt() : managedPrompt(node, protocolInSystemPrompt), signal.signal);
       // Control complete 是 Worker 的业务完成边界。某些 ACP Agent 在工具调用后会继续
       // 保持原 prompt turn；不能因此阻塞 Runtime 的 run.completed。turn 的拒绝由
       // race handler 消费，避免 complete 之后形成未处理 rejection。
@@ -806,9 +818,36 @@ function workerControlToolGuide(): string {
 若没有发现机制，或发现后工具仍不可用，如实报告工具不可用；不得用聊天JSON、自然语言、文件或回合结束代替受管完成上报。`;
 }
 
-function managedPrompt(node: AgentNodeSnapshot): string {
+/**
+ * 受管完成协议：宿主静态文本，不含任务正文或用户内容。
+ *
+ * `schemaLine` 只在协议内联进用户消息时非空；走系统提示层时 schema 由用户消息
+ * 单独携带（系统层只放宿主编写的内容，避免把作者/用户文本提升到系统优先级）。
+ */
+function workerCompletionProtocol(schemaLine = ""): string {
+  return `## Wave Flow 受管节点完成协议（高优先级、不可省略）
+你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。
+
+${workerControlToolGuide()}
+完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schemaLine}
+若没有用户决定无法安全继续，调用 wave_flow_block 并提供至少一个字段的扁平 answerSchema。宿主会展示表单：answered 表示答案已交付并自动继续；closed 表示本次表单关闭，宿主可在同一会话恢复，不要新建 block、不要改参数、不要把 closed 当作答案。
+
+禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时宿主会在同一 session 尝试协议恢复；无法安全恢复时才进入 interrupted。`;
+}
+
+const WORKER_TASK_SCOPE = "任务工作范围：在当前cwd完成用户授权的任务；read-only节点不得修改业务文件。Worker沿用可信原生CLI配置与权限，Wave Flow不施加OS文件隔离，cwd/worktree不是安全边界。不要修改其他Worker目录、Engine状态或共享Git分支，不要自行commit、push或合入主分支；Git保存与合入由用户决定，宿主不提交、不推送、不收集成果快照。你的改动直接留在当前受管 worktree 的未提交文件里，宿主不会自动收集、提交或写回主工作区，也不会为 ignored 文件另存副本。不得把提示词约束宣称为OS隔离保证。";
+
+/**
+ * 受管首轮提示。
+ *
+ * `protocolInSystemPrompt` 为 true 时，完成协议已随会话系统提示下发，用户消息
+ * 只保留任务、工作范围与 schema；未声明能力的 CLI 仍把协议内联在用户消息里，
+ * 逐字保持旧行为。
+ */
+function managedPrompt(node: AgentNodeSnapshot, protocolInSystemPrompt = false): string {
   const schema = node.request.schema ? `\n最终 JSON 必须符合此 resultSchema：${JSON.stringify(node.request.schema)}` : "";
-  return `${node.request.prompt}\n\n任务工作范围：在当前cwd完成用户授权的任务；read-only节点不得修改业务文件。Worker沿用可信原生CLI配置与权限，Wave Flow不施加OS文件隔离，cwd/worktree不是安全边界。不要修改其他Worker目录、Engine状态或共享Git分支，不要自行commit、push或合入主分支；Git保存与合入由用户决定，宿主不提交、不推送、不收集成果快照。你的改动直接留在当前受管 worktree 的未提交文件里，宿主不会自动收集、提交或写回主工作区，也不会为 ignored 文件另存副本。不得把提示词约束宣称为OS隔离保证。\n\n## Wave Flow 受管节点完成协议（高优先级、不可省略）\n你在受管 Worker 节点内工作，ACP turn 的 end_turn、聊天文本、JSON 文本或“已完成”都不会完成节点。即使业务任务要求“只回复”“只输出 JSON”或不执行命令，也必须先完成以下上报；这些要求不与业务任务冲突。\n\n${workerControlToolGuide()}\n完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schema}\n若没有用户决定无法安全继续，调用 wave_flow_block 并提供至少一个字段的扁平 answerSchema。宿主会展示表单：answered 表示答案已交付并自动继续；closed 表示本次表单关闭，宿主可在同一会话恢复，不要新建 block、不要改参数、不要把 closed 当作答案。\n\n禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时宿主会在同一 session 尝试协议恢复；无法安全恢复时才进入 interrupted。`;
+  if (protocolInSystemPrompt) return `${node.request.prompt}\n\n${WORKER_TASK_SCOPE}${schema}`;
+  return `${node.request.prompt}\n\n${WORKER_TASK_SCOPE}\n\n${workerCompletionProtocol(schema)}`;
 }
 
 function recoveryPrompt(background = ""): string {

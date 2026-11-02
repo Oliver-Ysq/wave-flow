@@ -6,8 +6,8 @@ import { ControlServer } from "../../src/control/control-server";
 import { runsRoot } from "../../src/journal/paths";
 import { RunJournal } from "../../src/journal/run-journal";
 import { RUNTIME_VERSION, type JournalEvent, type RunManifest } from "../../src/journal/types";
-import { AcpWorkerExecutor, type AcpWorkerSession } from "../../src/runtime/acp-worker-executor";
-import { acpProgressIsMeaningful } from "../../src/adapters/acp-session";
+import { AcpWorkerExecutor, loadWithWriterReleaseWait, type AcpWorkerSession } from "../../src/runtime/acp-worker-executor";
+import { acpProgressIsMeaningful, type AcpSessionOptions } from "../../src/adapters/acp-session";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RunStateMachine } from "../../src/runtime/run-state-machine";
 import type { JsonSchema } from "../../src/shared/workflow-types";
@@ -385,6 +385,34 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
   expect(managed).toContain("工具搜索/发现");
   const opened = await RunJournal.open(value.manifest.runId, runsRoot(value.cwd));
   expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", delivery: "acp", acp: expect.objectContaining({ sessionId: "native-session" }) }));
+});
+
+test("声明 systemPrompt 时完成协议进会话系统提示，用户消息只留任务与工作范围", async () => {
+  const task = "把 auth 迁移到 OAuth2";
+  const value = await fixture({ prompt: task });
+  let capability = "", managed = "", options: AcpSessionOptions | undefined;
+  const session: AcpWorkerSession = {
+    binding: null,
+    supportsClientSystemPrompt: () => true,
+    async initialize() {},
+    async createSession(_cwd, _signal, _mcp, _startup, next) { options = next; return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
+    async prompt(text) { managed = text; await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+
+  // 协议只随系统提示下发：用户消息不重复，任务与工作范围仍在。
+  expect(managed).not.toContain("高优先级、不可省略");
+  expect(managed).not.toContain("wave-flow-worker-control");
+  expect(managed).toContain(task);
+  expect(managed).toContain("任务工作范围");
+  expect(options?.systemPrompt?.mode).toBe("append");
+  expect(options?.systemPrompt?.text).toContain("高优先级、不可省略");
+  expect(options?.systemPrompt?.text).toContain("wave-flow-worker-control");
+  // 系统层只放宿主静态文本，不得混入任务正文或作者/用户内容。
+  expect(options?.systemPrompt?.text).not.toContain("OAuth2");
 });
 
 test("受管写ACP complete后先close，再由成果阶段核验退出；核验失败不得丢句柄", async () => {

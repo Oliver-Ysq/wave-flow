@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import * as acp from "@agentclientprotocol/sdk";
+import * as acpUnstable from "@agentclientprotocol/sdk/unstable";
 import { AcpAmbiguousPromptError, AcpSessionClient, type AcpTransportFactory } from "../../src/adapters/acp-session";
 
 function fakeTransport(events: acp.SessionUpdate[], hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown>; replay?: acp.SessionUpdate[]; loadMcp?: unknown }): AcpTransportFactory {
@@ -253,4 +254,105 @@ test("ACP transport 退出时拒绝挂起的 prompt，而不是永久等待", as
   await new Promise((resolve) => setTimeout(resolve, 5));
   exitTransport(0);
   await expect(pending).rejects.toBeInstanceOf(AcpAmbiguousPromptError);
+});
+
+/**
+ * 客户端系统提示（ACP client-system-prompt）只在 Agent 于 initialize 声明
+ * `sessionCapabilities.systemPrompt` 时才允许发送；声明了就必须在 new 与 load
+ * 上重发同一份，否则会话回到 Agent 自己的默认指令。
+ */
+function systemPromptTransport(options: { readonly advertised: boolean; readonly received: Array<Record<string, unknown>>; readonly created: { count: number } }): AcpTransportFactory {
+  return async () => {
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const capabilities = options.advertised
+      ? { loadSession: true, sessionCapabilities: { systemPrompt: {} } }
+      : { loadSession: true };
+    // 假 Agent 用未稳定 schema 收请求：稳定 schema 会剥离未知字段，看不到 systemPrompt。
+    const app = acpUnstable.agent({ name: "system-prompt-acp" })
+      .onRequest(acpUnstable.methods.agent.initialize, () => ({ protocolVersion: acpUnstable.PROTOCOL_VERSION, agentCapabilities: capabilities as unknown as acp.AgentCapabilities }))
+      .onRequest(acpUnstable.methods.agent.session.new, (context) => {
+        options.created.count += 1;
+        options.received.push(context.params as unknown as Record<string, unknown>);
+        return { sessionId: "acp-session" };
+      })
+      .onRequest(acpUnstable.methods.agent.session.load, (context) => {
+        options.received.push(context.params as unknown as Record<string, unknown>);
+        return {};
+      });
+    const connection = app.connect(acpUnstable.ndJsonStream(agentToClient.writable, clientToAgent.readable));
+    return {
+      stream: acpUnstable.ndJsonStream(clientToAgent.writable, agentToClient.readable),
+      exited: new Promise<number>(() => {}),
+      close: () => connection.close(),
+    };
+  };
+}
+
+test("声明 systemPrompt 时在 session/new 与 session/load 重发同一份 append 文本", async () => {
+  const received: Array<Record<string, unknown>> = [];
+  const created = { count: 0 };
+  const client = new AcpSessionClient(
+    { id: "fake", command: "fake", args: [] },
+    systemPromptTransport({ advertised: true, received, created }),
+  );
+  const signal = new AbortController().signal;
+  await client.initialize(signal);
+  expect(client.supportsClientSystemPrompt()).toBe(true);
+
+  const systemPrompt = { mode: "append" as const, text: "  受管节点系统说明  " };
+  await client.createSession("/workspace", signal, [], undefined, { systemPrompt });
+  await client.loadSession("acp-session", "/workspace", signal, [], undefined, { systemPrompt });
+
+  const expected = { mode: "append", content: [{ type: "text", text: "受管节点系统说明" }] };
+  expect(received).toHaveLength(2);
+  expect(received[0]!.systemPrompt).toEqual(expected);
+  expect(received[1]!.systemPrompt).toEqual(expected);
+  client.close();
+});
+
+test("未声明 systemPrompt 时拒绝发送，且不创建会话", async () => {
+  const received: Array<Record<string, unknown>> = [];
+  const created = { count: 0 };
+  const client = new AcpSessionClient(
+    { id: "fake", command: "fake", args: [] },
+    systemPromptTransport({ advertised: false, received, created }),
+  );
+  const signal = new AbortController().signal;
+  await client.initialize(signal);
+  expect(client.supportsClientSystemPrompt()).toBe(false);
+
+  await expect(
+    client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "说明" } }),
+  ).rejects.toThrow("未声明 ACP sessionCapabilities.systemPrompt");
+  // 拒绝发生在发送之前：不能出现“会话建好了但系统提示被静默丢掉”。
+  expect(created.count).toBe(0);
+  expect(received).toHaveLength(0);
+
+  await expect(client.loadSession("acp-session", "/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "说明" } }))
+    .rejects.toThrow("未声明 ACP sessionCapabilities.systemPrompt");
+  expect(received).toHaveLength(0);
+  client.close();
+});
+
+test("即使声明能力，未请求时不发送 systemPrompt；空内容与超限一律拒绝", async () => {
+  const received: Array<Record<string, unknown>> = [];
+  const created = { count: 0 };
+  const client = new AcpSessionClient(
+    { id: "fake", command: "fake", args: [] },
+    systemPromptTransport({ advertised: true, received, created }),
+  );
+  const signal = new AbortController().signal;
+  await client.initialize(signal);
+
+  await client.createSession("/workspace", signal);
+  expect(received[0]).not.toHaveProperty("systemPrompt");
+
+  await expect(client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "   " } }))
+    .rejects.toThrow("不能为空");
+  await expect(client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "x".repeat(16 * 1024 + 1) } }))
+    .rejects.toThrow("超过 16KiB");
+  // 三次失败请求都在发送前被拒：只有第一次真正建立了会话。
+  expect(created.count).toBe(1);
+  client.close();
 });
