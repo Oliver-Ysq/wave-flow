@@ -95,6 +95,12 @@ Type `/` in the composer to open the command menu: `/wave-flow` asks the control
 
 After execution, review the summary. To adjust, revise the generated proposal, prepare a new template parameter version, or edit a local file and re-run preflight. Archived Tasks are read-only.
 
+## Note
+
+- **Whether completion reporting survives context compaction depends on the CLI advertising client-provided system prompts.** Wave Flow delivers the "you must call the completion tool" contract as a session-level system prompt (ACP `systemPrompt`). CLIs that advertise the capability keep that contract through compaction; CLIs that do not keep the contract inline in the task prompt, exactly as before.
+- **No silent downgrade.** If the capability is not advertised, the field is not sent; if it is advertised but cannot be applied, the session fails with an explicit error rather than being silently ignored.
+- **The field is currently an ACP preview capability.** If the upstream field or semantics change, Wave Flow falls back to the inline contract path and re-runs real-CLI acceptance when adapters are upgraded. Completion is always decided by the completion tool, result-schema validation and the durable Journal—never by this field.
+
 ## Feedback
 
 Have a suggestion or want to help maintain the project? Contact: <oliver.ysq@gmail.com>
