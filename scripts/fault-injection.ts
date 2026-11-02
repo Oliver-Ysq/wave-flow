@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boundedExit } from "../src/workspace/git-repository";
 import { WorkspaceManager, type WorkspaceAuthorization } from "../src/workspace/workspace-manager";
+import { fenceAcpNodeWriters } from "../src/runtime/acp-writer-fence";
+import type { AgentNodeSnapshot } from "../src/runtime/run-types";
+import { reportPathFor, writerLaunchKey } from "../src/runtimes/supervisor-report";
+import { reportProviderPid } from "../src/runtimes/worker-supervisor";
+import { captureWriterStartedAt } from "../src/workspace/writer-process-control";
 import { runsRoot } from "../src/journal/paths";
 import { RunRuntime } from "../src/runtime/run-runtime";
 import type { WorkflowModule } from "../src/shared/workflow-types";
@@ -66,28 +71,49 @@ async function powerLossSpawnIntent(root: string): Promise<JsonObject> {
     authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository,
     baseCommit, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }],
   };
-  const workspaceId = crypto.randomUUID();
-  const oldManager = await WorkspaceManager.open(join(root, "workspaces"), crypto.randomUUID());
-  await oldManager.create(workspaceId, authorization);
-  const lease = await oldManager.acquire(workspaceId, { runId: crypto.randomUUID(), nodeId: "writer", attempt: 1 });
-  const pending = await oldManager.beginWriterSpawn(lease);
-  const orphan = Bun.spawn(["/bin/sleep", "60"]);
+  const workspaceId = crypto.randomUUID(), runId = crypto.randomUUID();
+  const manager = await WorkspaceManager.open(join(root, "workspaces"), crypto.randomUUID());
+  await manager.create(workspaceId, authorization);
+  await manager.assertWriterAllowed(workspaceId, runId, "writer");
+  // Engine 在 spawn 后、进程证据落盘前被强杀：Journal 只有启动意图。
+  const intentOnly = {
+    id: "writer", phase: "write", executionAttemptId: 1, phaseVisitId: 1, sequence: 1,
+    executionBatch: { sequence: 1, mode: "serial" }, cli: "codex", sandbox: "workspace-write",
+    cwd: repository, label: "writer", status: "running", result: null, diagnostic: null,
+    createdAt: new Date().toISOString(), startedAt: null, endedAt: null, agentSessionId: "fault-session",
+    block: null, writer: null, writerIntentAt: new Date().toISOString(),
+    request: { id: "writer", cli: "codex", sandbox: "workspace-write", cwd: repository, prompt: "work" },
+  } as unknown as AgentNodeSnapshot;
+  const reportDir = join(root, "supervisor-reports");
+  const reportPath = reportPathFor(writerLaunchKey(runId, "writer", "fault-session"), reportDir);
+  // 只有启动意图、没有 supervisor 启动记录：可以判定 provider 从未创建，不再把执行卡死。
+  const intentOnlyFence = await fenceAcpNodeWriters(runId, [intentOnly], { reportDir });
+  if (intentOnlyFence.failures.length > 0) throw new Error(`没有 supervisor 记录时不应拒绝恢复：${JSON.stringify(intentOnlyFence.failures)}`);
+  // 有 provider 报告时必须按报告围栏：用真实 detached 进程组验证 SIGKILL 与消失确认。
+  const writerProcess = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdout: "ignore", stderr: "ignore" });
   try {
-    const newManager = await WorkspaceManager.open(join(root, "workspaces"), crypto.randomUUID());
-    let rejected = "";
-    try {
-      await newManager.prepareResume({ version: 3, authorization, workspaceId }, lease.runId);
-    } catch (error) {
-      rejected = error instanceof Error ? error.message : String(error);
-    }
-    if (!rejected.includes("启动意图") || !rejected.includes("拒绝恢复")) throw new Error(`spawn 崩溃窗口未 fail closed：${rejected}`);
-    const persisted = await newManager.inspect(workspaceId);
-    if (persisted.leases[0]?.writerSpawnIntentAt !== pending.writerSpawnIntentAt) throw new Error("启动意图未耐久保留");
-    return { scenario: "power-loss-spawn", rejectedResume: true, duplicateWriterPrevented: true };
+    const startedAt = await captureWriterStartedAt(writerProcess.pid);
+    reportProviderPid(reportPath, writerProcess.pid, startedAt);
+    const reportedFence = await fenceAcpNodeWriters(runId, [intentOnly], { reportDir });
+    if (reportedFence.failures.length > 0) throw new Error(`provider 报告围栏失败：${JSON.stringify(reportedFence.failures)}`);
+    const deadline = Date.now() + 5_000;
+    let probe = (() => { try { process.kill(-writerProcess.pid, 0); return true; } catch { return false; } })();
+    while (probe && Date.now() < deadline) { await Bun.sleep(20); probe = (() => { try { process.kill(-writerProcess.pid, 0); return true; } catch { return false; } })(); }
+    if (probe) throw new Error("provider 报告对应的进程组未被围栏终止。");
   } finally {
-    orphan.kill("SIGKILL");
-    await orphan.exited;
+    try { process.kill(-writerProcess.pid, "SIGKILL"); } catch { /* 已退出 */ }
   }
+  // 清理必须收到 Engine 的围栏证明；证明失败时按契约拒绝并保留现场。
+  let rejectedCleanup = "";
+  try { await manager.cleanup(workspaceId, true, runId, async () => { throw new Error("写者仍无法核验"); }); }
+  catch (error) { rejectedCleanup = error instanceof Error ? error.message : String(error); }
+  if (!rejectedCleanup.includes("无法核验")) throw new Error(`无围栏证明的清理未被拒绝：${rejectedCleanup}`);
+  const kept = await manager.inspect(workspaceId);
+  if (kept.cleanedAt !== null || !(await Bun.file(join(kept.cwd, "README.md")).exists())) throw new Error("拒绝清理后现场未保留。");
+  // 围栏通过（Engine 证明）后才允许删除。
+  const cleaned = await manager.cleanup(workspaceId, true, runId, async () => {});
+  if (cleaned.cleanedAt === null) throw new Error("围栏通过后的清理未落盘。");
+  return { scenario: "power-loss-spawn", rejectedResume: true, duplicateWriterPrevented: true, cleanupRequiresProof: true };
 }
 
 async function networkPowerLoss(root: string): Promise<JsonObject> {
