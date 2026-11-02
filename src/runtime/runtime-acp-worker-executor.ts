@@ -12,9 +12,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { prepareSessionScratch } from "../workspace/session-scratch";
 import { prepareSessionSkills } from "../skills/session";
 import { adapterById } from "../runtimes/adapter-catalog";
-import { ownedAcpTransport } from "../workspace/managed-acp-transport";
-import { WriterProcessGroups } from "../workspace/writer-process-group";
 import { WorkflowContractError } from "../workflow/errors";
+import { verifiedAcpTransport } from "../workspace/managed-acp-transport";
 import { logWorkerLifecycle } from "./worker-lifecycle-log";
 
 /**
@@ -122,8 +121,7 @@ export class RuntimeAcpWorkerExecutor implements AgentNodeExecutor {
         ? { launcher: resolveWorkerLauncher(runtime), session: undefined, evidence: null }
         : await prepareSessionSkills({ scratch, launcher: resolveWorkerLauncher(runtime), capability, libraryRoot: this.skillsRoot });
       stage("skills_ready");
-      const transport = ownedAcpTransport({ groups: new WriterProcessGroups(), bindWriter: async () => {} });
-      worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow", { compaction: true }), runtimeProvenance(runtime, prepared.evidence), identity => this.createControlMcp(identity, scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
+      worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, verifiedAcpTransport(), "allow", { compaction: true }), runtimeProvenance(runtime, prepared.evidence), identity => this.createControlMcp(identity, scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
       owned = true;
     } else worker = this.createWorker(resolveWorkerLauncher(runtime), runtimeProvenance(runtime));
     worker.bindControl(control);

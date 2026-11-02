@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -21,6 +22,12 @@ export async function runWorkerMcpServer(): Promise<void> {
   // 因此它是唯一不随对话历史被压缩折叠的完成条件载体。
   const resultSchema = readResultSchema();
   const control = await connectControlSocket({ socketPath, idPrefix: "worker", capability: required("WF_WORKER_CONTROL_CAPABILITY") });
+  // 真机验收可选的协议轨迹：只记录工具名、结果与错误摘要，不记录 result 正文。
+  const tracePath = process.env.WF_MCP_TRACE;
+  const trace = (event: { readonly phase: "tools/list" | "call" | "ok" | "error"; readonly tool?: string; readonly detail?: string }): void => {
+    if (!tracePath) return;
+    try { appendFileSync(tracePath, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`); } catch { /* 诊断失败不影响协议。 */ }
+  };
   const server = new Server({ name: "wave-flow-worker-control", version: "1" }, { capabilities: { tools: {} } });
   let closing = false;
   const close = async () => {
@@ -50,26 +57,30 @@ export async function runWorkerMcpServer(): Promise<void> {
     await close();
   });
   process.stdin.once("end", () => { void close(); });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    trace({ phase: "tools/list", detail: "complete,block" });
+    return ({ tools: [
     { name: "wave_flow_complete", description: resultSchema ? "完成当前受管节点。传入最终 JSON 对象与简短摘要；result 必须符合本节点 resultSchema（已内联在 inputSchema 的 result 属性中），Control 会再次校验并耐久写入结果。成功后才可以结束 ACP turn。" : "完成当前受管节点。传入最终 JSON 对象与简短摘要；Control 会校验节点 Schema 并耐久写入结果。成功后才可以结束 ACP turn。", inputSchema: { type: "object", required: ["summary", "result"], properties: { summary: { type: "string" }, result: resultSchema ?? { type: "object" } }, additionalProperties: false } },
     { name: "wave_flow_block", description: "仅在没有人类决定无法安全继续时请求人工协助。必须提供扁平 answerSchema：根 type 为 object 且至少一个字段；字段只允许 string/number/integer/boolean 或字符串单选 enum，禁止嵌套、数组多选、动态字段、条件约束和自由正则。answered 表示答案已交付并自动继续；closed 表示表单关闭，宿主可在同一会话恢复，不要新建 block 或改参数。blockRequestId 只用于宿主恢复时重接同一请求，首次调用不要传。", inputSchema: { type: "object", required: ["needHelp", "answerSchema"], properties: { needHelp: { type: "string" }, answerSchema: { type: "object", description: "扁平人类答案 JSON Schema；禁止嵌套、数组多选、动态字段和条件约束。" }, blockRequestId: { type: "string", description: "仅宿主恢复时重接原请求使用；首次调用不要传。" } }, additionalProperties: false } },
-  ] }));
+  ] }); });
   let inFlight = 0;
   server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     inFlight += 1;
+    trace({ phase: "call", tool: params.name });
     try {
     const args = params.arguments ?? {};
     if (params.name === "wave_flow_complete") {
       if (typeof args.summary !== "string" || !isObject(args.result)) throw new Error("wave_flow_complete 需要 summary 字符串和 result JSON 对象。 ");
       await control.request({ action: "complete", summary: args.summary, result: args.result });
       completeResponses.add(extra.requestId);
+      trace({ phase: "ok", tool: params.name });
       return text({ ok: true });
     }
     if (params.name === "wave_flow_block") {
       if (typeof args.needHelp !== "string" || !args.needHelp.trim() || !isObject(args.answerSchema)) throw new Error("wave_flow_block 需要 needHelp 和扁平 answerSchema。 ");
       if (args.blockRequestId !== undefined && (typeof args.blockRequestId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.blockRequestId))) throw new Error("wave_flow_block 的 blockRequestId 必须是首次调用返回的 UUID。 ");
       const blockRequestId = typeof args.blockRequestId === "string" && args.blockRequestId.trim() ? args.blockRequestId : crypto.randomUUID();
-      const status = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as { readonly answerSchema: JsonObject; readonly answer: JsonObject | null; readonly delivery: "pending" | "answered" | "closed" | "delivered" };
+      const status = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as { readonly answerSchema: JsonObject; readonly answer: JsonObject | null; readonly delivery: "pending" | "answered" | "closed" | "delivered"; readonly deliveryToken?: string };
       if (status.answer) {
         await control.request({ action: "continue", blockRequestId });
         return text({ status: "answered", blockRequestId, answer: status.answer });
@@ -83,7 +94,7 @@ export async function runWorkerMcpServer(): Promise<void> {
       }, { timeout: WORKER_ELICIT_TIMEOUT_MS, signal: extra.signal }).catch(async (error: unknown) => {
         // SDK 将业务超时与 tools/call 的显式取消都归为 RequestTimeout；连接死亡不属于可重开关闭。
         if (!clientConnectionClosed && error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
-          await control.request({ action: "close-block", blockRequestId });
+          await control.request({ action: "close-block", blockRequestId, deliveryToken: status.deliveryToken });
           return null;
         }
         throw error;
@@ -102,7 +113,7 @@ export async function runWorkerMcpServer(): Promise<void> {
         await control.request({ action: "continue", blockRequestId });
         return text({ status: "answered", blockRequestId, answer: durable.answer });
       }
-      await control.request({ action: "close-block", blockRequestId });
+      await control.request({ action: "close-block", blockRequestId, deliveryToken: status.deliveryToken });
       const current = await control.request({ action: "block", blockRequestId, needHelp: args.needHelp, answerSchema: args.answerSchema }) as typeof status;
       if (current.answer) {
         await control.request({ action: "continue", blockRequestId });
@@ -111,6 +122,9 @@ export async function runWorkerMcpServer(): Promise<void> {
       return text({ status: "closed", blockRequestId });
     }
     throw new Error(`未知 Worker Control 工具：${params.name}`);
+    } catch (error) {
+      trace({ phase: "error", tool: params.name, detail: (error instanceof Error ? error.message : String(error)).slice(0, 240) });
+      throw error;
     } finally { inFlight -= 1; }
   });
   await server.connect(transport);

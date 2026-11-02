@@ -2,14 +2,24 @@ import { expect, test } from "bun:test";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAmbiguousPromptError, AcpSessionClient, type AcpTransportFactory } from "../../src/adapters/acp-session";
 
-function fakeTransport(events: acp.SessionUpdate[], hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown> }): AcpTransportFactory {
+function fakeTransport(events: acp.SessionUpdate[], hooks: { cancelled: number; loaded: string[]; newSessionMeta?: Record<string, unknown>; replay?: acp.SessionUpdate[]; loadMcp?: unknown }): AcpTransportFactory {
   return async () => {
     const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
     const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
     const app = acp.agent({ name: "fake-acp" })
       .onRequest(acp.methods.agent.initialize, () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } }))
       .onRequest(acp.methods.agent.session.new, (context) => { hooks.newSessionMeta = context.params._meta as Record<string, unknown> | undefined; return { sessionId: "acp-session" }; })
-      .onRequest(acp.methods.agent.session.load, (context) => { hooks.loaded.push(context.params.sessionId); return {}; })
+      .onRequest(acp.methods.agent.session.load, async (context) => {
+        hooks.loaded.push(context.params.sessionId);
+        hooks.loadMcp = context.params.mcpServers;
+        for (const update of hooks.replay ?? []) {
+          await context.client.notify(acp.methods.client.session.update, { sessionId: context.params.sessionId, update });
+        }
+        // 模拟 load 响应之后才到达的迟到重放：首个新 prompt 之前也必须丢弃。
+        const late = hooks.replay?.[0];
+        if (late) setTimeout(() => { void context.client.notify(acp.methods.client.session.update, { sessionId: context.params.sessionId, update: late }); }, 5);
+        return {};
+      })
       .onRequest(acp.methods.agent.session.prompt, async (context) => {
         await context.client.notify(acp.methods.client.session.update, { sessionId: context.params.sessionId, update: events[0]! });
         return { stopReason: "end_turn" };
@@ -47,6 +57,29 @@ test("ACP session client records a binding, forwards stream events, cancels and 
  * 压缩契约必须由客户端显式广告：未声明 session.compaction 时，Codex 与 Claude Code 适配器
  * 都会把压缩降级成一条 tool_call 呈现，结构化压缩事实不可得。
  */
+test("load 时传入 MCP，并在首个新 prompt 前丢弃全部重放", async () => {
+  const hooks = {
+    cancelled: 0,
+    loaded: [] as string[],
+    replay: [{ sessionUpdate: "user_message_chunk", content: { type: "text", text: "old" } } as acp.SessionUpdate],
+    loadMcp: undefined as unknown,
+  };
+  const client = new AcpSessionClient({ id: "fake", command: "fake", args: [] }, fakeTransport([
+    { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "new" } },
+  ], hooks));
+  await client.initialize(new AbortController().signal);
+  const received: acp.SessionUpdate[] = [];
+  client.subscribe((event) => received.push(event.update));
+  const server = { name: "wf", command: "/bin/true", args: [], env: [] } as acp.McpServer;
+  await client.loadSession("saved", "/workspace", new AbortController().signal, [server]);
+  await Bun.sleep(30);
+  expect(hooks.loadMcp).toEqual([server]);
+  expect(received).toEqual([]);
+  await client.prompt("continue", new AbortController().signal);
+  expect(received).toEqual([{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "new" } }]);
+  client.close();
+});
+
 test("initialize 只在显式要求时广告压缩能力", async () => {
   const advertised: unknown[] = [];
   const factory: AcpTransportFactory = async () => {

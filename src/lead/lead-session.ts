@@ -46,7 +46,7 @@ export async function createLeadSession(options: {
     ? { launcher: actual, session: undefined, evidence: null }
     : await prepareSessionSkills({ scratch, launcher: actual, capability: options.skills ?? undefined, libraryRoot: options.skillsRoot });
   actual = prepared.launcher;
-  const transport = managedAcpTransport({ boundary, groups: new WriterProcessGroups(), bindWriter: async () => {}, transport: options.transport });
+  const transport = managedAcpTransport({ boundary, transport: options.transport });
   const client = new AcpSessionClient(actual, transport, "allow");
   const session = new AcpLeadSession(actual, options.cwd, options.prompt, options.prior, options.mcp, client, prepared.session);
   const close = session.close.bind(session);

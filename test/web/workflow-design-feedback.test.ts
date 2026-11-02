@@ -21,7 +21,8 @@ test("归档与旧Execution隐藏成果恢复合入清理，不保留变更面�
  expect(app).toContain('lead.executions.at(-1)?.executionId !==');
  expect(app).toContain('所选工作流记录暂时不可用');
  expect(app).not.toContain('所选工作流记录已失效');
- expect(app).toContain('(detail.workspaceEvidence?.leases.length ?? 0) > 0');
+ expect(app).toContain('!!detail.workspaceEvidence &&');
+ expect(app).toContain('["cancelled", "interrupted"].includes(');
  expect(app).not.toContain('TEMP DEBUG');
  expect(app).toContain('{!readOnly && (');
  expect(app).toContain('<div className="execution-actions">');

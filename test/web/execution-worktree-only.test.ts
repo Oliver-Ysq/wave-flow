@@ -36,10 +36,16 @@ test("方案页用工作区说明改动保留范围", async () => {
   expect(design).not.toContain("重新整理改动");
 });
 
-test("closedWriters 文案标明 worktree 累计与核验语义，避免误读为本次 Execution 独占", async () => {
+test("工作区现场只展示路径、HEAD 与清理状态，不暴露写者计数", async () => {
   const app = await Bun.file("src-tauri/web/src/App.tsx").text();
-  expect(app).toContain("该受管 worktree 累计，含其他接续 Execution");
-  expect(app).toContain("已在恢复前完成核验（终止 / 已退出 / 从未启动）");
-  expect(app).not.toContain("个重启前租约已在显式恢复时释放");
-  expect(app).not.toContain("staleLeases");
+  const types = await Bun.file("src-tauri/web/src/types.ts").text();
+  expect(app).toContain("所有写节点共享同一 worktree");
+  expect(app).toContain("受管 worktree 已清理");
+  // 只有最近一次交接该 worktree 的 Execution 才能看到清理入口。
+  expect(app).toContain("detail.workspaceEvidence.latestExecutionId ===");
+  expect(types).toContain("latestExecutionId");
+  expect(app).not.toContain("closedWriters");
+  expect(app).not.toContain(".leases");
+  expect(types).not.toContain("closedWriters");
+  expect(types).not.toContain("leases");
 });

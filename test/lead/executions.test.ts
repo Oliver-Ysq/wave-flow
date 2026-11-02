@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -692,4 +693,75 @@ describe("LeadExecutionService", () => {
     const finished = outer.events.filter((event) => event.type === "workflow.execution_finished" && event.executionId === execution.executionId);
     expect(finished.map((event) => (event as { readonly status: string }).status)).toEqual(["interrupted", "completed"]);
   });
+});
+
+test("启动意图没有 supervisor 启动记录时自动判定 provider 未创建并允许 resume", async () => {
+  const { lead, leadRunId, root } = await fixture();
+  await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+  await lead.acceptWorkflowRevision(leadRunId, 1);
+  let runtime: import("../../src/runtime/run-runtime").RunRuntime;
+  let control: import("../../src/control/control-server").ControlServer;
+  let calls = 0;
+  const executions = new LeadExecutionService(lead, () => ({
+    executor: {
+      execute: async (node) => {
+        calls += 1;
+        if (calls > 1) return { nodeId: node.id };
+        // 模拟 spawn 后崩溃：启动意图已耐久，但 supervisor 从未写启动标记/provider 报告。
+        const runId = runtime.snapshot().id;
+        control.register({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: crypto.randomUUID() });
+        await control.recordWriterIntent({ runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "started" });
+        throw new Error("provider 启动后崩溃，未落进程证据");
+      },
+    },
+  }), {
+    wireControl: (value) => {
+      runtime = value;
+      control = value.createControlServer();
+      value.createControlServer = () => control;
+    },
+  }, root);
+  const created = await executions.createExecution(leadRunId, 1, {}, undefined);
+  await waitFor(async () => (await executions.listExecutions(leadRunId))[0].finishedAt !== null);
+  expect((await executions.listExecutions(leadRunId))[0].status).toBe("interrupted");
+  // 没有 supervisor 启动记录：围栏判定 provider 从未创建，不再把执行永久卡死。
+  await executions.resume(leadRunId, created.execution.executionId);
+  await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
+  expect(calls).toBe(2);
+});
+
+
+test("createExecution 与 resume 共用 Task 生命周期锁，操作不交错", async () => {
+  const { lead, leadRunId, root } = await fixture();
+  let broken = true;
+  const executions = new LeadExecutionService(lead, () => ({ executor: { execute: async () => ({ ok: true }) } }), { wireControl: () => { if (broken) throw new Error("control unavailable"); } }, root);
+  await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+  await lead.acceptWorkflowRevision(leadRunId, 1);
+  await expect(executions.createExecution(leadRunId, 1, {}, undefined)).rejects.toThrow("control unavailable");
+  const firstId = (await executions.listExecutions(leadRunId))[0].executionId;
+  broken = false;
+  await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
+  await lead.acceptWorkflowRevision(leadRunId, 2);
+  let active = 0, maxActive = 0, operations = 0;
+  const original = lead.lifecycle.run.bind(lead.lifecycle);
+  const depth = new AsyncLocalStorage<number>();
+  const lock = spyOn(lead.lifecycle, "run").mockImplementation((id, operation) =>
+    original(id, () =>
+      depth.run((depth.getStore() ?? 0) + 1, async () => {
+        // 只统计拿到锁的顶层操作；事务内的重入调用不算并发。
+        const outermost = depth.getStore() === 1;
+        if (outermost) { operations += 1; active += 1; maxActive = Math.max(maxActive, active); }
+        try { await Bun.sleep(30); return await operation(); }
+        finally { if (outermost) active -= 1; }
+      })));
+  try {
+    await Promise.allSettled([
+      executions.resume(leadRunId, firstId),
+      executions.createExecution(leadRunId, 2, {}, undefined),
+    ]);
+  } finally { lock.mockRestore(); }
+  // 两个入口都必须走同一把 Task 锁，且锁内操作从未重叠。
+  expect(operations).toBeGreaterThanOrEqual(2);
+  expect(maxActive).toBe(1);
+  expect(active).toBe(0);
 });

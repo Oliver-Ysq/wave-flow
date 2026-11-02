@@ -13,7 +13,7 @@ type ControlRequest = (
   | { readonly requestId: string; readonly action: "complete"; readonly summary: string; readonly result: JsonObject }
   | { readonly requestId: string; readonly action: "block"; readonly blockRequestId: string; readonly needHelp: string; readonly answerSchema?: JsonObject }
   | { readonly requestId: string; readonly action: "continue"; readonly blockRequestId: string }
-  | { readonly requestId: string; readonly action: "close-block"; readonly blockRequestId: string }
+  | { readonly requestId: string; readonly action: "close-block"; readonly blockRequestId: string; readonly deliveryToken?: string }
 ) & { readonly capability?: string };
 type ControlResponse = { readonly requestId: string; readonly ok: true; readonly result: unknown } | { readonly requestId: string; readonly ok: false; readonly error: string };
 
@@ -85,7 +85,7 @@ export class WorkerControlChannel {
         return { requestId, ok: true, result: resolution };
       }
       if (request.action === "close-block") {
-        await this.control.closeBlock(request.blockRequestId, this.identity);
+        await this.control.closeBlock(request.blockRequestId, this.identity, request.deliveryToken);
         return { requestId, ok: true, result: { ok: true } };
       }
       await this.control.continue({ ...this.identity, blockRequestId: request.blockRequestId } as ContinueSubmission);
@@ -115,7 +115,7 @@ function parseRequest(line: string): ControlRequest {
   if (request.action === "complete" && typeof request.summary === "string" && isObject(request.result)) return { requestId: request.requestId, action: "complete", summary: request.summary, result: request.result, capability };
   if (request.action === "block" && typeof request.blockRequestId === "string" && typeof request.needHelp === "string" && (request.answerSchema === undefined || isObject(request.answerSchema))) return { requestId: request.requestId, action: "block", blockRequestId: request.blockRequestId, needHelp: request.needHelp, ...(isObject(request.answerSchema) ? { answerSchema: request.answerSchema } : {}), capability };
   if (request.action === "continue" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "continue", blockRequestId: request.blockRequestId, capability };
-  if (request.action === "close-block" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "close-block", blockRequestId: request.blockRequestId, capability };
+  if (request.action === "close-block" && typeof request.blockRequestId === "string") return { requestId: request.requestId, action: "close-block", blockRequestId: request.blockRequestId, ...(typeof request.deliveryToken === "string" ? { deliveryToken: request.deliveryToken } : {}), capability };
   throw new Error("Worker 私有控制请求无效。");
 }
 function assertCapability(actual: string | undefined, expected: string): void {

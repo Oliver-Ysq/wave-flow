@@ -234,14 +234,26 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "agent.created":
       if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || (event.phase !== null && typeof event.phase !== "string") || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.created payload 无效。");
       break;
-    case "agent.restarted":
+    case "agent.restarted": {
       if (typeof event.nodeId !== "string" || !Number.isInteger(event.sequence) || (event.sequence as number) < 1 || (event.logicalSequence !== undefined && (!Number.isInteger(event.logicalSequence) || (event.logicalSequence as number) < 1)) || typeof event.newAgentSessionId !== "string" || !event.newAgentSessionId.trim() || typeof event.invalidatedByPriorRestart !== "boolean" || (event.executionAttemptId !== undefined && !isPositiveInteger(event.executionAttemptId)) || (event.phaseVisitId !== undefined && !isPositiveInteger(event.phaseVisitId)) || !isNormalizedRequest(event.request)) throw new Error("agent.restarted payload 无效。");
+      const continuedFrom = (event as { continuedFrom?: unknown }).continuedFrom;
+      if (continuedFrom !== undefined && (!continuedFrom || typeof continuedFrom !== "object" || typeof (continuedFrom as { launcherId?: unknown }).launcherId !== "string" || !(continuedFrom as { launcherId: string }).launcherId.trim() || typeof (continuedFrom as { sessionId?: unknown }).sessionId !== "string" || !(continuedFrom as { sessionId: string }).sessionId.trim())) throw new Error("agent.restarted 的续用会话坐标无效。");
       break;
+    }
     case "agent.status":
       if (typeof event.nodeId !== "string" || !isAgentStatus(event.status) || (event.pauseCause !== undefined && event.pauseCause !== "user" && event.pauseCause !== "recovery")) throw new Error("agent.status payload 无效。");
       break;
     case "agent.session":
       if (typeof event.nodeId !== "string" || event.delivery !== "acp" || !isAcpBinding(event.acp)) throw new Error("agent.session 必须是有效 ACP binding。");
+      break;
+    case "agent.writer": {
+      const pgid = (event as { pgid?: unknown }).pgid;
+      const startedAt = (event as { startedAt?: unknown }).startedAt;
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !event.agentSessionId.trim() || !Number.isInteger(pgid) || (pgid as number) <= 1 || typeof startedAt !== "string" || !startedAt.trim()) throw new Error("agent.writer payload 无效。");
+      break;
+    }
+    case "agent.writerIntent":
+      if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !event.agentSessionId.trim() || (event.status !== "started" && event.status !== "cancelled")) throw new Error("agent.writerIntent payload 无效。");
       break;
     case "agent.recovered":
       if (typeof event.nodeId !== "string" || typeof event.agentSessionId !== "string" || !isAcpRecovery(event.acp)) throw new Error("agent.recovered payload 无效。 ");
@@ -295,6 +307,8 @@ function isPositiveInteger(value: unknown): value is number { return Number.isIn
 function isRunStatus(value: unknown): boolean { return value === "running" || value === "pausing" || value === "paused" || value === "recovering" || value === "completed" || value === "cancelled" || value === "interrupted"; }
 function isAcpBinding(value: unknown): value is { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: import("../runtimes/types").RuntimeProvenance } {
   if (!value || typeof value !== "object" || typeof (value as { launcherId?: unknown }).launcherId !== "string" || !(value as { launcherId: string }).launcherId.trim() || typeof (value as { sessionId?: unknown }).sessionId !== "string" || !(value as { sessionId: string }).sessionId.trim() || !(value as { capabilities?: unknown }).capabilities || typeof (value as { capabilities: unknown }).capabilities !== "object") return false;
+  const writer = (value as { writer?: unknown }).writer;
+  if (writer !== undefined && (!writer || typeof writer !== "object" || !Number.isInteger((writer as { pgid?: unknown }).pgid) || (writer as { pgid: number }).pgid <= 1 || typeof (writer as { startedAt?: unknown }).startedAt !== "string" || !(writer as { startedAt: string }).startedAt.trim())) return false;
   const runtime = (value as { runtime?: unknown }).runtime;
   return runtime === undefined || !!runtime && typeof runtime === "object" && ((runtime as { cli?: unknown }).cli === "codex" || (runtime as { cli?: unknown }).cli === "kimi" || (runtime as { cli?: unknown }).cli === "claude" || (runtime as { cli?: unknown }).cli === "dsh") && typeof (runtime as { runtimeId?: unknown }).runtimeId === "string" && typeof (runtime as { executablePath?: unknown }).executablePath === "string" && (runtime as { executablePath: string }).executablePath.startsWith("/") && typeof (runtime as { version?: unknown }).version === "string" && ((runtime as { adapterId?: unknown }).adapterId === "codex-acp" || (runtime as { adapterId?: unknown }).adapterId === "kimi-acp" || (runtime as { adapterId?: unknown }).adapterId === "claude-acp" || (runtime as { adapterId?: unknown }).adapterId === "dsh-acp") && typeof (runtime as { adapterVersion?: unknown }).adapterVersion === "string" && typeof (runtime as { verifiedAt?: unknown }).verifiedAt === "string";
 }

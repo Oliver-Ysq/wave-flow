@@ -357,4 +357,9 @@ function takeUtf8(text: string, byteBudget: number): { readonly text: string; re
 }
 
 function utf8Length(text: string): number { return new TextEncoder().encode(text).byteLength; }
-function clipChars(text: string | null, maxChars: number): string | null { if (text === null) return null; return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text; }
+function clipChars(text: string | null, maxChars: number): string | null {
+  if (text === null) return null;
+  if (text.length <= maxChars) return text;
+  // 省略号也占一个字符：截断结果必须满足调用方的长度契约，否则 Journal 形状校验会拒绝整条事实。
+  return `${text.slice(0, Math.max(0, maxChars - 1))}…`;
+}

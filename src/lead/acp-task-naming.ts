@@ -26,7 +26,7 @@ export async function generateAcpTaskTitle(options: {
     // DSH 的一次性命名会话同样受主控写边界约束；复用 link→clone/copy shim。
     if (launcher.id === "dsh-acp") launcher = await prepareDshLinkShim(launcher, scratch);
     if (signal.aborted) throw new Error("命名已取消。");
-    const transport = managedAcpTransport({boundary:{scratch,controlFiles:[],protectedDirectories:[options.projectCwd,waveFlowHome()]},groups:new WriterProcessGroups(),bindWriter:async()=>{},transport:options.transport});
+    const transport = managedAcpTransport({boundary:{scratch,controlFiles:[],protectedDirectories:[options.projectCwd,waveFlowHome()]},transport:options.transport});
     client = new AcpSessionClient(launcher,async(...args)=>{const created=await transport(...args);owned=created;if(signal.aborted){created.close();throw new Error("命名启动已取消。");}return created;},()=>{abort.abort();return {outcome:{outcome:"cancelled"}};});
     signal.addEventListener("abort",closeOnAbort,{once:true});
     client.subscribe(({update})=>{

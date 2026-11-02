@@ -1,3 +1,4 @@
+import { withDeadline } from "../fixtures/deadline";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -106,11 +107,10 @@ test.skipIf(process.env.WF_REAL_CODEX_PERMISSION_ACCEPTANCE !== "1")("真实Code
     const blocked = runtime.snapshot().phases[0]!.agents[0]!;
     expect(blocked.status).toBe("blocked");
     await control.answer({ blockRequestId: blocked.block!.blockRequestId, answer: { ok: true } });
-    expect(await running).toEqual({ ok: true });
+    expect(await withDeadline(running, 420_000, "Codex权限验收")).toEqual({ ok: true });
     expect(runtime.snapshot().status).toBe("completed");
     const manager = await WorkspaceManager.open(join(root, "workspaces"), engineId);
     const workspace = await manager.inspect(workspaceId);
-    expect(workspace.leases).toHaveLength(0);
     expect(await Bun.file(join(workspace.cwd, "inside.txt")).text()).toBe(`${insideMarker}\n`);
     expect(await Bun.file(outsideFile).text()).toBe(`${outsideMarker}\n`);
     expect(networkRequests).toBeGreaterThan(0);
@@ -132,4 +132,4 @@ test.skipIf(process.env.WF_REAL_CODEX_PERMISSION_ACCEPTANCE !== "1")("真实Code
     pipes.forEach(pipe => pipe.close());
     executor.close();
   }
-}, 300_000);
+}, 480_000);

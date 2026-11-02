@@ -102,6 +102,9 @@ if (process.argv[2] === "__codex-acp") {
 } else if (process.argv[2] === "__claude-acp") {
   // 包根 main 是 lib.js（库入口）；ACP stdio server 在 bin 入口 dist/index.js。
   await import("@agentclientprotocol/claude-agent-acp/dist/index.js");
+} else if (process.argv[2] === "__worker-supervisor") {
+  const { runWorkerSupervisor } = await import("../runtimes/worker-supervisor");
+  await runWorkerSupervisor();
 } else if (process.argv[2] === "__worker-mcp") {
   const { runWorkerMcpServer } = await import("../runtime/worker-mcp-server");
   // sidecar 启动失败必须以可读诊断非零退出（例如宿主下发的 resultSchema 无法解析）。

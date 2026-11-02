@@ -1,3 +1,4 @@
+import { withDeadline } from "../fixtures/deadline";
 import { expect, spyOn, test } from "bun:test";
 import { AcpSessionClient } from "../../src/adapters/acp-session";
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
@@ -17,41 +18,6 @@ import { DesktopExecutionEngine } from "../../src/desktop/desktop-execution-engi
 import { DesignConfirmationCache } from "../../src-tauri/web/src/workflow-design-config";
 import { RunJournal } from "../../src/journal/run-journal";
 import type { ExecutionWorkspaceConfig } from "../../src/workspace/execution-workspaces";
-
-test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写Worker完成后租约释放失败，显式恢复只补交接且零新会话", async () => {
-  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-result-recovery-"))),cwd=join(root,"repo");await mkdir(cwd);
-  const git=async(...args:string[])=>{const child=Bun.spawn(["/usr/bin/git","-c","user.name=Acceptance","-c","user.email=acceptance@example.invalid",...args],{cwd,stdout:"pipe",stderr:"pipe"});const [out,err,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);if(code)throw Error(err);return out.trim();};
-  await git("init","-b","main");await writeFile(join(cwd,"a.txt"),"base\n");await git("add","a.txt");await git("commit","-m","acceptance base");
-  const base=await git("rev-parse","HEAD"),workspaceId=crypto.randomUUID(),engineId=crypto.randomUUID();
-  const cli=process.env.WF_REAL_WORKSPACE_CLI==="kimi"?"kimi":"codex",registry=new CliRuntimeRegistry();await registry.resolveWorker(cli);
-  let runtime!:RunRuntime;const pipes:WorkerControlChannel[]=[];
-  const executor=new ProductionWorkspaceExecutor({version:3,authorization:{authorizationId:crypto.randomUUID(),approvedAt:new Date().toISOString(),repository:cwd,baseCommit:base,excludeExistingDirty:false,nodes:[{nodeId:"writer"}]},workspaceId},join(root,"workspaces"),engineId,registry,(identity,scratch)=>{
-    const pipe=new WorkerControlChannel(runtime.createControlServer(),identity,undefined,scratch);pipes.push(pipe);
-    return {name:"wave-flow-worker-control",command:process.execPath,args:[join(import.meta.dir,"../../src/desktop/engine-main.ts"),"__worker-mcp"],env:[{name:"WF_WORKER_CONTROL_SOCKET",value:pipe.endpoints.socketPath},{name:"WF_WORKER_CONTROL_CAPABILITY",value:identity.capability}],close:()=>pipe.close()} as acp.McpServer;
-  },null);
-  const workflow:WorkflowModule<JsonObject,unknown>={meta:{name:"result-recovery",description:"成果交接恢复",phases:[{title:"write"}]},default:async()=>{phase("write");return agent('只将当前cwd的a.txt改成done加换行；不要commit/push、联网或安装。最终结果{ok:true}。',{id:"writer",cli,sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}};
-  await writeFile(join(root,"workflow.ts"),"result-recovery");
-  runtime=await RunRuntime.create({workflow,input:{},workflowSource:"result-recovery",workflowPath:join(root,"workflow.ts"),workflowProjectCwd:cwd,clientRequestId:crypto.randomUUID(),executor,storeRoot:join(root,"runs")});
-  const control=runtime.createControlServer();runtime.createControlServer=()=>control;await executor.bindRuntime(runtime,control);
-  console.log(JSON.stringify({root,runId:runtime.snapshot().id,cli}));
-  const release=spyOn(WorkspaceManager.prototype,"release").mockRejectedValueOnce(new Error("injected lease release failure"));
-  try{await expect(runtime.run(workflow)).rejects.toThrow("injected lease release failure");}finally{release.mockRestore();}
-  try{
-    expect(runtime.snapshot().status).toBe("interrupted");const node=runtime.snapshot().phases[0].agents[0];expect(node.status).toBe("completed");
-    const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId);expect((await manager.inspect(workspaceId)).leases).toHaveLength(1);
-    let businessCalls=0;
-    const resumed=await RunRuntime.resume(runtime.snapshot().id,{execute:async()=>{businessCalls++;throw Error("不得重跑业务");},finalizeCompleted:actual=>executor.finalizeCompleted(actual)},join(root,"runs"));
-    expect(await resumed.run(workflow)).toEqual({ok:true});expect(businessCalls).toBe(0);
-    const workspace=await manager.inspect(workspaceId);expect(workspace.leases).toHaveLength(0);
-    expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("done\n");
-    expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");
-    expect((await GitRepository.open(workspace.cwd)).inspect()).resolves.toMatchObject({ head: base, changedPaths: ["a.txt"] });
-    const events=(await RunJournal.open(runtime.snapshot().id,join(root,"runs"))).events;
-    expect(events.filter(event=>event.type==="agent.session")).toHaveLength(1);expect(events.filter(event=>event.type==="agent.restarted")).toHaveLength(0);
-    expect(events.filter(event=>event.type==="execution-attempt.started")).toHaveLength(1);
-    console.log(JSON.stringify({status:resumed.snapshot().status,businessCalls,sessionCount:events.filter(event=>event.type==="agent.session").length}));
-  }finally{pipes.forEach(pipe=>pipe.close());executor.close();}
-},180_000);
 
 // 真实模型/登录验收仅显式开启，普通bun test不访问模型；保留隔离现场用于审计，不自动删除成果。
 test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场stop后保留共享worktree改动，resume新attempt继续写", async () => {
@@ -82,14 +48,14 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实写现场st
    expect(runtime.snapshot().status).toBe("cancelled");const node=runtime.snapshot().phases[0].agents[0];
    await executor.finalizePartial(node);
    const manager=await WorkspaceManager.open(join(root,"workspaces"),engineId);const partial=await manager.inspect(workspaceId);
-   expect(partial.leases).toHaveLength(0);expect(await Bun.file(join(partial.cwd,"a.txt")).text()).toBe("partial\n");
+   expect(await Bun.file(join(partial.cwd,"a.txt")).text()).toBe("partial\n");
    let resumed!:RunRuntime;const next=makeExecutor(()=>resumed);resumed=await RunRuntime.resume(runtime.snapshot().id,next,join(root,"runs"));const nextControl=resumed.createControlServer();resumed.createControlServer=()=>nextControl;await next.bindRuntime(resumed,nextControl);
-   expect(await resumed.run(workflow)).toEqual({ok:true});
+   expect(await withDeadline(resumed.run(workflow), 300_000, "写现场恢复")).toEqual({ok:true});
    const current=resumed.snapshot().phases[0].agents[0];expect(current.agentSessionId).not.toBe(node.agentSessionId);expect(current.executionAttemptId).toBe(2);
-   const final=await manager.inspect(workspaceId);expect(final.leases).toHaveLength(0);expect(await Bun.file(join(final.cwd,"a.txt")).text()).toBe("partial\n");
+   const final=await manager.inspect(workspaceId);expect(await Bun.file(join(final.cwd,"a.txt")).text()).toBe("partial\n");
    expect(await Bun.file(join(cwd,"a.txt")).text()).toBe("base\n");console.log(JSON.stringify({runId:resumed.snapshot().id,status:resumed.snapshot().status,attempt:2}));
  }finally{release();held.mockRestore();pipes.forEach(pipe=>pipe.close());executor.close();}
-},240_000);
+},420_000);
 
 test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写共享同一worktree，结果保留在worktree", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-workspace-")));
@@ -105,7 +71,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
   let runtime!: RunRuntime;
   const executor = new ProductionWorkspaceExecutor({ version: 3, authorization: { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "a" }, { nodeId: "b" }] }, workspaceId }, join(root, "workspaces"), engine, registry, (identity, scratch) => {
     const pipe = new WorkerControlChannel(runtime.createControlServer(), identity, undefined, scratch); pipes.push(pipe);
-    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }], close: () => pipe.close() } as acp.McpServer;
+    return { name: "wave-flow-worker-control", command: process.execPath, args: [join(import.meta.dir, "../../src/desktop/engine-main.ts"), "__worker-mcp"], env: [{ name: "WF_WORKER_CONTROL_SOCKET", value: pipe.endpoints.socketPath }, { name: "WF_WORKER_CONTROL_CAPABILITY", value: identity.capability }, { name: "WF_MCP_TRACE", value: join(root, `mcp-${identity.nodeId}.jsonl`) }], close: () => pipe.close() } as acp.McpServer;
   }, null);
   const schema = { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false };
   const workflow: WorkflowModule<JsonObject, unknown> = { meta: { name: "workspace-acceptance", description: "真实双写验收", phases: [{ title: "write" }] }, default: async () => {
@@ -127,12 +93,11 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
   try {
     await executor.bindRuntime(runtime, control);
     let output: unknown;
-    try { output = await runtime.run(workflow); }
+    try { output = await withDeadline(runtime.run(workflow), 360_000, "双写验收"); }
     catch (error) { console.log(JSON.stringify(runtime.snapshot().phases.flatMap(phase => phase.agents).map(node => ({ id: node.id, status: node.status, diagnostic: node.diagnostic })))); throw error; }
     expect(output).toEqual({ ok: true });
     const manager = await WorkspaceManager.open(join(root, "workspaces"), engine);
     const workspace = await manager.inspect(workspaceId);
-    expect(workspace.leases).toHaveLength(0);
     expect(await Bun.file(join(workspace.cwd, "a.txt")).text()).toBe("worker-a\n");
     expect(await Bun.file(join(workspace.cwd, "b.txt")).text()).toBe("worker-b\n");
     expect(await Bun.file(join(cwd, "a.txt")).text()).toBe("base\n"); expect(await Bun.file(join(cwd, "b.txt")).text()).toBe("base\n"); expect(await git("rev-parse", "HEAD")).toBe(base);
@@ -143,7 +108,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP双写�
     expect(await git("rev-parse", "HEAD")).toBe(base);expect(await git("diff", "--cached", "--name-only")).toBe("");
     console.log(JSON.stringify({ workspace: workspace.cwd, paths: ["a.txt", "b.txt"] }));
   } finally { diagnosticSpy.mockRestore(); pipes.forEach(pipe => pipe.close()); executor.close(); }
-}, 240_000);
+}, 420_000);
 
 test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execution接续共享worktree，新节点修正并重新验证，不跨执行Replay",async()=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),"wave-flow-real-revision-"))),cwd=join(root,"repo");await mkdir(cwd);
@@ -163,7 +128,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   const path=join(root,`${id}.ts`);await writeFile(path,id);
   runtime=await RunRuntime.create({workflow,input:{},workflowSource:id,workflowPath:path,workflowProjectCwd:cwd,clientRequestId:crypto.randomUUID(),executor,storeRoot:join(root,"runs")});
   const control=runtime.createControlServer();runtime.createControlServer=()=>control;await executor.bindRuntime(runtime,control);
-  expect(await runtime.run(workflow)).toEqual({ok:true});return runtime;
+  expect(await withDeadline(runtime.run(workflow), 300_000, "续作验收")).toEqual({ok:true});return runtime;
  };
  try{
   const firstConfig:ExecutionWorkspaceConfig={version:3,authorization:original,workspaceId};
@@ -182,7 +147,8 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实ACP新Execu
   expect(newEvents.find(item=>item.type==="agent.session")!.agentSessionId).not.toBe(oldEvents.find(item=>item.type==="agent.session")!.agentSessionId);
   console.log(JSON.stringify({root,firstExecution:first.snapshot().id,secondExecution:second.snapshot().id,workspace:workspace.cwd,cli}));
  }finally{pipes.forEach(pipe=>pipe.close());executors.forEach(executor=>executor.close());}
-},240_000);
+ // 两次顺序执行共享真实模型延迟；240s 在慢 gateway 上会与第二次执行重叠，放宽但不改变断言。
+},480_000);
 
 test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完成后不保存快照，结果只保留在worktree", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-real-auto-delivery-"))), cwd = join(root, "repo"); await mkdir(cwd);
@@ -191,7 +157,7 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完�
   const base = await git("rev-parse", "HEAD"), cli = process.env.WF_REAL_WORKSPACE_CLI === "kimi" ? "kimi" : "codex";
   const selected = await new CliRuntimeRegistry().resolveWorker(cli), registry = new CliRuntimeRegistry(root);
   const saved = await registry.saveVerified(selected); await registry.select(saved.runtimeId);
-  const source = `const meta={name:"auto-delivery",description:"自动单条交付",phases:[{title:"write"}]};async function run(args){phase("write");return agent('只修改当前cwd的a.txt为done加换行。不要git commit、push、联网、安装。最终结果{ok:true}。',{id:"writer",cli:"${cli}",sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}`;
+  const source = `import { agent, phase } from "wave-flow";\nexport const meta={name:"auto-delivery",description:"自动单条交付",phases:[{title:"write"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("write");return agent('只修改当前cwd的a.txt为done加换行。不要git commit、push、联网、安装。最终结果{ok:true}。',{id:"writer",cli:"${cli}",sandbox:"workspace-write",schema:{type:"object",properties:{ok:{type:"boolean",const:true}},required:["ok"],additionalProperties:false}});}`;
   const engine = new DesktopExecutionEngine({ storeRoot: join(root, "runs"), leadRoot: join(root, "lead-runs"), createLeadSession: async (_id, _cwd, _prior, actions) => ({ isRunning: false, subscribe: () => () => {}, abort: () => {}, close: () => {}, prompt: async text => { if (text.startsWith("请总结")) return "业务已完成；Git交付请以真实证据为准，不代表业务验收。"; await actions.proposeWorkflowRevision(source, "自动交付验收", "只写a.txt"); return "方案已提出"; } }) });
   try {
     const project = await engine.handleDesktopAction("projects.create", { cwd }) as import("../../src/desktop/types").LeadProjectResponse;
@@ -204,7 +170,8 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完�
     const created = await engine.handleDesktopAction("executions.confirm", { leadRunId: taskId, revision: 1, config: request.config, clientRequestId: request.id, input: {} }) as import("../../src/desktop/types").ExecutionResponse;
     console.log(JSON.stringify({ root, taskId, executionId: created.execution.executionId, cli }));
     let detail = created;
-    const deadline = Date.now() + 150_000;
+    // 单节点真实模型回合在不同 gateway 负载下可从 20s 波动到数分钟。
+    const deadline = Date.now() + 300_000;
     while (detail.execution.finishedAt === null && Date.now() < deadline) { await Bun.sleep(100); detail = await engine.handleDesktopAction("executions.get", { leadRunId: taskId, executionId: created.execution.executionId }) as import("../../src/desktop/types").ExecutionResponse; }
     expect(detail.execution.status, detail.execution.diagnostic ?? "").toBe("completed");
     // 宿主不保存任何成果快照或证据 ref；结果只作为 worktree 未提交文件存在。
@@ -215,4 +182,4 @@ test.skipIf(process.env.WF_REAL_WORKSPACE_ACCEPTANCE !== "1")("真实Engine完�
     expect(await Bun.file(join(detail.workspaceEvidence!.cwd, "a.txt")).text()).toBe("done\n");
     console.log(JSON.stringify({ root, taskId, executionId: detail.execution.executionId, workspace: detail.workspaceEvidence!.cwd }));
   } finally { engine.shutdown(); }
-}, 180_000);
+}, 420_000);

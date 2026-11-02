@@ -1,4 +1,9 @@
 import * as acp from "@agentclientprotocol/sdk";
+import { join } from "node:path";
+import { waveFlowHome } from "../journal/paths";
+import { encodeWorkerSupervisorSpec, type WorkerSupervisorSpec } from "../runtimes/worker-supervisor";
+import { captureWriterStartedAt } from "../workspace/writer-process-control";
+import { removeLaunchFiles, reportPathFor } from "../runtimes/supervisor-report";
 import { acpLifecycleLogPath, logAcpLifecycle } from "./acp-lifecycle-log";
 
 /** ACP Agent 的受控启动配置；argv 只能由 Engine 的已验证配置提供。 */
@@ -99,6 +104,11 @@ export type AcpSessionBinding = {
   readonly sessionId: string;
   /** initialize 返回的能力快照；恢复前必须重新协商，不能盲信历史值。 */
   readonly capabilities: acp.AgentCapabilities;
+  /**
+   * provider 进程组与启动时间指纹；用于恢复前判断旧写者是否已死。
+   * 采集失败时缺省；恢复端必须按“无证据”处理，不得续用。
+   */
+  readonly writer?: { readonly pgid: number; readonly startedAt: string };
 };
 
 /** prompt 已写入 ACP 连接但响应未确认时抛出；调用方禁止自动重发。 */
@@ -125,6 +135,8 @@ export class AcpSessionClient {
   #permissionTurn: AbortController | null = null;
   #permissionSignal: AbortSignal | null = null;
   #elicitationResolver: AcpElicitationResolver | null = null;
+  /** load 重放抑制：从 load 请求发出到首个新 prompt 之前，session/update 一律丢弃。 */
+  #suppressReplay = false;
 
   constructor(
     private readonly launcher: AcpLauncher,
@@ -212,18 +224,43 @@ export class AcpSessionClient {
     }, { cancellationSignal: signal });
     if (!created.sessionId.trim()) throw new Error("ACP session/new 返回空 sessionId。 ");
     const capabilities = await this.requireCapabilities(signal);
-    const binding = { launcherId: this.launcher.id, sessionId: created.sessionId, capabilities } as const;
+    const writer = await this.captureWriterEvidence();
+    const binding = { launcherId: this.launcher.id, sessionId: created.sessionId, capabilities, ...(writer ? { writer } : {}) } as const;
     this.#binding = binding;
     return binding;
   }
 
   /** 重新附着一个已有 ACP session；只证明原生会话可 load，不等于恢复 Workflow。 */
-  async loadSession(sessionId: string, cwd: string, signal: AbortSignal): Promise<AcpSessionBinding> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    signal: AbortSignal,
+    mcpServers: acp.McpServer[] = [],
+    mcpStartupAwaitMs?: number,
+    options: AcpSessionOptions = {},
+  ): Promise<AcpSessionBinding> {
     if (!sessionId.trim()) throw new Error("ACP sessionId 不能为空。 ");
     const connection = this.requireConnection();
-    await connection.agent.request(acp.methods.agent.session.load, { sessionId, cwd, mcpServers: [] }, { cancellationSignal: signal });
+    const meta: Record<string, unknown> = { ...(options.meta ?? {}) };
+    if (mcpServers.length > 0 && mcpStartupAwaitMs !== undefined) meta.mcpStartupAwaitTimeoutMs = mcpStartupAwaitMs;
+    // load 会把整段历史当作 session/update 重放；从请求发出到首个新 prompt 之前全部丢弃，
+    // 不能依赖 binding 发布时序——adapter 可能在响应之后继续补发重放事件。
+    this.#suppressReplay = true;
+    try {
+      await connection.agent.request(acp.methods.agent.session.load, {
+        sessionId,
+        cwd,
+        mcpServers,
+        ...(options.additionalDirectories && options.additionalDirectories.length > 0 ? { additionalDirectories: [...options.additionalDirectories] } : {}),
+        ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+      }, { cancellationSignal: signal });
+    } catch (error) {
+      this.#suppressReplay = false;
+      throw error;
+    }
     const capabilities = await this.requireCapabilities(signal);
-    const binding = { launcherId: this.launcher.id, sessionId, capabilities } as const;
+    const writer = await this.captureWriterEvidence();
+    const binding = { launcherId: this.launcher.id, sessionId, capabilities, ...(writer ? { writer } : {}) } as const;
     this.#binding = binding;
     return binding;
   }
@@ -233,6 +270,8 @@ export class AcpSessionClient {
     const binding = this.requireBinding();
     if (!text.trim()) throw new Error("ACP prompt 不能为空。 ");
     if (this.#permissionTurn) throw new Error("ACP回合仍在运行，不能覆盖权限等待身份。");
+    // 首个新 prompt 之后的重放窗口结束：之后到的 update 属于真实回合。
+    this.#suppressReplay = false;
     const turn = new AbortController();
     this.#permissionTurn = turn;
     this.#permissionSignal = AbortSignal.any([signal, turn.signal, this.#permissionAbort.signal]);
@@ -280,6 +319,15 @@ export class AcpSessionClient {
     await transport.verifyClosed();
   }
 
+  /** 采集 provider 进程组与启动指纹；失败或缺省时按无证据处理，不阻塞会话建立。 */
+  private async captureWriterEvidence(): Promise<{ pgid: number; startedAt: string } | null> {
+    const pid = this.#transport?.writerProcess?.pid;
+    if (!pid || !Number.isInteger(pid) || pid <= 1) return null;
+    const reported = this.#transport?.writerProcess?.startedAt;
+    try { return { pgid: pid, startedAt: reported ?? await captureWriterStartedAt(pid) }; }
+    catch { return null; }
+  }
+
   private async requireCapabilities(signal: AbortSignal): Promise<acp.AgentCapabilities> {
     if (signal.aborted) throw new Error("ACP capability 读取已取消。 ");
     if (!this.#capabilities) throw new Error("ACP initialize 未返回 capability。 ");
@@ -288,6 +336,7 @@ export class AcpSessionClient {
 
   private onSessionUpdate(value: acp.SessionNotification): void {
     if (!this.#binding || value.sessionId !== this.#binding.sessionId) return;
+    if (this.#suppressReplay) return;
     const event = { sessionId: value.sessionId, update: value.update } as const;
     for (const listener of this.#subscribers) {
       try { listener(event); } catch { /* 展示订阅者不能中断 ACP protocol loop。 */ }
@@ -422,5 +471,136 @@ export const bunAcpTransport: AcpTransportFactory = async (launcher, signal) => 
     close: () => { signal.removeEventListener("abort", abort); process.removeListener("exit", onParentExit); terminateGroup(); },
   };
 };
+
+/**
+ * 受 supervisor 托管的 ACP transport。
+ *
+ * 与 `bunAcpTransport` 的区别只有一个：直接子进程是 supervisor，provider 是它的子进程。
+ * Engine 拿到的是 provider 的真实进程组（报告文件），`terminate` 改为请 supervisor 走
+ * 自己的收尾阶梯；provider 的真实退出码由 supervisor 透传，异常退出判定与原来一致。
+ */
+export const supervisedAcpTransport: AcpTransportFactory = async (launcher, signal) => {
+  if (signal.aborted) throw new Error("ACP 启动已取消。 ");
+  const launchKey = launcher.env?.WF_WORKER_LAUNCH_KEY;
+  const reportDir = process.env.WF_SUPERVISOR_REPORT_DIR?.trim() || join(waveFlowHome(), "runtime");
+  // Worker 会话用身份派生的稳定路径，恢复端可据此找到 provider 报告；
+  // 主控等无 launch key 的会话仍用一次性路径。
+  const reportPath = launchKey ? reportPathFor(launchKey, reportDir) : join(reportDir, `worker-supervisor-${crypto.randomUUID()}.pid`);
+  const spec: WorkerSupervisorSpec = {
+    command: launcher.command,
+    args: [...launcher.args],
+    cwd: process.cwd(),
+    env: { ...(launcher.env ?? {}) },
+    ownerPid: process.pid,
+    reportPath,
+  };
+  const compiled = import.meta.dir.startsWith("/$bunfs/");
+  const supervisorArgs = compiled ? ["__worker-supervisor"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-supervisor"];
+  const supervisor = Bun.spawn([process.execPath, ...supervisorArgs], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    // supervisor 必须自成进程组：Engine 被整组杀掉时它要活下来完成收尾。
+    detached: true,
+    env: { ...(launcher.env ?? {}), WF_WORKER_SUPERVISOR_SPEC: encodeWorkerSupervisorSpec(spec) },
+  });
+
+  let reported: { pgid: number; startedAt?: string };
+  try {
+    reported = await awaitReportedPgid(reportPath, supervisor, signal);
+  } catch (error) {
+    try { process.kill(supervisor.pid, "SIGKILL"); } catch { /* 已退出 */ }
+    throw error;
+  }
+  const pgid = reported.pgid;
+  logAcpLifecycle({ event: "spawn", launcher: launcher.id, pid: pgid });
+
+  const stderrReader = supervisor.stderr.getReader();
+  const stderrDecoder = new TextDecoder();
+  let stderrTail = "";
+  const stderrDone = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await stderrReader.read();
+        if (done) break;
+        if (value) stderrTail = (stderrTail + stderrDecoder.decode(value, { stream: true })).slice(-8_000);
+      }
+      stderrTail = (stderrTail + stderrDecoder.decode()).slice(-8_000);
+    } catch { /* stderr 读取失败不能影响退出判定。 */ }
+  })();
+  const exited = supervisor.exited.then(async (code) => {
+    logAcpLifecycle({ event: "exit", launcher: launcher.id, pid: pgid, code, signal: supervisor.signalCode, stderr: stderrTail });
+    if (code !== 0) {
+      await Promise.race([stderrDone, Bun.sleep(250)]);
+      throw new Error(`ACP Agent 进程异常退出（code=${code}），诊断日志：${acpLifecycleLogPath()}`);
+    }
+    return code;
+  });
+
+  /** 请 supervisor 收尾；宽限后仍未退出时再直接杀 provider 组与 supervisor。 */
+  let terminated = false;
+  const terminate = () => {
+    // 多次 close/abort 只允许一条终止链，避免叠加多个 escalate 定时器。
+    if (terminated) return;
+    terminated = true;
+    logAcpLifecycle({ event: "terminate", launcher: launcher.id, pid: pgid });
+    try { process.kill(supervisor.pid, "SIGTERM"); } catch { /* 已退出 */ }
+    const escalate = setTimeout(() => {
+      // pgid 可能在窗口内被复用；先确认组仍存在再发 SIGKILL，降低误杀无关进程组的概率。
+      if (processGroupExists(pgid)) {
+        try { process.kill(-pgid, "SIGKILL"); } catch { /* 已退出 */ }
+      }
+      try { process.kill(supervisor.pid, "SIGKILL"); } catch { /* 已退出 */ }
+    }, ACP_SIGTERM_GRACE_MS + 500);
+    escalate.unref?.();
+    // supervisor 正常退出后立即撤销升级定时器，不能让它在几秒后凭旧 pgid 开枪。
+    void supervisor.exited.then(() => clearTimeout(escalate), () => clearTimeout(escalate));
+  };
+  const onParentExit = () => terminate();
+  process.once("exit", onParentExit);
+  const abort = () => terminate();
+  signal.addEventListener("abort", abort, { once: true });
+
+  return {
+    stream: acp.ndJsonStream(new WritableStream<Uint8Array>({
+      write(chunk) { supervisor.stdin.write(chunk); },
+      close() { supervisor.stdin.end(); },
+      abort() { supervisor.stdin.end(); },
+    }), supervisor.stdout),
+    exited,
+    writerProcess: { pid: pgid, exited: supervisor.exited, terminate, ...(reported.startedAt ? { startedAt: reported.startedAt } : {}) },
+    close: () => {
+      signal.removeEventListener("abort", abort); process.removeListener("exit", onParentExit); terminate();
+      // 无 launch key 的会话（主控）不参与写者恢复，关闭时直接回收报告文件。
+      if (!launchKey) void removeLaunchFiles(reportPath);
+    },
+  };
+};
+
+/** 等待 supervisor 报告 provider 进程组；先退出或超时都拒绝启动。 */
+async function awaitReportedPgid(path: string, supervisor: Bun.Subprocess, signal: AbortSignal): Promise<{ pgid: number; startedAt?: string }> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      const lines = (await Bun.file(path).text()).trim().split("\n");
+      const value = Number(lines[0]?.trim());
+      if (Number.isInteger(value) && value > 1) {
+        const startedAt = lines[1]?.trim();
+        // 报告文件保留：Engine 可能在记录写者证据前崩溃，恢复端仍需按同一路径围栏。
+        return { pgid: value, ...(startedAt ? { startedAt } : {}) };
+      }
+    } catch { /* 还没写出来 */ }
+    if (supervisor.exitCode !== null) throw new Error(`Worker supervisor 在报告 provider 前退出（code=${supervisor.exitCode}）。`);
+    if (signal.aborted) throw new Error("ACP 启动已取消。 ");
+    if (Date.now() >= deadline) throw new Error("Worker supervisor 未在预算内报告 provider 进程组。");
+    await Bun.sleep(25);
+  }
+}
+
+/** 进程组是否仍存在；只用于升级终止前的保守判断，不作为退出证明。 */
+function processGroupExists(pgid: number): boolean {
+  try { process.kill(-pgid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
 
 function messageOf(error: unknown): string { return error instanceof Error ? error.message : String(error); }

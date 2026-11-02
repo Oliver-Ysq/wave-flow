@@ -6,11 +6,16 @@ export type OwnedWriterProcess = {
   readonly pid: number;
   /** 实际子进程退出Promise；不是ACP回合结束。 */
   readonly exited: Promise<unknown>;
+  /**
+   * spawn 时同源采集的启动时间指纹；只有 supervisor 托管路径提供。
+   * 缺失时由调用方事后读取，存在时优先使用，避免“spawn 后数秒才采集”的 PID 复用窗口。
+   */
+  readonly startedAt?: string;
   /** 请求终止整个进程组；不得仅取消ACP会话。 */
   terminate(): void;
 };
 
-/** writer退出证明登记簿；只有本实例登记且leader/进程组都退出才能移交租约。 */
+/** writer退出证明登记簿；只有本实例登记且leader/进程组都退出才算核验通过。 */
 export class WriterProcessGroups {
   #owned = new Map<string, { process: OwnedWriterProcess; leaderExited: boolean }>();
   #verifiedExited = new Set<string>();
@@ -30,7 +35,7 @@ export class WriterProcessGroups {
   }
 
   /** 检查真实退出；重启或未知身份永远false，不按旧PID推测。
-   * 进程组一旦验证消失，保留该身份的退出证明，PID后续复用不污染旧租约。
+   * 进程组一旦验证消失，保留该身份的退出证明，PID后续复用不污染旧记录。
    */
   hasExited(identity: string): boolean {
     if (this.#verifiedExited.has(identity)) return true;

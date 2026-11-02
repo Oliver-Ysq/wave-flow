@@ -1,4 +1,6 @@
-import { AcpSessionClient, acpProgressIsMeaningful, type AcpElicitationResolver, type AcpLauncher, type AcpSessionBinding, type AcpSessionOptions } from "../adapters/acp-session";
+import { AcpSessionClient, acpProgressIsMeaningful, type AcpElicitationResolver, type AcpLauncher, type AcpSessionBinding, type AcpSessionEvent, type AcpSessionOptions } from "../adapters/acp-session";
+import { fenceAcpWriter } from "../workspace/writer-process-control";
+import { removeLaunchFiles, reportPathFor, writerLaunchKey } from "../runtimes/supervisor-report";
 import { AcpContextTracker } from "../adapters/acp-context";
 import type { ControlServer, WorkerTurnContext } from "../control/control-server";
 import { workerAdapterForCli } from "../runtimes/adapter-catalog";
@@ -8,6 +10,7 @@ import type { AgentNodeExecutor, AgentNodeSnapshot } from "./run-types";
 import type { RuntimeProvenance } from "../runtimes/types";
 import type * as acp from "@agentclientprotocol/sdk";
 import { WorkflowContractError } from "../workflow/errors";
+import { acpContinuationPrompt } from "./acp-continuation";
 import { logWorkerLifecycle } from "./worker-lifecycle-log";
 
 /** ACP Worker 会话的最小使用面，便于在不依赖真实模型的情况下验证 Runtime/Control 边界。 */
@@ -16,6 +19,8 @@ export interface AcpWorkerSession {
   readonly binding: AcpSessionBinding | null;
   initialize(signal: AbortSignal): Promise<unknown>;
   createSession(cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number, options?: AcpSessionOptions): Promise<AcpSessionBinding>;
+  /** 重新附着一条已有 ACP 会话；缺省表示该测试夹具不支持续用，执行器必须回退新会话。 */
+  loadSession?(sessionId: string, cwd: string, signal: AbortSignal, mcpServers?: acp.McpServer[], mcpStartupAwaitMs?: number, options?: AcpSessionOptions): Promise<AcpSessionBinding>;
   /** 仅真实 Worker 在 initialize 前注册私有 Elicitation；测试夹具与 Lead 可省略。 */
   setElicitationResolver?(resolver: AcpElicitationResolver): void;
   prompt(text: string, signal: AbortSignal): Promise<{ readonly stopReason: string }>;
@@ -98,17 +103,23 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     control.register({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, onCompleted: resolveCompletion });
     // capability 只保留在 Engine 与私有 MCP server 的绑定中，绝不注入 ACP adapter
     // 或 Coding Worker 的环境。稳定三元组只用于定位，不能单独授权上报。
-    const session = this.createSession(this.launcher);
-    if (workerAdapterForCli(node.cli)?.capabilities.elicitationForm) session.setElicitationResolver?.((request, signal) => control.waitForBlockAnswer(
-      { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability },
-      {
-        mode: request.mode,
-        message: request.message,
-        requestedSchema: "requestedSchema" in request && request.requestedSchema && typeof request.requestedSchema === "object" ? request.requestedSchema as JsonObject : {},
-        blockRequestId: elicitationBlockRequestId(request),
-      },
-      signal,
-    ));
+    // Worker 会话用身份派生的稳定 launch key：恢复端可据同一路径找到 supervisor 报告。
+    const launchLauncher = (): AcpLauncher => ({ ...this.launcher, env: { ...(this.launcher.env ?? {}), WF_WORKER_LAUNCH_KEY: writerLaunchKey(control.runId, node.id, node.agentSessionId!) } });
+    let session = this.createSession(launchLauncher());
+    const bindElicitation = (client: AcpWorkerSession, nextCapability: string): void => {
+      if (!workerAdapterForCli(node.cli)?.capabilities.elicitationForm) return;
+      client.setElicitationResolver?.((request, signal) => control.waitForBlockAnswer(
+        { runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: nextCapability },
+        {
+          mode: request.mode,
+          message: request.message,
+          requestedSchema: "requestedSchema" in request && request.requestedSchema && typeof request.requestedSchema === "object" ? request.requestedSchema as JsonObject : {},
+          blockRequestId: elicitationBlockRequestId(request),
+        },
+        signal,
+      ));
+    };
+    bindElicitation(session, capability);
     let lastActivity = performance.now();
     let stallTimer: ReturnType<typeof setInterval> | undefined;
     let checkingStall = false;
@@ -118,10 +129,10 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     const contextTracker = new AcpContextTracker();
     // active 必须先于 subscribe 声明：测试 fixture 的 binding 从构造起即非空，
     // 同步回放事件的实现不得在 TDZ 内触碰 active。
-    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, turnGap: false, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, recoveryAttempts: 0, taskPrompt: node.request.prompt, contextTracker, nodeId: node.id, agentSessionId: node.agentSessionId! };
+    const active: ActiveAcpWorker = { session, reject: rejectCompletion, isSettled: () => settled, turn: null, turnGap: false, pauseRequested: false, paused: false, stopped: false, stallDiagnosed: false, resume: null, releaseResume: null, recoveryStarted: null, resolveRecoveryStarted: null, cancelAck: null, resolveCancelAck: null, recoveryAttempts: 0, sessionDead: false, taskPrompt: node.request.prompt, contextTracker, nodeId: node.id, agentSessionId: node.agentSessionId! };
     active.onTurnStarted = () => { lastActivity = performance.now(); active.stallDiagnosed = false; };
     let skillAdvertisementChecked = false;
-    const unsubscribe = session.subscribe?.(event => {
+    const onSessionEvent = (event: AcpSessionEvent): void => {
       // 停滞提示只由有意义进展刷新；thought 空分片/心跳不得续命。进展恢复后允许再次提示。
       if (event.sessionId === session.binding?.sessionId && acpProgressIsMeaningful(event.update)) { lastActivity = performance.now(); active.stallDiagnosed = false; }
       // 上下文占用与压缩事实：只解释 Agent 自报的结构化事件，用于归因与回合边界决策。
@@ -141,7 +152,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         const missing = this.skillVerification.expected.filter(skill => !advertised.some(name => this.skillVerification!.match(skill, name)));
         if (missing.length > 0) void control.recordExecutorDiagnostic(`技能注入未在 CLI 广告中得到确认：${missing.slice(0, 10).join("、")}；本次只证明文件已投影，不能据此宣称模型可见。`, node.id, node.agentSessionId!).catch(() => { /* 证据写入失败不改节点状态。 */ });
       }
-    });
+    };
+    let unsubscribe = session.subscribe?.(onSessionEvent);
     this.#active.set(key, active);
     const startedAt = performance.now();
     const stage = (name: string, diagnostic?: string): void => logWorkerLifecycle({
@@ -162,6 +174,9 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       const signal = new AbortController();
       stage("execute_start");
       await hint("ACP Worker 启动中：正在初始化 CLI 适配器。");
+      // spawn 前耐久记录启动意图：若崩溃发生在 agent.session 之前，恢复端必须按
+      // “可能已有孤儿”fail closed，不能仅凭没有 writer 就放行。
+      await control.recordWriterIntent({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "started" });
       await withStartupTimeout(
         Promise.race([session.initialize(signal.signal), completion]),
         this.startupTimeoutMs,
@@ -178,8 +193,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       // resultSchema 随 MCP 配置下发：sidecar 把它内联进完成工具的 inputSchema，
       // 让"必须交什么形状的结果"成为每轮重发的工具签名，而不是提示词里的一句话。
       mcpServers = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId, capability, ...(node.request.schema ? { resultSchema: node.request.schema } : {}) })] : [];
-      void hint("ACP Worker 启动中：正在创建 session/new（含 MCP 与托管技能注入）。");
-      const binding = await withStartupTimeout(
+      void hint("ACP Worker 启动中：正在创建或续用 ACP 会话（含 MCP 与托管技能注入）。");
+      const createFreshSession = (): Promise<AcpSessionBinding> => withStartupTimeout(
         Promise.race([session.createSession(node.cwd, signal.signal, mcpServers, 10_000, this.sessionOptions), completion.then(() => { throw new Error("ACP Worker 启动已终止。"); })]),
         this.startupTimeoutMs,
         "session/new",
@@ -190,6 +205,38 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
           void hint("本地执行环境响应较慢，正在自动恢复…");
         },
       );
+      let binding: AcpSessionBinding;
+      let continued = false;
+      const continuation = node.continuation;
+      if (continuation && continuation.launcherId === this.launcher.id && typeof session.loadSession === "function") {
+        // 续用有自己的取消信号：load 超时不能把随后回退的新会话一起 abort。
+        const loadControl = new AbortController();
+        try {
+          binding = await withStartupTimeout(
+            Promise.race([
+              session.loadSession(continuation.sessionId, node.cwd, AbortSignal.any([signal.signal, loadControl.signal]), mcpServers, 10_000, this.sessionOptions),
+              completion.then(() => { throw new Error("ACP Worker 启动已终止。"); }),
+            ]),
+            300_000,
+            "session/load",
+            () => {
+              stage("session_load_timeout");
+              loadControl.abort();
+              void hint("原会话续用超时，正在改用新会话…");
+            },
+          );
+          continued = true;
+        } catch (error) {
+          if (active.stopped || settled || signal.signal.aborted) throw error;
+          await control.recordExecutorDiagnostic(`续用原会话失败，改用新会话：${error instanceof Error ? error.message : String(error)}`, node.id, node.agentSessionId).catch(() => { /* 诊断失败不改回退决定 */ });
+          binding = await createFreshSession();
+        }
+      } else {
+        if (continuation) {
+          await control.recordExecutorDiagnostic("续用原会话不适用（launcher 不匹配或客户端不支持 session/load），改用新会话。", node.id, node.agentSessionId!).catch(() => { /* 诊断失败不阻止新会话 */ });
+        }
+        binding = await createFreshSession();
+      }
       stage("session_new_end");
       if (active.stopped || settled) throw new Error("ACP Worker 启动已终止，拒绝记录或投递任务。");
       await control.recordSession({
@@ -197,7 +244,7 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         nodeId: node.id,
         agentSessionId: node.agentSessionId,
         delivery: "acp",
-        acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities, ...(this.runtime ? { runtime: this.runtime } : {}) },
+        acp: { launcherId: binding.launcherId, sessionId: binding.sessionId, capabilities: binding.capabilities, ...(this.runtime ? { runtime: this.runtime } : {}), ...(binding.writer ? { writer: binding.writer } : {}) },
       });
       stage("session_ready");
       void hint("ACP Worker 已建立会话，正在投递任务。");
@@ -228,17 +275,118 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
         })().catch(() => { /* 提示采样永不终结节点：只读事实读取失败时下个周期重试。 */ })
           .finally(() => { checkingStall = false; });
       }, Math.min(1_000, this.stallWindowMs));
-      const turn = this.runTurn(active, managedPrompt(node), signal.signal);
+      /** 同一 attempt 内换新 provider 并续用原会话；失败即抛给外层收敛为中断。 */
+      const recoverInPlace = async (recoverSignal?: AbortSignal): Promise<void> => {
+        const oldBinding = session.binding;
+        if (!oldBinding) throw new Error("原会话已失去 binding，拒绝原地续用。");
+        // 用户 recover 有 15 秒预算；重建必须受同一 signal 约束，不能后台跑到 300 秒。
+        const effectiveSignal = recoverSignal ? AbortSignal.any([signal.signal, recoverSignal]) : signal.signal;
+        if (oldBinding.writer) {
+          const fence = await fenceAcpWriter(oldBinding.writer);
+          if (fence.outcome === "unknown") throw new Error(`无法核验旧 provider 进程组：${fence.reason}`);
+        }
+        // 新 provider 即将 spawn：先耐久启动意图。initialize/load 最长可跨数百秒，
+        // 崩溃时 Journal 里已死的旧 writer 证据不足以说明新进程不存在。
+        await control.recordWriterIntent({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "started" });
+        stage("session_recover_start");
+        unsubscribe?.();
+        session.close();
+        const next = this.createSession(launchLauncher());
+        const nextCapability = crypto.randomUUID();
+        bindElicitation(next, nextCapability);
+        try {
+          await withStartupTimeout(
+            Promise.race([next.initialize(effectiveSignal), completion.then(() => { throw new Error("ACP Worker 续用已终止。"); })]),
+            this.startupTimeoutMs,
+            "recover/initialize",
+            () => { /* 由外层 catch 收敛为中断 */ },
+          );
+          if (!next.loadSession) throw new Error("当前 ACP client 不支持 session/load。");
+          const nextMcp = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: nextCapability, ...(node.request.schema ? { resultSchema: node.request.schema } : {}) })] : [];
+          let nextBinding: AcpSessionBinding;
+          try {
+            nextBinding = await withStartupTimeout(
+              Promise.race([next.loadSession(oldBinding.sessionId, node.cwd, effectiveSignal, nextMcp, 10_000, this.sessionOptions), completion.then(() => { throw new Error("ACP Worker 续用已终止。"); })]),
+              300_000,
+              "recover/load",
+              () => { /* 由外层 catch 收敛为中断 */ },
+            );
+          } catch (error) {
+            for (const server of nextMcp) (server as { close?: () => void }).close?.();
+            throw error;
+          }
+          for (const server of mcpServers) (server as { close?: () => void }).close?.();
+          mcpServers = nextMcp;
+          // 先耐久新 writer，再切换 capability：崩溃落在两者之间时，Journal 已指向新进程，
+          // 不会出现“旧 pgid 已死、新 provider 无证据”的窗口。
+          if (nextBinding.writer) await control.recordWriter({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, pgid: nextBinding.writer.pgid, startedAt: nextBinding.writer.startedAt });
+          control.rebind({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: nextCapability, onCompleted: resolveCompletion });
+          session = next;
+          active.session = next;
+          active.readTurnContext = () => control.workerTurnContext({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: nextCapability });
+          unsubscribe = session.subscribe?.(onSessionEvent);
+          await control.recordExecutorDiagnostic("原会话进程退出，已围栏并续用同一 ACP 会话。", node.id, node.agentSessionId!).catch(() => { /* 诊断失败不改续用结果 */ });
+          stage("session_recover_end");
+        } catch (error) {
+          next.close();
+          // 只有核验新 provider 进程组已退出才撤回启动意图；核验不了就保留意图，
+          // 让下一次恢复围栏 fail closed，而不是默认“没启动过”。
+          try {
+            if (!next.verifyClosed) throw new Error("新 provider 没有退出核验能力。");
+            await next.verifyClosed();
+            await control.recordWriterIntent({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "cancelled" });
+          } catch { /* 保留启动意图。 */ }
+          throw error;
+        }
+      };
+      active.rebuild = recoverInPlace;
+      let turn = this.runTurn(active, continued ? acpContinuationPrompt() : managedPrompt(node), signal.signal);
       // Control complete 是 Worker 的业务完成边界。某些 ACP Agent 在工具调用后会继续
-      // 保持原 prompt turn；不能因此阻塞 Runtime 的 run.completed。turn 的拒绝仍被
+      // 保持原 prompt turn；不能因此阻塞 Runtime 的 run.completed。turn 的拒绝由
       // race handler 消费，避免 complete 之后形成未处理 rejection。
-      return await Promise.race([completion, turn.then(() => completion)]);
+      let sessionRecoveryUsed = false;
+      for (;;) {
+        const outcome = await Promise.race([
+          completion.then((result) => ({ kind: "completed" as const, result })),
+          turn.then(() => ({ kind: "turn" as const }), (error: unknown) => ({ kind: "error" as const, error })),
+        ]);
+        if (outcome.kind === "completed") return outcome.result;
+        if (outcome.kind === "turn") return completion;
+        // 只有 ACP 会话本身失效才尝试一次原地续用；协议/业务错误仍走既有恢复路径。
+        if (sessionRecoveryUsed || active.stopped || active.isSettled() || !isAcpSessionFailure(outcome.error)) throw outcome.error;
+        // 正在等待人工答案的节点不做原地续用：旧 block 的表单与答案投递关系不跨会话重建，
+        // 续用会让模型在没有答案的情况下继续。按投递失效收敛为中断，由用户显式恢复。
+        if (control.isWorkerWaiting(node.id, node.agentSessionId!)) throw outcome.error;
+        // 写 Worker 与只读 Worker 使用同一原地续用路径：旧 writer 先按 Journal 证据围栏，
+        // 新 provider 的进程证据在 load 成功后耐久记录，再切换 capability。
+        sessionRecoveryUsed = true;
+        try {
+          await recoverInPlace();
+        } catch (error) {
+          if (!this.#recoveryHold || active.stopped || active.isSettled()) throw error;
+          // 续用失败不再直接把节点打成中断：保留原会话坐标与名额，进入节点级可恢复暂停。
+          active.sessionDead = true;
+          active.turn = null;
+          active.turnGap = true;
+          await control.recordExecutorDiagnostic(`续用原会话失败：${error instanceof Error ? error.message : String(error)}；节点进入可恢复暂停，等待用户重试或停止。`, node.id, node.agentSessionId!).catch(() => { /* 诊断失败不改暂停 */ });
+          await this.#recoveryHold(node.id);
+          if (active.stopped || active.isSettled()) return completion;
+          await active.resume;
+          if (active.stopped || active.isSettled()) return completion;
+          // recover() 已重建并 load 原会话；若重建失败，sessionDead 仍为 true。
+          if (active.sessionDead) throw error;
+        }
+        turn = this.runTurn(active, acpContinuationPrompt(), signal.signal);
+      }
     } catch (error) {
       stage("execute_error", error instanceof Error ? error.message : String(error));
       if (startupTimeoutMessage) {
         await control.recordExecutorDiagnostic(startupTimeoutMessage, node.id, node.agentSessionId!).catch(() => {});
         // 诊断日志保留技术阶段；节点 UI 只留用户可理解的自动恢复提示。
         await hint("本地执行环境响应较慢，正在自动恢复…");
+      }
+      if (!control.hasRecordedNodeSession(node.id, node.agentSessionId!)) {
+        await control.recordWriterIntent({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "cancelled" }).catch(() => { /* 取消失败时恢复端 fail closed */ });
       }
       control.unregister(control.runId, node.id, node.agentSessionId);
       throw error;
@@ -250,6 +398,10 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       active.releaseResume?.();
       this.#active.delete(key);
       session.close();
+      // 启动阶段被 stop/取消时没有 agent.session；取消启动意图，避免下一次恢复误判。
+      if (!control.hasRecordedNodeSession(node.id, node.agentSessionId!)) {
+        await control.recordWriterIntent({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, status: "cancelled" }).catch(() => { /* 取消失败时恢复端 fail closed */ });
+      }
       if (this.requireWriterExit) this.#closedSessions.set(key, session);
       // Worker 未 complete 就停止、取消或异常结束时也必须回收本 session 的私有
       // Control 通道；它不能存活到整个 Engine 退出后才消失。
@@ -276,6 +428,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
     catch (error) { throw new WorkflowContractError(`受管writer退出核验失败：${error instanceof Error ? error.message : String(error)}`); }
     this.#closedSessions.delete(key);
     this.#verifiedSessions.add(key);
+    const runId = this.#control?.runId;
+    if (runId) await removeLaunchFiles(reportPathFor(writerLaunchKey(runId, node.id, node.agentSessionId ?? ""))).catch(() => {});
   }
   /** stop已使execute进入finally并close；退出证明与completed共用，不推断业务成功。 */
   finalizePartial(node: AgentNodeSnapshot): Promise<void> { return this.finalizeCompleted(node); }
@@ -283,6 +437,14 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
   /** 同一 Engine 内暂停：cancel 必须真实以 cancelled 结束，不能把未知中断伪装为 paused。 */
   async pause(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<void> {
     const active = this.requireActive(node);
+    // 会话已死时没有可 cancel 的原回合；只把节点挂起，等用户 recover 时重建会话。
+    if (active.sessionDead) {
+      if (active.paused || active.pauseRequested) throw new Error("ACP Worker 已在暂停控制中。 ");
+      active.pauseRequested = true;
+      active.paused = true;
+      if (!active.releaseResume) active.resume = new Promise<void>((resolve) => { active.releaseResume = resolve; });
+      return;
+    }
     if (active.paused || active.pauseRequested) throw new Error("ACP Worker 已在暂停控制中。 ");
     if (!active.turn) {
       // 回合间隙暂停：上一 turn 已 end_turn、收尾事实读取尚未完成，没有可取消的
@@ -322,6 +484,12 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
   async recover(node: AgentNodeSnapshot, signal?: AbortSignal): Promise<{}> {
     const active = this.requireActive(node);
     if (!active.paused || !active.releaseResume) throw new Error("ACP Worker 未处于可恢复暂停状态。 ");
+    // 会话已经死掉时，先重建并 load 原会话；失败则保持暂停，让用户重试或停止。
+    if (active.sessionDead) {
+      if (!active.rebuild) throw new Error("ACP Worker 没有可用的会话重建路径。 ");
+      await active.rebuild(signal);
+      active.sessionDead = false;
+    }
     active.recoveryStarted = new Promise<void>((resolve) => { active.resolveRecoveryStarted = resolve; });
     active.paused = false;
     active.pauseRequested = false;
@@ -514,7 +682,8 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
 }
 
 type ActiveAcpWorker = {
-  readonly session: AcpWorkerSession;
+  /** 当前存活的 ACP client；原地续用换新进程后会被替换。 */
+  session: AcpWorkerSession;
   readonly reject: (error: Error) => void;
   readonly isSettled: () => boolean;
   turn: Promise<{ readonly stopReason: string }> | null;
@@ -535,6 +704,10 @@ type ActiveAcpWorker = {
   rejectCancelAck?: (error: Error) => void;
   /** 本节点自动协议恢复次数；达到上限后进入节点级恢复暂停。 */
   recoveryAttempts: number;
+  /** ACP 会话/进程已失效，等待重建；此时 pause 只能本地挂起，不能 cancel 死会话。 */
+  sessionDead: boolean;
+  /** 重建并 load 原会话；由 execute 注入，供用户 recover 时复用；signal 用于约束用户恢复预算。 */
+  rebuild?: (signal?: AbortSignal) => Promise<void>;
   /** 每个真实新回合重置诊断窗口；不延用用户暂停时间。 */
   onTurnStarted?: () => void;
   /** 当前原Control会话的只读事实读取；初始化后设置，不重建会话或操作节点。 */
@@ -577,6 +750,21 @@ async function withStartupTimeout<T>(promise: Promise<T>, timeoutMs: number, sta
   });
   try { return await Promise.race([promise, timeout]); }
   finally { if (timer) clearTimeout(timer); }
+}
+
+/**
+ * 判断异常是否意味着 ACP 会话/进程本身失效。
+ *
+ * 只有连接关闭或进程退出允许同一 attempt 内换新 provider 续用；投递不确定
+ * （prompt 可能已写入连接但没有响应）仍按“不重发”处理，不能围栏后重试，
+ * 否则可能对仍在执行的原 provider 重复副作用。
+ */
+function isAcpSessionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("ACP 连接已关闭")
+    || message.includes("ACP Agent 进程已退出")
+    || message.includes("ACP 连接失败")
+    || message.includes("ACP Agent 进程观察失败");
 }
 
 function nodeKey(node: AgentNodeSnapshot): string { return `${node.id}:${node.agentSessionId ?? ""}`; }

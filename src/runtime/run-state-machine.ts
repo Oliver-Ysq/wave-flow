@@ -89,6 +89,12 @@ export class RunStateMachine {
       case "agent.session":
         this.#applyAgentSession(event);
         return;
+      case "agent.writer":
+        this.#applyAgentWriter(event);
+        return;
+      case "agent.writerIntent":
+        this.#applyAgentWriterIntent(event);
+        return;
       case "agent.recovered":
         this.#applyAgentRecovered(event);
         return;
@@ -230,6 +236,11 @@ export class RunStateMachine {
     return this.#sessionRuntimes.get(nodeId) ?? null;
   }
 
+  /** 当前 attempt 已记录的 ACP 绑定；只用于构造续用坐标，不是授权依据。 */
+  acpBinding(nodeId: string): { readonly launcherId: string; readonly sessionId: string } | null {
+    return this.#acpBindings.get(nodeId) ?? null;
+  }
+
   /** 节点当前 attempt 是否已耐久 agent.session；执行器只在 false 时允许启动前回退。 */
   hasNodeSession(nodeId: string, agentSessionId: string | null): boolean {
     if (!this.#recordedSessions.has(nodeId)) return false;
@@ -331,7 +342,7 @@ export class RunStateMachine {
     const phaseVisitId = event.phaseVisitId ?? agent.phaseVisitId;
     if (executionAttemptId !== this.#currentExecutionAttemptId || !this.#phaseVisits.has(visitKey(executionAttemptId, phaseVisitId))) throw new Error("agent.restarted 不属于当前执行尝试的阶段访问。 ");
     if (executionAttemptId !== agent.executionAttemptId) this.#historicalAgents.set(`${agent.executionAttemptId}:${agent.id}`, cloneAgent(agent));
-    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", hint: null, startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null, pauseCause: null });
+    this.#agents.set(event.nodeId, { ...agent, executionAttemptId, phaseVisitId, status: "queued", result: null, diagnostic: "用户显式 resume 创建新 attempt。", hint: null, startedAt: null, endedAt: null, agentSessionId: event.newAgentSessionId, block: null, writer: null, writerIntentAt: null, continuation: event.continuedFrom ?? null, pauseCause: null });
   }
 
   #applyAgentSession(event: Extract<JournalEvent, { type: "agent.session" }>): void {
@@ -345,6 +356,30 @@ export class RunStateMachine {
     this.#recordedSessions.add(event.nodeId);
     this.#acpBindings.set(event.nodeId, { launcherId: event.acp.launcherId, sessionId: event.acp.sessionId });
     this.#sessionRuntimes.set(event.nodeId, event.acp.runtime ?? null);
+    const current = this.#agents.get(event.nodeId)!;
+    this.#agents.set(event.nodeId, { ...current, writer: event.acp.writer ?? null, writerIntentAt: event.acp.writer ? null : current.writerIntentAt ?? null });
+  }
+
+  /** 同一 attempt 内换 provider 后覆盖写者证据；旧证据不得继续用于围栏判定。 */
+  #applyAgentWriter(event: Extract<JournalEvent, { type: "agent.writer" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("agent.writer 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    // 节点级 recover 会先把状态写成 recovering 再重建会话；换新 provider 的 writer 证据
+    // 必须在这个窗口内可写，否则用户重试必然失败。
+    if (!agent || (agent.status !== "running" && agent.status !== "recovering") || agent.agentSessionId !== event.agentSessionId) throw new Error("agent.writer 必须属于当前 running 或 recovering 节点。");
+    if (!this.#recordedSessions.has(event.nodeId)) throw new Error("agent.writer 必须先有 agent.session 事实。");
+    this.#agents.set(event.nodeId, { ...agent, writer: { pgid: event.pgid, startedAt: event.startedAt }, writerIntentAt: null });
+  }
+
+  /** provider 创建意图；started 且没有 writer 时恢复端必须 fail closed。 */
+  #applyAgentWriterIntent(event: Extract<JournalEvent, { type: "agent.writerIntent" }>): void {
+    if (!event.nodeId || !event.agentSessionId) throw new Error("agent.writerIntent 缺少节点或会话身份。");
+    const agent = this.#agents.get(event.nodeId);
+    if (!agent || agent.agentSessionId !== event.agentSessionId) throw new Error("agent.writerIntent 必须属于当前节点会话。");
+    // 节点级 recover 会先把状态写成 recovering 再重建会话；换新 provider 的写者意图
+    // 与证据必须在这个窗口内可写，否则用户重试必然失败。
+    if (event.status === "started" && agent.status !== "running" && agent.status !== "recovering") throw new Error("agent.writerIntent(started) 只能用于 running 或 recovering 节点。");
+    this.#agents.set(event.nodeId, { ...agent, writerIntentAt: event.status === "started" ? event.at : null });
   }
 
   #applyAgentRecovered(event: Extract<JournalEvent, { type: "agent.recovered" }>): void {
@@ -390,7 +425,7 @@ export class RunStateMachine {
     if (agent.block) throw new Error("同一 Agent 不能同时创建多个 block。");
     const answerSchema = normalizeHitlAnswerSchema(event.answerSchema);
     this.#applyAgentStatus(event.nodeId, "blocked", event.at, event.diagnostic, null, event.agentSessionId);
-    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false, answerSchema, delivery: "pending" } });
+    this.#agents.set(event.nodeId, { ...this.#agents.get(event.nodeId)!, block: { blockRequestId: event.blockRequestId, needHelp: event.needHelp, answered: false, answerSchema, delivery: "pending", deliveryToken: crypto.randomUUID() } });
     this.#blockSchemas.set(event.blockRequestId, answerSchema);
   }
 
@@ -413,7 +448,7 @@ export class RunStateMachine {
     if (!event.nodeId || !event.agentSessionId) throw new Error("block.reopened 缺少节点或会话身份。");
     const agent = this.#agents.get(event.nodeId);
     if (!agent || agent.status !== "blocked" || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || agent.block.delivery !== "closed") throw new Error("block.reopened 不属于已关闭的当前 block。");
-    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, delivery: "pending" } });
+    this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, delivery: "pending", deliveryToken: crypto.randomUUID() } });
   }
 
   #applyBlockContinued(event: Extract<JournalEvent, { type: "agent.continued" }>): void {

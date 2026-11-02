@@ -4,7 +4,7 @@ import { dlopen, FFIType } from "bun:ffi";
  * 跨 Engine 恢复时的 writer 进程核验与终止能力。
  *
  * 只解决一个问题：上一 executionAttempt 的 writer 进程组是否还活着、是不是它。
- * 判定依据是 lease 里持久化的进程组 leader PID 与启动时间指纹；不以业务状态、
+ * 判定依据是 Run Journal 里耐久的进程组 leader PID 与启动时间指纹；不以业务状态、
  * 会话是否关闭或终端文本推断。
  */
 export type WriterProcessProbe =
@@ -98,7 +98,7 @@ function psStartFingerprint(pid: number): string | null {
   } catch { return null; }
 }
 
-/** 绑定 writer 时必须拿到指纹；拿不到就拒绝启动，而不是留下不可核验的租约。 */
+/** 记录 writer 证据时必须拿到指纹；拿不到就拒绝当作已核验，而不是留下不可核验的身份。 */
 export async function captureWriterStartedAt(pid: number): Promise<string> {
   // 进程刚 spawn 时极少数情况下内核信息尚未可读；有界重试，仍读不到才拒绝。
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -134,5 +134,51 @@ function groupExists(pgid: number): boolean {
     // 绝不解释成已退出。其他错误同样不能被当成退出证据。
     if (code === "EPERM") return true;
     throw new Error(`进程组 ${pgid} 不可核验：${(error as Error).message}`);
+  }
+}
+
+/** 启动指纹比较：内核格式为 `sec:usec`，ps 兜底是文本；两种采集方式不能互相比较。 */
+function compareStartFingerprint(recorded: string, observed: string): "same" | "different" | "unknown" {
+  if (recorded === observed) return "same";
+  const kernel = /^\d+:\d+$/;
+  if (kernel.test(recorded) === kernel.test(observed)) return "different";
+  return "unknown";
+}
+
+/** 单个 ACP provider 组的围栏结论；unknown 必须由调用方 fail closed。 */
+export type AcpWriterFenceOutcome =
+  | { readonly outcome: "exited"; readonly reason: string }
+  | { readonly outcome: "killed"; readonly reason: string }
+  | { readonly outcome: "unknown"; readonly reason: string };
+
+/**
+ * 恢复前核验并终止一个 ACP provider 进程组。
+ *
+ * 判据与 Journal 写者围栏一致：组不存在 → 已退出；启动指纹不一致 → PID 复用、原进程已退出；
+ * 指纹一致或 leader 已退出但组仍存在 → SIGKILL 整组并轮询到消失；不可读 → unknown。
+ */
+export async function fenceAcpWriter(
+  writer: { readonly pgid: number; readonly startedAt: string },
+  control: WriterProcessControl = nodeWriterProcessControl(),
+  timeoutMs = 5_000,
+): Promise<AcpWriterFenceOutcome> {
+  const probe = await control.probe(writer.pgid);
+  if (probe.state === "unknown") return { outcome: "unknown", reason: probe.reason };
+  if (probe.state === "absent") return { outcome: "exited", reason: "进程组已不存在，原 provider 已退出。" };
+  if (probe.startedAt !== null) {
+    const fingerprint = compareStartFingerprint(writer.startedAt, probe.startedAt);
+    // 格式不一致说明采集方式不同，不能把“看起来不一样”解释成 PID 复用。
+    if (fingerprint === "unknown") return { outcome: "unknown", reason: "启动指纹采集方式不一致，无法核验是否同一进程组。" };
+    if (fingerprint === "different") return { outcome: "exited", reason: "进程组号已被其他进程复用，原 provider 已退出。" };
+  }
+  await control.killGroup(writer.pgid);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    await Bun.sleep(20);
+    const next = await control.probe(writer.pgid);
+    if (next.state === "absent") return { outcome: "killed", reason: "已终止整个 provider 进程组并确认消失。" };
+    if (Date.now() >= deadline) {
+      return { outcome: "unknown", reason: next.state === "unknown" ? next.reason : "provider 进程组未在预算内确认消失。" };
+    }
   }
 }

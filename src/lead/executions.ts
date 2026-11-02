@@ -7,6 +7,7 @@ import { RUNTIME_VERSION } from "../journal/types";
 import { DeterministicExecutor } from "../runtime/deterministic-executor";
 import { DEFAULT_WORKFLOW_POLICY } from "../runtime/policy-host";
 import { RunRuntime } from "../runtime/run-runtime";
+import { fenceAcpNodeWriters } from "../runtime/acp-writer-fence";
 import type { AgentNodeExecutor, RunSnapshot } from "../runtime/run-types";
 import { isJsonObject, type JsonObject } from "../shared/json";
 import { isCliSelectable } from "../shared/cli-availability";
@@ -34,7 +35,7 @@ export type LeadExecutionExecutor = {
 
 /** Engine 注入的真实执行器接线；测试可全部省略。 */
 export type LeadExecutionHooks = {
-  /** 用户显式resume前仅补原completed节点成果；缺省无动作，禁止execute或释放未知writer租约。 */
+  /** 用户显式resume前只做现场门禁；缺省无动作，禁止execute或凭PID推断未知writer。 */
   readonly prepareResume?: (executionId: string, snapshot: RunSnapshot) => Promise<void>;
   /**
    * 节点启动前绑定本实例的 ControlServer；缺省不接线。可返回同步释放器，捕获
@@ -108,7 +109,7 @@ export class LeadExecutionService {
       try{
         const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
         const workspace=await manager.inspect(execution.config.workspaces.workspaceId);
-        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,leases:workspace.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedReleases:workspace.closedReleases??[],cleanedAt:workspace.cleanedAt},limitation:"宿主不保存成果快照；结果只保留在受管worktree，当前内容可能已被用户或后续执行修改，不证明外部副作用"};
+        workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,baseCommit:execution.config.workspaces.authorization.baseCommit,workspace:{workspaceId:workspace.workspaceId,branch:workspace.branch,cleanedAt:workspace.cleanedAt},limitation:"宿主不保存成果快照；结果只保留在受管worktree，当前内容可能已被用户或后续执行修改，不证明外部副作用"};
       }catch(error){workspaceEvidence={cwd:run.journal.manifest.workflowProjectCwd,status:"受管Git证据不可读取",diagnostic:error instanceof Error?error.message:String(error),limitation:"缺失不代表没有改动"};}
     }
     return { executionId,attempt,status:results.status,summary:results.summary,input:run.journal.manifest.input,workspaceEvidence,nodeEvidenceTruncated:page.nextCursor!==null,nodes:page.items.flatMap(visit => visit.batches.flatMap(batch => batch.agents)).map(node=>({id:node.id,label:node.label,cli:node.cli,cwd:node.cwd,status:node.status,result:node.result,diagnostic:node.diagnostic,hint:node.hint??null,startedAt:node.startedAt,endedAt:node.endedAt,agentSessionId:node.agentSessionId,request:{sandbox:node.request.sandbox,model:node.request.model},batch:node.executionBatch})), journalEvidence:evidence };
@@ -142,7 +143,7 @@ export class LeadExecutionService {
     const workspace = await manager.inspect(execution.config.workspaces.workspaceId);
     return {
       project: await (await GitRepository.open(task.cwd)).sceneFingerprint(),
-      workspace: { workspaceId: workspace.workspaceId, leases: workspace.leases, closedReleases: workspace.closedReleases ?? [], cleanedAt: workspace.cleanedAt, scene: workspace.cleanedAt ? null : await (await GitRepository.open(workspace.cwd)).sceneFingerprint() },
+      workspace: { workspaceId: workspace.workspaceId, cleanedAt: workspace.cleanedAt, scene: workspace.cleanedAt ? null : await (await GitRepository.open(workspace.cwd)).sceneFingerprint() },
       limitation: "当前Git可见文件现场；宿主不保存历史成果快照，不锁定外部系统或无限制外部修改",
     };
   }
@@ -194,7 +195,10 @@ export class LeadExecutionService {
       if(config.workspaces.authorization.repository!==prior.config.workspaces.authorization.repository||config.workspaces.authorization.baseCommit!==prior.config.workspaces.authorization.baseCommit)throw new Error("续作必须保留原仓库与Git基准，不回滚或换现场。");
       const manager=await WorkspaceManager.open(this.workspaceRoot,crypto.randomUUID());
       const saved=await manager.inspect(continuation.workspaceId);
-      if(saved.leases.length)throw new Error("原writer尚未退出交接，不能启动新版。");
+      // 先围栏原 Execution 的写者，再允许新版写入；无法核验即拒绝接续。
+      const priorRun=await this.snapshotExecution(leadRunId,prior.executionId);
+      const fence=await fenceAcpNodeWriters(prior.executionId,priorRun.phases.flatMap(phase=>phase.agents));
+      if(fence.failures.length>0)throw new Error(`无法核验原执行 provider 进程组：${fence.failures.map((item)=>`${item.nodeId}（${item.reason}）`).join("；")}；不能启动新版。`);
       if(saved.cleanedAt||saved.cleanupRequestedAt)throw new Error("原受管worktree已清理，不能继续写入。");
       const scene=await (await GitRepository.open(saved.cwd)).inspect();
       if(scene.head!==continuation.head||scene.conflicts.length)throw new Error("原现场HEAD已漂移或存在冲突，不能隐式接续；请修订方案。");
@@ -521,7 +525,7 @@ export class LeadExecutionService {
     const source = await readFile(sourcePath, "utf8").catch(() => { throw new Error("Execution 冻结源码快照不可读取。 "); });
     if (createHash("sha256").update(source).digest("hex") !== record.sourceHash) throw new Error("Execution 冻结源码快照与登记 hash 不一致，fail closed。 ");
     // 所有前置拒绝必须在 prepareResume/状态写入之前完成：读取 Run 快照、CLI 可用性
-    // 与技能库摘要都不改变旧 Execution，但 prepareResume 会终止旧 writer。
+    // 与技能库摘要都不改变旧 Execution；prepareResume 只做授权与现场门禁。
     const opened = await RunRuntime.open(executionId, new DeterministicExecutor(), root);
     const blocked = opened.snapshot().phases.flatMap(phase => phase.agents).find(node => !isCliSelectable(node.cli));
     if (blocked) throw new Error(`无法恢复：节点 ${blocked.id} 使用 ${blocked.cli}，该 CLI 支持已暂时下线。请新建使用其他 CLI 的执行。 `);
@@ -545,17 +549,18 @@ export class LeadExecutionService {
     // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
     // waiter 和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
     // 尝试收敛为 interrupted，再由标准 Replay 路径创建新 attempt。
+    // 围栏必须先于任何交接登记：Journal 写者证据 + 进程组核验不通过时不得改动
+    // 旧 Journal 状态、重开 Execution 登记或构造执行器。
+    const fence = await fenceAcpNodeWriters(executionId, opened.snapshot().phases.flatMap(phase => phase.agents));
+    if (fence.failures.length > 0) throw new Error(`无法核验旧 provider 进程组：${fence.failures.map((item) => `${item.nodeId}（${item.reason}）`).join("；")}；拒绝恢复。`);
     if (record.config?.workspaces) {
       const manager = await WorkspaceManager.open(this.workspaceRoot, crypto.randomUUID());
-      // 顺序不能交换：旧 Engine 遗留的 writer 租约只有 prepareResume 能在无法跨进程
-      // 核验退出时耐久释放（共享 worktree 改动保留）。若先调 prepareExecution，
-      // 续作的“既有交接”分支会因残留租约直接拒绝，Execution 在释放旧锁之前就失败。
+      // prepareResume 只校验授权、仓库身份、清理状态与冲突；写者已在上一步围栏，
+      // 共享 worktree 改动保留。顺序仍先于 prepareExecution：续作已关联但授权落盘
+      // 失败时由 prepareExecution 幂等补齐。
       await manager.prepareResume(record.config.workspaces, executionId);
-      // 续作已关联但 worktree 授权逐条落盘失败时，仅补原冻结交接，不启动 Worker；
-      // 该分支要求旧租约已释放，因此必须晚于 prepareResume。
       if(record.config.workspaces.continuation)await manager.prepareExecution(executionId,record.config.workspaces);
     }
-    // 现场拒绝时不构造执行器、不重开外层登记，也不先修改旧节点状态。
     const resumedExecutor = this.createExecutor(record.config?.workspaces?record.config:null);
     const previousStatus = opened.snapshot().status;
     if (previousStatus === "pausing" || previousStatus === "paused" || previousStatus === "recovering") {

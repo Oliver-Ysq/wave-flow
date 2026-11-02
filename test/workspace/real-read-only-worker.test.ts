@@ -1,3 +1,4 @@
+import { withDeadline } from "../fixtures/deadline";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,7 +37,7 @@ test.skipIf(process.env.WF_REAL_READ_ONLY_WORKER_ACCEPTANCE !== "1")("真实只�
   const control = runtime.createControlServer(); runtime.createControlServer = () => control; executor.bindControl(control);
   console.log(JSON.stringify({ root, runId: runtime.snapshot().id }));
   try {
-    expect(await runtime.run(workflow)).toEqual({ ok: true });
+    expect(await withDeadline(runtime.run(workflow), 100_000, "只读Worker验收")).toEqual({ ok: true });
     expect(runtime.snapshot().status).toBe("completed");
     expect(await Bun.file(inside).text()).toBe("INSIDE_42\n"); expect(await Bun.file(outside).text()).toBe("OUTSIDE_73\n");
   } finally { pipes.forEach(pipe => pipe.close()); }
@@ -90,7 +91,7 @@ test.skipIf(process.env.WF_REAL_MCP_TIMEOUT_ACCEPTANCE !== "1")("真实CLI客户
     await runtime.reopenBlock(blockRequestId);
     await waitFor(() => runtime.snapshot().phases[0]?.agents[0]?.block?.delivery === "pending", "原表单重开");
     await control.answer({ blockRequestId, answer: { ok: true } });
-    expect(await running).toEqual({ ok: true });
+    expect(await withDeadline(running, 360_000, "HITL验收")).toEqual({ ok: true });
     expect(runtime.snapshot().status).toBe("completed");
     expect(runtime.snapshot().phases[0]!.agents[0]!.agentSessionId).toBe(agentSessionId);
     const events = (await RunJournal.open(runtime.snapshot().id, join(root, "runs"))).events;
@@ -106,7 +107,7 @@ test.skipIf(process.env.WF_REAL_MCP_TIMEOUT_ACCEPTANCE !== "1")("真实CLI客户
     await running.catch(() => undefined);
     pipes.forEach(pipe => pipe.close());
   }
-}, 240_000);
+}, 480_000);
 
 /** 真实生产配置：保留 Full Access 沙箱，同时首次表单必须能等待并接受。 */
 test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex FullAccess沙箱下首次Elicitation等待并接受", async () => {
@@ -152,7 +153,7 @@ test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex F
     await Bun.sleep(2_000);
     expect(runtime.snapshot().phases[0]!.agents[0]!.block!.delivery).toBe("pending");
     await control.answer({ blockRequestId, answer: { ok: true } });
-    expect(await running).toEqual({ ok: true });
+    expect(await withDeadline(running, 360_000, "HITL验收")).toEqual({ ok: true });
     const frames = (await Bun.file(trace).text()).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { direction: string; action?: string });
     console.log(JSON.stringify({ elicitationFrames: frames.filter(frame => frame.action !== undefined) }));
     expect(frames.some(frame => frame.direction === "client->server" && frame.action === "accept")).toBe(true);
@@ -173,7 +174,7 @@ test.skipIf(process.env.WF_REAL_CODEX_TIMEOUT_ACCEPTANCE !== "1")("真实Codex F
     await running.catch(() => undefined);
     pipes.forEach(pipe => pipe.close());
   }
-}, 240_000);
+}, 480_000);
 
 /** 只给测试 Worker 注入 10 秒工具超时，记录 Claude Code 自己产生的 MCP 帧。 */
 test.skipIf(process.env.WF_REAL_CLAUDE_TIMEOUT_ACCEPTANCE !== "1")("真实Claude 10秒MCP工具超时发送取消并可在原会话重开", async () => {
@@ -223,7 +224,7 @@ test.skipIf(process.env.WF_REAL_CLAUDE_TIMEOUT_ACCEPTANCE !== "1")("真实Claude
     await runtime.reopenBlock(blockRequestId);
     await waitFor(() => runtime.snapshot().phases[0]?.agents[0]?.block?.delivery === "pending", "原表单重开");
     await control.answer({ blockRequestId, answer: { ok: true } });
-    expect(await running).toEqual({ ok: true });
+    expect(await withDeadline(running, 360_000, "HITL验收")).toEqual({ ok: true });
     expect(runtime.snapshot().phases[0]!.agents[0]!.agentSessionId).toBe(agentSessionId);
     const events = (await RunJournal.open(runtime.snapshot().id, join(root, "runs"))).events;
     expect(events.filter(event => event.type === "block.created")).toHaveLength(1);
@@ -238,7 +239,7 @@ test.skipIf(process.env.WF_REAL_CLAUDE_TIMEOUT_ACCEPTANCE !== "1")("真实Claude
     await running.catch(() => undefined);
     pipes.forEach(pipe => pipe.close());
   }
-}, 240_000);
+}, 480_000);
 
 const timeoutProxySource = `import { appendFileSync } from "node:fs";
 let toolCallId = null;

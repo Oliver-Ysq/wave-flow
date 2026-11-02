@@ -1,3 +1,4 @@
+import { withDeadline } from "../fixtures/deadline";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -94,7 +95,7 @@ test.skipIf(process.env.WF_REAL_CONTEXT_ACCEPTANCE !== "1")("真实CLI：广告�
   const control = host.createControlServer(); host.createControlServer = () => control; executor.bindControl(control);
   console.log(JSON.stringify({ root, runId: host.snapshot().id }));
   try {
-    expect(await host.run(workflow)).toEqual({ ok: true });
+    expect(await withDeadline(host.run(workflow), 150_000, "上下文能力验收")).toEqual({ ok: true });
     expect(host.snapshot().status).toBe("completed");
     // 客户端广告了压缩契约：真实适配器据此才会发 compaction_update。
     expect(initializeCapabilities).toMatchObject({ session: { compaction: {} } });
@@ -195,8 +196,14 @@ test.skipIf(process.env.WF_REAL_COMPACTION_ACCEPTANCE !== "1")("真实CLI：压�
   host = await RunRuntime.create({ workflow, input: {}, workflowSource: "compaction-acceptance", workflowPath: join(root, "workflow.ts"), workflowProjectCwd: cwd, clientRequestId: crypto.randomUUID(), executor, storeRoot: join(root, "runs") });
   const control = host.createControlServer(); host.createControlServer = () => control; executor.bindControl(control);
   console.log(JSON.stringify({ root, runId: host.snapshot().id }));
+  // 真实 gateway 偶发长时间无响应；Bun 的测试超时在部分等待形态下不会及时打断，
+  // 这里再加一条显式的硬截止，失败要快且可诊断，不能把验收挂成十几分钟。
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  const hardDeadline = new Promise<never>((_, reject) => {
+    hardTimer = setTimeout(() => reject(new Error("压缩验收超过 360s 未完成")), 360_000);
+  });
   try {
-    await host.run(workflow);
+    await Promise.race([host.run(workflow), hardDeadline]);
     console.log(JSON.stringify({ updates: [...new Set(updates)], status: host.snapshot().status }));
     // 客户端广告了压缩契约。
     expect(initializeCapabilities).toMatchObject({ session: { compaction: {} } });
@@ -205,8 +212,8 @@ test.skipIf(process.env.WF_REAL_COMPACTION_ACCEPTANCE !== "1")("真实CLI：压�
     // 压缩事实落成耐久诊断，可归因。
     const events = (await RunJournal.open(host.snapshot().id, join(root, "runs"))).events;
     expect(events.some((event) => event.type === "log.written" && event.diagnostic !== null && event.diagnostic.includes("上下文压缩"))).toBe(true);
-  } finally { pipes.forEach(pipe => pipe.close()); }
-}, 300_000);
+  } finally { if (hardTimer) clearTimeout(hardTimer); pipes.forEach(pipe => pipe.close()); }
+}, 480_000);
 
 /**
  * 真机验收：一次运行里的多个 agent() 节点必须拿到**各自不同**的完成工具入参形状。
@@ -262,7 +269,7 @@ test.skipIf(process.env.WF_REAL_MULTI_NODE_ACCEPTANCE !== "1")("真实CLI：同�
   const control = host.createControlServer(); host.createControlServer = () => control; executor.bindControl(control);
   console.log(JSON.stringify({ root, runId: host.snapshot().id }));
   try {
-    const result = await host.run(workflow);
+    const result = await withDeadline(host.run(workflow), 360_000, "多节点验收");
     expect(host.snapshot().status).toBe("completed");
     // 每个节点各自编译出的完成工具声明。
     const declared = new Map<string, unknown>();
@@ -284,4 +291,4 @@ test.skipIf(process.env.WF_REAL_MULTI_NODE_ACCEPTANCE !== "1")("真实CLI：同�
     // 报告节点的结果必须符合它自己的签名。
     expect(result).toMatchObject({ report: { markdown: expect.any(String) } });
   } finally { pipes.forEach(pipe => pipe.close()); }
-}, 300_000);
+}, 480_000);

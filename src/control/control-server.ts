@@ -57,7 +57,14 @@ export type RecordedAgentSession = {
   /** 首条任务的实际投递方式。 */
   readonly delivery: "acp";
   /** ACP Worker 的可审计 binding；不是 capability 或完成证据。 */
-  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: RuntimeProvenance; };
+  readonly acp?: {
+    readonly launcherId: string;
+    readonly sessionId: string;
+    readonly capabilities: Readonly<Record<string, unknown>>;
+    readonly runtime?: RuntimeProvenance;
+    /** provider 进程组与启动时间指纹；缺失时不具备跨重启围栏证据。 */
+    readonly writer?: { readonly pgid: number; readonly startedAt: string };
+  };
 };
 
 /** 仅供原执行器收尾使用的当前耐久协议事实；不授权状态转换或携带capability。 */
@@ -128,9 +135,27 @@ export class ControlServer {
     this.#nodes.set(key, node);
   }
 
+  /**
+   * 同一 attempt 内换 Control capability。
+   *
+   * 原地续用会重建私有 MCP server（新 socket、新 capability），但节点、会话与 attempt 不变；
+   * 旧 capability 必须立即失效，block 等待关系保持不变，因此不能用 unregister（它会关闭 block）。
+   */
+  rebind(node: RegisteredControlNode): void {
+    if (node.runId !== this.journal.manifest.runId) throw new Error("Control 节点不属于当前 Run。");
+    if (!node.agentSessionId.trim() || !node.capability.trim()) throw new Error("Control 重绑缺少会话身份或 capability。");
+    const key = controlKey(node.runId, node.nodeId);
+    const existing = this.#nodes.get(key);
+    if (!existing) throw new Error("Control 节点尚未注册，不能重绑。");
+    if (existing.agentSessionId !== node.agentSessionId) throw new Error("Control 重绑不得替换会话身份。");
+    if (existing.capability === node.capability) throw new Error("Control 重绑必须使用新的 capability。");
+    const snapshot = this.state.agent(node.nodeId);
+    if ((snapshot.status !== "running" && snapshot.status !== "recovering") || snapshot.agentSessionId !== node.agentSessionId) throw new Error("Control 只能重绑当前 running/recovering 的同一 Agent 会话。");
+    this.#nodes.set(key, node);
+  }
+
   /** 启动失败时撤销尚未完成的 capability；已完成节点不会被撤销。 */
-  unregister(runId: string, nodeId: string, agentSessionId: string): void {
-    const key = controlKey(runId, nodeId);
+  unregister(runId: string, nodeId: string, agentSessionId: string): void {    const key = controlKey(runId, nodeId);
     const node = this.#nodes.get(key);
     if (node?.agentSessionId === agentSessionId) {
       this.#blocks.cancelForSession(runId, nodeId, agentSessionId, "原 Agent 会话已结束，无法继续等待人工答案。");
@@ -161,9 +186,46 @@ export class ControlServer {
     });
   }
 
+  /** 同一 attempt 内更新 provider 进程组证据；只允许已记录会话的 running 节点。 */
+  async recordWriter(record: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly pgid: number; readonly startedAt: string }): Promise<void> {
+    await this.exclusive(async () => {
+      const key = controlKey(record.runId, record.nodeId);
+      const node = this.#nodes.get(key);
+      if (!node || node.agentSessionId !== record.agentSessionId) throw new Error("agent.writer 的 Control 节点或会话身份不匹配。");
+      if (!this.#recordedSessions.has(key)) throw new Error("agent.writer 必须先有 agent.session 事实。");
+      const snapshot = this.state.agent(record.nodeId);
+      if ((snapshot.status !== "running" && snapshot.status !== "recovering") || snapshot.agentSessionId !== record.agentSessionId) throw new Error("agent.writer 只能更新当前 running/recovering 节点。");
+      const event: JournalEvent = {
+        type: "agent.writer", at: new Date().toISOString(), runId: record.runId, nodeId: record.nodeId,
+        agentSessionId: record.agentSessionId, diagnostic: null, pgid: record.pgid, startedAt: record.startedAt,
+      };
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+    });
+  }
+
+  /** 记录 provider 创建意图；started 必须先于 spawn，cancelled 表示确定未创建或已清理。 */
+  async recordWriterIntent(record: { readonly runId: string; readonly nodeId: string; readonly agentSessionId: string; readonly status: "started" | "cancelled" }): Promise<void> {
+    await this.exclusive(async () => {
+      const key = controlKey(record.runId, record.nodeId);
+      const node = this.#nodes.get(key);
+      if (!node || node.agentSessionId !== record.agentSessionId) throw new Error("agent.writerIntent 的 Control 节点或会话身份不匹配。");
+      const snapshot = this.state.agent(record.nodeId);
+      if (snapshot.agentSessionId !== record.agentSessionId) throw new Error("agent.writerIntent 与当前节点会话身份不一致。");
+      if (record.status === "started" && snapshot.status !== "running") throw new Error("agent.writerIntent(started) 只能用于 running 节点。");
+      const event: JournalEvent = {
+        type: "agent.writerIntent", at: new Date().toISOString(), runId: record.runId, nodeId: record.nodeId,
+        agentSessionId: record.agentSessionId, diagnostic: null, status: record.status,
+      };
+      this.state.assertApplicable(event);
+      await this.journal.append(event);
+      this.state.apply(event);
+    });
+  }
+
   /** 节点当前 attempt 的 agent.session 是否已耐久；执行器仅在 false 时允许启动前回退。 */
-  hasRecordedNodeSession(nodeId: string, agentSessionId: string): boolean {
-    return this.state.hasNodeSession(nodeId, agentSessionId);
+  hasRecordedNodeSession(nodeId: string, agentSessionId: string): boolean {    return this.state.hasNodeSession(nodeId, agentSessionId);
   }
 
   /** 节点已进入终态或 Run 已停止时，启动重试不得再创建新 Worker。 */
@@ -261,7 +323,7 @@ export class ControlServer {
         if (snapshot.status !== "blocked" && snapshot.status !== "running") throw new Error(`重接 block 只允许当前 blocked/running 节点，实际为 ${snapshot.status}。`);
         if (snapshot.status === "blocked" && snapshot.block?.blockRequestId !== request.blockRequestId) throw new Error("重接 block 不是该节点当前等待的 block。");
         this.#blocks.assertSameSubmission(request);
-        return this.#blocks.status(request, snapshot.block?.delivery);
+        return { ...this.#blocks.status(request, snapshot.block?.delivery), deliveryToken: snapshot.block?.deliveryToken };
       }
       if (snapshot.status !== "running") throw new Error(`block 只允许当前 running 节点，实际为 ${snapshot.status}。`);
       const created = this.#blocks.create(request);
@@ -281,7 +343,7 @@ export class ControlServer {
       } finally {
         this.#blocking.delete(key);
       }
-      return this.#blocks.status(created);
+      return { ...this.#blocks.status(created), deliveryToken: this.state.agent(request.nodeId).block?.deliveryToken };
     });
   }
 
@@ -314,9 +376,10 @@ export class ControlServer {
   }
 
   /** 关闭当前表单并唤醒等待者；Worker 私有调用必须同时证明原节点身份，Desktop 按 block 路由。 */
-  async closeBlock(blockRequestId: string, identity?: Pick<RegisteredControlNode, "runId" | "nodeId" | "agentSessionId" | "capability">): Promise<void> {
+  async closeBlock(blockRequestId: string, identity?: Pick<RegisteredControlNode, "runId" | "nodeId" | "agentSessionId" | "capability">, expectedDeliveryToken?: string): Promise<void> {
     await this.exclusive(async () => {
       const snapshot = this.state.agentForBlock(blockRequestId);
+      if (expectedDeliveryToken !== undefined && snapshot?.block?.deliveryToken !== expectedDeliveryToken) return;
       if (identity) {
         this.requireCurrentNode(controlKey(identity.runId, identity.nodeId), identity);
         if (!snapshot || snapshot.id !== identity.nodeId || snapshot.agentSessionId !== identity.agentSessionId || this.runId !== identity.runId) throw new Error("close-block 不属于创建该 block 的原 Agent 会话。 ");
@@ -352,7 +415,7 @@ export class ControlServer {
       if (!isDeepStrictEqual(requestedSchema, pending.answerSchema)) throw new Error("elicitation Schema 与原 block 不一致。 ");
       if (block.delivery === "closed") return null;
       // 等待注册与 close/answer 共用互斥区，消除“先关闭、后注册”的永久等待窗口。
-      return { blockRequestId: pending.blockRequestId, waiting: this.#blocks.wait(pending.blockRequestId, signal) };
+      return { blockRequestId: pending.blockRequestId, deliveryToken: block.deliveryToken, waiting: this.#blocks.wait(pending.blockRequestId, signal) };
     });
     if (!registration) return { action: "cancel" };
     try {
@@ -362,7 +425,9 @@ export class ControlServer {
       // closeBlock 已经拒绝了原等待者；迟到 catch 不得再关闭用户已重开的新表单。
       if (error instanceof Error && error.message.includes("已关闭")) return { action: "cancel" };
       if (signal?.aborted) {
-        try { await this.closeBlock(registration.blockRequestId); } catch { /* 会话已注销时保留取消语义。 */ }
+        // 只允许关闭本次 elicitation 注册时的那一代交付；用户重开后 token 已更换，
+        // 迟到的 abort 不能把新表单重新关掉。
+        try { await this.closeBlock(registration.blockRequestId, undefined, registration.deliveryToken); } catch { /* 会话已注销时保留取消语义。 */ }
         return { action: "cancel" };
       }
       throw error;

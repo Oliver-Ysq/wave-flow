@@ -232,15 +232,14 @@ export type ExecutionResponse = {
    * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
    */
   readonly controllable: boolean;
-  /** 受管Git成果投影；只展示共享worktree与租约事实，不改变Run业务状态。 */
+  /** 受管Git成果投影；只展示共享worktree与清理事实，不改变Run业务状态。 */
   readonly workspaceEvidence?: {
     /** 本Execution唯一受管worktree UUID。 */ readonly workspaceId:string;
     /** 受管worktree的绝对路径；供用户定位成果，不改变文件。 */ readonly cwd:string;
     /** 受管分支短名。 */ readonly branch:string;
     /** worktree当前HEAD；已清理为null。 */ readonly head:string|null;
-    /** 当前仍存活的本Execution writer租约。 */ readonly leases:readonly { readonly nodeId:string; readonly attempt:number }[];
-    /** 该worktree累计被显式恢复终止或确认退出的旧writer数（含其他接续Execution）。 */ readonly closedWriters:number;
     /** worktree是否已安全清理。 */ readonly cleaned:boolean;
+    /** 最近一次交接该worktree的Execution；只有它能发起清理。 */ readonly latestExecutionId:string;
   };
   /** 工作区现场读取失败不影响原Run状态读取；错误不代表目录不存在或没有改动。 */
   readonly workspaceDiagnostic?: string;

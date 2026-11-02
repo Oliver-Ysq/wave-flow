@@ -17,7 +17,7 @@ export type AgentNodeExecutor = {
   hasWaitingStart?(): boolean;
   /** 执行一个已进入 running 的节点；对象表示完成，null 或抛错都表示无法验证完成的中断。 */
   execute(node: AgentNodeSnapshot): Promise<JsonObject | null>;
-  /** 业务completed已耐久后的宿主交接（writer退出核验与租约释放）；普通只读执行器省略，失败必须抛契约错误且不回退业务终态。 */
+  /** 业务completed已耐久后的宿主交接（writer退出核验）；普通只读执行器省略，失败必须抛契约错误且不回退业务终态。 */
   finalizeCompleted?(node: AgentNodeSnapshot): Promise<void>;
   /** 用户普通stop后的宿主partial收尾；业务cancelled先耐久，失败保留锁/现场且不能回退业务终态。Desktop退出不调用。 */
   finalizePartial?(node: AgentNodeSnapshot): Promise<void>;
@@ -82,6 +82,18 @@ export type AgentNodeSnapshot = {
   readonly agentSessionId: string | null;
   /** 当前业务型人工协助请求；非 blocked 节点固定为 null。 */
   readonly block: BlockSnapshot | null;
+  /**
+   * 当前 attempt 的 provider 进程组与启动时间指纹；恢复前据此围栏。
+   * null/缺省表示没有证据（旧档案或采集失败），恢复时不得续用该会话。
+   */
+  readonly writer?: { readonly pgid: number; readonly startedAt: string } | null;
+  /** provider 创建前的耐久意图；存在且没有 writer 时恢复端必须按“可能仍有孤儿”fail closed。 */
+  readonly writerIntentAt?: string | null;
+  /**
+   * 本 attempt 可续用的上一条 ACP 会话；只有恢复前围栏通过、且原 attempt 有写者证据时
+   * 才由 agent.restarted 写入。缺省表示新会话。
+   */
+  readonly continuation?: { readonly launcherId: string; readonly sessionId: string } | null;
   /** 暂停原因；仅暂停/恢复相关状态可携带，recovery 表示节点级协议恢复等待。 */
   readonly pauseCause?: "user" | "recovery" | null;
   /** 原始规范化请求，供 Journal / Replay 之后计算指纹。 */
@@ -142,6 +154,8 @@ export type BlockSnapshot = {
   readonly answered: boolean;
   /** 表单交付状态；缺省按 answered 的既有事实解释，closed 可重开原 block。 */
   readonly delivery?: "pending" | "answered" | "closed" | "delivered";
+  /** 本次交付代际；重开会换新 token，迟到的 close 不能撤销用户刚重开的表单。 */
+  readonly deliveryToken?: string;
 };
 
 /** 作者模块声明的业务决策门的查询视图；不属于任何 Agent 节点。 */

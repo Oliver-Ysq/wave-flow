@@ -32,6 +32,8 @@ export type BlockStatus = {
   readonly answer: JsonObject | null;
   /** 当前交付状态；closed 只能由用户显式重开，Worker 重接不得撤销。 */
   readonly delivery: "pending" | "answered" | "closed" | "delivered";
+  /** 当前交付代际；close-block 必须携带，迟到代际必须被忽略。 */
+  readonly deliveryToken?: string;
 };
 
 /** 人类向一个 pending block 提交的 JSON 对象答案。 */

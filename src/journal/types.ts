@@ -124,6 +124,11 @@ export type JournalEvent = JournalBase & ({
   readonly phaseVisitId?: number;
   /** 当前重新执行时验证到的请求；必须与原请求完全一致。 */
   readonly request: NormalizedAgentRequest;
+  /**
+   * 本 attempt 允许续用的上一条 ACP 会话；只有存在进程证据并由恢复前围栏核验过才可携带。
+   * 缺省表示新会话，不得从历史绑定自行推断。
+   */
+  readonly continuedFrom?: { readonly launcherId: string; readonly sessionId: string };
 } | {
   readonly type: "agent.status";
   readonly status: AgentNodeStatus;
@@ -135,7 +140,31 @@ export type JournalEvent = JournalBase & ({
   /** 首条任务的实际投递通道。 */
   readonly delivery: "acp";
   /** ACP 投递的 launcher、原生 session 与初始化能力快照。 */
-  readonly acp?: { readonly launcherId: string; readonly sessionId: string; readonly capabilities: Readonly<Record<string, unknown>>; readonly runtime?: RuntimeProvenance; };
+  readonly acp?: {
+    readonly launcherId: string;
+    readonly sessionId: string;
+    readonly capabilities: Readonly<Record<string, unknown>>;
+    readonly runtime?: RuntimeProvenance;
+    /** provider 进程组与启动时间指纹；恢复前据此判断旧写者是否已死。 */
+    readonly writer?: { readonly pgid: number; readonly startedAt: string };
+  };
+} | {
+  /** 同一 attempt 内更新 provider 进程组证据（原地续用换新进程后必须覆盖旧证据）。 */
+  readonly type: "agent.writer";
+  /** provider 进程组 leader PID。 */
+  readonly pgid: number;
+  /** 内核启动时间指纹；用于区分 PID 复用。 */
+  readonly startedAt: string;
+} | {
+  /**
+   * provider 进程创建前的耐久启动意图。
+   *
+   * `started` 表示此后可能已创建 provider；若崩溃发生在 `agent.session` 之前，
+   * 恢复端必须按“无法证明旧进程未创建”fail closed，不能仅凭没有 writer 就放行。
+   * `cancelled` 表示确定未创建（或已清理），恢复端可忽略。
+   */
+  readonly type: "agent.writerIntent";
+  readonly status: "started" | "cancelled";
 } | {
   /** paused 后同一受管会话的恢复回合；不创建新 Agent attempt。 */
   readonly type: "agent.recovered";

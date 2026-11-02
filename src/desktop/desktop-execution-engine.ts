@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { loadWorkflow } from "../workflow/load-workflow";
 import { inspectWorkflowModuleSource, preflightLocalWorkflow, validateLocalInput } from "../workflow/preflight-local";
 import { RunRuntime } from "../runtime/run-runtime";
+import { fenceAcpNodeWriters } from "../runtime/acp-writer-fence";
 import { isJsonObject } from "../shared/json";
 import type { JsonSchema } from "../shared/workflow-types";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
@@ -282,6 +283,8 @@ export class DesktopExecutionEngine {
     this.#leadControlPipes.clear();
     for (const pipe of this.#workerControlPipes.values()) pipe.close();
     this.#workerControlPipes.clear();
+    // 执行器持有 Runtime 与控制通道引用；Engine 退出时统一释放，避免跨实例累积。
+    this.#workspaceExecutors.clear();
   }
 
   /** 有界后台主控检查；不影响启动ready或自动恢复任务，创建时仍做相同兜底检查。 */
@@ -882,7 +885,11 @@ export class DesktopExecutionEngine {
         if(!this.singleWorkflowForAcceptance)throw new Error("修订现场续作仅专用验收入口可用。");
         assertCurrentWorkspaceRecord(prior.config.workspaces);
         const frozen=prior.config.workspaces,manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId),record=await manager.inspect(frozen.workspaceId);
-        if(record.leases.length||record.cleanedAt||record.cleanupRequestedAt)throw new Error("原writer未交接或worktree已清理，不能准备新版写入。");
+        if(record.cleanedAt||record.cleanupRequestedAt)throw new Error("worktree已清理或正在清理，不能准备新版写入。");
+        // 续作前先围栏原 Execution 的写者；无法核验即拒绝准备新版本。
+        const priorSnapshot=await this.#executions.snapshotExecution(leadRunId,prior.executionId);
+        const fence=await fenceAcpNodeWriters(prior.executionId,priorSnapshot.phases.flatMap(phase=>phase.agents));
+        if(fence.failures.length>0)throw new Error(`无法核验原执行 provider 进程组：${fence.failures.map((item)=>`${item.nodeId}（${item.reason}）`).join("；")}；拒绝准备新版写入。`);
         const scene=await (await GitRepository.open(record.cwd)).inspect();
         if(scene.conflicts.length)throw new Error("原现场存在未解决冲突，请先处理后再准备新版写入。");
         continuationPlan={executionId:prior.executionId,baseCommit:frozen.authorization.baseCommit,workspaceId:frozen.workspaceId,head:scene.head};
@@ -910,7 +917,7 @@ export class DesktopExecutionEngine {
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
         const value=await manager.inspect(execution.config.workspaces.workspaceId);
         const head=value.cleanedAt?null:(await (await GitRepository.open(value.cwd)).inspect()).head;
-        workspaceEvidence={workspaceId:value.workspaceId,cwd:value.cwd,branch:value.branch,head,leases:value.leases.filter(lease=>lease.runId===executionId).map(lease=>({nodeId:lease.nodeId,attempt:lease.attempt})),closedWriters:value.closedReleases?.length??0,cleaned:value.cleanedAt!==null};
+        workspaceEvidence={workspaceId:value.workspaceId,cwd:value.cwd,branch:value.branch,head,cleaned:value.cleanedAt!==null,latestExecutionId:value.executionAuthorizations?.at(-1)?.executionId??executionId};
         } catch(error) { workspaceDiagnostic=`受管工作区现场不可读取：${error instanceof Error?error.message:String(error)}；不代表目录不存在或没有改动。`; }
       }
       return { execution, workspaceEvidence, workspaceDiagnostic, dynamicCount:revision?extractAgentWorkers(revision.source).dynamicCount:undefined, snapshot: await this.#executions.snapshotExecution(leadRunId, executionId), controllable: this.#executions.isControllable(executionId) };
@@ -1091,7 +1098,7 @@ export class DesktopExecutionEngine {
         for(const node of detail.snapshot.phases.flatMap(phase=>phase.agents))if(node.status==="cancelled"||node.status==="interrupted")await executor.finalizePartial(node);
         return this.executionSnapshot(taskId,executionId);
       }
-      // 受管checkout清理动作：用户明确授权后删除身份一致、无租约且未命中删除防护的受管checkout。
+      // 受管checkout清理动作：用户明确授权、Engine 提供写者围栏证明后，删除身份一致且未命中删除防护的受管checkout。
       // 宿主不保存成果快照，未提交内容随目录删除，由用户负责。当前没有 Web 入口，只能由 Engine 动作显式触发。
       case "executions.cleanupWorkspaces": {
         if(object(value).authorized!==true)throw new Error("清理受管checkout必须由用户明确授权。");
@@ -1100,8 +1107,16 @@ export class DesktopExecutionEngine {
         if(task.status==="completed"||!execution?.config?.workspaces)throw new Error("只能清理当前未归档任务的受管workspace。");
         if(execution.finishedAt===null)throw new Error("执行尚未终态，禁止清理。");
         assertCurrentWorkspaceRecord(execution.config.workspaces);
+        const detail = await this.executionSnapshot(taskId, executionId);
         const manager=await WorkspaceManager.open(this.workspaceRoot,this.instanceId);
-        await manager.cleanup(execution.config.workspaces.workspaceId,true);
+        // 清理前必须由 Engine 围栏旧写者：Journal 证据 + 进程组核验，无法核验即拒绝。
+        // executionId 参与门禁：只有该 workspace 最近一次交接的执行能清理共享 worktree。
+        await manager.cleanup(execution.config.workspaces.workspaceId, true, executionId, async () => {
+          const fence = await fenceAcpNodeWriters(executionId, detail.snapshot.phases.flatMap(phase => phase.agents));
+          if (fence.failures.length > 0) throw new Error(`无法核验旧 provider 进程组：${fence.failures.map((item) => `${item.nodeId}（${item.reason}）`).join("；")}；拒绝清理。`);
+        });
+        // checkout 已删除：本 Engine 的写者句柄不再有用途，释放执行器引用。
+        this.#workspaceExecutors.delete(executionId);
         return this.executionSnapshot(taskId,executionId);
       }
       case "executions.attemptResults": return this.#executions.attemptResults(requiredString(value,"leadRunId"),requiredString(value,"executionId"),requiredInteger(value,"attempt"));
@@ -1426,6 +1441,8 @@ export class DesktopExecutionEngine {
     const runtime = await RunRuntime.resume(runId, executor, this.storeRoot, null, this.skillsRoot);
     const blocked = runtime.snapshot().phases.flatMap(phase => phase.agents).find(node => !isCliSelectable(node.cli));
     if (blocked) throw new EngineActionError(409, `无法恢复：节点 ${blocked.id} 使用 ${blocked.cli}，该 CLI 支持已暂时下线。请新建使用其他 CLI 的执行。 `);
+    const fence = await fenceAcpNodeWriters(runId, runtime.snapshot().phases.flatMap(phase => phase.agents));
+    if (fence.failures.length > 0) throw new EngineActionError(409, `无法核验旧 provider 进程组：${fence.failures.map((item) => `${item.nodeId}（${item.reason}）`).join("；")}；拒绝恢复。`);
     await this.reconcileResumeSessions(runtime);
     if (!this.deterministicForTest && isControlBoundExecutor(baseExecutor)) {
       const control = runtime.createControlServer();

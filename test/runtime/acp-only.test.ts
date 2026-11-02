@@ -119,11 +119,11 @@ test("原生ACP静默停滞只耐久提示一次，不自动中断；显式compl
 
 test("停滞提示不依赖 Run 互斥区：互斥区被占死后仍能耐久落盘", async () => {
   const value = await fixture();
-  // 第一次 exclusive（recordSession）正常放行；之后的调用永久挂起，模拟 Run 互斥区被占死。
+  // 前两次 exclusive（writerIntent、recordSession）正常放行；之后的调用永久挂起，模拟 Run 互斥区被占死。
   let exclusiveCalls = 0;
   const control = new ControlServer(value.journal, value.state, <T>(operation: () => Promise<T>): Promise<T> => {
     exclusiveCalls += 1;
-    return exclusiveCalls === 1 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
+    return exclusiveCalls <= 2 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
   });
   const session: AcpWorkerSession = {
     binding: { launcherId: "codex-acp", sessionId: "native", capabilities: {} }, async initialize() {},
@@ -140,7 +140,7 @@ test("停滞提示不依赖 Run 互斥区：互斥区被占死后仍能耐久落
     await Bun.sleep(20);
     diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events.filter(event => event.type === "log.written" && event.diagnostic !== null);
   }
-  expect(exclusiveCalls).toBe(1);
+  expect(exclusiveCalls).toBe(2);
   expect(diagnostics).toHaveLength(1);
   expect(diagnostics[0]).toMatchObject({ nodeId: "node", agentSessionId: value.sessionId, diagnostic: expect.stringContaining("停滞") });
   // 收尾走 stop（cancel + 拒绝 completion），不需要互斥区。
@@ -153,7 +153,7 @@ test("回合间隙也算静默：end_turn 后读取上下文被占死仍会提�
   let exclusiveCalls = 0;
   const control = new ControlServer(value.journal, value.state, <T>(operation: () => Promise<T>): Promise<T> => {
     exclusiveCalls += 1;
-    return exclusiveCalls === 1 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
+    return exclusiveCalls <= 2 ? operation() : new Promise<T>(() => { /* 永久占用 */ });
   });
   let prompts = 0;
   const session: AcpWorkerSession = {
@@ -1093,4 +1093,26 @@ test("压缩背景排在工具指南之前", async () => {
   const reminder = prompts[1]!;
   expect(reminder.indexOf("原始任务背景")).toBeGreaterThan(-1);
   expect(reminder.indexOf("原始任务背景")).toBeLessThan(reminder.indexOf("本会话提供私有 MCP server"));
+});
+
+test("写节点先耐久启动意图再记录 agent.session，完成后不留下未决意图", async () => {
+  const value = await fixture();
+  let capability = "";
+  const session: AcpWorkerSession = {
+    binding: null,
+    async initialize() {},
+    async createSession() { return { launcherId: "codex-acp", sessionId: "native", capabilities: {}, writer: { pgid: 4242, startedAt: "fp-initial" } }; },
+    async prompt() { await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() {}, async verifyClosed() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "fake", args: [], env: [] }; }, undefined, true);
+  executor.bindControl(value.control);
+  expect(await executor.execute(value.node)).toEqual({ ok: true });
+  const events = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events;
+  const order = events.filter(event => event.type === "agent.writerIntent" || event.type === "agent.session" || event.type === "agent.writer").map(event => event.type);
+  expect(order).toEqual(["agent.writerIntent", "agent.session"]);
+  expect(events.find(event => event.type === "agent.writerIntent")).toMatchObject({ status: "started", agentSessionId: value.sessionId });
+  // 会话携带了进程证据，意图必须被清除；否则后续围栏会误判为崩溃窗口。
+  expect(value.state.agent("node").writer).toEqual({ pgid: 4242, startedAt: "fp-initial" });
+  expect(value.state.agent("node").writerIntentAt).toBeNull();
 });

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,7 +35,7 @@ test("Engine重启不补成果快照、不重跑业务；completed resume 只读
  // 模块 Workflow 只接受脚本模式配置；CLI 由源码字面量决定，这里只冻结 Git 成果授权。
  const config={version:1 as const,assignmentMode:"script" as const,createdAt:new Date().toISOString(),workspaces:{version:3 as const,authorization,workspaceId}};
  let calls=0,runId="";
- const executions=new LeadExecutionService(lead,()=>({executor:{execute:async node=>{calls++;const lease=await manager.bindWriter(await manager.acquire(workspaceId,{runId:runId,nodeId:node.id,attempt:node.executionAttemptId}),"test-writer",{pgid:54321,startedAt:"test-fingerprint"});await writeFile(join(workspace.cwd,"a.txt"),"final\n");await manager.release(lease,async()=>true);return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},leadRoot,join(root,"runs"),join(root,"workspaces"));
+ const executions=new LeadExecutionService(lead,()=>({executor:{execute:async node=>{calls++;await writeFile(join(workspace.cwd,"a.txt"),"final\n");return {ok:true};}}}),{wireControl:runtime=>{runId=runtime.snapshot().id;}},leadRoot,join(root,"runs"),join(root,"workspaces"));
  const {execution}=await executions.createExecution(task.leadRunId,1,{},config);
  for(let n=0;n<1000;n++){if((await executions.listExecutions(task.leadRunId))[0].finishedAt!==null)break;await Bun.sleep(10);}
  expect((await executions.listExecutions(task.leadRunId))[0].status).toBe("completed");expect(calls).toBe(1);lead.close();
@@ -47,7 +47,6 @@ test("Engine重启不补成果快照、不重跑业务；completed resume 只读
   // 宿主不创建任何成果 ref；结果就是 worktree 里的未提交文件。
   expect(await git("for-each-ref","--format=%(refname)","refs/wave-flow")).toBe("");
   expect(await Bun.file(join(workspace.cwd,"a.txt")).text()).toBe("final\n");
-  expect((await manager.inspect(workspaceId)).leases).toHaveLength(0);
   // completed 的 resume 不再补收尾，也不重跑业务。
   await engine.handleDesktopAction("executions.resume",{leadRunId:task.leadRunId,executionId:execution.executionId});
   expect(calls).toBe(1);
@@ -738,4 +737,37 @@ test("Engine 保存接管仅在系统面板确认替换时覆盖已有文件", a
     expect(prepared.lead.workflowRevisions).toHaveLength(3);
     expect(prepared.lead.workflowRevisions[2]).toMatchObject({ revision: 3, parentRevision: 2, updateReason: "save-local", acceptedAt: null });
   } finally { engine.shutdown(); }
+}, 30_000);
+
+test("cleanupWorkspaces 把发起清理的 Execution 传给 WorkspaceManager，并在围栏通过后执行", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "wave-flow-cleanup-wiring-"))); roots.push(root);
+  const cwd = join(root, "repo"); await mkdir(cwd);
+  const git = async (...args: string[]) => { const p = Bun.spawn(["/usr/bin/git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args], { cwd, stdout: "pipe", stderr: "pipe" }); const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]); if (code) throw new Error(err); return out.trim(); };
+  await git("init", "-b", "main"); await writeFile(join(cwd, "a.txt"), "base\n"); await git("add", "a.txt"); await git("commit", "-m", "fixture");
+  const base = await git("rev-parse", "HEAD"), workspaceId = crypto.randomUUID();
+  const authorization = { authorizationId: crypto.randomUUID(), approvedAt: new Date().toISOString(), repository: cwd, baseCommit: base, excludeExistingDirty: false, nodes: [{ nodeId: "writer" }] };
+  const leadRoot = join(root, "lead-runs"), runsDir = join(root, "runs"), stateRoot = join(root, "workspaces");
+  await (await WorkspaceManager.open(stateRoot, crypto.randomUUID())).create(workspaceId, authorization);
+  const lead = new LeadService(leadRoot, async () => { throw new Error("不会运行主控"); });
+  const task = await lead.create(cwd);
+  const source = 'import { agent, phase } from "wave-flow";\nexport const meta={name:"cleanup-wiring",description:"清理接线",phases:[{title:"write"}],inputSchema:{type:"object",properties:{},additionalProperties:false}};\nexport default async function run(args){phase("write");return agent("写",{id:"writer",cli:"codex",sandbox:"workspace-write"});}';
+  await lead.proposeWorkflowRevision(task.leadRunId, source); await lead.acceptWorkflowRevision(task.leadRunId, 1);
+  const config = { version: 1 as const, assignmentMode: "script" as const, createdAt: new Date().toISOString(), workspaces: { version: 3 as const, authorization, workspaceId } };
+  const executions = new LeadExecutionService(lead, () => ({ executor: { execute: async () => ({ ok: true }) } }), {}, leadRoot, runsDir, stateRoot);
+  const { execution } = await executions.createExecution(task.leadRunId, 1, {}, config);
+  for (let n = 0; n < 1000; n++) { if ((await executions.listExecutions(task.leadRunId))[0].finishedAt !== null) break; await Bun.sleep(10); }
+  expect((await executions.listExecutions(task.leadRunId))[0].status).toBe("completed");
+  const engine = new DesktopExecutionEngine({ storeRoot: runsDir, leadRoot, deterministicForTest: true });
+  const calls: Array<{ authorized: boolean; executionId: string }> = [];
+  const cleanup = spyOn(WorkspaceManager.prototype, "cleanup").mockImplementation(async (_workspaceId, authorized, executionId, proof) => {
+    calls.push({ authorized, executionId });
+    await proof();
+    return {} as never;
+  });
+  try {
+    await engine.handleDesktopAction("executions.cleanupWorkspaces", { leadRunId: task.leadRunId, executionId: execution.executionId, authorized: true });
+    expect(calls).toEqual([{ authorized: true, executionId: execution.executionId }]);
+  } finally {
+    cleanup.mockRestore(); engine.shutdown(); lead.close();
+  }
 }, 30_000);

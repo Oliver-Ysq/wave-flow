@@ -545,6 +545,33 @@ describe("LeadService", () => {
     expect(body).toMatchObject({ kind: "body", text: "残留文本", completed: false, finishedAt: expect.any(String) });
   });
 
+  test("超长 ACP 工具标题截断后仍满足 Journal 形状，回合能正常终结", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-lead-long-tool-title-")); directories.push(cwd);
+    let service!: LeadService;
+    class LongTitlePi implements LeadSession {
+      #listeners = new Set<(event: LeadStreamEvent) => void>();
+      isRunning = false;
+      subscribe(listener: (event: LeadStreamEvent) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+      async prompt() {
+        const title = `"sed -n '1,120p' /very/long/path/${"x".repeat(300)}.txt"`;
+        for (const listener of this.#listeners) listener({ type: "acp_tool_call", call: { callId: "long-1", title, name: null, toolKind: "command", status: "completed", locations: [], contentText: "ok", rawInput: null, rawOutput: null } });
+        return "读取完成";
+      }
+      abort() {}
+    }
+    service = new LeadService(leadRunsRoot(cwd), async () => testModel, () => new LongTitlePi());
+    const created = await service.create(cwd);
+    await service.send(created.leadRunId, "读取长路径");
+    await waitFor(async () => (await service.snapshot(created.leadRunId)).status === "idle");
+    const entries = (await service.snapshot(created.leadRunId)).conversationEntries;
+    const tool = entries.find((entry) => entry.kind === "tool");
+    expect(tool?.kind).toBe("tool");
+    expect((tool as { name: string }).name.length).toBeLessThanOrEqual(200);
+    expect((tool as { name: string }).name.endsWith("…")).toBe(true);
+    const events = (await LeadJournal.open(created.leadRunId, leadRunsRoot(cwd))).events;
+    expect(events.some((event) => event.type === "lead.turn_finished")).toBe(true);
+  });
+
   test("ACP 侧 mcp__server__tool 编码名通知与 Engine 包装器归并，不产生重复工具条目", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-lead-acp-dedupe-")); directories.push(cwd);
     await writeFile(join(cwd, "package.json"), '{"name":"dedupe"}', "utf8");

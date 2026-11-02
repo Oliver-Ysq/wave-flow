@@ -28,8 +28,9 @@ test.skipIf(process.env.WF_REAL_LEAD_MODEL_ACCEPTANCE !== "1")("真实主控原�
       const value = await bunAcpTransport(launcher, signal);
       const readable = value.stream.readable.pipeThrough(new TransformStream({ transform(message, controller) {
         // 只打印协议种类/会话身份，不打印正文、prompt、工具参数或凭据。
-        const raw = message as unknown as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string } }; id?: unknown; result?: { stopReason?: string }; error?: { code?: number; message?: string } };
-        console.log(JSON.stringify({ method: raw.method, sessionId: raw.params?.sessionId, update: raw.params?.update?.sessionUpdate, responseId: raw.id, stopReason: raw.result?.stopReason, errorCode: raw.error?.code }));
+        const raw = message as unknown as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string; status?: string; toolCallId?: string; title?: string; kind?: string } }; id?: unknown; result?: { stopReason?: string }; error?: { code?: number; message?: string } };
+        const update = raw.params?.update;
+        console.log(JSON.stringify({ at: Date.now(), method: raw.method, sessionId: raw.params?.sessionId, update: update?.sessionUpdate, toolCallId: update?.toolCallId, toolTitle: update?.title, toolKind: update?.kind, toolStatus: update?.status, responseId: raw.id, stopReason: raw.result?.stopReason, errorCode: raw.error?.code, errorMessage: raw.error?.message }));
         controller.enqueue(message);
       } }));
       return { ...value, stream: { ...value.stream, readable } };
@@ -40,7 +41,8 @@ test.skipIf(process.env.WF_REAL_LEAD_MODEL_ACCEPTANCE !== "1")("真实主控原�
     const created = await service.create(cwd);
     console.log(JSON.stringify({ root, cli, task: created.leadRunId }));
     await service.send(created.leadRunId, `只做读取验收，不设计或执行Workflow。用当前CLI原生文件工具读取${inside}与${outside}，然后调用wave-flow-lead的inspect_execution读取执行列表。最后报告两个标记及执行数量；不得修改文件、安装依赖、创建Worker或提交草案。`);
-    const deadline = Date.now() + 100_000;
+    // 主控需要多次原生工具调用 + 窄 MCP；慢 gateway 上 100s 会与最终回答重叠。
+    const deadline = Date.now() + 360_000;
     let snapshot = await service.snapshot(created.leadRunId);
     while (snapshot.status === "running" && Date.now() < deadline) { await Bun.sleep(100); snapshot = await service.snapshot(created.leadRunId); }
     console.log(JSON.stringify({ task: created.leadRunId, status: snapshot.status, diagnostic: snapshot.diagnostic }));
@@ -49,4 +51,4 @@ test.skipIf(process.env.WF_REAL_LEAD_MODEL_ACCEPTANCE !== "1")("真实主控原�
     expect(snapshot.conversationEntries.some(item => item.kind === "tool" && item.source === "engine-mcp" && item.name === "读取执行状态" && item.status === "completed")).toBe(true);
     expect(await Bun.file(inside).text()).toBe("INSIDE_FIXTURE_42\n"); expect(await Bun.file(outside).text()).toBe("OUTSIDE_FIXTURE_73\n");
   } finally { await service.close(); pipes.forEach(pipe => pipe.close()); }
-}, 120_000);
+}, 420_000);

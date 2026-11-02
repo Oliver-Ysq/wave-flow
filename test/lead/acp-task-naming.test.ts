@@ -50,7 +50,11 @@ test.skipIf(process.env.WF_REAL_NAMING_ACCEPTANCE!=="1")("真实所选主控CLI�
   while(!namingError&&!saved.events.some(e=>e.type==="lead.title_generated")&&Date.now()<deadline){await Bun.sleep(100);saved=await LeadJournal.open(task.leadRunId,join(root,"state"));}
   if(namingError){service.close();throw namingError;}
   service.close();const title=saved.snapshot.task!.title;
-  expect(saved.events.filter(e=>e.type==="lead.title_generated")).toHaveLength(1);expect(title).not.toBe(task.task!.title);expect(await readdir(join(root,"scratch"))).toEqual([]);expect(await readdir(project)).toEqual([]);
+  expect(saved.events.filter(e=>e.type==="lead.title_generated")).toHaveLength(1);expect(title).not.toBe(task.task!.title);
+  // 标题事件先于命名会话 finally 清理落盘；有界等待 scratch 删除，避免把异步收尾当泄漏。
+  let scratchEntries=await readdir(join(root,"scratch"));const scratchDeadline=Date.now()+5_000;
+  while(scratchEntries.length>0&&Date.now()<scratchDeadline){await Bun.sleep(50);scratchEntries=await readdir(join(root,"scratch"));}
+  expect(scratchEntries).toEqual([]);expect(await readdir(project)).toEqual([]);
   console.log(JSON.stringify({cli:runtime.cli,title,sessionScratchRemoved:true,projectUnchanged:true}));
 },70000);
 test.skipIf(process.env.WF_PACKAGED_NAMING_ACCEPTANCE!=="1")("打包Engine真实本地Task后台命名，事件与Journal一致且无Workflow执行",async()=>{

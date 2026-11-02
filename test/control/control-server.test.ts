@@ -352,6 +352,60 @@ describe("ControlServer block / answer / continue", () => {
   });
 });
 
+describe("ControlServer rebind", () => {
+  test("同一 attempt 内换 capability：旧凭据立即失效，新凭据可完成", async () => {
+    const value = await fixture();
+    const next = "capability-2";
+    value.control.rebind({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: next });
+    await expect(value.control.complete({
+      runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId,
+      capability: value.capability, summary: "old", result: { ok: true },
+    })).rejects.toThrow();
+    await value.control.complete({
+      runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId,
+      capability: next, summary: "done", result: { ok: true },
+    });
+    expect(value.state.agent("node").status).toBe("completed");
+  });
+
+  test("rebind 不接受未注册节点或相同 capability", async () => {
+    const value = await fixture();
+    expect(() => value.control.rebind({ runId: value.runId, nodeId: "missing", agentSessionId: value.agentSessionId, capability: "x" })).toThrow("尚未注册");
+    expect(() => value.control.rebind({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability })).toThrow("新的 capability");
+  });
+
+  test("recovering 状态允许 rebind 与 recordWriter（用户恢复重建路径）", async () => {
+    const value = await fixture();
+    for (const status of ["pausing", "paused", "recovering"] as const) {
+      value.state.apply({ type: "agent.status", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, status, pauseCause: "recovery" });
+    }
+    value.control.rebind({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: "capability-2" });
+    await value.control.recordWriter({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, pgid: 4242, startedAt: "fp-2" });
+    expect(value.state.agent("node").writer).toEqual({ pgid: 4242, startedAt: "fp-2" });
+  });
+});
+
+describe("ControlServer writer evidence", () => {
+  test("同一 attempt 内可覆盖 provider 进程组证据", async () => {
+    const value = await fixture();
+    await value.control.recordWriter({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, pgid: 4242, startedAt: "fp-1" });
+    expect(value.state.agent("node").writer).toEqual({ pgid: 4242, startedAt: "fp-1" });
+  });
+
+  test("非法进程组证据拒绝写入", async () => {
+    const value = await fixture();
+    await expect(value.control.recordWriter({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, pgid: 1, startedAt: "fp" })).rejects.toThrow();
+  });
+
+  test("启动意图可记录并取消，用于崩溃窗口 fail closed", async () => {
+    const value = await fixture();
+    await value.control.recordWriterIntent({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, status: "started" });
+    expect(value.state.agent("node").writerIntentAt).toBeTruthy();
+    await value.control.recordWriterIntent({ runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, status: "cancelled" });
+    expect(value.state.agent("node").writerIntentAt).toBeNull();
+  });
+});
+
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -359,3 +413,25 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
     await Bun.sleep(2);
   }
 }
+
+test("用户重开后，旧交付代际的迟到 close 不能关闭新表单", async () => {
+  const value = await fixture();
+  const blockRequestId = crypto.randomUUID();
+  const submission = { blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } };
+  await value.control.block(submission);
+  const firstToken = value.state.agent("node").block!.deliveryToken!;
+  await value.control.closeBlock(blockRequestId, submission, firstToken);
+  expect(value.state.agent("node").block?.delivery).toBe("closed");
+  const reopened: JournalEvent = { type: "block.reopened", at: new Date().toISOString(), runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, diagnostic: null, blockRequestId };
+  await value.journal.append(reopened); value.state.apply(reopened);
+  const secondToken = value.state.agent("node").block!.deliveryToken!;
+  expect(secondToken).not.toBe(firstToken);
+  // 旧 elicitation 的迟到 close 必须被忽略。
+  await value.control.closeBlock(blockRequestId, submission, firstToken);
+  expect(value.state.agent("node").block?.delivery).toBe("pending");
+  // 当前代际的 close 仍然有效。
+  await value.control.closeBlock(blockRequestId, submission, secondToken);
+  expect(value.state.agent("node").block?.delivery).toBe("closed");
+  const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
+  expect(events.filter(event => event.type === "block.closed")).toHaveLength(2);
+});

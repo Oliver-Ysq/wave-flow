@@ -12,10 +12,10 @@ import { adapterById } from "../runtimes/adapter-catalog";
 import { prepareSessionSkills } from "../skills/session";
 import { WorkflowContractError } from "../workflow/errors";
 import { validateExecutionWorkspaces, type ExecutionWorkspaceConfig } from "./execution-workspaces";
-import { ownedAcpTransport } from "./managed-acp-transport";
+import { verifiedAcpTransport } from "./managed-acp-transport";
+import { supervisedAcpTransport } from "../adapters/acp-session";
 import { WorkspaceManager } from "./workspace-manager";
 import { WorkspaceExecutor } from "./workspace-executor";
-import { WriterProcessGroups } from "./writer-process-group";
 import { logWorkerLifecycle } from "../runtime/worker-lifecycle-log";
 
 /** Engine受管Workspace路径；首次执行/恢复沿用冻结Git授权，不重新让主控生成配置。 */
@@ -23,7 +23,6 @@ export class ProductionWorkspaceExecutor {
   #delegate: WorkspaceExecutor | null = null;
   #runtime: RunRuntime | null = null;
   #recoveryHold: ((nodeId: string) => Promise<void>) | null = null;
-  readonly #groups = new WriterProcessGroups();
   readonly config: ExecutionWorkspaceConfig;
   constructor(
     config: ExecutionWorkspaceConfig,
@@ -65,22 +64,32 @@ export class ProductionWorkspaceExecutor {
         ? { launcher: resolveWorkerLauncher(selected), session: undefined, evidence: null }
         : await prepareSessionSkills({ scratch: binding.scratch, launcher: resolveWorkerLauncher(selected), capability, libraryRoot: this.skillsRoot });
       stage("skills_ready");
-      const transport = ownedAcpTransport({ groups: this.#groups, bindWriter: binding.bindWriter, beginWriterStart: binding.beginSpawn, cancelWriterStart: binding.cancelSpawn });
-      // cwd用于工作分离，不是安全隔离；可信CLI沿用原生配置，业务状态仍由Control仲裁。
-      const worker = new AcpWorkerExecutor(prepared.launcher, value => new AcpSessionClient(value, transport, "allow", { compaction: true }), runtimeProvenance(selected, prepared.evidence), identity => this.controlMcp(identity, binding.scratch), undefined, true, undefined, prepared.session, prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined);
+      // 每个 writer（含原地续用的新 provider）创建独立受管 transport 与进程组；
+      // 写者证据由 Run Journal 记录。Worker 沿用原生 CLI 权限，不套主控写沙箱。
+      const transport = verifiedAcpTransport({ transport: supervisedAcpTransport });
+      const worker = new AcpWorkerExecutor(
+        prepared.launcher,
+        value => new AcpSessionClient(value, transport, "allow", { compaction: true }),
+        runtimeProvenance(selected, prepared.evidence),
+        identity => this.controlMcp(identity, binding.scratch),
+        undefined,
+        true,
+        undefined,
+        prepared.session,
+        prepared.evidence && capability ? { expected: prepared.evidence.names, match: capability.advertisedMatch } : undefined,
+      );
       return {
-        bindWriter: binding.bindWriter,
-        verifyExited: async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)),
         bindControl: value => worker.bindControl(value),
         bindRecoveryHold: handler => worker.bindRecoveryHold(handler),
         execute: actual => worker.execute(actual),
         finalizeCompleted: actual => worker.finalizeCompleted(actual),
-        finalizePartial: actual => worker.finalizeCompleted(actual),
+        finalizePartial: actual => worker.finalizePartial(actual),
         pause: (actual, signal) => worker.pause(actual, signal),
         recover: (actual, signal) => worker.recover(actual, signal),
         stop: actual => worker.stop(actual),
+        discard: actual => worker.discard(actual),
       };
-    }, async lease => Boolean(lease.writerIdentity && this.#groups.hasExited(lease.writerIdentity)));
+    });
     if (this.#recoveryHold) delegate.bindRecoveryHold(this.#recoveryHold);
     delegate.bindControl(control); this.#delegate = delegate;
   }
@@ -93,7 +102,7 @@ export class ProductionWorkspaceExecutor {
   pause(node: AgentNodeSnapshot, signal?: AbortSignal) { return this.require().pause(node, signal); }
   recover(node: AgentNodeSnapshot, signal?: AbortSignal) { return this.require().recover(node, signal); }
   stop(node: AgentNodeSnapshot) { return this.require().stop(node); }
-  /** Execution释放只清当前Engine会话资源；含租约的worktree绝不自动删除。 */
+  /** Execution释放只清当前Engine会话资源；受管worktree绝不自动删除。 */
   close(): void { /* 保留本Engine的writer退出核验句柄供用户显式收尾；不重新派发。 */ }
   private require(): WorkspaceExecutor { if (!this.#delegate) throw new WorkflowContractError("受管Workspace尚未完成Engine接线。"); return this.#delegate; }
 }

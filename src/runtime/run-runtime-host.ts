@@ -209,7 +209,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       // （含启动前回退）与当前分配快照不一致时，旧结果不可复用，从该节点开始新 attempt。
       const provenanceMatches = this.assignmentProvenanceMatches(nodeId);
       if (existing.status === "completed" && this.#replayPrefix && provenanceMatches) {
-        // 业务JSON可复用不代表可以跳过退出核验与租约释放。宿主先补交接，不能重跑业务。
+        // 业务JSON可复用不代表可以跳过退出核验。宿主先补交接，不能重跑业务。
         await this.executor.finalizeCompleted?.(existing);
         if (this.executor.finalizeCompleted && this.resumeInterrupted) {
           // 纯Git收尾恢复没有新Worker，不伪造executionAttempt；仅在收尾核验成功后恢复Run调度。
@@ -228,7 +228,10 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
       // 会在首个重跑节点等待Journal时把旧completed结果混入新attempt。
       this.#replayPrefix = false;
       const replayVisit = await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!);
-      const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, executionAttemptId: replayVisit.executionAttemptId, phaseVisitId: replayVisit.phaseVisitId, request: effectiveRequest });
+      // 只有原 attempt 有写者证据、且不是“已完成但指纹不符”或“等待人工答案”的重跑，才允许续用原会话；
+      // blocked 节点不得续用（旧 block 关系不跨 Engine 恢复），按原语义进入新会话/中断。
+      const previousBinding = existing.status !== "completed" && existing.status !== "blocked" && existing.writer ? this.state.acpBinding(nodeId) : null;
+      const restarted = this.event({ type: "agent.restarted", nodeId, sequence: existing.sequence, logicalSequence, newAgentSessionId: crypto.randomUUID(), invalidatedByPriorRestart, executionAttemptId: replayVisit.executionAttemptId, phaseVisitId: replayVisit.phaseVisitId, request: effectiveRequest, ...(previousBinding ? { continuedFrom: previousBinding } : {}) });
       await this.durableApply(restarted);
     } else {
       const activeVisit = this.replay ? await this.ensureReplayAttempt(phaseVisit.title || effectiveRequest.phase!) : phaseVisit;
@@ -315,7 +318,7 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
         // 第二次已经建立 session（可能已投递任务）后失败，错误必须原样上抛；不能
         // 用“启动失败可重试”掩盖可能已有副作用的 prompt 失败。
         if (this.state.hasNodeSession(nodeId, after.agentSessionId)) throw retryError;
-        // 首次是启动超时且 session 未建立；重试若因租约/清理等任何原因失败，仍按
+        // 首次是启动超时且 session 未建立；重试若因交接/清理等任何原因失败，仍按
         // 启动失败向用户呈现一个可执行动作，不把底层清理细节推到主界面。
         throw new Error("本地执行环境暂时不可用，已自动恢复仍未成功。请重试。");
       }
