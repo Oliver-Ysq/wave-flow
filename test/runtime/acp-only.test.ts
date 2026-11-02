@@ -490,7 +490,8 @@ test("stop的cancel忽略signal时仍在宿主预算内拒绝并清理会话", a
  expect(Date.now()-before).toBeLessThan(18_000);
  expect(await running).toContain("停止未确认");
  expect(closed).toBe(1);
-}, 20_000);
+ // 用例本身要等满一次 15s 的控制等待预算；20s 只够机器空闲时，并发下会被判超时。
+}, 40_000);
 
 for(const lateTurn of [false,true])test(`cancel抛错也收敛执行并释放会话/MCP，迟到end_turn=${lateTurn}`,async()=>{
  const value=await fixture();let finish!:(turn:{stopReason:string})=>void,prompts=0,closed=0,pipeClosed=0;
