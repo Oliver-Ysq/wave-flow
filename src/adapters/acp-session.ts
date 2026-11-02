@@ -545,6 +545,9 @@ export const supervisedAcpTransport: AcpTransportFactory = async (launcher, sign
   // Worker 会话用身份派生的稳定路径，恢复端可据此找到 provider 报告；
   // 主控等无 launch key 的会话仍用一次性路径。
   const reportPath = launchKey ? reportPathFor(launchKey, reportDir) : join(reportDir, `worker-supervisor-${crypto.randomUUID()}.pid`);
+  // 同一 launch key 的上一代报告会留在同一路径上；本次 spawn 用一次性 spawnId 认领自己的报告，
+  // 否则启动超时后的自动重试会立刻读到上一代 pgid 并把它当成新 provider。
+  const spawnId = crypto.randomUUID();
   const spec: WorkerSupervisorSpec = {
     command: launcher.command,
     args: [...launcher.args],
@@ -552,6 +555,7 @@ export const supervisedAcpTransport: AcpTransportFactory = async (launcher, sign
     env: { ...(launcher.env ?? {}) },
     ownerPid: process.pid,
     reportPath,
+    spawnId,
   };
   const compiled = import.meta.dir.startsWith("/$bunfs/");
   const supervisorArgs = compiled ? ["__worker-supervisor"] : [join(import.meta.dir, "../desktop/engine-main.ts"), "__worker-supervisor"];
@@ -566,7 +570,7 @@ export const supervisedAcpTransport: AcpTransportFactory = async (launcher, sign
 
   let reported: { pgid: number; startedAt?: string };
   try {
-    reported = await awaitReportedPgid(reportPath, supervisor, signal);
+    reported = await awaitReportedPgid(reportPath, supervisor, signal, spawnId);
   } catch (error) {
     try { process.kill(supervisor.pid, "SIGKILL"); } catch { /* 已退出 */ }
     throw error;
@@ -637,13 +641,15 @@ export const supervisedAcpTransport: AcpTransportFactory = async (launcher, sign
 };
 
 /** 等待 supervisor 报告 provider 进程组；先退出或超时都拒绝启动。 */
-async function awaitReportedPgid(path: string, supervisor: Bun.Subprocess, signal: AbortSignal): Promise<{ pgid: number; startedAt?: string }> {
+async function awaitReportedPgid(path: string, supervisor: Bun.Subprocess, signal: AbortSignal, spawnId: string): Promise<{ pgid: number; startedAt?: string }> {
   const deadline = Date.now() + 10_000;
   for (;;) {
     try {
       const lines = (await Bun.file(path).text()).trim().split("\n");
       const value = Number(lines[0]?.trim());
-      if (Number.isInteger(value) && value > 1) {
+      // 只认本次 spawn 写出的报告：同一 launch key 的上一代报告会留在同一路径上，
+      // 不校验 spawnId 就会在自动重试时立刻读到上一代的死 pgid。
+      if (Number.isInteger(value) && value > 1 && lines[2]?.trim() === spawnId) {
         const startedAt = lines[1]?.trim();
         // 报告文件保留：Engine 可能在记录写者证据前崩溃，恢复端仍需按同一路径围栏。
         return { pgid: value, ...(startedAt ? { startedAt } : {}) };

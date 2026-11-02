@@ -39,7 +39,7 @@ test("启动意图只剩启动标记且 supervisor 已退出时判定 provider �
 test("启动意图有 provider 报告时按报告围栏，并删除报告", async () => {
   const directory = await reportDir(), path = reportPath(directory);
   reportLaunchMarker(path, 2_000_000_000);
-  reportProviderPid(path, 2_000_000_000, "1:2");
+  reportProviderPid(path, 2_000_000_000, "1:2", "spawn-a");
   const result = await fenceAcpNodeWriters(RUN, [intentNode()], { reportDir: directory });
   expect(result.failures).toEqual([]);
   expect(result.checked).toBe(1);
@@ -50,7 +50,7 @@ test("启动意图有 provider 报告时按报告围栏，并删除报告", asyn
 test("启动中等待 supervisor 写出 provider 报告后再围栏", async () => {
   const directory = await reportDir(), path = reportPath(directory);
   reportLaunchMarker(path, process.pid);
-  setTimeout(() => reportProviderPid(path, 2_000_000_000, "1:2"), 60);
+  setTimeout(() => reportProviderPid(path, 2_000_000_000, "1:2", "spawn-b"), 60);
   const result = await fenceAcpNodeWriters(RUN, [intentNode()], { reportDir: directory });
   expect(result.failures).toEqual([]);
   expect(result.checked).toBe(1);

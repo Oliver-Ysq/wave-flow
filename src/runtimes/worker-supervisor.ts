@@ -26,6 +26,8 @@ export type WorkerSupervisorSpec = {
   readonly ownerPid: number;
   /** provider 进程组的报告文件；supervisor 原子写入 pgid，Engine 读取后删除。 */
   readonly reportPath: string;
+  /** 本次 supervisor 启动的一次性标识；写入报告第三行，供客户端拒绝上一代的陈旧报告。 */
+  readonly spawnId: string;
   /** owner 消失或显式停止时，SIGTERM 之后等待组自行退出的宽限。 */
   readonly sigtermGraceMs?: number;
   /** SIGKILL 之后等待进程组消失的上限。 */
@@ -59,6 +61,7 @@ export function decodeWorkerSupervisorSpec(raw: string | undefined): WorkerSuper
   const ownerPid = spec.ownerPid;
   if (typeof ownerPid !== "number" || !Number.isInteger(ownerPid) || ownerPid <= 1) throw new Error("worker supervisor spec 的 ownerPid 无效。");
   if (typeof spec.reportPath !== "string" || !spec.reportPath.startsWith("/")) throw new Error("worker supervisor spec 的 reportPath 必须是绝对路径。");
+  if (typeof spec.spawnId !== "string" || !spec.spawnId.trim()) throw new Error("worker supervisor spec 缺少 spawnId。");
   for (const key of ["sigtermGraceMs", "reapTimeoutMs"] as const) {
     const value = spec[key];
     if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 30_000)) throw new Error(`worker supervisor spec 的 ${key} 超出 1-30000ms。`);
@@ -76,11 +79,15 @@ export function reportLaunchMarker(reportPath: string, supervisorPid: number): v
   renameSync(temporary, `${reportPath}.launch`);
 }
 
-/** 把 provider 进程组与同源启动指纹写入报告文件；原子改名，Engine 不会读到半截内容。 */
-export function reportProviderPid(reportPath: string, pgid: number, startedAt: string): void {
+/**
+ * 把 provider 进程组、同源启动指纹与本次 spawnId 写入报告文件；原子改名，Engine 不会读到半截内容。
+ *
+ * 第三行 spawnId 只供客户端区分"本次 spawn"与同一路径上的上一代报告；恢复端仍只读前两行。
+ */
+export function reportProviderPid(reportPath: string, pgid: number, startedAt: string, spawnId: string): void {
   mkdirSync(dirname(reportPath), { recursive: true });
   const temporary = `${reportPath}.tmp-${process.pid}`;
-  writeFileSync(temporary, `${pgid}\n${startedAt}\n`, { mode: 0o600 });
+  writeFileSync(temporary, `${pgid}\n${startedAt}\n${spawnId}\n`, { mode: 0o600 });
   renameSync(temporary, reportPath);
 }
 
@@ -110,7 +117,7 @@ export async function runWorkerSupervisor(): Promise<void> {
   // 那时进程可能已退出、pgid 已被复用，指纹会属于别人的进程。
   const startedAt = await captureWriterStartedAt(pgid).catch(() => "");
   // 把真实进程组交给 Engine：它据此做 writer 绑定与跨重启围栏。
-  try { reportProviderPid(spec.reportPath, pgid, startedAt); }
+  try { reportProviderPid(spec.reportPath, pgid, startedAt, spec.spawnId); }
   catch {
     // 报告失败时 Engine 不知道 provider 已经创建；绝不能留下无监管孤儿。
     try { process.kill(-pgid, "SIGKILL"); } catch { /* 已退出 */ }

@@ -223,10 +223,14 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
       if (continuation && continuation.launcherId === this.launcher.id && typeof session.loadSession === "function") {
         // 续用有自己的取消信号：load 超时不能把随后回退的新会话一起 abort。
         const loadControl = new AbortController();
+        const loadSignal = AbortSignal.any([signal.signal, loadControl.signal]);
         try {
           binding = await withStartupTimeout(
             Promise.race([
-              session.loadSession(continuation.sessionId, node.cwd, AbortSignal.any([signal.signal, loadControl.signal]), mcpServers, 10_000, this.sessionOptions),
+              loadWithWriterReleaseWait(
+                () => session.loadSession!(continuation.sessionId, node.cwd, loadSignal, mcpServers, 10_000, workerSessionOptions),
+                loadSignal,
+              ),
               completion.then(() => { throw new Error("ACP Worker 启动已终止。"); }),
             ]),
             300_000,
@@ -314,11 +318,21 @@ export class AcpWorkerExecutor implements AgentNodeExecutor {
             () => { /* 由外层 catch 收敛为中断 */ },
           );
           if (!next.loadSession) throw new Error("当前 ACP client 不支持 session/load。");
+          // 续用的新 provider 重新 initialize 后复用同一份系统提示；能力未声明时保持内联协议。
+          const nextSessionOptions: AcpSessionOptions = next.supportsClientSystemPrompt?.() === true
+            ? { ...(this.sessionOptions ?? {}), systemPrompt: { mode: "append", text: workerCompletionProtocol() } }
+            : (this.sessionOptions ?? {});
           const nextMcp = this.createControlMcp ? [this.createControlMcp({ runId: control.runId, nodeId: node.id, agentSessionId: node.agentSessionId!, capability: nextCapability, ...(node.request.schema ? { resultSchema: node.request.schema } : {}) })] : [];
           let nextBinding: AcpSessionBinding;
           try {
             nextBinding = await withStartupTimeout(
-              Promise.race([next.loadSession(oldBinding.sessionId, node.cwd, effectiveSignal, nextMcp, 10_000, this.sessionOptions), completion.then(() => { throw new Error("ACP Worker 续用已终止。"); })]),
+              Promise.race([
+                loadWithWriterReleaseWait(
+                  () => next.loadSession!(oldBinding.sessionId, node.cwd, effectiveSignal, nextMcp, 10_000, nextSessionOptions),
+                  effectiveSignal,
+                ),
+                completion.then(() => { throw new Error("ACP Worker 续用已终止。"); }),
+              ]),
               300_000,
               "recover/load",
               () => { /* 由外层 catch 收敛为中断 */ },
@@ -735,8 +749,14 @@ type ActiveAcpWorker = {
 };
 
 
-/** 默认 Worker 启动超时；启动挂起必须收敛为节点中断，不能永久占用 running。 */
-const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 60_000;
+/**
+ * 默认 Worker 启动超时；启动挂起必须收敛为节点中断，不能永久占用 running。
+ *
+ * 取 120 秒而不是 60 秒：codex-acp 2.5.0 的 `session/new` 正常就要 20–30 秒用于取模型
+ * 列表与启动 stdio MCP，冷启动实测顶到过 60 秒；60 秒预算会把正常冷启动判成启动失败。
+ * 超时后的自动重试仍保留，这里只是不把正常的慢启动当成故障。
+ */
+const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 120_000;
 
 /** 读取 Worker 启动超时；测试/排障可通过环境变量缩短，非法值回退默认值。 */
 function configuredWorkerStartupTimeoutMs(): number {
@@ -877,6 +897,33 @@ function elicitationBlockRequestId(request: acp.CreateElicitationRequest): strin
   if (!waveFlow || typeof waveFlow !== "object") return undefined;
   const value = (waveFlow as Record<string, unknown>).blockRequestId;
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * 旧 provider 已退出但 Codex 尚未释放 thread writer 时，`session/load` 会返回
+ * `thread_active_writer`（“This Codex session is in use by another Codex client”）。
+ *
+ * 围栏只能证明进程已死，不能证明锁已释放；这里做有界等待后重试同一个 load，
+ * 其他错误原样上抛。等待期间响应取消信号，不把停止请求拖到预算结束。
+ */
+export async function loadWithWriterReleaseWait<T>(load: () => Promise<T>, signal: AbortSignal, budgetMs = 15_000): Promise<T> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    try {
+      return await load();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const busy = message.includes("thread_active_writer") || message.includes("in use by another Codex client");
+      if (!busy || signal.aborted || Date.now() >= deadline) throw error;
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const onAbort = () => { clearTimeout(timer); resolve(); };
+        timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, 500);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      if (signal.aborted) throw error;
+    }
+  }
 }
 
 async function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

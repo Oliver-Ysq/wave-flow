@@ -48,6 +48,7 @@ test("provider 退出码原样透传", async () => {
           env: { PATH },
           ownerPid: process.pid,
           reportPath: join(dir, "pgid"),
+          spawnId: "test-exit",
         }),
       },
     });
@@ -74,10 +75,12 @@ test("owner 消失后 supervisor 终止整个 provider 组", async () => {
       return (await readNumber(reportPath))!;
     });
     expect(groupExists(pgid)).toBe(true);
-    // 报告文件第二行是 spawn 时同源采集的启动指纹；缺它时 Engine 只能事后补采。
+    // 报告文件第二行是 spawn 时同源采集的启动指纹；第三行是本次 spawnId，
+    // 客户端据此拒绝同一路径上的上一代报告。
     const report = (await Bun.file(reportPath).text()).trim().split("\n");
-    expect(report).toHaveLength(2);
+    expect(report).toHaveLength(3);
     expect(report[1]!.length).toBeGreaterThan(0);
+    expect(report[2]).toBe("test-spawn");
 
     process.kill(owner.pid, "SIGKILL");
     expect(await waitFor(() => !groupExists(pgid), 12_000)).toBe(true);
@@ -125,7 +128,7 @@ test("owner 消失后，逃出进程组的后代也会被快照并终止", async
   }
 }, 30_000);
 
-function spawnOwner(dir: string, spec: Omit<WorkerSupervisorSpec, "ownerPid" | "reportPath"> & { ownerPid: number; reportPath: string }) {
+function spawnOwner(dir: string, spec: Omit<WorkerSupervisorSpec, "ownerPid" | "reportPath" | "spawnId"> & { ownerPid: number; reportPath: string }) {
   const ownerScript = `
     const spec = JSON.parse(process.env.WF_SUP_SPEC);
     spec.ownerPid = process.pid;
@@ -141,7 +144,7 @@ function spawnOwner(dir: string, spec: Omit<WorkerSupervisorSpec, "ownerPid" | "
     stdio: ["ignore", "ignore", "ignore"],
     env: {
       ...process.env,
-      WF_SUP_SPEC: JSON.stringify(spec),
+      WF_SUP_SPEC: JSON.stringify({ ...spec, spawnId: "test-spawn" }),
       WF_SUP_ENTRY: entry,
       WF_SUP_REPORT: join(dir, "pgid"),
     },

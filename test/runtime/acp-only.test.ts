@@ -1145,3 +1145,24 @@ test("写节点先耐久启动意图再记录 agent.session，完成后不留下
   expect(value.state.agent("node").writer).toEqual({ pgid: 4242, startedAt: "fp-initial" });
   expect(value.state.agent("node").writerIntentAt).toBeNull();
 });
+
+test("Codex thread writer 未释放时 load 有界重试，其他错误不重试", async () => {
+  // 真实 Codex 在旧 provider 退出后短时间内仍持有 thread writer：load 返回
+  // thread_active_writer 属于可等待的瞬态，必须重试同一个 load。
+  let busyCalls = 0;
+  const busy = new Error("This Codex session is in use by another Codex client (thread_active_writer)");
+  await expect(loadWithWriterReleaseWait(async () => {
+    busyCalls += 1;
+    if (busyCalls < 3) throw busy;
+    return "loaded";
+  }, new AbortController().signal)).resolves.toBe("loaded");
+  expect(busyCalls).toBe(3);
+
+  // 其他错误不是瞬态：只调用一次，立即上抛。
+  let otherCalls = 0;
+  await expect(loadWithWriterReleaseWait(async () => {
+    otherCalls += 1;
+    throw new Error("ACP 协议版本不兼容");
+  }, new AbortController().signal)).rejects.toThrow("协议版本不兼容");
+  expect(otherCalls).toBe(1);
+}, 20_000);

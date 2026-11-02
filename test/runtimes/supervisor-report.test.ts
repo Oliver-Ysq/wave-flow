@@ -17,7 +17,7 @@ test("supervisor 报告区分未启动、启动中与 provider 已创建", async
   expect(await readLaunchState(path)).toEqual({ kind: "launching", supervisorPid: process.pid });
   expect(await Bun.file(launchMarkerPath(path)).exists()).toBe(true);
 
-  reportProviderPid(path, 43210, "1792645200:363555");
+  reportProviderPid(path, 43210, "1792645200:363555", "spawn-c");
   expect(await readLaunchState(path)).toEqual({ kind: "provider", pgid: 43210, startedAt: "1792645200:363555" });
 
   await removeLaunchFiles(path);
@@ -35,7 +35,7 @@ test("launch key 对同一 Run/节点/会话稳定，对不同会话不同", () 
 test("新的启动标记会覆盖上一代 provider 报告，避免旧 pgid 被当成本次结果", async () => {
   const directory = await mkdtemp(join(tmpdir(), "wave-flow-supervisor-report-")); directories.push(directory);
   const path = reportPathFor(writerLaunchKey("run", "node", "session"), directory);
-  reportProviderPid(path, 43210, "1792645200:363555");
+  reportProviderPid(path, 43210, "1792645200:363555", "spawn-d");
   reportLaunchMarker(path, process.pid);
   expect(await readLaunchState(path)).toEqual({ kind: "launching", supervisorPid: process.pid });
 });

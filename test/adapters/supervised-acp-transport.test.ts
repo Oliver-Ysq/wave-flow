@@ -76,3 +76,29 @@ test("supervised transport 按 launch key 写启动标记与 provider 报告", a
   // 传输层不删除报告：恢复端仍需按同一路径找到 provider；由 finalize/围栏负责回收。
   expect(await Bun.file(path).exists()).toBe(true);
 }, 30_000);
+
+/**
+ * 回归：同一个 launch key 上一次失败留下的报告不能被本次 spawn 认领。
+ *
+ * 启动超时后的自动重试复用同一 key（同一 run/节点/会话），报告路径不变；旧实现的
+ * 首个轮询会直接读到上一代 pgid，把死进程当成新 provider，重试随即在几十毫秒内失败。
+ */
+test("同一 launch key 的上一代报告不会被新 spawn 认领", async () => {
+  const key = writerLaunchKey("run-stale-report", "node-a", "session-a");
+  const path = reportPathFor(key);
+  // 合法但陈旧的报告：pgid 是一个几乎不可能存在的值，spawnId 属于上一代。
+  await Bun.write(path, "999999\nfake-fingerprint\nold-spawn\n");
+  const transport = await supervisedAcpTransport(
+    { id: "fake-stale-report", command: "sleep", args: ["60"], env: { PATH, WF_WORKER_LAUNCH_KEY: key } },
+    new AbortController().signal,
+  );
+  // 必须等到本次 supervisor 真正写出报告，而不是直接返回陈旧 pgid。
+  expect(transport.writerProcess?.pid).toBeGreaterThan(1);
+  expect(transport.writerProcess?.pid).not.toBe(999999);
+  const lines = (await Bun.file(path).text()).trim().split("\n");
+  expect(lines[2]).toBeDefined();
+  expect(lines[2]).not.toBe("old-spawn");
+  expect(Number(lines[0])).toBe(transport.writerProcess!.pid);
+  transport.close();
+  await transport.exited.catch(() => undefined);
+}, 30_000);
