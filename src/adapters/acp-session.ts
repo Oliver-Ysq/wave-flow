@@ -49,9 +49,10 @@ export type AcpTransport = {
 /**
  * 会话级客户端系统提示（ACP client-system-prompt，当前为未稳定能力）。
  *
- * 只允许 `append` 与纯文本：宿主仅发送自己编写的静态说明，禁止把任务正文、
- * Workflow 源码、模型输出或任何用户内容拼进来——系统层的指令权重更高，
- * 混入不可信文本会扩大提示注入面。
+ * 只允许 `append` 与纯文本，文本由宿主构造。宿主会把完成协议与节点原始任务指令
+ * 一并放进该层：任务正文可能来自 Workflow 作者或用户，因此必须显式标注为数据、
+ * 声明宿主规则优先。这确实扩大了提示注入面，分隔与优先级声明只能降低风险，
+ * 不能提供技术保证；Workflow 源码与模型输出仍不得进入该层。
  */
 export type AcpClientSystemPrompt = {
   /** 投递模式；本期只支持在 Agent 自身指令之后追加。 */
@@ -60,8 +61,13 @@ export type AcpClientSystemPrompt = {
   readonly text: string;
 };
 
-/** 客户端系统提示的体积上限；超过即拒绝，不做截断。 */
-const MAX_CLIENT_SYSTEM_PROMPT_BYTES = 16 * 1024;
+/**
+ * 客户端系统提示的体积上限；超过即拒绝，不做截断。
+ *
+ * 48KiB 覆盖宿主协议与常见任务正文；执行器在发送前先按同一上限检查，
+ * 超限时整体回退为内联协议，而不是把任务正文截断后送进系统层。
+ */
+export const MAX_CLIENT_SYSTEM_PROMPT_BYTES = 48 * 1024;
 
 /**
  * ACP session/new 的附加参数；只由已验证的宿主能力产生，不是 Workflow 作者输入。
@@ -202,7 +208,7 @@ export class AcpSessionClient {
   /**
    * 把宿主系统提示转成线上字段；未声明能力、内容为空或超限一律拒绝。
    *
-   * 不能静默丢弃：协议说明若发不出去，就只剩会被上下文压缩折叠的用户消息，
+   * 不能静默丢弃：系统提示若发不出去，就只剩会被上下文压缩折叠的用户消息，
    * 等于回到原来的缺陷，因此这里按契约失败而不是降级。
    */
   #clientSystemPrompt(prompt: AcpClientSystemPrompt | undefined): { readonly mode: "append"; readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }> } | undefined {
@@ -210,7 +216,7 @@ export class AcpSessionClient {
     if (prompt.mode !== "append") throw new Error("ACP 客户端系统提示本期只支持 append 模式。 ");
     const text = prompt.text.trim();
     if (!text) throw new Error("ACP 客户端系统提示不能为空。 ");
-    if (Buffer.byteLength(text, "utf8") > MAX_CLIENT_SYSTEM_PROMPT_BYTES) throw new Error("ACP 客户端系统提示超过 16KiB，拒绝发送。 ");
+    if (Buffer.byteLength(text, "utf8") > MAX_CLIENT_SYSTEM_PROMPT_BYTES) throw new Error("ACP 客户端系统提示超过 48KiB，拒绝发送。 ");
     if (!this.supportsClientSystemPrompt()) throw new Error("该 CLI 未声明 ACP sessionCapabilities.systemPrompt，拒绝发送客户端系统提示。 ");
     return { mode: "append", content: [{ type: "text", text }] };
   }

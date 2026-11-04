@@ -350,8 +350,8 @@ test("即使声明能力，未请求时不发送 systemPrompt；空内容与超�
 
   await expect(client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "   " } }))
     .rejects.toThrow("不能为空");
-  await expect(client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "x".repeat(16 * 1024 + 1) } }))
-    .rejects.toThrow("超过 16KiB");
+  await expect(client.createSession("/workspace", signal, [], undefined, { systemPrompt: { mode: "append", text: "x".repeat(48 * 1024 + 1) } }))
+    .rejects.toThrow("超过 48KiB");
   // 三次失败请求都在发送前被拒：只有第一次真正建立了会话。
   expect(created.count).toBe(1);
   client.close();

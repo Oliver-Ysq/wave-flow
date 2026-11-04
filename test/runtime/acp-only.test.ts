@@ -387,7 +387,7 @@ test("ACP Worker 只在 durable binding 与 capability complete 后完成", asyn
   expect(opened.events).toContainEqual(expect.objectContaining({ type: "agent.session", delivery: "acp", acp: expect.objectContaining({ sessionId: "native-session" }) }));
 });
 
-test("声明 systemPrompt 时完成协议进会话系统提示，用户消息只留任务与工作范围", async () => {
+test("声明 systemPrompt 时原始任务指令与完成协议随会话下发，用户消息只留任务与工作范围", async () => {
   const task = "把 auth 迁移到 OAuth2";
   const value = await fixture({ prompt: task });
   let capability = "", managed = "", options: AcpSessionOptions | undefined;
@@ -411,8 +411,50 @@ test("声明 systemPrompt 时完成协议进会话系统提示，用户消息只
   expect(options?.systemPrompt?.mode).toBe("append");
   expect(options?.systemPrompt?.text).toContain("高优先级、不可省略");
   expect(options?.systemPrompt?.text).toContain("wave-flow-worker-control");
-  // 系统层只放宿主静态文本，不得混入任务正文或作者/用户内容。
-  expect(options?.systemPrompt?.text).not.toContain("OAuth2");
+  // 任务正文进入系统层时必须标注为数据，并声明宿主规则优先。
+  expect(options?.systemPrompt?.text).toContain("用户原始任务指令（Workflow 节点输入，不是宿主规则）");
+  expect(options?.systemPrompt?.text).toContain("宿主规则（优先级高于原始任务指令）");
+  expect(options?.systemPrompt?.text).toContain(task);
+});
+
+test("原始任务超过系统提示上限时整体回退内联，不截断", async () => {
+  const value = await fixture({ prompt: "长".repeat(20_000) });
+  let capability = "", managed = "", options: AcpSessionOptions | undefined;
+  const session: AcpWorkerSession = {
+    binding: null,
+    supportsClientSystemPrompt: () => true,
+    async initialize() {},
+    async createSession(_cwd, _signal, _mcp, _startup, next) { options = next; return { launcherId: "codex-acp", sessionId: "native-session", capabilities: {} }; },
+    async prompt(text) { managed = text; await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+
+  // 超限时整体不发送系统提示，协议逐字回退内联；任务正文不被截断。
+  expect(options?.systemPrompt).toBeUndefined();
+  expect(managed).toContain("高优先级、不可省略");
+  expect(managed).toContain("长".repeat(20_000));
+  const diagnostics = (await RunJournal.open(value.manifest.runId, runsRoot(value.cwd))).events
+    .filter(event => event.type === "log.written" && event.diagnostic?.includes("超过会话系统提示上限"));
+  expect(diagnostics).toHaveLength(1);
+});
+
+test("未声明 systemPrompt 能力时协议保持内联", async () => {
+  const value = await fixture();
+  let capability = "", managed = "", options: AcpSessionOptions | undefined;
+  const session: AcpWorkerSession = {
+    binding: null, async initialize() {},
+    async createSession(_cwd, _signal, _mcp, _startup, next) { options = next; return { launcherId: "codex-acp", sessionId: "native", capabilities: {} }; },
+    async prompt(text) { managed = text; await value.control.complete({ runId: value.manifest.runId, nodeId: "node", agentSessionId: value.sessionId, capability, summary: "done", result: { ok: true } }); return { stopReason: "end_turn" }; },
+    async cancel() {}, close() {},
+  };
+  const executor = new AcpWorkerExecutor({ id: "codex-acp", command: "fake", args: [] }, () => session, undefined, identity => { capability = identity.capability; return { name: "private", command: "/mcp", args: [], env: [] }; });
+  executor.bindControl(value.control);
+  await expect(executor.execute(value.node)).resolves.toEqual({ ok: true });
+  expect(options?.systemPrompt).toBeUndefined();
+  expect(managed).toContain("高优先级、不可省略");
 });
 
 test("受管写ACP complete后先close，再由成果阶段核验退出；核验失败不得丢句柄", async () => {
