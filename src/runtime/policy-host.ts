@@ -1,6 +1,6 @@
 import type { JsonObject } from "../shared/json";
 import type { AuthorAgentRequest } from "../shared/workflow-types";
-import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "./workflow-host";
+import type { ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "./workflow-host";
 import { WorkflowContractError } from "../workflow/errors";
 
 /**
@@ -12,18 +12,15 @@ export type WorkflowPolicy = {
   readonly maxNodes: number;
   /** 单次执行内 phase() 切换的最大次数；用于限制无界阶段回溯循环。 */
   readonly maxPhaseVisits: number;
-  /** 单次执行内 decisionGate 声明的最大数量。 */
-  readonly maxGates: number;
 };
 
 /** Lead 生成脚本的默认护栏；取值是实现验证的初始上限，不是性能结论。 */
-export const DEFAULT_WORKFLOW_POLICY: WorkflowPolicy = { maxNodes: 20, maxPhaseVisits: 50, maxGates: 10 };
+export const DEFAULT_WORKFLOW_POLICY: WorkflowPolicy = { maxNodes: 20, maxPhaseVisits: 50 };
 
 /** 包装任意 WorkflowExecutionHost，在委派前按 Policy 计数拒绝；不持有 Runtime 内部对象。 */
 export class PolicyEnforcingHost implements WorkflowExecutionHost {
   #nodes = 0;
   #phaseVisits = 0;
-  #gates = 0;
 
   constructor(
     private readonly inner: WorkflowExecutionHost,
@@ -44,11 +41,5 @@ export class PolicyEnforcingHost implements WorkflowExecutionHost {
 
   log(message: string): void {
     this.inner.log(message);
-  }
-
-  decisionGate(request: DecisionGateRequest, phaseVisit: PhaseVisit | null): Promise<JsonObject> {
-    this.#gates += 1;
-    if (this.#gates > this.policy.maxGates) throw new WorkflowContractError(`脚本 decisionGate 声明超过 Policy 上限 ${this.policy.maxGates}。`);
-    return this.inner.decisionGate(request, phaseVisit);
   }
 }

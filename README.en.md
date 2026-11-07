@@ -49,7 +49,13 @@ Adjust proposals through conversation and retain each revision; discarding a pro
 
 ## Download and installation
 
-Current version: `v0.4.5`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.5.0`, supporting macOS 12+ / Apple Silicon.
+
+### Important changes in v0.5.0
+
+- New Workflows no longer provide `decisionGate`. Whenever a Worker cannot proceed without additional information, a decision, or authorization from the user, it must use `block` in the same session. The Worker reviews the answer, asks again if anything remains unresolved, and continues only after every issue is settled.
+- Ordinary product defects still go through repair and re-verification. Only a hard blocker that the user cannot resolve may terminate execution; a custom `status: "blocked"` is not a substitute for a real human-input form.
+- Legacy script-gate events are no longer compatible. Opening a Journal containing them will be rejected explicitly, so clear those historical events before upgrading. Worker `block` events and other execution facts keep their original meaning.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -67,7 +73,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.4.5_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.5.0_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install

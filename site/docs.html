@@ -64,6 +64,7 @@
           <a href="#workflow">编写 Workflow</a>
           <a href="#author-api">作者 API</a>
           <a href="#parallel-write">并行与写入</a>
+          <a href="#hitl">人工输入</a>
         </div>
         <div class="docs-nav__group">
           <p>运行</p>
@@ -87,7 +88,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.4.5</span>
+          <span>适用于 v0.5.0</span>
           <span>macOS 12+</span>
           <span>更新于 2026-11</span>
         </div>
@@ -109,7 +110,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.4.5 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.5.0 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -254,6 +255,20 @@ bun run desktop:dev</code></pre>
             <li>同一文件任一时刻只能有一个写者。并发分支可以读取前置节点生成且在并发期间保持不变的快照，但不能共同写入或追加。</li>
             <li>分支需要独立接力时使用按稳定节点 id 分配的独立文件，或在 <code>parallel()</code> 汇合后由单个节点统一整理。</li>
           </ul>
+        </section>
+
+        <section id="hitl">
+          <h2>人工输入</h2>
+          <p>新 Workflow 不提供脚本级 <code>decisionGate</code>。任何 Worker 无法独立解决、需要用户补充信息、裁决或授权的问题，都必须由原 Worker 在同一会话中 <code>block</code>。自然语言提问、自定义 <code>status: "blocked"</code> 或结束回合都不会创建人工表单。</p>
+          <ol>
+            <li>Worker 先说明无法安全继续的原因、已经尝试过什么，以及需要哪类帮助，并提交扁平的 <code>answerSchema</code>。</li>
+            <li>答案先校验并耐久落盘，再由 sidecar 自动 <code>continue</code>；原 Worker 逐项复核答案是否覆盖全部问题。</li>
+            <li>仍有歧义时再次 <code>block</code>，全部解决后才能继续。表单关闭不等于已回答，不自动重问，只有用户显式重开才能继续。</li>
+          </ol>
+          <p>普通产品缺陷仍通过修复与复验处理；只有用户也无法解除的硬阻塞才允许终止。不要通过人工表单降低既有验收标准。</p>
+          <div class="callout">
+            <p><strong>v0.5.0 迁移：</strong>旧 Journal 中的脚本 gate 事件不再兼容，重开含此类事件的档案会明确拒绝；升级前请自行清理。Worker <code>block</code> 事件与其他执行事实保持原语义。</p>
+          </div>
         </section>
 
         <section id="states">

@@ -903,7 +903,7 @@ export class DesktopExecutionEngine {
     return { leadRunId, executions: await this.#executions.listExecutions(leadRunId) };
   }
 
-  /** Execution 详情：登记事实 + 内嵌 Run 权威快照（含决策门）。 */
+  /** Execution 详情：登记事实 + 内嵌 Run 权威快照。 */
   private async executionSnapshot(leadRunId: string, executionId: string): Promise<ExecutionResponse> {
     const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
     if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
@@ -953,17 +953,6 @@ export class DesktopExecutionEngine {
     if (!value || typeof value !== "object" || Array.isArray(value) || (value as { authorized?: unknown }).authorized !== true) throw new EngineActionError(400, "resume 必须明确携带 authorized: true。 ");
     try {
       const snapshot = await this.#executions.resume(leadRunId, executionId);
-      const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
-      if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
-      return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
-    } catch (error) { throw this.executionError(error); }
-  }
-
-  /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后只唤醒等待中的脚本。 */
-  private async answerExecutionGate(leadRunId: string, executionId: string, gateId: string, value: unknown): Promise<ExecutionResponse> {
-    if (!value || typeof value !== "object" || Array.isArray(value) || !isJsonObject((value as AnswerDecisionRequest).answer)) throw new EngineActionError(400, "决策门答案必须是 JSON 对象。 ");
-    try {
-      const snapshot = await this.#executions.answerGate(leadRunId, executionId, gateId, (value as AnswerDecisionRequest).answer);
       const execution = (await this.#executions.listExecutions(leadRunId)).find((item) => item.executionId === executionId);
       if (!execution) throw new EngineActionError(404, "未知 WorkflowExecution。 ");
       return { execution, snapshot, controllable: this.#executions.isControllable(executionId) };
@@ -1151,7 +1140,6 @@ export class DesktopExecutionEngine {
         if(updateReason!==undefined&&updateReason!=="save-local"&&updateReason!=="modify-plan"&&updateReason!=="modify-parameters")throw new Error("本地修订的更新原因无效。");
         return {lead:await this.#lead.reviseLocalTask(requiredString(value,"leadRunId"),{clientRequestId:requiredString(value,"clientRequestId"),baseRevision:requiredInteger(value,"baseRevision"),sourceHash:requiredString(value,"sourceHash"),input,...(object(value).path===undefined?{}:{path:requiredString(value,"path")}),...(updateReason===undefined?{}:{updateReason})})};
       }
-      case "executions.answerGate": return this.answerExecutionGate(requiredString(value, "leadRunId"), requiredString(value, "executionId"), requiredString(value, "gateId"), value);
       default: throw new Error(`未知 Desktop action：${action}。`);
     }
   }

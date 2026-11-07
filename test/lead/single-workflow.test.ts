@@ -20,7 +20,7 @@ test("验收Task冻结单链身份，执行后仍同卡修订，放弃不删除�
  const first=(await service.snapshot(task.leadRunId)).workflowRevisions[0]!;
  expect(task.task?.workflowContract).toBe("single-workflow-v1");
  await service.acceptWorkflowRevision(task.leadRunId,1);
- await service.recordExecutionCreated(task.leadRunId,{executionId:crypto.randomUUID(),revision:1,sourceHash:first.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxGates:10,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,diagnostic:null,summary:null});
+ await service.recordExecutionCreated(task.leadRunId,{executionId:crypto.randomUUID(),revision:1,sourceHash:first.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,diagnostic:null,summary:null});
  const execution=(await service.snapshot(task.leadRunId)).executions[0]!;
  await service.recordExecutionFinished(task.leadRunId,execution.executionId,"cancelled","用户停止",null,1);
  await service.send(task.leadRunId,"修改");await idle(service,task.leadRunId);
@@ -65,7 +65,7 @@ test("已执行模板参数修订沿用冻结来源同卡，迟到基础版本�
  try{
   const task=await service.startTask(root,{clientRequestId:crypto.randomUUID(),projectId:"p",text:"审查",template:selection}),id=task.leadRunId;
   await service.acceptWorkflowRevision(id,1);const executionId=crypto.randomUUID();
-  await service.recordExecutionCreated(id,{executionId,revision:1,sourceHash:template.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxGates:10,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,summary:null,diagnostic:null});
+  await service.recordExecutionCreated(id,{executionId,revision:1,sourceHash:template.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxPhaseVisits:50},createdAt:new Date().toISOString(),status:"running",finishedAt:null,summary:null,diagnostic:null});
   await service.recordExecutionFinished(id,executionId,"completed",null,{},1);
   for(let n=0;n<100;n++){if((await service.snapshot(id)).impactSummaries?.[0]?.status==="completed")break;await Bun.sleep(5);}
   const original=(await service.snapshot(id)).workflowRevisions[0];

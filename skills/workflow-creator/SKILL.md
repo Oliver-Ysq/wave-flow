@@ -1,6 +1,6 @@
 ---
 name: workflow-creator
-description: 把用户的任务描述变成可运行的 Wave Flow Workflow 模块，或修改既有 Workflow。当用户要求把可重复的多步骤任务编排为 Workflow、生成或修改含 agent/phase/parallel/pipeline/decisionGate 的模块、作为主控起草 workflow revision 草案，或修复不符合加载/模块校验的 Workflow 时使用。
+description: 把用户的任务描述变成可运行的 Wave Flow Workflow 模块，或修改既有 Workflow。当用户要求把可重复的多步骤任务编排为 Workflow、生成或修改含 agent/phase/parallel/pipeline 的模块、作为主控起草 workflow revision 草案，或修复不符合加载/模块校验的 Workflow 时使用。
 ---
 
 # Wave Flow Workflow 作者
@@ -13,7 +13,7 @@ description: 把用户的任务描述变成可运行的 Wave Flow Workflow 模�
 Wave Flow 只有一种 Workflow 形状：ESM 作者模块。
 
 ```ts
-import { agent, decisionGate, log, parallel, phase, pipeline } from "wave-flow";
+import { agent, log, parallel, phase, pipeline } from "wave-flow";
 
 export const meta = { /* 纯字面量 */ };
 
@@ -103,18 +103,18 @@ Wave Flow 新增宿主边界：主控使用原生CLI配置与工具（skill/MCP/
 - 并行写共享同一 worktree，没有宿主冲突检测或合并：任务分配必须让不同 Agent 写不同模块/文件，每个文件只有一个 owner；同一模块的改动必须顺序执行，或把依赖前序结果的修改放到后续 phase。不要把“两个 Agent 同时改同一文件/同一函数/同一配置块”当作可接受设计，也不要在脚本里安排集成 Agent 去解冲突。执行完成后宿主不保存快照，结果只保留在受管 worktree 的当前未提交文件里，不写入主工作区；冲突已被覆盖时不会报错或恢复丢失的修改。
 - **不要**在 prompt 里指导 Worker 如何上报完成。Runtime 会为每个 Worker session
   注入私有 `wave_flow_complete / block / continue` MCP 工具；作者只描述业务任务。
-  Worker 需要人工输入时会自行 `block`，无需作者编排。
+  但必须在 prompt 中明确要求哪些业务矛盾、缺失或歧义需要 `block`，不得假设 Worker 总会自行提问。
 
 Runtime在原Worker回合结束但未完成时，在同一session最多自动恢复两次：只上报已有结果，或在pending人工请求上重接并交付原答案；`elicitInput` 成功返回后由sidecar自动continue，作者不指导Worker如何continue。closed表单不自动重问、不消耗恢复额度，只有用户显式重开才继续。两次失败后只暂停目标节点并保留原session，由用户选择同会话重试、停止或重新执行，其他并行节点继续。它不重做业务、不自动新建attempt；作者不新增重试/收尾API，也不把回合结束当作交付。上下文被压缩后，下一个回合边界会把原始任务描述作为**只读背景**附回（明确不重新授权执行），恢复任务语境；模型已丢失的业务判断与已发生的外部副作用宿主无法恢复，只能由用户显式resume重跑。
 
 Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展（正文/工具/计划事件）时只记录一条耐久停滞提示，不自动中断、不cancel、不杀进程、不重发任务或创建attempt，唯一出口是用户显式停止；block、暂停及在途Control落盘属于合法等待。原冻结版本resume先满足原终态总结和当前Git现场补充，再核验授权、写者围栏与已保存现场；现场漂移拒绝并提示修订，不回滚。业务已completed的恢复只读返回原终态，不补成果快照、不重做Worker，也不自动应用。当前现场补充是独立证据版本，不改写旧总结，不构成新执行批准，也不证明ignored文件或外部系统无变化。作者不新增stall/retry或跨Execution缓存接口。
 
-## 人工决策
+## 人工输入与禁止断头路（Wave Flow 新增设计）
 
-- 脚本级的业务决策：`decisionGate(id, question, answerSchema?)`，阻塞等待用户在界面上
-  提交经 Schema 校验的 JSON 答案。只用于没有人类决定就无法安全继续的真正分叉；
-  普通错误由脚本自行处理。
-- 决策不是节点状态机的一部分；gate 的 id 在同一 Run 内唯一。
+- Runtime 不解释 Agent 自定义结果中的 `status`。任何 Worker 无法独立消解、且需要用户补充信息、裁决或授权才能继续的问题，都必须在同一会话使用 `block`，不限于需求冲突；不得以返回 `blocked`、`needs_user`、自然语言提问、写总结或结束回合代替。
+- 收到答案后，原 Worker 必须逐项核对是否覆盖全部问题，并将答案落实到当前工作；仍有歧义时再次 `block`，全部解决前不得 `complete`。表单关闭不等于已回答，不自动重问，只有用户显式重开才能继续。
+- 只有无法通过普通用户裁决继续的硬阻塞才返回结构化 `blocked`。功能或视觉缺陷走回修，预算耗尽返回 `needs_more_work`，进程或证据异常由 Runtime 标记 `interrupted`。
+- 参考 [references/patterns.md](references/patterns.md) 的 Worker 人工输入模式，不要引入脚本级 decision gate。
 
 ## 保持可观测
 
@@ -158,8 +158,8 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 - 顶层只允许 import、`export const meta`、类型声明与 `export default async function run(args)`；不得执行其他顶层语句。
 - 字符串与标点使用合法 TypeScript/ASCII 引号；中文引号（`“”‘’`）、全角分号、省略号等会导致语法错误。
 - 主控生成稿会被用户审批后执行，或在用户显式“保存并接管”后成为项目内本地模块；它与手写 Workflow 同等受信任，可访问本机。不要用它读取、传输或修改用户未明确授权的数据。
-- `decisionGate` 是正式作者 API，本地与生成模块都可使用；它只做编排层人工决策，不替代 Worker 的 block/continue。
-- 资源护栏：主控生成的 Execution 受宿主 `agent()` 总数 ≤ 20、`phase()` 切换 ≤ 50、`decisionGate()` ≤ 10 约束；不要依赖无限循环或动态扩权。
+- 不提供脚本级 decision gate。人工输入统一使用 Worker 的 `block`，自定义 `status` 不得代替真实表单。
+- 资源护栏：主控生成的 Execution 受宿主 `agent()` 总数 ≤ 20、`phase()` 切换 ≤ 50 约束；不要依赖无限循环或动态扩权。
 
 ## 交付前校验
 
@@ -169,7 +169,7 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 4. 每个 `agent()` 都有唯一稳定 `id`。`cli` 可以省略：省略时由用户在启动前**逐节点**为该节点选择一个本机已验证的 CLI（同一份模块的不同节点可以跑在不同 CLI 上，粒度与主控生成稿逐节点声明一致）；写死时只接受 `"codex"` / `"claude"`（两者均已完成真实双角色验收，均可设为主控），且不会被节点选择覆盖。可移植模块与内置预置应当省略 `cli`，让同一份源码能在只装了某一个 CLI 的机器上运行；循环/变量 id 的动态调用无法逐节点列出，需要一个兜底选择。`"dsh"` 与 `"kimi"` 支持已暂时下线，不得写入新草案。`sandbox` 只取 `read-only`/`workspace-write`，且必须是字面量；循环写节点按轮次生成 id 时必须以非空字面量前缀开头，供宿主披露与核验。
 5. `parallel()` 每项都是零参数函数；并发结果在使用前判空。
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
-7. 脚本级人工决策使用 `decisionGate`；prompt 不含完成上报指令。
+7. 人工输入使用原 Worker 的 `block`；没有脚本级决策门导入或调用，也没有以自定义 `blocked` 状态直接终止的断头路。
 8. 每个可能较慢的操作之前都有 `log()`。
 9. 没有仅因任务较长就机械加入 `todo.md`；启用时包含目标、已实现与已解决的问题，后续节点先读取再核对实际状态，且不存在并发分支共同写同一交接文件的设计。
 10. 引用的每个 API 都存在于 [references/api.md](references/api.md)；不臆造 `workflow()` 嵌套、

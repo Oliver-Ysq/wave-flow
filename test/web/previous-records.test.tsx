@@ -23,6 +23,6 @@ test('执行与结果共用原终态时间，聊天事件不展示恢复次数',
  expect(events).not.toContain('第 {attempt} 次');
  const result=app.slice(app.indexOf('function HistoricalResults('),app.indexOf('function ImpactSummaryNotice('));
  expect(result.indexOf('part="list"')).toBeGreaterThan(result.indexOf('高级 / 诊断信息'));
- const execution=app.slice(app.indexOf('function ExecutionDetail('),app.indexOf('function GateCard('));
+ const execution=app.slice(app.indexOf('function ExecutionDetail('),app.indexOf('function ExecutionRecoveryCard('));
  expect(execution.indexOf('part="list"')).toBeGreaterThan(execution.indexOf('<TeamPanel'));
 });

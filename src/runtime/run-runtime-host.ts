@@ -2,10 +2,10 @@ import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
 import type { JsonObject } from "../shared/json";
 import type { AuthorAgentRequest, NormalizedAgentRequest } from "../shared/workflow-types";
-import type { DecisionGateRequest, WorkflowExecutionHost } from "./workflow-host";
+import type { WorkflowExecutionHost } from "./workflow-host";
 import type { ExecutionBatch, PhaseVisit } from "./workflow-host";
 import type { AgentNodeExecutor } from "./run-types";
-import { RunStateMachine, validateGateAnswer } from "./run-state-machine";
+import { RunStateMachine } from "./run-state-machine";
 import { WorkflowContractError } from "../workflow/errors";
 import { isDeepStrictEqual } from "node:util";
 
@@ -32,8 +32,6 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   #mutationTail: Promise<unknown> = Promise.resolve();
   /** 同一节点的用户暂停与协议恢复暂停共享真实 Executor.pause，避免双取消与状态覆盖。 */
   #pauseOperations = new Map<string, Promise<void>>();
-  /** 等待用户答案的决策门；stop 时必须拒绝，避免 Workflow 永远悬挂。 */
-  #gateWaiters = new Map<string, { readonly resolve: (answer: JsonObject) => void; readonly reject: (error: Error) => void }>();
 
   constructor(
     private readonly journal: RunJournal,
@@ -343,61 +341,6 @@ export class RunRuntimeHost implements WorkflowExecutionHost {
   log(message: string): void {
     if (this.replay) return;
     void this.captureBackgroundFailure(this.durableApply(this.event({ type: "log.written", nodeId: null, message })));
-  }
-
-  /**
-   * 脚本显式决策门：先耐久 gate.created 再等待用户答案；replay 时同一 id 的
-   * 问题与 Schema 必须完全一致，已回答的直接返回耐久答案，不重复写入。
-   */
-  async decisionGate(request: DecisionGateRequest, phaseVisit: PhaseVisit | null): Promise<JsonObject> {
-    const existing = this.state.gate(request.id);
-    if (existing) {
-      if (existing.question !== request.question || !isDeepStrictEqual(existing.answerSchema, request.answerSchema)) throw new WorkflowContractError(`decisionGate 与已耐久决策门不匹配：${request.id}`);
-      if (!this.replay) throw new WorkflowContractError(`decisionGate 的 id 在同一 Run 内必须唯一：${request.id}`);
-      if (existing.answer !== null) return existing.answer;
-      // completed 前缀后的未答 gate 也是恢复边界；校验原问题/Schema 后建立新 attempt，
-      // 不能让外层已运行而内层仍 cancelled，且不能自动回答或重跑 completed 前缀。
-      await this.ensureReplayAttempt(phaseVisit?.title ?? this.#replayPhaseTitle ?? "default");
-      return this.waitForGateAnswer(request.id);
-    }
-    // resume 首个重跑节点会把脚本 phase() 的占位访问（phaseVisitId=0）替换为
-    // 新 attempt 的真实耐久访问；后续首次创建 gate 必须绑定这个新身份。
-    const activeVisit = this.replay
-      ? await this.ensureReplayAttempt(phaseVisit?.title ?? this.#replayPhaseTitle ?? "default")
-      : phaseVisit;
-    const created = this.event({ type: "gate.created", nodeId: null, gateId: request.id, question: request.question, answerSchema: request.answerSchema, executionAttemptId: this.state.snapshot().currentExecutionAttemptId, phaseVisitId: activeVisit?.phaseVisitId ?? null });
-    await this.durableApply(created);
-    return this.waitForGateAnswer(request.id);
-  }
-
-  /** Engine 答题入口：先于 Journal 写入校验 Schema；答案只唤醒等待同一 gate 的脚本调用。 */
-  async answerGate(gateId: string, answer: JsonObject): Promise<void> {
-    const gate = this.state.gate(gateId);
-    if (!gate) throw new WorkflowContractError(`未知决策门：${gateId}`);
-    if (gate.answer !== null) throw new WorkflowContractError(`决策门已回答：${gateId}`);
-    // Schema 拒绝必须先发生于任何耐久写入，否则坏答案会污染 Journal 并阻断重开。
-    validateGateAnswer(gate.answerSchema, answer);
-    await this.durableApply(this.event({ type: "gate.answered", nodeId: null, gateId, answer }));
-    const waiter = this.#gateWaiters.get(gateId);
-    if (waiter) {
-      this.#gateWaiters.delete(gateId);
-      waiter.resolve(answer);
-    }
-  }
-
-  /** stop 时拒绝全部 pending 决策门，让 Workflow 调用栈随节点一起收敛。 */
-  rejectPendingGates(diagnostic: string): void {
-    for (const waiter of this.#gateWaiters.values()) waiter.reject(new Error(diagnostic));
-    this.#gateWaiters.clear();
-  }
-
-  private waitForGateAnswer(gateId: string): Promise<JsonObject> {
-    // resume 建立 attempt 期间答案可能先耐久；注册等待者前复核，避免丢失唤醒。
-    const saved = this.state.gate(gateId)?.answer;
-    if (saved !== null && saved !== undefined) return Promise.resolve(saved);
-    return new Promise<JsonObject>((resolve, reject) => {
-      this.#gateWaiters.set(gateId, { resolve, reject });
-    });
   }
 
   /** 等待同步作者 API 排队的 Journal 写入，供 Run 收尾前建立 durable barrier。 */

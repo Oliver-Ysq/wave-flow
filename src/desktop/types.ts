@@ -224,11 +224,11 @@ export type ExecutionResponse = {
   readonly dynamicCount?:number;
   /** Execution 登记事实；终态与摘要由 lead.execution_finished 固定。 */
   readonly execution: WorkflowExecutionRecord;
-  /** Execution 内嵌 Run 的 Engine 权威快照；gates 字段携带决策门状态。 */
+  /** Execution 内嵌 Run 的 Engine 权威快照。 */
   readonly snapshot: RunSnapshot;
   /**
    * 该 Execution 是否在当前 Engine 的可控制生命周期内（Engine 进程持有活跃实例）。
-   * false 时 pause/recover/stop/answerGate 都会被拒绝，唯一前进路径是显式 resume；
+   * false 时 pause/recover/stop 都会被拒绝，唯一前进路径是显式 resume；
    * 重启后尚未收敛或尚未 resume 的 Execution 会长期处于 false。
    */
   readonly controllable: boolean;
@@ -280,7 +280,7 @@ export type ResumeExecutionRequest = {
   readonly authorized: true;
 };
 
-/** 用户对脚本决策门或主控决策请求提交 JSON 答案；答案不自动推进任何节点状态。 */
+/** 用户对主控决策请求提交 JSON 答案；答案不自动推进任何节点状态。 */
 export type AnswerDecisionRequest = {
   /** 已通过对应 answerSchema 校验前的原始 JSON 对象；Engine 负责校验。 */
   readonly answer: JsonObject;

@@ -49,7 +49,13 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.4.5`，支持 macOS 12+ / Apple Silicon。
+当前版本：`v0.5.0`，支持 macOS 12+ / Apple Silicon。
+
+### v0.5.0 重要变更
+
+- 新 Workflow 不再提供 `decisionGate`。任何 Worker 无法独立解决、需要用户补充信息、裁决或授权的问题，统一由原 Worker 在同一会话中 `block`；回答后逐项复核，仍有歧义则继续 `block`，全部解决后才能继续。
+- 普通产品缺陷仍通过修复与复验处理，只有用户也无法解除的硬阻塞才允许终止，不能用自定义 `status: "blocked"` 代替人工表单。
+- 旧 Journal 中的脚本 gate 事件不再兼容，重开含此类事件的档案会明确拒绝；升级前请自行清理这些历史事件。Worker `block` 事件与其他执行事实保持原语义。
 
 运行前提（Wave Flow 不内置、也不自动安装这些工具）：
 
@@ -67,7 +73,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.4.5_aarch64.dmg`，或从源码构建：
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.5.0_aarch64.dmg`，或从源码构建：
 
 ```sh
 bun install

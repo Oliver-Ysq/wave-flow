@@ -20,7 +20,6 @@ function snapshot(status: RunSnapshot["status"], nodeStatus: AgentSnapshot["stat
     phases: [{ title: "阶段", agents: [node], batches: [{ sequence: 1, mode: "serial", agents: [node] }] }],
     currentExecutionAttemptId: 1,
     phaseVisits: [],
-    gates: [],
   };
 }
 

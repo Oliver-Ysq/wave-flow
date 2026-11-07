@@ -1236,7 +1236,7 @@ ${evidence.text}`, false, undefined, key);
     });
   }
 
-  /** Execution 内部状态变化（gate、暂停等）的展示通知；展示层随后回读快照，不以本事件为状态依据。 */
+  /** Execution 内部状态变化（Worker block、暂停等）的展示通知；展示层随后回读快照，不以本事件为状态依据。 */
   async notifyExecutionChanged(leadRunId: string, executionId: string): Promise<void> {
     const entry = await this.entry(leadRunId);
     this.emit(entry, leadRunId, { type: "execution_changed", executionId });

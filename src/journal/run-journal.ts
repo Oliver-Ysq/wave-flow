@@ -274,20 +274,17 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
     case "agent.continued":
       if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim()) throw new Error("agent.continued payload 无效。");
       break;
-    case "gate.created":
-      if (event.nodeId !== null || event.agentSessionId !== null || typeof event.gateId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(event.gateId) || typeof event.question !== "string" || !event.question.trim() || (event.answerSchema !== undefined && !isJsonObject(event.answerSchema)) || !isPositiveInteger(event.executionAttemptId) || (event.phaseVisitId !== null && !isPositiveInteger(event.phaseVisitId))) throw new Error("gate.created payload 无效。");
-      break;
-    case "gate.answered":
-      if (event.nodeId !== null || event.agentSessionId !== null || typeof event.gateId !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/.test(event.gateId) || !isJsonObject(event.answer)) throw new Error("gate.answered payload 无效。");
-      break;
     case "desktop.exit_requested":
       if (event.nodeId !== null || event.agentSessionId !== null || typeof event.engineInstanceId !== "string" || !event.engineInstanceId.trim()) throw new Error("desktop.exit_requested payload 无效。 ");
       break;
     case "run.status":
       if (event.nodeId !== null || !isRunStatus(event.status)) throw new Error("run.status payload 无效。");
       break;
-    default:
+    default: {
+      const eventType = (event as { type?: unknown }).type;
+      if (eventType === "gate.created" || eventType === "gate.answered") throw new Error("旧脚本决策门事件已不支持，请清除该历史事件后再打开 Journal。");
       throw new Error("Journal 事件类型未知。");
+    }
   }
   return event as unknown as JournalEvent;
 }

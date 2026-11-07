@@ -440,18 +440,6 @@ export const api = {
       leadRunId,
       executionId,
     }),
-  answerExecutionGate: (
-    leadRunId: string,
-    executionId: string,
-    gateId: string,
-    answer: Record<string, unknown>,
-  ) =>
-    action<ExecutionResponse>("executions.answerGate", {
-      leadRunId,
-      executionId,
-      gateId,
-      answer,
-    }),
   answerLeadDecision: (
     leadRunId: string,
     decisionId: string,

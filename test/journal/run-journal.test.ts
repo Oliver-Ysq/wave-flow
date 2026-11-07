@@ -166,6 +166,13 @@ describe("RunJournal", () => {
     await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("未知");
   });
 
+  test("旧 gate 事件给出明确的不兼容诊断", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
+    const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));
+    await appendFile(join(journal.directory, "journal.jsonl"), `${JSON.stringify({ type: "gate.created", at: new Date().toISOString(), runId: journal.manifest.runId, nodeId: null, agentSessionId: null, diagnostic: null, gateId: "legacy", question: "旧问题", executionAttemptId: 1, phaseVisitId: null })}\n`, "utf8");
+    await expect(RunJournal.open(journal.manifest.runId, runsRoot(cwd))).rejects.toThrow("旧脚本决策门事件已不支持");
+  });
+
   test("拒绝完成节点早于创建节点的事件顺序", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "wave-flow-journal-")); directories.push(cwd);
     const journal = await RunJournal.create(manifest(cwd), runsRoot(cwd));

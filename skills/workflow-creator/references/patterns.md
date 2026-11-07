@@ -157,27 +157,13 @@ return agent(`复审刚才的实现，修复已验证的问题并再次运行检
 “集成 Agent”去解冲突，也不得预测 commit/tree hash 或执行 push；宿主在
 Execution 完成后宿主不保存快照，结果只保留在受管 worktree 的当前未提交文件里，不写入主工作区；作者不提供该接口。
 
-## 脚本级人工决策
+## Worker 人工输入与禁止断头路
 
-只有真正的业务分叉才用 `decisionGate`；先说明为什么需要人、可选项与影响：
+Runtime 不解释 Agent 自定义结果中的 `status`。需要人工输入时，必须由原 Worker 在同一会话调用 `block`，不得以返回 `blocked`、`needs_user`、自然语言提问、写总结或结束回合代替。
 
-```ts
-phase("确认");
-const decision = await decisionGate(
-  "confirm-scope",
-  `计划将修改 ${planned.files} 个文件。是否按此范围继续？`,
-  {
-    type: "object",
-    properties: { approved: { type: "boolean" }, note: { type: "string" } },
-    required: ["approved"],
-    additionalProperties: false,
-  },
-);
-if (decision.approved !== true) throw new Error(`用户未批准执行范围：${decision.note ?? "无说明"}`);
-```
+任何 Worker 无法独立消解、且需要用户补充信息、裁决或授权才能继续的问题，都必须请求人工裁决，不限于需求冲突。收到答案后逐项核对是否覆盖全部问题，并将答案落实到当前工作；仍有歧义时再次 `block`，全部解决前不得 `complete`。表单关闭不等于已回答，不自动重问，只有用户显式重开才能继续。
 
-gate  durable-first：先落盘再等待；用户停止 Execution 时等待中的 gate 会被拒绝，
-脚本随之收敛。Worker 自己的中途提问走 block/answer/continue，不要为它编排 gate。
+只有无法通过普通用户裁决继续的硬阻塞才返回结构化 `blocked`。功能或视觉缺陷走回修，预算耗尽返回 `needs_more_work`，进程或证据异常由 Runtime 标记 `interrupted`。
 
 ## 可观测的长任务
 
@@ -200,7 +186,7 @@ gate  durable-first：先落盘再等待；用户停止 Execution 时等待中�
 `src/lead/templates/` 下的同名 `.ts`；主控会话的 cwd 是用户项目，通常读不到它们，
 因此这里直接给出骨架要点），起草同类 Workflow 时按同一骨架组织，不要从零发明：
 
-- 深度调研：计划（`decisionGate` 让用户先确认或调整）→ 并行多源调研 → 每条结论由独立
+- 深度调研：计划（原 Worker 通过 `block` 让用户先确认或调整）→ 并行多源调研 → 每条结论由独立
   核验员复核 → 交叉检查矛盾与单一来源 → 缺口驱动的第二轮定向补证 → 撰写 → 红队审查 →
   修订。关键纪律：结论必须带原文摘录与来源 URL，核验员要重新打开来源而不是相信上游
   文本，缺口由交叉检查产出而不是拍脑袋。

@@ -77,8 +77,6 @@ export type RunSnapshot = {
   currentExecutionAttemptId: number;
   /** 当前尝试的阶段访问（含 occurrence 回访轮次与耐久批次）；两类 Run 统一以此呈现 Phase 轨迹。 */
   phaseVisits: PhaseVisit[];
-  /** 脚本声明的决策门；未回答时可由 Execution 专用端点交付 JSON 答案。 */
-  gates: Array<{ gateId: string; question: string; answerSchema: Record<string, unknown> | undefined; executionAttemptId: number; phaseVisitId: number | null; createdAt: string; answeredAt: string | null; answer: Record<string, unknown> | null }>;
 };
 
 export type PhaseSummary = {
@@ -231,7 +229,7 @@ export type WorkflowRevision = {
 /** Lead 内一次冻结脚本的执行登记；细节由 executionId 对应的 Run 快照提供。 */
 export type WorkflowExecution = {
  /** 本次明确确认冻结的前执行现场hash；首次缺省，不构成Replay或权限。 */ sceneEvidenceHash?:string;
- executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number; maxGates: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
+ executionId: string; revision: number; sourceHash: string; runtimeVersion: number; policy: { maxNodes: number; maxPhaseVisits: number }; createdAt: string; status: RunStatus; finishedAt: string | null; diagnostic: string | null; summary: Record<string, unknown> | null; config?: ExecutionConfigSnapshot | null };
 
 /** 分配卡冻结的一个 Worker 指派；创建 Execution 时随配置快照耐久。 */
 export type WorkerAssignment = { agentId: string; cli: RuntimeCli; model: "cli-default"; source: "lead-cli" | "user" | "random" | "rule" | "literal-cli"; runtimeId: string; adapterId: RuntimeAdapterId; adapterVersion: string };
@@ -295,7 +293,7 @@ export type LeadSnapshot = {
   /** 当前 ACP 会话广告的斜杠命令/技能；仅内存态，缺省表示尚无会话或尚未收到。 */
   availableCommands?: LeadAvailableCommand[];
   /** 当前 Engine 活跃执行的待答计数；只作提示，缺省不猜测，不能用于授权。 */
-  executionAttention?: Record<string,{workerRequests:number;scriptGates:number;finalizationError:string|null}>;
+  executionAttention?: Record<string,{workerRequests:number;finalizationError:string|null}>;
   task?: {
     /** 人工名称已耐久保存；缺省无人工覆盖，自动命名不得覆盖manual。 */
     titleSource?: "manual";

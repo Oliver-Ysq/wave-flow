@@ -94,8 +94,7 @@ type AgentOptions = {
 `format` 关键字。
 
 Worker 的完成、阻塞与恢复由 Runtime 注入的 session-private MCP 控制工具处理：prompt
-里只写业务任务，不写 shell `wave-flow complete` 之类的上报指令。Worker 中途需要人工
-输入时会自行调用 block，用户在 Web 界面回答后由原 Worker 决定是否继续。
+里只写业务任务，不写 shell `wave-flow complete` 之类的上报指令。任何 Worker 无法独立消解、且需要用户补充信息、裁决或授权才能继续的问题，都必须在同一会话调用 `block`，不限于需求冲突；自定义 `status`、自然语言提问或结束回合都不能代替表单。回答后由原 Worker 逐项复核，仍有歧义时再次 `block`，全部解决后才能继续。表单关闭不自动重问。
 
 ## `phase()`
 
@@ -155,17 +154,6 @@ function log(message: string): void;
 ```
 
 写入耐久日志事实，供 CLI 与 Web 实时展示。在每个可能较慢的操作之前调用；只发新信息。
-
-## `decisionGate()`
-
-```ts
-function decisionGate(id: string, question: string, answerSchema?: JsonObject): Promise<JsonObject>;
-// 或对象形式：decisionGate({ id, question, answerSchema })
-```
-
-先耐久落盘再阻塞等待用户在界面提交 JSON 答案；`answerSchema` 提供时先校验再交付。
-`id` 在同一 Run 内唯一（1–120 位 `[A-Za-z0-9._:/-]`）。只用于没有人类决定就无法安全
-继续的真正业务分叉；脚本普通错误自行处理，不要升级为用户表单。
 
 ## 结果与返回
 

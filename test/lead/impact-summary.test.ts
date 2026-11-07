@@ -27,7 +27,7 @@ async function fixture(prompt:()=>Promise<string>, singleWorkflow=true, beforeFi
  await journal.append({type:"workflow.revision_proposed",at:revision.createdAt,leadRunId:task.leadRunId,revision});
  await journal.append({type:"workflow.revision_accepted",at:revision.createdAt,leadRunId:task.leadRunId,revision:1});
  const executionId=crypto.randomUUID();
- await journal.append({type:"workflow.execution_created",at:revision.createdAt,leadRunId:task.leadRunId,execution:{executionId,revision:1,sourceHash:revision.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxGates:10,maxPhaseVisits:50},createdAt:revision.createdAt,status:"running",finishedAt:null,diagnostic:null,summary:null}});
+ await journal.append({type:"workflow.execution_created",at:revision.createdAt,leadRunId:task.leadRunId,execution:{executionId,revision:1,sourceHash:revision.sourceHash,runtimeVersion:9,policy:{maxNodes:20,maxPhaseVisits:50},createdAt:revision.createdAt,status:"running",finishedAt:null,diagnostic:null,summary:null}});
  service.close();
  const reopened=new LeadService(root,factory,undefined,async()=>({fingerprint:"injected-lead-session"}),true);services.push(reopened);
  reopened.setExecutionCapsuleReader(async(_task,ex,attempt)=>({executionId:ex,attempt,status:"cancelled",input:{token:"secret-value"},nodes:[],validation:"未覆盖"}));

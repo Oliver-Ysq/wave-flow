@@ -92,14 +92,14 @@ test("旧尝试中断总结不冒充最新已完成尝试的待办",()=>{
 });
 
 test("已结束执行的残留问题不提醒，活跃执行的问题仍提醒",()=>{
-  const snapshot={...task,executionAttention:{A:{workerRequests:1,scriptGates:1}}} as LeadSnapshot;
+  const snapshot={...task,executionAttention:{A:{workerRequests:1}}} as LeadSnapshot;
   expect(hasActiveExecutionQuestions(snapshot)).toBe(false);
   expect(hasActiveExecutionQuestions({...snapshot,executions:[{...execution,status:"running",finishedAt:null}]})).toBe(true);
   expect(hasActiveExecutionQuestions({...snapshot,executionAttention:{}})).toBe(false);
 });
 
 test("终态登记失败在活动区可见，不显示为正常执行中",()=>{
- const snapshot={...task,executions:[{...execution,status:"running",finishedAt:null}],executionAttention:{A:{workerRequests:0,scriptGates:0,finalizationError:"终态登记失败"}}} as LeadSnapshot;
+ const snapshot={...task,executions:[{...execution,status:"running",finishedAt:null}],executionAttention:{A:{workerRequests:0,finalizationError:"终态登记失败"}}} as LeadSnapshot;
  const html=renderToStaticMarkup(<TaskActivity task={snapshot} onPlan={()=>{}} onExecution={()=>{}} onResults={()=>{}} onAdjust={()=>{}} onTemplate={()=>{}} />);
  expect(html).toContain("登记失败");
  expect(html).not.toContain("执行中");

@@ -2120,8 +2120,7 @@ export function App() {
                       return (
                         execution.finishedAt === null &&
                         attention &&
-                        (attention.workerRequests > 0 ||
-                          attention.scriptGates > 0)
+                        attention.workerRequests > 0
                       );
                     })
                     .map((execution) => (
@@ -2301,34 +2300,6 @@ export function App() {
                     const next = await api.execution(
                       lead.leadRunId,
                       executionDetail.execution.executionId,
-                    );
-                    if (
-                      valid() &&
-                      leadRef.current?.leadRunId ===
-                        lead.leadRunId &&
-                      routeRef.current.kind === "workflow" &&
-                      routeRef.current.executionId ===
-                        next.execution.executionId
-                    )
-                      setExecutionDetail(next);
-                  } finally {
-                    finishBusy();
-                  }
-                }}
-                onAnswer={async (gateId, answer) => {
-                  const valid = requestFence.current.begin(
-                    `execution:${lead.leadRunId}:${executionDetail.execution.executionId}`,
-                  );
-                  const finishBusy = beginBusy(
-                    `execution:${executionDetail.execution.executionId}`,
-                    `gate:${gateId}`,
-                  );
-                  try {
-                    const next = await api.answerExecutionGate(
-                      lead.leadRunId,
-                      executionDetail.execution.executionId,
-                      gateId,
-                      answer,
                     );
                     if (
                       valid() &&
@@ -4559,7 +4530,6 @@ function ExecutionDetail({
   dynamicCount,
   leadRunId,
   onControl,
-  onAnswer,
   onAnswerBlock,
   onSavePartial,
 }: {
@@ -4574,7 +4544,6 @@ function ExecutionDetail({
   /** 所属 Lead Run id；用于跨 attempt 读取耐久 Phase 访问（复用分组）。 */
   leadRunId: string;
   onControl: (action: "pause" | "recover" | "stop" | "resume") => Promise<void>;
-  onAnswer: (gateId: string, answer: Record<string, unknown>) => Promise<void>;
   onAnswerBlock: (
     blockId: string,
     answer: Record<string, unknown>,
@@ -4855,21 +4824,6 @@ function ExecutionDetail({
                 {userFacingText(detail.snapshot.diagnostic)}
               </div>
             )}
-          {detail.snapshot.gates
-            .filter(
-              (gate) =>
-                gate.answer === null &&
-                detail.controllable &&
-                detail.snapshot.status === "running",
-            )
-            .map((gate) => (
-              <GateCard
-                key={gate.gateId}
-                gate={gate}
-                busy={busy === `gate:${gate.gateId}`}
-                onAnswer={(answer) => onAnswer(gate.gateId, answer)}
-              />
-            ))}
           <TeamPanel
             readOnly={
               !detail.controllable || terminal.has(detail.snapshot.status)
@@ -4884,14 +4838,6 @@ function ExecutionDetail({
             busy={busy}
             onAnswer={onAnswerBlock}
             loadAllVisits={loadAllVisits}
-            waitingVisitId={
-              detail.snapshot.gates.find(
-                (gate) =>
-                  gate.answer === null &&
-                  gate.executionAttemptId ===
-                    detail.snapshot.currentExecutionAttemptId,
-              )?.phaseVisitId ?? undefined
-            }
           />
           {/* 诊断与 Git 检查点合并为唯一的页尾附录，不占正文与操作区之间。 */}
           {!detail.workspaceEvidence && (
@@ -4989,38 +4935,6 @@ function ExecutionRecoveryCard({
         </details>
       )}
     </section>
-  );
-}
-
-function GateCard({
-  gate,
-  busy,
-  onAnswer,
-}: {
-  gate: RunSnapshot["gates"][number];
-  busy: boolean;
-  onAnswer: (answer: Record<string, unknown>) => Promise<void>;
-}) {
-  return (
-    <article className="conversation-action execution-gate">
-      <span>需要你确认的步骤</span>
-      <p>{gate.question}</p>
-      {gate.answerSchema ? (
-        <SchemaForm
-          schema={gate.answerSchema}
-          draftKey={`gate:${gate.gateId}`}
-          busy={busy}
-          submitLabel="提交答案"
-          onSubmit={onAnswer}
-        />
-      ) : (
-        <FreeJsonAnswer
-          busy={busy}
-          submitLabel="提交答案"
-          onSubmit={onAnswer}
-        />
-      )}
-    </article>
   );
 }
 

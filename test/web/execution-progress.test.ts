@@ -34,7 +34,6 @@ function snapshot(
     phases,
     currentExecutionAttemptId: 1,
     phaseVisits: [],
-    gates: [],
   };
 }
 

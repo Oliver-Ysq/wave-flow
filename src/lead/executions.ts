@@ -98,7 +98,7 @@ export class LeadExecutionService {
       if (activeAttempt !== attempt) continue;
       if(event.type==="agent.completed")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,agentSessionId:event.agentSessionId,diagnostic:event.diagnostic,resultPath:event.resultPath,validationPath:event.validationPath,validation:event.validationPath?"原Journal重开已校验独立validation记录；不等于业务验收":"未保存独立validation记录，不补造验证证据"});
       if(event.type==="agent.status"||event.type==="run.status")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,agentSessionId:event.agentSessionId,status:event.status,diagnostic:event.diagnostic});
-      if(event.type==="block.created"||event.type==="block.answered"||event.type==="gate.created"||event.type==="gate.answered")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,diagnostic:event.diagnostic,decision:event.type.endsWith("answered")?"已交付原请求答案，不授权新动作":"原请求待处理"});
+      if(event.type==="block.created"||event.type==="block.answered")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,diagnostic:event.diagnostic,decision:event.type.endsWith("answered")?"已交付原请求答案，不授权新动作":"原请求待处理"});
       // 执行器提示只证明“曾观察到该现场”；它不改变状态，也不证明 Worker 仍在产出。
       if(boundedNodeLogs.has(index)&&event.type==="log.written")evidence.push({type:event.type,at:event.at,nodeId:event.nodeId,agentSessionId:event.agentSessionId,diagnostic:event.diagnostic,message:event.message,note:"执行器提示不改变业务状态，也不保证后续仍有进展"});
     }
@@ -381,7 +381,7 @@ export class LeadExecutionService {
 
   /**
    * Execution 是否处于当前 Engine 的可控制生命周期内（本进程持有活跃实例）。
-   * Engine 重启后旧 Execution 的耐久状态可能仍是 running/paused，但 pause/stop/answerGate
+   * Engine 重启后旧 Execution 的耐久状态可能仍是 running/paused，但 pause/stop
    * 都会拒绝；UI 依此提供显式 resume 入口，而不是展示注定失败的控制按钮。
    */
   isControllable(executionId: string): boolean {
@@ -389,9 +389,9 @@ export class LeadExecutionService {
   }
 
   /** 活跃实例的轻量待答投影；不读取历史节点结果，不作为控制授权。 */
-  attention(executionId:string): { readonly workerRequests:number; readonly scriptGates:number; readonly finalizationError:string|null } {
+  attention(executionId:string): { readonly workerRequests:number; readonly finalizationError:string|null } {
     const snapshot=this.#instances.get(executionId)?.runtime.snapshot();
-    return {workerRequests:snapshot?.phases.flatMap(phase=>phase.agents).filter(agent=>agent.status==="blocked").length ?? 0,scriptGates:snapshot?.status==="running" ? snapshot.gates.filter(gate=>gate.answer===null).length : 0,finalizationError:this.#finalizationErrors.get(executionId)??null};
+    return {workerRequests:snapshot?.phases.flatMap(phase=>phase.agents).filter(agent=>agent.status==="blocked").length ?? 0,finalizationError:this.#finalizationErrors.get(executionId)??null};
   }
 
   /** 特定 attempt 的只读证据；新格式显式身份，旧格式按事件顺序绑定，不猜时间。 */
@@ -451,7 +451,7 @@ export class LeadExecutionService {
     return this.control(leadRunId, executionId, "recover", current => current.reopenBlock(blockRequestId), `block:${blockRequestId}`);
   }
 
-  /** 用户停止是终态；先抢占悬挂的 pause/recover，再拒绝 pending 决策门。 */
+  /** 用户停止是终态；先抢占悬挂的 pause/recover，再收敛所有活跃 Worker。 */
   async stop(leadRunId: string, executionId: string): Promise<RunSnapshot> {
     const active = this.#controlRequests.get(executionId);
     if (active && active.kind !== "stop") {
@@ -480,21 +480,6 @@ export class LeadExecutionService {
         this.retireInstance(executionId, instance);
       });
     }
-  }
-
-  /** 用户对脚本决策门提交答案；Execution 必须在当前 Engine 活跃，否则应先显式 resume。 */
-  async answerGate(leadRunId: string, executionId: string, gateId: string, answer: JsonObject): Promise<RunSnapshot> {
-    return this.withLifecycleLock(leadRunId,async()=>{
-    await this.runtimeFor(leadRunId,executionId);
-    const runtime = this.#instances.get(executionId)?.runtime;
-    if (!runtime) throw new Error("该 Execution 不在当前 Engine 的可控制生命周期内；请先显式 resume。 ");
-    const record=(await this.lead.snapshot(leadRunId)).executions.find(item=>item.executionId===executionId);
-    // 显式 resume 已登记 running 时，原 Runtime 可能还在建立 attempt；答案仍可耐久交付。
-    if(record?.finishedAt!==null||record.status!=="running")throw new Error("只有运行中的原Execution可以回答决策门。");
-    await runtime.answerGate(gateId, answer);
-    await this.lead.notifyExecutionChanged(leadRunId, executionId);
-    return runtime.snapshot();
-    });
   }
 
   /**
@@ -546,8 +531,8 @@ export class LeadExecutionService {
     }
     if (record.kind !== "local-run" && record.kind !== "module-run") throw new Error("旧格式执行记录不可恢复，请重新生成。");
     const module = await loadWorkflowSource(source, revision.localOrigin?.path ?? "workflow.ts");
-    // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、决策门
-    // waiter 和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
+    // Engine 在 paused/pausing/recovering 中退出时，原 Workflow 调用栈、Worker block
+    // 等待者和执行器均不存在；不能伪造 recover。用户明确 resume 时先如实把旧
     // 尝试收敛为 interrupted，再由标准 Replay 路径创建新 attempt。
     // 围栏必须先于任何交接登记：Journal 写者证据 + 进程组核验不通过时不得改动
     // 旧 Journal 状态、重开 Execution 登记或构造执行器。
@@ -654,7 +639,7 @@ export class LeadExecutionService {
       .then(async () => {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            // stop() 会先拒绝 pending gate 再写 cancelled；run() 的 rejection 可能先到达。
+            // run() 的 rejection 可能先到达，停止中的调用栈必须先完成收敛。
             // 等待快照收敛到终态再登记，避免把"停止中"误记为 interrupted。
             const deadline = Date.now() + 10_000;
             let snapshot = runtime.snapshot();
@@ -708,7 +693,7 @@ export class LeadExecutionService {
 
 /** Engine 内一次实际执行的所有权；对象身份独立于持久 executionId/attempt。 */
 type ExecutionInstance = {
-  /** 该实例独占的 Runtime、调用栈和决策门等待者。 */
+  /** 该实例独占的 Runtime、调用栈和 Worker block 等待者。 */
   readonly runtime: RunRuntime;
   /** 接线时捕获的同步资源释放器；缺省表示没有外部 Control 资源。 */
   readonly releaseControl: void | (() => void);

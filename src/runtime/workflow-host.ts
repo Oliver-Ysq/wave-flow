@@ -21,16 +21,6 @@ export type PhaseVisit = {
   readonly occurrence: number;
 };
 
-/** 作者模块声明的业务决策门请求；本地与生成模块共用，不替代 Worker block/continue。 */
-export type DecisionGateRequest = {
-  /** Run 内稳定唯一的决策门 id；replay 按它对齐已耐久事实。 */
-  readonly id: string;
-  /** 面向用户的完整问题说明：为什么必须有人类决定才能安全继续。 */
-  readonly question: string;
-  /** 可选答案 JSON Schema；Engine 答题 action 与 Journal 重开都会按它校验。 */
-  readonly answerSchema?: JsonObject;
-};
-
 /** Workflow 作者 API 在本阶段委派给 Runtime 的最小操作集合。 */
 export interface WorkflowExecutionHost {
   /**
@@ -42,6 +32,4 @@ export interface WorkflowExecutionHost {
   phase(title: string): PhaseVisit;
   /** 接收作者日志；本阶段不解释文本，后续 Journal/Web 可消费该事件。 */
   log(message: string): void;
-  /** 接收脚本显式声明的决策门；durable-first 写入后等待用户答案，replay 直接返回已耐久答案。 */
-  decisionGate(request: DecisionGateRequest, phaseVisit: PhaseVisit | null): Promise<JsonObject>;
 }

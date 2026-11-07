@@ -6,7 +6,7 @@ import Ajv from "ajv";
 import { executeWorkflow } from "../../src/workflow/execute-workflow";
 import { loadWorkflowSource } from "../../src/workflow/load-workflow";
 import { listWorkflowTemplates } from "../../src/lead/workflow-templates";
-import type { DecisionGateRequest, ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "../../src/runtime/workflow-host";
+import type { ExecutionBatch, PhaseVisit, WorkflowExecutionHost } from "../../src/runtime/workflow-host";
 import type { JsonObject } from "../../src/shared/json";
 import type { AuthorAgentRequest } from "../../src/shared/workflow-types";
 
@@ -23,9 +23,8 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 class ScriptedHost implements WorkflowExecutionHost {
   readonly agents: AuthorAgentRequest[] = [];
   readonly phases: string[] = [];
-  readonly gates: DecisionGateRequest[] = [];
   readonly agentBatches = new Map<string, ExecutionBatch>();
-  constructor(private readonly respond: (request: AuthorAgentRequest) => JsonObject | null, private readonly answer: JsonObject = { approved: true, adjustments: "" }) {}
+  constructor(private readonly respond: (request: AuthorAgentRequest) => JsonObject | null) {}
   async agent(request: AuthorAgentRequest, batch: ExecutionBatch): Promise<JsonObject | null> {
     this.agents.push(request);
     this.agentBatches.set(request.id, batch);
@@ -38,7 +37,6 @@ class ScriptedHost implements WorkflowExecutionHost {
   }
   phase(title: string): PhaseVisit { this.phases.push(title); return { executionAttemptId: 1, phaseVisitId: this.phases.length, title, occurrence: 1 }; }
   log(): void {}
-  async decisionGate(request: DecisionGateRequest): Promise<JsonObject> { this.gates.push(request); return this.answer; }
 }
 
 const finding = { title: "越界读", severity: "high", confidence: "high", file: "src/a.ts", lines: "10-14", evidence: "const x = arr[i]", trigger: "i 越界", impact: "崩溃", suggestion: "加边界判断" };
@@ -80,9 +78,6 @@ test("深度调研：计划确认、并行调研、逐条核验、缺口补证�
   const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(researchRespond);
   const result = await executeWorkflow(module, { topic: "端侧推理框架", depth: "deep", questions: ["怎么选"], context: "", language: "中文" }, host, { cwd: await workspace() }) as { report: string; stats: Record<string, number> };
-  expect(host.gates).toHaveLength(1);
-  expect(host.gates[0]!.id).toBe("approve-research-plan");
-  expect(host.gates[0]!.answerSchema).toMatchObject({ required: ["approved", "adjustments"] });
   expect(host.phases).toEqual(["计划", "调研", "核验", "交叉检查与补证", "综评", "批判", "定稿"]);
   const ids = host.agents.map(request => request.id);
   expect(ids).toContain("planner");
@@ -127,23 +122,16 @@ test("深度调研：standard 模式也把交叉检查的缺口列入未解决�
   expect(host.agents.some(request => request.id.startsWith("research-r2-"))).toBe(false);
 });
 
-test("深度调研：计划被否决且无调整说明时立即失败，不消耗调研预算", async () => {
+test("深度调研：计划确认由原 Worker 会话处理，不使用脚本决策门", async () => {
   const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
   const module = await loadWorkflowSource(template.source);
-  const host = new ScriptedHost(researchRespond, { approved: false, adjustments: "  " });
-  await expect(executeWorkflow(module, { topic: "端侧推理框架" }, host, { cwd: await workspace() })).rejects.toThrow("未获批准");
-  expect(host.agents.map(request => request.id)).toEqual(["planner"]);
-});
-
-test("深度调研：用户给出调整时重新出计划再继续调研", async () => {
-  const template = listWorkflowTemplates().find(item => item.id === "deep-research")!;
-  const module = await loadWorkflowSource(template.source);
-  const host = new ScriptedHost(researchRespond, { approved: false, adjustments: "只研究基准测试" });
+  const host = new ScriptedHost(researchRespond);
   await executeWorkflow(module, { topic: "端侧推理框架", depth: "standard" }, host, { cwd: await workspace() });
-  const ids = host.agents.map(request => request.id);
-  expect(ids[0]).toBe("planner");
-  expect(ids[1]).toBe("planner-revised");
-  expect(ids.filter(id => id.startsWith("research-r1-"))).toHaveLength(2);
+  const planner = host.agents.find(request => request.id === "planner")!;
+  expect(planner.prompt).toContain("必须使用 block 请用户确认");
+  expect(planner.prompt).toContain("不得把自定义 blocked 状态或结束回合当作人工确认");
+  expect(template.source).not.toContain("decisionGate");
+  expect(template.source).not.toContain("planner-revised");
 });
 
 test("深度调研：调研节点失败时继续用其余结果，不产出空报告", async () => {
@@ -245,7 +233,6 @@ test("深度CR：摸底、六个专项并行审查、逐条取证复核、裁决
   const module = await loadWorkflowSource(template.source);
   const host = new ScriptedHost(reviewRespond);
   const result = await executeWorkflow(module, { target: "src", base: "main", focus: ["并发"], context: "", language: "中文" }, host, { cwd: await workspace() }) as { report: string; mergeRecommendation: string; stats: Record<string, number> };
-  expect(host.gates).toHaveLength(0);
   expect(host.phases).toEqual(["摸底", "分维审查", "取证复核", "交叉裁决", "盲区扫描", "定稿汇总"]);
   const ids = host.agents.map(request => request.id);
   expect(ids).toEqual([

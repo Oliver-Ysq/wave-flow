@@ -205,25 +205,6 @@ export type JournalEvent = JournalBase & ({
   readonly type: "agent.continued";
   readonly blockRequestId: string;
 } | {
-  /** 作者模块显式声明的业务决策门；nodeId 固定为 null，不属于任何 Agent 会话。 */
-  readonly type: "gate.created";
-  /** Run 内稳定唯一的决策门 id；replay 按它对齐旧事实。 */
-  readonly gateId: string;
-  /** 面向用户的完整问题说明：为什么必须有人类决定才能安全继续。 */
-  readonly question: string;
-  /** 可选答案 JSON Schema；只约束答案形状，不承担业务说明。 */
-  readonly answerSchema?: JsonObject;
-  /** 创建该 gate 的执行尝试；必须属于当前尝试。 */
-  readonly executionAttemptId: number;
-  /** 创建时所属的阶段访问；脚本尚未调用 phase() 时为 null。 */
-  readonly phaseVisitId: number | null;
-} | {
-  /** 用户答案已耐久写入；只唤醒等待同一 gate 的脚本调用，不改变任何节点状态。 */
-  readonly type: "gate.answered";
-  readonly gateId: string;
-  /** 已按 gate.created 的 answerSchema 校验的 JSON 答案。 */
-  readonly answer: JsonObject;
-} | {
   /** 用户明确退出 Desktop；必须先于本次退出写入的 cancelled 终态。 */
   readonly type: "desktop.exit_requested";
   /** 当前 Desktop Execution Engine 的随机实例标识，仅用于审计，不是授权凭据。 */

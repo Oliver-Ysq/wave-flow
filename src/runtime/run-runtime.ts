@@ -133,7 +133,6 @@ export class RunRuntime {
       // Journal fail closed 时封存写入必然失败；绝不因此吞掉上方的首个失败。
       if (!this.#stopping && this.state.snapshot().status === "running") {
         this.host.abortQueuedStarts();
-        this.host.rejectPendingGates("Workflow 异常终止，停止等待中的决策与节点。 ");
         try {
           await this.interruptControlWorkers(diagnostic, true);
           await this.transitionRun("interrupted", diagnostic);
@@ -165,9 +164,6 @@ export class RunRuntime {
 
   /** 启动/恢复收敛的耐久写入；与 Worker/控制路径共用同一互斥区与可重放核验。 */
   async commitConvergence(event: JournalEvent): Promise<void> { await this.host.commitEvent(event); }
-
-  /** 用户对脚本决策门提交答案；Schema 校验通过并耐久后才唤醒等待中的脚本。 */
-  answerGate(gateId: string, answer: JsonObject): Promise<void> { return this.host.answerGate(gateId, answer); }
 
   /** 为当前 Run 创建唯一 ControlServer；真实执行器须在节点启动前绑定它。 */
   createControlServer(): ControlServer {
@@ -312,8 +308,6 @@ export class RunRuntime {
     // 归还名额，绝不能在 stop 释放名额后启动真实 Worker。
     this.host.abortQueuedStarts();
     this.#stopping = true;
-    // 等待用户答案的决策门不属于任何节点；stop 必须主动拒绝它们，Workflow 调用栈才能退出。
-    this.host.rejectPendingGates("用户停止 Run，决策门不再等待答案。 ");
     const activeControl = this.#controlAbort;
     activeControl?.abort();
     // pause/recover 可能正写入 agent/run 状态；先等待它因 abort 完成 finally 清理，
@@ -374,7 +368,6 @@ export class RunRuntime {
     catch (error) { exitError = error instanceof Error ? error : new Error(String(error)); }
     this.host.pauseScheduling(); this.#stopping = true;
     this.host.abortQueuedStarts();
-    this.host.rejectPendingGates("退出 Wave Flow，决策门不再等待答案。 ");
     const activeControl = this.#controlAbort;
     activeControl?.abort();
     // pause/recover 可能正写入 agent/run 状态；先等它完成 finally 清理再写

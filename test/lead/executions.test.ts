@@ -18,13 +18,14 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 const model: ResolvedLeadModelConfig = { model: "test-model", baseUrl: "http://127.0.0.1:9", apiKey: "test-key" };
 const createPi = (): LeadSession => { throw new Error("测试不创建真实 Pi 会话。 "); };
 
-async function fixture(): Promise<{ lead: LeadService; executions: LeadExecutionService; leadRunId: string; root: string }> {
+async function fixture(): Promise<{ lead: LeadService; executions: LeadExecutionService; executor: DeterministicExecutor; leadRunId: string; root: string }> {
   const root = await mkdtemp(join(tmpdir(), "wave-flow-execution-"));
   directories.push(root);
   const lead = new LeadService(root, async () => model, createPi);
-  const executions = new LeadExecutionService(lead, () => ({ executor: new DeterministicExecutor() }), {}, root);
+  const executor = new DeterministicExecutor(["w2"]);
+  const executions = new LeadExecutionService(lead, () => ({ executor }), {}, root);
   const created = await lead.create(root);
-  return { lead, executions, leadRunId: created.leadRunId, root };
+  return { lead, executions, executor, leadRunId: created.leadRunId, root };
 }
 
 test("只读Execution现场仍检测Git文件内容变化；非Git明确缺基线而非伪造Git证据", async () => {
@@ -60,13 +61,11 @@ export default async function run(args) {
   return { ok: true, node: done.nodeId, note: args.note ?? null };
 }`;
 
-const GATE_SOURCE = `import { agent, decisionGate, phase } from "wave-flow";
-export const meta = { name: "exec-gate", description: "带决策门", phases: [{ title: "工作" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };
+const PENDING_SOURCE = `import { agent, phase } from "wave-flow";
+export const meta = { name: "exec-pending", description: "等待 Worker 完成", phases: [{ title: "工作" }], inputSchema: { type: "object", properties: {}, additionalProperties: false } };
 export default async function run(args) {
   phase("工作");
   await agent("第一阶段", { id: "w1", cli: "codex" });
-  const answer = await decisionGate({ id: "confirm", question: "是否进入第二阶段？" });
-  if (!answer.ok) throw new Error("用户拒绝");
   return agent("第二阶段", { id: "w2", cli: "codex" });
 }`;
 
@@ -86,7 +85,7 @@ describe("LeadExecutionService", () => {
       if(text.startsWith("请总结"))return "完整总结，测试不证明外部副作用。";
       await actions.proposeWorkflowRevision(basis===1?SIMPLE_SOURCE:writeSource,"同目标继续","现场保留",undefined,basis++);return "方案";
     }}),undefined,async()=>({fingerprint:"injected-lead-session"}),true);
-    const service=new LeadExecutionService(lead,()=>({executor:new DeterministicExecutor()}),{},root);
+    const service=new LeadExecutionService(lead,()=>({executor:new DeterministicExecutor(["w2"])}),{},root);
     lead.setExecutionCapsuleReader((task,execution,attempt)=>service.capsuleEvidence(task,execution,attempt));lead.setExecutionSceneReader(async()=>({stable:true}));
     try{
       const task=await lead.startTask(root,{clientRequestId:crypto.randomUUID(),projectId:"p",text:"写任务"});
@@ -174,7 +173,7 @@ describe("LeadExecutionService", () => {
   test("已执行候选拒绝重复创建；新候选须显式准备且历史结果保持原身份", async () => {
     const root = await mkdtemp(join(tmpdir(), "wave-flow-task-execution-")); directories.push(root);
     const lead = new LeadService(root, async (_id,_cwd,_prior,actions) => ({ isRunning:false, subscribe:()=>()=>{}, abort:()=>{}, prompt:async(text)=> { if(text.startsWith("请总结"))return "执行完成，交付已保存，影响证据不足。";await actions.proposeWorkflowRevision(SIMPLE_SOURCE,"检查目标","只读"); return "方案已提出"; } }));
-    const executions = new LeadExecutionService(lead, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    const executions = new LeadExecutionService(lead, () => ({ executor: new DeterministicExecutor(["w2"]) }), {}, root);
     lead.setExecutionCapsuleReader((task,execution,attempt)=>executions.capsuleEvidence(task,execution,attempt));
     const task = await lead.startTask(root, { clientRequestId:crypto.randomUUID(),projectId:"project",text:"验证启动资格" });
     await waitFor(async()=> (await lead.snapshot(task.leadRunId)).status === "idle");
@@ -201,7 +200,8 @@ describe("LeadExecutionService", () => {
     const oldReturn = new Promise<void>(resolve => { oldReturned = resolve; });
     const runtimes: import("../../src/runtime/run-runtime").RunRuntime[] = [];
     const releases: number[] = [];
-    const executions = new LeadExecutionService(lead, () => ({ executor: new DeterministicExecutor() }), {
+    const executor = new DeterministicExecutor(["w2"]);
+    const executions = new LeadExecutionService(lead, () => ({ executor }), {
       wireControl(runtime) {
         runtimes.push(runtime);
         const instanceNumber = runtimes.length;
@@ -215,10 +215,10 @@ describe("LeadExecutionService", () => {
       },
     }, root);
     try {
-      await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+      await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
       await lead.acceptWorkflowRevision(leadRunId, 1);
       const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-      await waitFor(() => runtimes[0].snapshot().gates.length === 1);
+      await waitFor(() => runtimes[0].snapshot().phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
       await executions.cancelForDesktopExit("test-exit");
       expect(releases).toEqual([1]);
       await executions.resume(leadRunId, execution.executionId);
@@ -227,7 +227,8 @@ describe("LeadExecutionService", () => {
       // 等待旧后台 promise 的 then/finally 执行完，且不让新回合提前完成。
       await new Promise<void>(resolve => setImmediate(resolve));
       expect(releases).toEqual([1]);
-      await expect(executions.answerGate(leadRunId, execution.executionId, "confirm", { ok: true })).resolves.toBeDefined();
+      await waitFor(() => executor.hasPending("w2"));
+      executor.completePending();
       await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
       expect((await executions.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
       const reopened = await LeadJournal.open(leadRunId, root);
@@ -267,19 +268,19 @@ describe("LeadExecutionService", () => {
   });
 
   test("一个 Lead 顺序拥有多个 Execution：活跃期拒绝新执行", async () => {
-    const { lead, executions, leadRunId,root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    const { lead, executions, executor, leadRunId,root } = await fixture();
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    // 第一个 Execution 停在决策门上，未达终态。
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
-    expect(executions.attention(execution.executionId)).toEqual({workerRequests:0,scriptGates:1,finalizationError:null});
+    // 第一个 Execution 的第二个 Worker 尚未完成，未达终态。
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
+    expect(executions.attention(execution.executionId)).toEqual({workerRequests:0,finalizationError:null});
     const unrelated=await lead.create(root);
-    await expect(executions.answerGate(unrelated.leadRunId,execution.executionId,"confirm",{ok:true})).rejects.toThrow("未知");
     await expect(executions.stop(unrelated.leadRunId,execution.executionId)).rejects.toThrow("不属于");
-    expect((await executions.snapshotExecution(leadRunId,execution.executionId)).gates[0].answer).toBeNull();
+    expect((await executions.snapshotExecution(leadRunId,execution.executionId)).phases[0]?.agents.find((agent) => agent.id === "w2")?.result).toBeNull();
     await expect(executions.createExecution(leadRunId, 1, {}, undefined)).rejects.toThrow("未结束");
-    await executions.answerGate(leadRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(() => executor.hasPending("w2"));
+    executor.completePending();
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
     // 终态后新 revision 可以创建下一个 Execution。
     await lead.proposeWorkflowRevision(leadRunId, SIMPLE_SOURCE);
@@ -292,7 +293,7 @@ describe("LeadExecutionService", () => {
 
   test("并发创建只登记首个 Execution，拒绝请求不会留下孤儿嵌套 Run", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const results = await Promise.allSettled([
       executions.createExecution(leadRunId, 1, {}, undefined),
@@ -333,24 +334,24 @@ describe("LeadExecutionService", () => {
     expect(await recovering).toBeInstanceOf(Error);
   });
 
-  test("stop 是终态并拒绝 pending 决策门；离线 Execution 不可控制", async () => {
+  test("stop 是终态且离线 Execution 不可控制", async () => {
     const { lead, executions, leadRunId } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
     const stopped = await executions.stop(leadRunId, execution.executionId);
     expect(stopped.status).toBe("cancelled");
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "cancelled");
-    await expect(executions.answerGate(leadRunId, execution.executionId, "confirm", { ok: true })).rejects.toThrow("可控制生命周期");
+    expect(executions.isControllable(execution.executionId)).toBe(false);
   });
 
   test("退出与 settle 并发登记终态只写一条 execution_finished，Journal 可重开", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
     // 退出路径与后台 settle 会同时尝试登记终态；第二条 execution_finished
     // 会让 Journal 重放永久失败，因此必须幂等。
     await executions.cancelForDesktopExit("exit-engine");
@@ -463,16 +464,17 @@ describe("LeadExecutionService", () => {
   });
 
   test("blocked Worker 的 Execution 在退出时收敛为 cancelled 且可显式 resume", async () => {
-    const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    const { lead, executions, executor, leadRunId, root } = await fixture();
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
     await executions.cancelForDesktopExit("exit-engine");
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].finishedAt !== null);
     expect((await executions.listExecutions(leadRunId))[0].status).toBe("cancelled");
     await executions.resume(leadRunId, execution.executionId);
-    await executions.answerGate(leadRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(() => executor.hasPending("w2"));
+    executor.completePending();
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
     expect((await executions.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
     const reopened = await LeadJournal.open(leadRunId, root);
@@ -486,47 +488,48 @@ describe("LeadExecutionService", () => {
   });
 
   test("用户取消的 Execution 可显式 resume 为新 attempt", async () => {
-    const { lead, executions, leadRunId } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    const { lead, executions, executor, leadRunId } = await fixture();
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
     await executions.stop(leadRunId, execution.executionId);
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "cancelled");
     await executions.resume(leadRunId, execution.executionId);
     await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId === 2);
     expect((await executions.snapshotExecution(leadRunId, execution.executionId)).status).toBe("running");
-    await executions.answerGate(leadRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(() => executor.hasPending("w2"));
+    executor.completePending();
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
     expect((await executions.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId).toBe(2);
   });
 
-  test("Engine 重启后只读还原登记事实，显式 resume 以新 attempt 继续未答 gate", async () => {
+  test("Engine 重启后只读还原登记事实，显式 resume 以新 attempt 继续未完成 Worker", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
 
     // 模拟 Engine 重启：全新服务实例，没有任何内存 Runtime。
     let executions2Count = 0;
+    const resumedExecutor = new DeterministicExecutor(["w2"]);
     const lead2 = new LeadService(root, async () => model, createPi);
-    const executions2 = new LeadExecutionService(lead2, () => ({ executor: { execute: async () => { executions2Count += 1; return { n: executions2Count }; } } }), {}, root);
+    const executions2 = new LeadExecutionService(lead2, () => ({ executor: { execute: async (node) => { executions2Count += 1; return resumedExecutor.execute(node); } } }), {}, root);
     const records = await executions2.listExecutions(leadRunId);
     expect(records).toHaveLength(1);
     expect(records[0].status).toBe("running");
     expect(executions2.isControllable(execution.executionId)).toBe(false);
-    await expect(executions2.answerGate(leadRunId, execution.executionId, "confirm", { ok: true })).rejects.toThrow("可控制生命周期");
 
-    // 显式 resume：w1 复用 completed 结果，已创建的 gate 不重复落盘，等待原 gate 答案。
+    // 显式 resume：w1 复用 completed 结果，未完成的 w2 在新 attempt 中重新执行。
     const resumed = await executions2.resume(leadRunId, execution.executionId);
     expect(resumed.status).toBe("running");
     expect(executions2.isControllable(execution.executionId)).toBe(true);
-    await executions2.answerGate(leadRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(async () => (await executions2.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId === 2);
+    await waitFor(() => resumedExecutor.hasPending("w2"));
+    resumedExecutor.completePending();
     await waitFor(async () => (await executions2.listExecutions(leadRunId))[0].status === "completed");
     const detail = await executions2.snapshotExecution(leadRunId, execution.executionId);
-    expect(detail.gates).toHaveLength(1);
-    // w1 在尝试 #1 已完成并被复用；答题后新建的 w2 属于新尝试 #2。
     expect(detail.currentExecutionAttemptId).toBe(2);
     expect(executions2Count).toBe(1);
     expect(detail.phases[0].agents.map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w2:completed"]);
@@ -534,13 +537,13 @@ describe("LeadExecutionService", () => {
 
   test("Engine 重启时遗留的 active Execution 必须收敛为 interrupted，不能伪装为工作中", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
 
     const restartedLead = new LeadService(root, async () => model, createPi);
-    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor(["w2"]) }), {}, root);
     await restarted.convergeStaleExecutions(leadRunId);
     await expect(restarted.listExecutions(leadRunId)).resolves.toMatchObject([
       { executionId: execution.executionId, status: "interrupted", finishedAt: expect.any(String), diagnostic: expect.stringContaining("不可跨进程认领") },
@@ -555,19 +558,22 @@ describe("LeadExecutionService", () => {
 
   test("重启收敛为 interrupted 后，用户仍可显式 resume 创建新 attempt", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
 
     let resumedNodes = 0;
+    const resumedExecutor = new DeterministicExecutor(["w2"]);
     const restartedLead = new LeadService(root, async () => model, createPi);
-    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: { execute: async () => ({ n: ++resumedNodes }) } }), {}, root);
+    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: { execute: async (node) => { resumedNodes += 1; return resumedExecutor.execute(node); } } }), {}, root);
     await restarted.convergeStaleExecutions(leadRunId);
     // interrupted 的 running 事实由首个重放节点通过调用指纹校验后才写入；resume
     // 返回时可以仍是 interrupted，但后台重放必须实际创建 attempt #2。
     await expect(restarted.resume(leadRunId, execution.executionId)).resolves.toMatchObject({ status: "interrupted", currentExecutionAttemptId: 1 });
-    await restarted.answerGate(leadRunId, execution.executionId, "confirm", { ok: true });
+    await waitFor(async () => (await restarted.snapshotExecution(leadRunId, execution.executionId)).currentExecutionAttemptId === 2);
+    await waitFor(() => resumedExecutor.hasPending("w2"));
+    resumedExecutor.completePending();
     await waitFor(async () => (await restarted.listExecutions(leadRunId))[0].status === "completed");
     const detail = await restarted.snapshotExecution(leadRunId, execution.executionId);
     expect(detail.currentExecutionAttemptId).toBe(2);
@@ -577,7 +583,7 @@ describe("LeadExecutionService", () => {
     // 供 UI 补齐"历史访问已交付、本次 replay 复用"的 Phase → Agent 关系。
     const all = await restarted.listExecutionPhaseVisits(leadRunId, execution.executionId);
     expect(all.items.map((item) => [item.executionAttemptId, item.title])).toEqual([[1, "工作"], [2, "工作"]]);
-    expect(all.items[0].batches.flatMap((batch) => batch.agents).map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w1:completed"]);
+    expect(all.items[0].batches.flatMap((batch) => batch.agents).map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w1:completed", "w2:interrupted"]);
     expect(all.items[1].batches.flatMap((batch) => batch.agents).map((agent) => `${agent.id}:${agent.status}`)).toEqual(["w2:completed"]);
     await expect(restarted.listExecutionPhaseVisits(leadRunId, execution.executionId, { attempt: 99 })).rejects.toThrow("指定执行尝试不存在");
     await expect(restarted.listExecutionPhaseVisits(leadRunId, execution.executionId, { attempt: 1 })).resolves.toMatchObject({ items: [{ executionAttemptId: 1 }], nextCursor: null });
@@ -589,14 +595,14 @@ describe("LeadExecutionService", () => {
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const first = await executions.createExecution(leadRunId, 1, {}, undefined);
     await waitFor(async () => (await executions.listExecutions(leadRunId))[0].status === "completed");
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 2);
     const second = await executions.createExecution(leadRunId, 2, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, second.execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, second.execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
     await Bun.write(join(root, leadRunId, "executions", first.execution.executionId, "manifest.json"), "{}\n");
 
     const restartedLead = new LeadService(root, async () => model, createPi);
-    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor(["w2"]) }), {}, root);
     await restarted.convergeStaleExecutions(leadRunId);
     await expect(restarted.listExecutions(leadRunId)).resolves.toMatchObject([
       { executionId: first.execution.executionId, status: "completed" },
@@ -606,10 +612,10 @@ describe("LeadExecutionService", () => {
 
   test("升级时为已中断 Execution 补齐遗留 active 节点，不改写其终态", async () => {
     const { lead, executions, leadRunId, root } = await fixture();
-    await lead.proposeWorkflowRevision(leadRunId, GATE_SOURCE);
+    await lead.proposeWorkflowRevision(leadRunId, PENDING_SOURCE);
     await lead.acceptWorkflowRevision(leadRunId, 1);
     const { execution } = await executions.createExecution(leadRunId, 1, {}, undefined);
-    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).gates.length === 1);
+    await waitFor(async () => (await executions.snapshotExecution(leadRunId, execution.executionId)).phases[0]?.agents.some((agent) => agent.id === "w2" && agent.status === "running"));
 
     // 模拟旧版本只写顶层 run.status，却漏掉旧 ACP 节点收敛的历史档案。
     const oldRuntime = await executions.snapshotExecution(leadRunId, execution.executionId);
@@ -618,7 +624,7 @@ describe("LeadExecutionService", () => {
     expect(oldRuntime.status).toBe("running");
 
     const restartedLead = new LeadService(root, async () => model, createPi);
-    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor() }), {}, root);
+    const restarted = new LeadExecutionService(restartedLead, () => ({ executor: new DeterministicExecutor(["w2"]) }), {}, root);
     await restarted.convergeStaleExecutions(leadRunId);
     const detail = await restarted.snapshotExecution(leadRunId, execution.executionId);
     expect(detail.status).toBe("interrupted");
@@ -764,4 +770,15 @@ test("createExecution 与 resume 共用 Task 生命周期锁，操作不交错",
   expect(operations).toBeGreaterThanOrEqual(2);
   expect(maxActive).toBe(1);
   expect(active).toBe(0);
+});
+
+test("pending Worker 被新执行取代时旧 Promise 以错误收敛", async () => {
+  const executor = new DeterministicExecutor(["w1"]);
+  const node = { id: "w1", label: "w1" } as never;
+  const first = executor.execute(node);
+  const second = executor.execute(node);
+  await expect(first).rejects.toThrow("取代");
+  executor.completePending();
+  await expect(second).resolves.toMatchObject({ nodeId: "w1" });
+  await executor.stop(node);
 });

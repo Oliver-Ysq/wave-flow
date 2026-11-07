@@ -302,7 +302,6 @@ export function TeamPanel({
   busy,
   onAnswer,
   loadAllVisits,
-  waitingVisitId,
   readOnly=false,
 }: {
   /** Run id（独立 Run）或 Execution id（Lead Execution）。 */
@@ -325,8 +324,6 @@ export function TeamPanel({
    * 否则只展示当前 attempt 视野（独立 Run 现状）。
    */
   loadAllVisits?: () => Promise<PhaseVisit[]>;
-  /** 当前 attempt 未回答脚本 gate 所属访问；不从自然语言猜等待状态。 */
-  waitingVisitId?: number;
   /** 历史或已封存执行只读，不渲染Worker提交表单。 */
   readOnly?:boolean;
 }) {
@@ -439,6 +436,7 @@ export function TeamPanel({
   }
 
   const sorted = [...(visits ?? [])].sort((a, b) => a.phaseVisitId - b.phaseVisitId);
+  const waitingVisitId = sorted.find((visit) => visit.batches.some((batch) => batch.agents.some((agent) => agent.status === "blocked")))?.phaseVisitId;
   const visitedTitles = new Set(sorted.map((visit) => visit.title));
   const unvisited = phaseTitles.filter((title) => !visitedTitles.has(title));
   const reusedGroups = allVisits ? computeReusedAgents(allVisits, attemptId) : null;

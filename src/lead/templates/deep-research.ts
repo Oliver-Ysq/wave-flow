@@ -1,4 +1,4 @@
-import { agent, decisionGate, log, parallel, phase } from "wave-flow";
+import { agent, log, parallel, phase } from "wave-flow";
 
 export const meta = {
   name: "deep-research",
@@ -35,21 +35,11 @@ export default async function run(args: Args) {
   phase("计划");
   log("正在把调研主题拆解为可独立并行、可逐条核验的研究问题清单。");
   const planSchema = { type: "object", properties: { brief: { type: "string" }, questions: { type: "array", minItems: 1, maxItems: 5, items: { type: "object", properties: { title: { type: "string" }, keyPoints: { type: "array", minItems: 1, maxItems: 5, items: { type: "string" } }, searchHints: { type: "array", maxItems: 6, items: { type: "string" } } }, required: ["title", "keyPoints", "searchHints"], additionalProperties: false } }, controversies: { type: "array", maxItems: 5, items: { type: "string" } } }, required: ["brief", "questions", "controversies"], additionalProperties: false };
-  const planPrompt = "你是一名调研主编。请把下面的调研主题拆解为 3 到 5 个互相独立、可以并行交给不同调研员的研究问题，并给出研究简报。要求：1) 每个研究问题必须具体、可回答、可核验，给出 title、keyPoints(该问题必须回答的 2 到 5 个要点)和 searchHints(4 到 6 个建议检索词)；2) 给出 brief(研究简报：目标、范围、验收标准、读者)，brief 是后续所有调研和验收的基准；3) 列出 controversies(该主题公开讨论中已知的争议点或容易失真的说法，没有就为空数组)；4) 不要编造用户没有说过的约束或意图，不确定的范围写进 controversies 并在 brief 中标注 open；5) 全部用 " + language + " 输出。用户输入：" + JSON.stringify({ topic: topic, questions: extraQuestions, context: context });
+  const planPrompt = "你是一名调研主编。请把下面的调研主题拆解为 3 到 5 个互相独立、可以并行交给不同调研员的研究问题，并给出研究简报。要求：1) 每个研究问题必须具体、可回答、可核验，给出 title、keyPoints(该问题必须回答的 2 到 5 个要点)和 searchHints(4 到 6 个建议检索词)；2) 给出 brief(研究简报：目标、范围、验收标准、读者)，brief 是后续所有调研和验收的基准；3) 列出 controversies(该主题公开讨论中已知的争议点或容易失真的说法，没有就为空数组)；4) 不要编造用户没有说过的约束或意图，不确定的范围写进 controversies 并在 brief 中标注 open；5) 全部用 " + language + " 输出。用户输入：" + JSON.stringify({ topic: topic, questions: extraQuestions, context: context }) + "。计划形成后必须使用 block 请用户确认；若用户要求调整，在同一会话中继续使用 block 澄清并修订，直到用户明确同意后才能完成本节点。不得把自定义 blocked 状态或结束回合当作人工确认。";
   const first = await agent(planPrompt, { id: "planner", label: "调研计划", schema: planSchema });
   if (!first) throw new Error("调研计划未能交付。");
-  let plan = first as Plan;
+  const plan = first as Plan;
   log("调研简报：" + plan.brief);
-  const titles = plan.questions.map((item) => item.title);
-  const decision = await decisionGate("approve-research-plan", "请确认调研计划。简报：" + plan.brief + "；研究问题：" + titles.join(" / ") + "。如不同意，请在 adjustments 中说明要调整的方向。", { type: "object", properties: { approved: { type: "boolean", description: "是否同意按该计划继续调研" }, adjustments: { type: "string", description: "不同意时请写明要调整的方向；同意可留空" } }, required: ["approved", "adjustments"], additionalProperties: false });
-  if (decision.approved !== true) {
-    const adjustments = typeof decision.adjustments === "string" ? decision.adjustments : "";
-    if (adjustments.trim() === "") throw new Error("调研计划未获批准，且没有提供调整说明。");
-    log("根据用户意见调整调研计划。");
-    const revised = await agent(planPrompt + "。这是对上一版计划的调整要求，请重新输出完整计划：" + adjustments, { id: "planner-revised", label: "调整调研计划", schema: planSchema });
-    if (!revised) throw new Error("调整后的调研计划未能交付。");
-    plan = revised as Plan;
-  }
   const researchSchema = { type: "object", properties: { findings: { type: "array", maxItems: 6, items: { type: "object", properties: { claim: { type: "string" }, evidence: { type: "array", minItems: 1, maxItems: 5, items: { type: "object", properties: { title: { type: "string" }, url: { type: "string" }, excerpt: { type: "string" }, publishedAt: { type: "string" } }, required: ["title", "url", "excerpt"], additionalProperties: false } }, confidence: { type: "string", enum: ["high", "medium", "low"] }, asOf: { type: "string" } }, required: ["claim", "evidence", "confidence"], additionalProperties: false } }, gaps: { type: "array", maxItems: 5, items: { type: "string" } }, failedSources: { type: "array", maxItems: 5, items: { type: "string" } } }, required: ["findings", "gaps", "failedSources"], additionalProperties: false };
   const researchPrompt = (question: Question) => "你是一名调研员，只负责下面这一个独立研究问题，不要越界研究其他问题。调研主题：" + topic + "；研究简报：" + plan.brief + "。研究问题：" + question.title + "；必须回答的要点：" + JSON.stringify(question.keyPoints) + "；建议检索词：" + JSON.stringify(question.searchHints) + "。要求：1) 使用你会话中可用的检索和浏览工具收集证据，每条 URL 必须来自一次真实检索，禁止凭记忆编造 URL；2) 每条结论 claim 用 " + language + " 书写，必须附 1 到 5 条证据，每条证据含 title、url、excerpt(原文摘录，不超过 300 字)、publishedAt(来源发布日期，没有就省略)；3) 给每条结论标 confidence(high/medium/low)，时效敏感的结论在 asOf 说明时效窗口；4) 检索不到或无法证实的要点写进 gaps，尝试过但失败的来源写进 failedSources，禁止用推测补空；5) 优先官方或一手来源，同一研究的多个转载只算一个来源。最终以 JSON 返回。";
   const runResearch = (question: Question, round: number, index: number) => async () => {

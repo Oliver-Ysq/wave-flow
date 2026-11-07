@@ -30,7 +30,7 @@ export function currentExecutionSummaries(task: LeadSnapshot, executionId: strin
 export function hasActiveExecutionQuestions(task: LeadSnapshot): boolean {
   return task.executions.some(execution => {
     const attention = task.executionAttention?.[execution.executionId];
-    return execution.finishedAt === null && Boolean(attention && attention.workerRequests + attention.scriptGates > 0);
+    return execution.finishedAt === null && Boolean(attention && attention.workerRequests > 0);
   });
 }
 
@@ -68,7 +68,7 @@ export function TaskActivity({ task, visible=true, onPlan, onExecution, onResult
   const summaries = current ? currentExecutionSummaries(task, current.executionId) : [];
   const summary = summaries.find(item => item.status !== "completed" && item.status !== "cancelled");
   const attention = current && task.executionAttention?.[current.executionId];
-  const needsAnswer = current?.finishedAt === null && attention && attention.workerRequests + attention.scriptGates > 0;
+  const needsAnswer = current?.finishedAt === null && attention && attention.workerRequests > 0;
   const state = current ? attention?.finalizationError ? "登记失败" : needsAnswer ? "需要你的回答" : current.finishedAt && summary ? summary.status === "interrupted" ? "总结未完成" : summary.status === "pending" ? "准备总结" : "正在总结" : executionLabel(current) : revision ? proposalLabel(task, revision).replace(" · 未执行", "") : task.status === "running" ? "正在准备方案" : "尚无方案";
   const ended = Boolean(current?.finishedAt);
   const canAdjust = revision && !revision.localOrigin && !execution && !active && task.status === "idle";
