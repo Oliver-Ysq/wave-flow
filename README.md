@@ -31,6 +31,8 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 交付须经过 Schema 校验和持久化记录，Agent 的一句“完成了”不能替代完成证据。
 
+多 Agent 默认通过自包含 prompt 与结构化结果交接。多轮顺序接力的工作现场较复杂、交接内容较大时，Workflow 可以按需让前一个 Agent 在共享 worktree 生成或更新 `todo.md`，记录目标、已实现内容与已解决的问题，后一个 Agent 读取后再核对实际现场。它只是可选的交接材料，不是完成判据；并发分支不得共同写同一文件，可使用独立文件，或在汇合后由单个节点统一整理。
+
 ### 不押注一个 Agent，让不同 CLI 各展所长
 
 把 Codex 和 Claude Code 放进同一条 Workflow：独立研究、交叉审查，再比较证据、择优汇总。每个 Worker 绑定独立真实 ACP 会话，使用你选择的本机 CLI 及其默认模型；多 CLI 协作降低单一路径的盲区。
@@ -47,7 +49,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.4.4`，支持 macOS 12+ / Apple Silicon。
+当前版本：`v0.4.5`，支持 macOS 12+ / Apple Silicon。
 
 运行前提（Wave Flow 不内置、也不自动安装这些工具）：
 
@@ -65,7 +67,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.4.4_aarch64.dmg`，或从源码构建：
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.4.5_aarch64.dmg`，或从源码构建：
 
 ```sh
 bun install

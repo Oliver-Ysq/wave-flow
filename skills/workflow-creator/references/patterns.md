@@ -75,6 +75,50 @@ const verdicts = await parallel(unique.map((candidate) => () => verify(candidate
 const confirmed = unique.filter((_, index) => verdicts[index] !== null);
 ```
 
+## 可选的文件接力：`todo.md`
+
+多 Agent 默认通过自包含 prompt、`schema` 结果、`await` 与 `parallel()` 传递任务和结果；
+结构化结果负责调度，文件只负责补充复杂工作现场。简单任务、交接内容较少或下游只需要
+上游结果时，直接传递结果，不额外创建文件。
+
+存在多轮顺序接力、已实现内容与关键决策较多，或交接内容难以完整塞进 prompt 时，可以让
+前一个 Agent 在共享 worktree 中生成或更新 `todo.md`，后一个 Agent 开始时读取。只在交接
+边界更新，不要求每个节点参与，也不要每执行一步就重写文件。它是可选的知识交接材料，
+不是 Runtime 状态、完成判据、执行日志或并发锁。
+
+启用时至少包含：
+
+- **目标**：原始目标与当前工作范围。
+- **已实现**：已经完成的成果，必要时注明关键文件或产出位置。
+- **已解决的问题**：对后续有用的问题、原因与解决方式；没有则明确写“无”，不要编造。
+
+待办与下一步、验证结果和关键决策按需补充，只记录对后续接力有用的信息。后一个 Agent
+仍要收到自包含任务说明，先读文件再核对工作区实际状态；文件缺失或内容不一致时说明差异，
+不要虚构进展，也不要仅凭文件宣称完成。
+
+```ts
+phase("实现");
+await agent(`完成本阶段任务：\n${args.requirement}\n结束前在 todo.md 写入供后续接力的当前快照。`, {
+  id: "implementer",
+  cwd: args.repository,
+  sandbox: "workspace-write",
+});
+
+phase("继续实现");
+await agent(`任务目标：\n${args.requirement}\n先读取 todo.md 并核对工作区，再继续剩余工作；若文件缺失或与实际状态不一致，说明差异，不要虚构进展。`, {
+  id: "continuer",
+  cwd: args.repository,
+  sandbox: "workspace-write",
+});
+```
+
+并发时遵守以下规则：
+
+- 同一份 `todo.md` 任一时刻只能有一个写者；禁止并发写入或追加，宿主不会加锁、检测或合并冲突。
+- 前置节点写完并 `await` 返回后，多个并发分支可以读取同一份冻结快照；整个并发期间不得有节点更新它。
+- 各分支确需独立接力时，使用按稳定节点 id 分配的独立路径，如 `handoff/research-1.todo.md`，每个文件只有一个 owner。
+- 独立并行分支默认返回结构化结果，不写共享文件。`parallel()` 汇合后，如后续仍需复杂接力，再由单个 Agent 统一生成或更新 `todo.md`，后续节点等待其完成后读取。
+
 ## 独立验证
 
 对发现、审计或高风险评审，让每一个候选结论由一个独立的 Agent 复核；`parallel()`

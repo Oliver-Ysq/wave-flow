@@ -31,6 +31,8 @@ Workflows define stages, dependencies, concurrency, and completion conditions, w
 
 Deliverables must pass schema validation and be durably recorded. “I'm done” is not completion evidence.
 
+Agents hand work off through self-contained prompts and structured results by default. For complex, multi-stage sequential work with substantial handoff context, a workflow can optionally have one agent create or update `todo.md` in the shared worktree, recording the goal, completed work, and resolved issues; the next agent reads it and verifies the actual workspace. This file is optional handoff context, not a completion criterion. Parallel branches must never write the same file; use branch-specific files or have a single node consolidate the handoff after they join.
+
 ### Don't bet everything on one agent
 
 Bring Codex and Claude Code into the same Workflow: research independently, cross-review findings, then compare evidence and synthesize the strongest results. Each Worker uses an independent real ACP session with your selected local CLI and its default model; multiple CLIs reduce single-path blind spots.
@@ -47,7 +49,7 @@ Adjust proposals through conversation and retain each revision; discarding a pro
 
 ## Download and installation
 
-Current version: `v0.4.4`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.4.5`, supporting macOS 12+ / Apple Silicon.
 
 Prerequisites (Wave Flow neither bundles nor installs these):
 
@@ -65,7 +67,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.4.4_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.4.5_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install

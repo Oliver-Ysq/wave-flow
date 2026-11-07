@@ -64,6 +64,11 @@ meta.description 用简短任务名称式说明（建议20个中文字符以内�
 与 `deep-cr` 展示了长任务编排的完整骨架（计划确认、分维度并行、逐条独立核验、缺口补证、
 红队审查、覆盖披露）；起草同类 Workflow 时按同一骨架组织，不要退化成"并行几个节点再汇总"。
 
+长任务默认用自包含 prompt 与结构化结果交接，不机械创建 `todo.md`。只有多轮顺序接力的工作
+现场较复杂、交接内容较大时，才按需让前一节点写、后一节点读；文件至少包含目标、已实现和
+已解决的问题，不要逐步重写。并行分支不得共同写一份 Todo，独立分支用独立文件，或在汇合后
+由单个节点统一整理。完整适用条件与并发规则见 [references/patterns.md](references/patterns.md)。
+
 ## 托管技能库
 
 执行期会把 `~/.wave-flow/skills/<name>/SKILL.md` 的托管技能投影注入主控与每个 Worker 会话（空库不改变行为）。用户点名技能时，默认理解为 Worker 节点的执行依赖，不是让主控立即代做；除非用户明确要求主控执行。主控仍可按自己的判断自由使用 skill 做设计、读取或准备。把技能写进相应 Worker 节点的 prompt，例如“建议使用托管技能 X，先加载并按 SKILL.md 执行”；仅作为任务提示，不做额外校验或阻塞，不要假设未在库中的 skill 一定可用。库非空但当前 CLI 没有已验证注入能力、或库内 skill 非法时，会话启动前会 fail closed。Kimi CLI 支持已暂时下线，不得在 `cli`、提示词或计划中把它当作可用执行底座。
@@ -166,5 +171,6 @@ Engine 按冻结 Schema 校验并同卡追加版本，不能修改模板源码�
 6. 需要解析的 Agent 结果同时有 `schema` 和对应类型。
 7. 脚本级人工决策使用 `decisionGate`；prompt 不含完成上报指令。
 8. 每个可能较慢的操作之前都有 `log()`。
-9. 引用的每个 API 都存在于 [references/api.md](references/api.md)；不臆造 `workflow()` 嵌套、
-   `danger-full-access`、重试或预算字段。
+9. 没有仅因任务较长就机械加入 `todo.md`；启用时包含目标、已实现与已解决的问题，后续节点先读取再核对实际状态，且不存在并发分支共同写同一交接文件的设计。
+10. 引用的每个 API 都存在于 [references/api.md](references/api.md)；不臆造 `workflow()` 嵌套、
+    `danger-full-access`、重试或预算字段。

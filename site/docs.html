@@ -87,7 +87,7 @@
         <h1>从目标到交付。</h1>
         <p>Wave Flow 把一次长任务拆成阶段、Agent 与完成条件。这里说明如何运行、编写 Workflow，以及哪些状态和边界不属于模型判断。</p>
         <div class="docs-meta">
-          <span>适用于 v0.4.4</span>
+          <span>适用于 v0.4.5</span>
           <span>macOS 12+</span>
           <span>更新于 2026-11</span>
         </div>
@@ -109,7 +109,7 @@
 
         <section id="install">
           <h2>安装与运行</h2>
-          <p>当前提供 v0.4.4 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
+          <p>当前提供 v0.4.5 预编译 dmg（macOS 12+ / Apple Silicon）。可在 <a href="download.html">下载页</a> 一键安装，或准备以下环境从源码运行：</p>
           <ul>
             <li>macOS 12.0 或更高版本</li>
             <li><a href="https://bun.sh">Bun</a>，用于安装依赖与编译 Engine sidecar</li>
@@ -246,6 +246,14 @@ bun run desktop:dev</code></pre>
           <div class="callout">
             <p><strong>worktree 不是安全边界。</strong>它只分离正常工作现场，不能阻止 Worker 修改其他目录、其他 worktree、共享 Git 或凭据。Git diff 也不证明工作区外没有副作用。</p>
           </div>
+          <h3>可选的文件接力</h3>
+          <p>多 Agent 默认通过自包含 prompt、结构化结果与 <code>await</code> / <code>parallel()</code> 交接，调度不依赖共享文件。只有多轮顺序接力的工作现场较复杂、交接内容较大时，才让前一节点在共享 worktree 生成或更新 <code>todo.md</code>，后一节点读取并核对实际状态；不要每执行一步就重写。</p>
+          <ul>
+            <li>至少记录<strong>目标、已实现、已解决的问题</strong>；待办、下一步、验证结果与关键决策按需补充。</li>
+            <li>文件只是交接材料，不是 Runtime 状态、完成判据、执行日志或并发锁。</li>
+            <li>同一文件任一时刻只能有一个写者。并发分支可以读取前置节点生成且在并发期间保持不变的快照，但不能共同写入或追加。</li>
+            <li>分支需要独立接力时使用按稳定节点 id 分配的独立文件，或在 <code>parallel()</code> 汇合后由单个节点统一整理。</li>
+          </ul>
         </section>
 
         <section id="states">
