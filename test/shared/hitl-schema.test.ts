@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeHitlAnswerSchema } from "../../src/shared/hitl-schema";
+import { normalizeBlockUserNote, normalizeHitlAnswerSchema } from "../../src/shared/hitl-schema";
 
 describe("HITL answerSchema", () => {
   test("规范化扁平标量与单选字段并禁止额外字段", () => {
@@ -49,5 +49,18 @@ describe("HITL answerSchema", () => {
     const schema = normalizeHitlAnswerSchema({ type: "object", properties, required: ["__proto__"] });
     expect(Object.prototype.hasOwnProperty.call(schema.properties, "__proto__")).toBe(true);
     expect((schema.properties as unknown as Record<string, unknown>)["__proto__"]).toEqual({ type: "string" });
+  });
+});
+
+
+describe("block userNote", () => {
+  test("去首尾空白、空串缺省、长度与类型护栏", () => {
+    expect(normalizeBlockUserNote(undefined)).toBeUndefined();
+    expect(normalizeBlockUserNote("  \n ")).toBeUndefined();
+    expect(normalizeBlockUserNote("  保留现有交互。  ")).toBe("保留现有交互。");
+    expect(normalizeBlockUserNote("x".repeat(4000))).toHaveLength(4000);
+    expect(() => normalizeBlockUserNote("x".repeat(4001))).toThrow("不能超过 4000 字");
+    expect(() => normalizeBlockUserNote(null)).toThrow("必须是字符串");
+    expect(() => normalizeBlockUserNote({ text: "意见" })).toThrow("必须是字符串");
   });
 });

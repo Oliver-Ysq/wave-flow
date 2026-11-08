@@ -1025,10 +1025,7 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-agent-diag dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:3px 10px; margin:6px 0 0; font-size:11px; }
 .agent-workbench .wf-agent-diag dt { color:var(--wf-text-dim); }
 .agent-workbench .wf-agent-diag dd { margin:0; color:var(--wf-text); font-family:ui-monospace, "SF Mono", Menlo, monospace; overflow-wrap:anywhere; }
-.agent-workbench .wf-block-answer { display:flex; align-items:center; gap:8px; margin-top:6px; }
-.agent-workbench .wf-block-answer input { flex:1 1 auto; min-width:0; min-height:32px; padding:0 10px; border:1px solid var(--wf-border); border-radius:8px; background:var(--wf-input); color:var(--wf-ink); font:12px ui-monospace, "SF Mono", Menlo, monospace; }
-.agent-workbench .wf-block-answer button { flex:0 0 auto; padding:6px 12px; border:0; border-radius:8px; background:var(--wf-accent-strong); color:#fff; font-size:11px; }
-.agent-workbench .wf-block-answer button:disabled { opacity:.5; }
+.agent-workbench .wf-block-answer { margin-top:6px; }
 
 .agent-workbench .wf-schema-form { display:grid; gap:10px; margin-top:8px; }
 .agent-workbench .wf-schema-field { display:grid; gap:5px; }
@@ -1039,8 +1036,16 @@ body:has(.history-sidebar) .conversation-pane { margin-right:380px; }
 .agent-workbench .wf-schema-field.invalid input, .agent-workbench .wf-schema-field.invalid select { border-color:var(--wf-danger-line); }
 .agent-workbench .wf-field-error { color:var(--wf-danger-ink); font-size:11px; }
 .agent-workbench .wf-field-group { display:grid; gap:10px; margin:0; padding:10px 12px; border:1px solid var(--wf-border); border-radius:9px; }
-.agent-workbench .wf-schema-form > button, .agent-workbench .wf-free-answer button { justify-self:start; padding:7px 14px; border:0; border-radius:8px; background:var(--wf-accent-strong); color:#fff; font-size:11px; }
-.agent-workbench .wf-schema-form > button:disabled, .agent-workbench .wf-free-answer button:disabled { opacity:.5; }
+.wf-schema-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.agent-workbench .wf-schema-actions > button, .agent-workbench .wf-free-answer button { flex:0 0 auto; min-height:34px; padding:7px 14px; border:1px solid transparent; border-radius:8px; background:var(--wf-accent-strong); color:#fff; font-size:11px; }
+.agent-workbench .wf-schema-actions > button.button-secondary { border-color:var(--wf-border); background:var(--wf-input); color:var(--wf-ink); }
+.agent-workbench .wf-schema-actions > button:disabled, .agent-workbench .wf-free-answer button:disabled { opacity:.5; }
+.agent-workbench .wf-block-user-note { display:grid; gap:6px; margin-top:2px; }
+.agent-workbench .wf-block-user-note-label { display:flex; align-items:baseline; gap:5px; color:var(--wf-ink); font-size:12px; font-weight:500; }
+.agent-workbench .wf-block-user-note-label small, .agent-workbench .wf-block-user-note-hint { color:var(--wf-text-dim); font-size:11px; font-weight:400; }
+.agent-workbench .wf-block-user-note textarea { box-sizing:border-box; width:100%; min-height:72px; max-height:180px; resize:vertical; padding:9px 10px; border:1px solid var(--wf-border); border-radius:8px; outline:0; background:var(--wf-input); color:var(--wf-ink); font:inherit; font-size:12px; line-height:1.55; }
+.agent-workbench .wf-block-user-note textarea:focus { border-color:var(--wf-accent); }
+.agent-workbench .wf-block-user-note textarea:disabled { opacity:.6; }
 .agent-workbench .wf-schema-unsupported { margin-top:8px; padding:9px 11px; border:1px solid var(--wf-border); border-radius:8px; color:var(--wf-text-dim); font-size:12px; }
 /* 布尔/少量枚举的分段单选控件：替代 WKWebView 中难操作的原生 <select>。 */
 .agent-workbench .wf-segmented { display:flex; gap:6px; flex-wrap:wrap; }

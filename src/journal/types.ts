@@ -190,8 +190,10 @@ export type JournalEvent = JournalBase & ({
   /** 用户答案已经耐久保存；不改变 blocked 状态。 */
   readonly type: "block.answered";
   readonly blockRequestId: string;
-  /** 已校验为 JSON 对象的人类答案。 */
+  /** 已校验为 JSON 对象的人类答案；严格符合原 answerSchema，不含宿主附加字段。 */
   readonly answer: JsonObject;
+  /** 用户随答案提交的可选补充意见；已去首尾空白，最长 4000 字，不改变宿主权限。 */
+  readonly userNote?: string;
 } | {
   /** 本次 elicitation 已关闭且没有答案；节点仍 blocked，可重开原请求。 */
   readonly type: "block.closed";

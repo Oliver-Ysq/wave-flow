@@ -2287,7 +2287,7 @@ export function App() {
                     finishBusy();
                   }
                 }}
-                onAnswerBlock={async (blockId, answer) => {
+                onAnswerBlock={async (blockId, answer, userNote) => {
                   const valid = requestFence.current.begin(
                     `execution:${lead.leadRunId}:${executionDetail.execution.executionId}`,
                   );
@@ -2296,7 +2296,7 @@ export function App() {
                     `answer:${blockId}`,
                   );
                   try {
-                    await api.answer(blockId, answer);
+                    await api.answer(blockId, answer, userNote);
                     const next = await api.execution(
                       lead.leadRunId,
                       executionDetail.execution.executionId,
@@ -4547,6 +4547,7 @@ function ExecutionDetail({
   onAnswerBlock: (
     blockId: string,
     answer: Record<string, unknown>,
+    userNote?: string,
   ) => Promise<void>;
   /** 显式保存停止现场，不恢复业务；只有当前Engine可核验writer才成功。 */
   onSavePartial?: () => Promise<void>;

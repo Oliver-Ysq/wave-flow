@@ -844,7 +844,7 @@ function workerControlToolGuide(): string {
   return `本会话提供私有 MCP server：wave-flow-worker-control。
 工具名与参数：
 - wave_flow_complete：{ summary: string, result: object }，提交最终JSON对象及简短摘要。
-- wave_flow_block：{ needHelp: string, answerSchema: object, blockRequestId?: string }，请求人工协助；answerSchema 必须是至少一个字段的扁平 object，禁止嵌套、数组多选、动态字段和条件约束。恢复时沿用原请求身份和参数；答案交付后宿主自动 continue。
+- wave_flow_block：{ needHelp: string, answerSchema: object, blockRequestId?: string }，请求人工协助；answerSchema 必须是至少一个字段的扁平 object，禁止嵌套、数组多选、动态字段和条件约束。恢复时沿用原请求身份和参数；答案与可选 userNote 交付后宿主自动 continue。
 以当前会话提供的真实工具声明和调用方式为准，不要把工具名当成某种编程语言中的函数名。
 若工具延迟加载、未直接显示，使用当前会话提供且允许的工具搜索/发现机制，精确定位上述server和工具，读取声明后调用；不要调用同名但属于其他server的工具。
 若没有发现机制，或发现后工具仍不可用，如实报告工具不可用；不得用聊天JSON、自然语言、文件或回合结束代替受管完成上报。`;
@@ -863,7 +863,7 @@ function workerCompletionProtocol(schemaLine = ""): string {
 
 ${workerControlToolGuide()}
 完成时必须调用 wave_flow_complete 并传入最终 JSON 对象和简短摘要；成功后才可结束 ACP turn。${schemaLine}
-若没有用户决定无法安全继续，调用 wave_flow_block 并提供至少一个字段的扁平 answerSchema。宿主会展示表单：answered 表示答案已交付并自动继续；closed 表示本次表单关闭，宿主可在同一会话恢复，不要新建 block、不要改参数、不要把 closed 当作答案。
+若没有用户决定无法安全继续，调用 wave_flow_block 并提供至少一个字段的扁平 answerSchema。宿主会展示表单：answered 返回 answer 与可选 userNote 并自动继续，userNote 是用户随答案提交的其他意见，必须纳入后续判断；closed 表示本次表单关闭，宿主可在同一会话恢复，不要新建 block、不要改参数、不要把 closed 当作答案。
 
 禁止把自然语言、终端输出或 ACP end_turn 当作成功。未调用 complete 时宿主会在同一 session 尝试协议恢复；无法安全恢复时才进入 interrupted。`;
 }
@@ -905,11 +905,11 @@ function recoveryPrompt(background = ""): string {
 
 function completionReminderPrompt(context:WorkerTurnContext, background = ""): string {
   const data=JSON.stringify(context);
-  if(Buffer.byteLength(data,"utf8")>48*1024)throw new Error("原协议事实超过48KiB，拒绝截断请求身份或答案；需用户显式恢复。");
+  if(Buffer.byteLength(data,"utf8")>48*1024)throw new Error("原协议事实超过48KiB，拒绝截断请求身份、Schema、答案或用户意见；需用户显式恢复。");
   const next=context.status==="blocked"
     ? context.block?.answer
-      ? "原block已有耐久答案。沿用原blockRequestId、needHelp和answerSchema重接wave_flow_block取得原答案；交付后宿主自动continue，再提交已有结果。不要再次提问，不得直接complete。"
-      : "快照读取时原节点仍blocked，用户尚未回答。沿用原blockRequestId、needHelp和answerSchema重接wave_flow_block重新打开原表单；closed不是答案。仅在尚未取得answered时禁止continue或complete，不得新建block。答案交付后宿主自动continue，再提交已确认结果；快照中的未回答不是永久禁令。"
+      ? "原block已有耐久答案与可选userNote。沿用原blockRequestId、needHelp和answerSchema重接wave_flow_block取得原答案与意见；交付后宿主自动continue，再提交已有结果。不要再次提问，不得直接complete。"
+      : "快照读取时原节点仍blocked，用户尚未回答。沿用原blockRequestId、needHelp和answerSchema重接wave_flow_block重新打开原表单；closed不是答案。仅在尚未取得answered时禁止continue或complete，不得新建block。答案与可选userNote交付后宿主自动continue，再提交已确认结果；快照中的未回答不是永久禁令。"
     : "现在只做受管完成上报：基于刚才已经完成/确认的已有任务结果，调用wave_flow_complete；不能安全构造结果时调用wave_flow_block，不编造结果。";
   // 背景插在"说明"与"事实"之间：先让模型恢复任务语境，再给动作指令，工具指南留在最后。
   // 没有压缩背景时逐字保持原提示：背景只是补偿，不能改变既有收尾语义。

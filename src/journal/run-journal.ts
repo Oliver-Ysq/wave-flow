@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isJsonObject, type JsonObject } from "../shared/json";
+import { normalizeBlockUserNote } from "../shared/hitl-schema";
 import { nodeDirectoryName, runDirectory, runsRoot, validateRunId, waveFlowHome } from "./paths";
 import { COMPATIBLE_RUNTIME_VERSIONS, type JournalEvent, type RunManifest } from "./types";
 import { RunStateMachine } from "../runtime/run-state-machine";
@@ -266,6 +267,7 @@ export function validateEvent(value: unknown, expectedRunId: string): JournalEve
       break;
     case "block.answered":
       if (typeof event.nodeId !== "string" || typeof event.blockRequestId !== "string" || !event.blockRequestId.trim() || !isJsonObject(event.answer)) throw new Error("block.answered payload 无效。");
+      if (event.userNote !== undefined && normalizeBlockUserNote(event.userNote) !== event.userNote) throw new Error("block.answered 的 userNote 必须是已规范化且不超过 4000 字的非空字符串。");
       break;
     case "block.closed":
     case "block.reopened":

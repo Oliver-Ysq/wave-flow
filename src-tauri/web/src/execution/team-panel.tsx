@@ -10,6 +10,8 @@ import { cliDisplayName } from "../cli-meta";
 import { statusLabel } from "./status-label";
 const agentExpansion=new ViewCache<boolean>(256);
 const AnswerAllowed=createContext(true);
+/** 按 block 隔离可选意见草稿；折叠或切换页面不清空，提交成功后删除。 */
+const userNoteDrafts = new ViewCache<string>(256);
 
 /** 节点状态文案（与工作台既有措辞一致）。 */
 
@@ -43,8 +45,8 @@ function Identicon({ seed }: { seed: string }) {
   );
 }
 
-/** Worker block 答题：只渲染统一扁平 Schema，不提供裸 JSON 入口。 */
-function BlockAnswerForm({
+/** Worker block 答题：Schema 答案与宿主可选意见分离交付，不提供裸 JSON 入口。 */
+export function BlockAnswerForm({
   blockRequestId,
   busy,
   onAnswer,
@@ -55,16 +57,45 @@ function BlockAnswerForm({
   blockRequestId: string;
   /** 是否正在交付。 */
   busy: boolean;
-  /** 交付回调（api.answer）。 */
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  /** 交付回调（api.answer）；意见独立于 Schema 答案。 */
+  onAnswer: (blockId: string, answer: Record<string, unknown>, userNote?: string) => Promise<void>;
   /** 暂不回答：只收起表单，不写答案或改变节点状态。 */
   onDefer: () => void;
   /** 原Worker答案Schema，不从自然语言猜测。 */
   schema: Record<string,unknown>;
 }) {
+  const [userNote, setUserNote] = useState(() => userNoteDrafts.get(blockRequestId) ?? "");
+  async function submit(answer: Record<string, unknown>): Promise<void> {
+    await onAnswer(blockRequestId, answer, userNote);
+    userNoteDrafts.delete(blockRequestId);
+  }
   return <div className="wf-block-answer">
-    <SchemaForm schema={schema} busy={busy} submitLabel="继续" draftKey={`block:${blockRequestId}`} onSubmit={answer=>onAnswer(blockRequestId,answer)} />
-    <button type="button" className="button-secondary" disabled={busy} onClick={onDefer}>暂不</button>
+    <SchemaForm
+      schema={schema}
+      busy={busy}
+      submitLabel="继续"
+      draftKey={`block:${blockRequestId}`}
+      onSubmit={submit}
+      actions={<button type="button" className="button-secondary" disabled={busy} onClick={onDefer}>暂不</button>}
+    >
+      <label className="wf-block-user-note">
+        <span className="wf-block-user-note-label">其他意见<small>可选</small></span>
+        <textarea
+          value={userNote}
+          disabled={busy}
+          maxLength={4000}
+          rows={3}
+          placeholder="补充选项未覆盖的信息或修改建议…"
+          aria-describedby={`note-hint-${blockRequestId}`}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            setUserNote(next);
+            userNoteDrafts.set(blockRequestId, next);
+          }}
+        />
+        <small className="wf-block-user-note-hint" id={`note-hint-${blockRequestId}`}>随答案一起发送给该 Agent</small>
+      </label>
+    </SchemaForm>
   </div>;
 }
 
@@ -93,7 +124,7 @@ function AgentRow({
   /** 面板级 busy 标识。 */
   busy: string | null;
   /** Worker block 答题回调。 */
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  onAnswer: (blockId: string, answer: Record<string, unknown>, userNote?: string) => Promise<void>;
 }) {
   const viewKey=`${runId}:${executionAttemptId}:${phaseVisitId??"reused"}:${agent.id}`;
   const [open, setOpen] = useState(()=>agentExpansion.get(viewKey)??(agent.block?.delivery === "pending"));
@@ -164,6 +195,7 @@ function AgentRow({
                 <button type="button" className="button-secondary" onClick={() => setDeferred(false)}>重新打开</button>
               ) : (
                 <BlockAnswerForm
+                  key={agent.block.blockRequestId}
                   blockRequestId={agent.block.blockRequestId}
                   schema={agent.block.answerSchema!}
                   busy={busy === `answer:${agent.block.blockRequestId}`}
@@ -218,7 +250,7 @@ function VisitBatches({
   batches: PhaseVisit["batches"];
   runId: string;
   busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  onAnswer: (blockId: string, answer: Record<string, unknown>, userNote?: string) => Promise<void>;
 }) {
   const attemptId = visit?.executionAttemptId ?? 0;
   return (
@@ -264,7 +296,7 @@ function ReusedBlock({
   group: ReusedAgentGroup;
   runId: string;
   busy: string | null;
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  onAnswer: (blockId: string, answer: Record<string, unknown>, userNote?: string) => Promise<void>;
 }) {
   return (
     <div className="wf-reused-block">
@@ -317,7 +349,7 @@ export function TeamPanel({
   /** 面板级 busy 标识。 */
   busy: string | null;
   /** Worker block 答题回调。 */
-  onAnswer: (blockId: string, answer: Record<string, unknown>) => Promise<void>;
+  onAnswer: (blockId: string, answer: Record<string, unknown>, userNote?: string) => Promise<void>;
   /**
    * 可选：读取全部 attempt 的耐久 Phase 访问（Lead Execution 专用通道）。
    * 提供时面板为每个 Phase 补齐"历史执行已完成、本次复用原结果"的节点组，

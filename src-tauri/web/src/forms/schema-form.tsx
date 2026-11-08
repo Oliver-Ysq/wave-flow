@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ViewCache } from "../workbench-state";
 import {
   coerceValue,
@@ -156,8 +156,10 @@ export function SchemaForm({
   submitLabel = "提交",
   onSubmit,
   draftKey,
+  children,
+  actions,
 }: {
-  /** 决策/决策门的 answerSchema（已在调用前确认存在）。 */
+  /** 人工请求的 answerSchema（已在调用前确认存在）。 */
   schema: Record<string, unknown>;
   /** 提交中禁用表单。 */
   busy: boolean;
@@ -167,6 +169,10 @@ export function SchemaForm({
   onSubmit: (value: Record<string, unknown>) => Promise<void>;
   /** 草稿所属的唯一次请求；缺省仅用于兼容独立表单，不能用于并行 Worker。 */
   draftKey?: string;
+  /** 在主操作区前渲染的宿主附加内容；不进入 answerSchema 或答案对象。 */
+  children?: ReactNode;
+  /** 主提交按钮后的附加操作；与主按钮共享同一底部操作区。 */
+  actions?: ReactNode;
 }) {
   const schemaIdentity=draftKey ?? JSON.stringify(schema);
   const support = isSupportedSchema(schema);
@@ -228,14 +234,18 @@ export function SchemaForm({
           onChange={(next) => setValue((current) => ({ ...current, [key]: next }))}
         />
       ))}
+      {children}
       {fieldErrors.some((error) => error.path === "") && (
         <p className="answer-error">
           {fieldErrors.find((error) => error.path === "")?.message}
         </p>
       )}
-      <button disabled={busy} onClick={() => void submit()}>
-        {busy ? "正在交付…" : submitLabel}
-      </button>
+      <div className="wf-schema-actions">
+        <button type="button" disabled={busy} onClick={() => void submit()}>
+          {busy ? "正在交付…" : submitLabel}
+        </button>
+        {actions}
+      </div>
       {submitError && <p className="answer-error">{submitError}</p>}
     </div>
   );

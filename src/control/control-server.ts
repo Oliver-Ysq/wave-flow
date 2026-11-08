@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import { isDeepStrictEqual } from "node:util";
-import { normalizeHitlAnswerSchema } from "../shared/hitl-schema";
+import { normalizeBlockUserNote, normalizeHitlAnswerSchema } from "../shared/hitl-schema";
 import type { RunJournal } from "../journal/run-journal";
 import type { JournalEvent } from "../journal/types";
 import type { RuntimeProvenance } from "../runtimes/types";
@@ -83,6 +83,8 @@ export type WorkerTurnContext = {
     readonly answerSchema:JsonSchema|null;
     /** 原耐久答案副本；未交付null，存在也不自动continue。 */
     readonly answer:JsonObject|null;
+    /** 原耐久用户补充意见；未提供null，不进入ACP accept content。 */
+    readonly userNote:string|null;
     /** 当前表单交付状态；closed 时禁止 Executor 自动重问，必须等待用户显式重开。 */
     readonly delivery:"pending"|"answered"|"closed"|"delivered";
   } | null;
@@ -251,7 +253,8 @@ export class ControlServer {
       if(!this.#recordedSessions.has(key))throw new Error("收尾缺少耐久ACP会话绑定。");
       const node=this.state.agent(identity.nodeId);
       if(node.agentSessionId!==identity.agentSessionId||!["running","blocked"].includes(node.status))throw new Error("原节点已终结或会话已变化，拒绝收尾。");
-      const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId}),delivery:node.block.delivery??(node.block.answered?"answered":"pending")}:null;
+      const answer=node.status==="blocked"&&node.block?this.#blocks.answerSnapshot({...identity,blockRequestId:node.block.blockRequestId}):null;
+      const block=node.status==="blocked"&&node.block?{blockRequestId:node.block.blockRequestId,needHelp:node.block.needHelp,answerSchema:node.block.answerSchema??null,answer:answer?.answer??null,userNote:answer?.userNote??null,delivery:node.block.delivery??(node.block.answered?"answered":"pending")}:null;
       return structuredClone({status:node.status as "running"|"blocked",resultSchema:node.request.schema??null,block});
     });
   }
@@ -354,6 +357,7 @@ export class ControlServer {
     try {
       await this.exclusive(async () => {
         const pending = this.#blocks.validateAnswer(submission);
+        const userNote = normalizeBlockUserNote(submission.userNote);
         this.requireCurrentNode(controlKey(pending.runId, pending.nodeId), pending);
         // continue 后仍允许同会话同值重试幂等成功；首次交付才要求 blocked。
         if (pending.answer) return;
@@ -363,12 +367,13 @@ export class ControlServer {
         const event: JournalEvent = {
           type: "block.answered", at: new Date().toISOString(), runId: pending.runId, nodeId: pending.nodeId,
           agentSessionId: pending.agentSessionId, diagnostic: null, blockRequestId: pending.blockRequestId, answer: submission.answer,
+          ...(userNote ? { userNote } : {}),
         };
         this.state.assertApplicable(event);
         await this.journal.append(event);
         this.state.apply(event);
-        // durable-first：只有答案已成为 Journal 事实后，才允许原 Agent 收到它。
-        this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer);
+        // durable-first：只有答案与可选意见已成为 Journal 事实后，才允许原 Agent 收到它们。
+        this.#blocks.deliverAnswer(submission.blockRequestId, submission.answer, userNote);
       });
     } finally {
       this.#answering.delete(submission.blockRequestId);

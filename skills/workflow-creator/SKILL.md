@@ -112,7 +112,7 @@ Wave Flow 新增恢复边界：原生ACP会话超过宿主窗口无实质进展�
 ## 人工输入与禁止断头路（Wave Flow 新增设计）
 
 - Runtime 不解释 Agent 自定义结果中的 `status`。任何 Worker 无法独立消解、且需要用户补充信息、裁决或授权才能继续的问题，都必须在同一会话使用 `block`，不限于需求冲突；不得以返回 `blocked`、`needs_user`、自然语言提问、写总结或结束回合代替。
-- 收到答案后，原 Worker 必须逐项核对是否覆盖全部问题，并将答案落实到当前工作；仍有歧义时再次 `block`，全部解决前不得 `complete`。表单关闭不等于已回答，不自动重问，只有用户显式重开才能继续。
+- 收到答案后，原 Worker 必须逐项核对是否覆盖全部问题，并将答案落实到当前工作；answered 还可能在 Schema 答案之外携带可选 `userNote`，这是用户随答案提交的其他意见，必须一并读取和落实，不能只处理枚举字段。仍有歧义时再次 `block`，全部解决前不得 `complete`。表单关闭不等于已回答，不自动重问，只有用户显式重开才能继续。
 - 只有无法通过普通用户裁决继续的硬阻塞才返回结构化 `blocked`。功能或视觉缺陷走回修，预算耗尽返回 `needs_more_work`，进程或证据异常由 Runtime 标记 `interrupted`。
 - 参考 [references/patterns.md](references/patterns.md) 的 Worker 人工输入模式，不要引入脚本级 decision gate。
 

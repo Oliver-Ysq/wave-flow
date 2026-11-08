@@ -49,7 +49,13 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 
 ## 下载与安装
 
-当前版本：`v0.5.0`，支持 macOS 12+ / Apple Silicon。
+当前版本：`v0.6.0`，支持 macOS 12+ / Apple Silicon。
+
+### v0.6.0 重要变更
+
+- Worker `block` 表单新增整张表单共享的“其他意见（可选）”多行输入，最长 4000 字。补充意见作为独立 `userNote` 与 Schema 答案一起耐久保存并交付原 Agent，不会注入 `answerSchema` 或 ACP accept content。
+- 答案与意见按 block 隔离草稿，“暂不”只收起表单，重新打开保留输入；“继续”和“暂不”统一收进底部主次操作区。
+- 旧 Journal 没有 `userNote` 仍可正常读取；同一 block 的幂等回答同时核答案与意见，任一冲突都拒绝覆盖。
 
 ### v0.5.0 重要变更
 
@@ -73,7 +79,7 @@ Wave Flow 是一个本机运行的 AI Agent 工作流桌面应用。用对话描
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.5.0_aarch64.dmg`，或从源码构建：
+也可以从 [Releases](https://github.com/Oliver-Ysq/wave-flow/releases) 下载 `Wave.Flow_0.6.0_aarch64.dmg`，或从源码构建：
 
 ```sh
 bun install

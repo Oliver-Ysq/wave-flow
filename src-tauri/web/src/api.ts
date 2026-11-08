@@ -321,8 +321,8 @@ export const api = {
       ...options,
     });
   },
-  answer: (blockRequestId: string, answer: Record<string, unknown>) =>
-    action("blocks.answer", { blockRequestId, answer }),
+  answer: (blockRequestId: string, answer: Record<string, unknown>, userNote?: string) =>
+    action("blocks.answer", { blockRequestId, answer, ...(userNote?.trim() ? { userNote } : {}) }),
   closeBlock: (blockRequestId: string) => action("blocks.close", { blockRequestId }),
   reopenBlock: (blockRequestId: string) => action("blocks.reopen", { blockRequestId }),
   recoverNode: (runId: string, nodeId: string) => action("runs.recoverNode", { runId, nodeId }),

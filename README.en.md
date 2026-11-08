@@ -49,7 +49,13 @@ Adjust proposals through conversation and retain each revision; discarding a pro
 
 ## Download and installation
 
-Current version: `v0.5.0`, supporting macOS 12+ / Apple Silicon.
+Current version: `v0.6.0`, supporting macOS 12+ / Apple Silicon.
+
+### Important changes in v0.6.0
+
+- Worker `block` forms now include an optional multi-line “Other notes” field for the whole form, up to 4000 characters. The note is delivered to the original Agent as an independent `userNote`, durably recorded alongside the schema answer without being injected into `answerSchema` or ACP accept content.
+- Answer and note drafts are isolated per block. “Not now” only collapses the form and preserves the draft when reopened, while “Continue” and “Not now” share a single footer with clear primary and secondary actions.
+- Existing Journals without `userNote` remain readable. Idempotent answers must match both the answer and the note; conflicts are rejected instead of overwritten.
 
 ### Important changes in v0.5.0
 
@@ -73,7 +79,7 @@ Install from a terminal:
 curl -fsSL https://oliver-ysq.github.io/wave-flow/install.sh | sh
 ```
 
-You can also download `Wave.Flow_0.5.0_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
+You can also download `Wave.Flow_0.6.0_aarch64.dmg` from [Releases](https://github.com/Oliver-Ysq/wave-flow/releases), or build from source:
 
 ```sh
 bun install

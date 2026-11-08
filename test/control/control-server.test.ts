@@ -435,3 +435,33 @@ test("用户重开后，旧交付代际的迟到 close 不能关闭新表单", a
   const events = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events;
   expect(events.filter(event => event.type === "block.closed")).toHaveLength(2);
 });
+
+
+describe("ControlServer userNote", () => {
+  test("可选意见与答案一起耐久、重读和恢复，ACP content 仍只含 Schema 答案", async () => {
+    const value = await fixture({ type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } }, additionalProperties: false });
+    const blockRequestId = crypto.randomUUID();
+    const identity = { runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability };
+    const submission = { blockRequestId, ...identity, needHelp: "需要确认", answerSchema: { type: "object", required: ["resolved"], properties: { resolved: { type: "boolean" } }, additionalProperties: false } };
+    await value.control.block(submission);
+    const waiting = value.control.waitForBlockAnswer(identity, { mode: "form", message: submission.needHelp, requestedSchema: submission.answerSchema });
+    await value.control.answer({ blockRequestId, answer: { resolved: true }, userNote: "  保留现有交互，只修正文案。  " });
+    await expect(waiting).resolves.toEqual({ action: "accept", content: { resolved: true } });
+    expect((await value.control.block(submission)).userNote).toBe("保留现有交互，只修正文案。");
+    expect((await value.control.workerTurnContext(identity)).block).toMatchObject({ answer: { resolved: true }, userNote: "保留现有交互，只修正文案。" });
+    const answered = (await RunJournal.open(value.runId, runsRoot(value.cwd))).events.find(event => event.type === "block.answered");
+    expect(answered).toMatchObject({ answer: { resolved: true }, userNote: "保留现有交互，只修正文案。" });
+    await value.control.continue({ blockRequestId, ...identity });
+    await expect(value.control.answer({ blockRequestId, answer: { resolved: true }, userNote: "保留现有交互，只修正文案。" })).resolves.toBeUndefined();
+    await expect(value.control.answer({ blockRequestId, answer: { resolved: true }, userNote: "另一份意见" })).rejects.toThrow("不同答案或用户意见");
+  });
+
+  test("非字符串、未规范化或超长意见拒绝且不落 block.answered", async () => {
+    const value = await fixture();
+    const blockRequestId = crypto.randomUUID();
+    await value.control.block({ blockRequestId, runId: value.runId, nodeId: "node", agentSessionId: value.agentSessionId, capability: value.capability, needHelp: "需要确认", answerSchema: { type: "object", properties: { ok: { type: "boolean" } } } });
+    await expect(value.control.answer({ blockRequestId, answer: { ok: true }, userNote: 7 as unknown as string })).rejects.toThrow("必须是字符串");
+    await expect(value.control.answer({ blockRequestId, answer: { ok: true }, userNote: "x".repeat(4001) })).rejects.toThrow("不能超过 4000 字");
+    expect((await RunJournal.open(value.runId, runsRoot(value.cwd))).events.some(event => event.type === "block.answered")).toBe(false);
+  });
+});

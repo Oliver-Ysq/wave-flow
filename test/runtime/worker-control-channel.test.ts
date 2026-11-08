@@ -156,7 +156,7 @@ test("wave_flow_block 经 Elicitation 返回答案并自动 continue", async () 
       requests.push(value);
       blockCalls += 1;
       const request = value as { answerSchema: unknown };
-      return { answerSchema: request.answerSchema, answer: blockCalls === 1 ? null : { x: 7 }, delivery: blockCalls === 1 ? "pending" : "answered" };
+      return { answerSchema: request.answerSchema, answer: blockCalls === 1 ? null : { x: 7 }, userNote: blockCalls === 1 ? null : "保留现有交互", delivery: blockCalls === 1 ? "pending" : "answered" };
     },
     async continue(value: unknown) { requests.push(value); return { ok: true }; },
   };
@@ -183,7 +183,7 @@ test("wave_flow_block 经 Elicitation 返回答案并自动 continue", async () 
   send({ jsonrpc: "2.0", id: elicitation.id, result: { action: "accept", content: { x: 7 } } });
   const answered = await next();
   const answeredPayload = JSON.parse((answered.result as { content: { text: string }[] }).content[0].text);
-  expect(answeredPayload).toEqual({ status: "answered", blockRequestId, answer: { x: 7 } });
+  expect(answeredPayload).toEqual({ status: "answered", blockRequestId, answer: { x: 7 }, userNote: "保留现有交互" });
   expect(requests.map(request => (request as { blockRequestId: string }).blockRequestId)).toEqual([blockRequestId, blockRequestId, blockRequestId]);
 }, 20_000);
 

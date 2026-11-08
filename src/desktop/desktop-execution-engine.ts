@@ -6,6 +6,7 @@ import { inspectWorkflowModuleSource, preflightLocalWorkflow, validateLocalInput
 import { RunRuntime } from "../runtime/run-runtime";
 import { fenceAcpNodeWriters } from "../runtime/acp-writer-fence";
 import { isJsonObject } from "../shared/json";
+import { normalizeBlockUserNote } from "../shared/hitl-schema";
 import type { JsonSchema } from "../shared/workflow-types";
 import { assertAbsoluteMcpCommand } from "../shared/mcp-server-command";
 import type { AnswerDecisionRequest, CliRuntimeListResponse, CreateExecutionRequest, CreateLeadProjectRequest, CreateLeadRunRequest, CreateRunRequest, CurrentAttemptResponse, DesktopStatusResponse, DiscoverCliRuntimesResponse, ExecutionAttemptsResponse, ExecutionListResponse, ExecutionPhaseVisitPageResponse, ExecutionPlanResponse, ExecutionResponse, LeadMessageRequest, LeadProjectListResponse, LeadProjectResponse, LeadCommandCatalogResponse, LeadRunListResponse, LeadRunResponse, PhaseVisitPageResponse, PhaseVisitResponse, ResumeRunRequest, RunListItem, RunResponse, ScanCliRuntimesResponse, SelectCliRuntimeResponse, StartLeadConversationRequest, ValidateCliRuntimeRequest } from "./types";
@@ -1217,11 +1218,15 @@ export class DesktopExecutionEngine {
 
   private async desktopAnswerBlock(value: unknown): Promise<{ readonly ok: true }> {
     const blockRequestId = requiredString(value, "blockRequestId");
-    const answer = object(value).answer;
+    const submission = object(value);
+    const answer = submission.answer;
     if (!isJsonObject(answer)) throw new EngineActionError(400, "block 答案必须是 JSON 对象。 ");
+    let userNote: string | undefined;
+    try { userNote = normalizeBlockUserNote(submission.userNote); }
+    catch (error) { throw new EngineActionError(400, error instanceof Error ? error.message : String(error)); }
     const control = [...this.#controls.values()].find(candidate => candidate.hasBlock(blockRequestId));
     if (!control) throw new EngineActionError(404, "指定 block 不属于当前 Engine。 ");
-    await control.answer({ blockRequestId, answer });
+    await control.answer({ blockRequestId, answer, ...(userNote ? { userNote } : {}) });
     return { ok: true };
   }
 

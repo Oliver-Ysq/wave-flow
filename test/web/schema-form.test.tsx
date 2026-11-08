@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {SchemaForm} from "../../src-tauri/web/src/forms/schema-form";
+import {BlockAnswerForm} from "../../src-tauri/web/src/execution/team-panel";
 
 test("布尔及枚举单选项读屏包含字段与不同选项，不读成重复字段名", () => {
  const html=renderToStaticMarkup(<SchemaForm schema={{type:"object",properties:{confirmed:{type:"boolean"},choice:{type:"string",enum:["a","b"]}},additionalProperties:false}} onSubmit={async()=>{}}/>);
@@ -93,3 +94,14 @@ test("validateAnswer：必填/类型/枚举错误定位到字段路径", () => {
   expect(byPath.get("addr.city")).toBe("必填字段未填写");
 });
 test("SchemaForm显示字段描述与必填，不支持Schema不回退裸JSON",()=>{const html=renderToStaticMarkup(<SchemaForm schema={{type:"object",required:["ready"],properties:{ready:{type:"boolean",description:"是否继续"}}}} busy={false} onSubmit={async()=>{}}/>);expect(html).toContain("ready");expect(html).toContain("必填");expect(html).toContain("是否继续");const unsupported=renderToStaticMarkup(<SchemaForm schema={{type:"array"}} busy={false} onSubmit={async()=>{}}/>);expect(unsupported).toContain("暂不支持表单回答");expect(unsupported).not.toContain("答案 JSON");});
+
+
+test("BlockAnswerForm 将可选意见置于操作区前，继续与暂不共享底部操作区",()=>{
+ const html=renderToStaticMarkup(<BlockAnswerForm blockRequestId="33333333-3333-4333-8333-333333333333" schema={{type:"object",properties:{ok:{type:"boolean"}}}} busy={false} onAnswer={async()=>{}} onDefer={()=>{}}/>);
+ expect(html).toContain("其他意见");
+ expect(html).toContain("随答案一起发送给该 Agent");
+ expect(html).toContain('maxLength="4000"');
+ expect(html).toContain('class="wf-schema-actions"');
+ expect(html.indexOf("其他意见")).toBeLessThan(html.indexOf("wf-schema-actions"));
+ expect(html.indexOf("继续")).toBeLessThan(html.indexOf("暂不"));
+});

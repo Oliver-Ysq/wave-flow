@@ -1,5 +1,5 @@
 import Ajv from "ajv";
-import { normalizeHitlAnswerSchema } from "../shared/hitl-schema";
+import { normalizeBlockUserNote, normalizeHitlAnswerSchema } from "../shared/hitl-schema";
 import type { JournalEvent, RunManifest } from "../journal/types";
 import type { AgentNodeSnapshot, AgentNodeStatus, CurrentAttemptSummary, ExecutionBatchSnapshot, PhaseSnapshot, PhaseSummary, PhaseVisitSnapshot, RunSnapshot, RunStatus } from "./run-types";
 import type { JsonSchema } from "../shared/workflow-types";
@@ -414,6 +414,7 @@ export class RunStateMachine {
     const agent = this.#agents.get(event.nodeId);
     if (!agent || !["blocked", "pausing", "paused", "recovering"].includes(agent.status) || agent.agentSessionId !== event.agentSessionId || agent.block?.blockRequestId !== event.blockRequestId || agent.block.delivery !== "pending") throw new Error("block.answered 不属于当前 pending block。");
     validateBlockAnswer(this.#blockSchemas.get(event.blockRequestId), event.answer);
+    if (event.userNote !== undefined && normalizeBlockUserNote(event.userNote) !== event.userNote) throw new Error("block.answered 的 userNote 未规范化或超过长度限制。");
     this.#agents.set(event.nodeId, { ...agent, block: { ...agent.block, answered: true, delivery: "answered" } });
   }
 

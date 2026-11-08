@@ -46,6 +46,19 @@ export function normalizeHitlAnswerSchema(schema: JsonSchema | undefined): JsonS
   return normalized as JsonSchema;
 }
 
+/** 用户附加意见的最大字符数；限制耐久事实与恢复上下文体积。 */
+export const MAX_BLOCK_USER_NOTE_LENGTH = 4000;
+
+/** 规范化 block 的可选用户意见：去首尾空白，空串归一为缺省，非字符串或超长输入拒绝。 */
+export function normalizeBlockUserNote(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("其他意见必须是字符串。 ");
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (normalized.length > MAX_BLOCK_USER_NOTE_LENGTH) throw new Error(`其他意见不能超过 ${MAX_BLOCK_USER_NOTE_LENGTH} 字。 `);
+  return normalized;
+}
+
 function normalizeField(name: string, field: unknown): JsonObject {
   if (!field || typeof field !== "object" || Array.isArray(field)) throw new Error(`字段 ${name} 的 Schema 必须是对象。`);
   const value = field as JsonObject;
